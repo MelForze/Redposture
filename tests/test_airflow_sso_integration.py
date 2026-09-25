@@ -93,7 +93,10 @@ def test_airflow_keycloak_redirect_is_reported_as_sso_and_skips_defcreds(output_
         assert all("/api/v1/pools" not in call and "/api/v1/eventLogs" not in call for call in airflow.calls)
         if output_format == "txt":
             output = "\n".join(lines)
-            assert "Airflow (auth required:sso) (provider:keycloak) (version:2.11.1)" in output
+            assert (
+                "Airflow (auth required:sso) (Dags allowed anonymously:False) "
+                "(provider:keycloak) (version:2.11.1)" in output
+            )
             assert "airflow:airflow" not in output
         else:
             payloads = [json.loads(line) for line in lines]

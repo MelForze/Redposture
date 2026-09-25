@@ -50,6 +50,7 @@
     "sql_error": null,
     "sql_ok": null,
     "sql_output": null,
+    "sslmode": "prefer",
     "stages": [
       {
         "attempt": 1,
@@ -84,7 +85,8 @@
     "table_dumps": [],
     "table_names": null,
     "table_row_counts": [],
-    "table_targets": []
+    "table_targets": [],
+    "tls_used": false
   },
   {
     "auth_database": "postgres",
@@ -137,6 +139,7 @@
     "sql_error": null,
     "sql_ok": null,
     "sql_output": null,
+    "sslmode": "prefer",
     "stages": [
       {
         "attempt": 1,
@@ -171,7 +174,8 @@
     "table_dumps": [],
     "table_names": null,
     "table_row_counts": [],
-    "table_targets": []
+    "table_targets": [],
+    "tls_used": false
   },
   {
     "auth_database": "postgres",
@@ -224,6 +228,7 @@
     "sql_error": null,
     "sql_ok": null,
     "sql_output": null,
+    "sslmode": "prefer",
     "stages": [
       {
         "attempt": 1,
@@ -258,7 +263,8 @@
     "table_dumps": [],
     "table_names": null,
     "table_row_counts": [],
-    "table_targets": []
+    "table_targets": [],
+    "tls_used": false
   },
   {
     "auth_database": "postgres",
@@ -311,6 +317,7 @@
     "sql_error": null,
     "sql_ok": null,
     "sql_output": null,
+    "sslmode": "prefer",
     "stages": [
       {
         "attempt": 1,
@@ -345,7 +352,8 @@
     "table_dumps": [],
     "table_names": null,
     "table_row_counts": [],
-    "table_targets": []
+    "table_targets": [],
+    "tls_used": false
   },
   {
     "auth_database": "postgres",
@@ -398,6 +406,7 @@
     "sql_error": null,
     "sql_ok": null,
     "sql_output": null,
+    "sslmode": "prefer",
     "stages": [
       {
         "attempt": 1,
@@ -432,6 +441,7 @@
     "table_dumps": [],
     "table_names": null,
     "table_row_counts": [],
-    "table_targets": []
+    "table_targets": [],
+    "tls_used": false
   }
 ]

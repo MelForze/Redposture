@@ -596,9 +596,11 @@ def render_finding_lines(payload: Mapping[str, Any], *, label: str, host: str, p
         return []
     findings = enumeration.get("findings")
     if not isinstance(findings, list):
-        return []
-    prefix = f"{label:<15}\t{host:<15}\t{int(port):<5}\t"
-    lines: list[str] = []
+        findings = []
+    # Use the same tab-separated prefix as module renderers. Fixed-width fields
+    # combined with tabs shifted CVE rows farther right than their service row.
+    prefix = f"{label}\t{host}\t{int(port)}\t "
+    lines: list[str] = [f"{prefix}[*] CVE's Enumeration"]
     for finding in findings:
         if not isinstance(finding, Mapping):
             continue

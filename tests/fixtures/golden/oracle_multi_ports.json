@@ -1,7 +1,7 @@
 [
   {
     "auth_required": true,
-    "banner": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0",
+    "banner": "Oracle AI Database 26ai Free Release 23.26.3.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.3.0.0",
     "capabilities": {
       "can_list_dblinks": false,
       "can_list_tables": false,
@@ -133,7 +133,7 @@
   },
   {
     "auth_required": true,
-    "banner": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0",
+    "banner": "Oracle AI Database 26ai Free Release 23.26.3.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.3.0.0",
     "capabilities": {
       "can_list_dblinks": false,
       "can_list_tables": false,
@@ -265,7 +265,7 @@
   },
   {
     "auth_required": true,
-    "banner": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0",
+    "banner": "Oracle AI Database 26ai Free Release 23.26.3.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.3.0.0",
     "capabilities": {
       "can_list_dblinks": false,
       "can_list_tables": false,
@@ -397,7 +397,7 @@
   },
   {
     "auth_required": true,
-    "banner": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0",
+    "banner": "Oracle AI Database 26ai Free Release 23.26.3.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.3.0.0",
     "capabilities": {
       "can_list_dblinks": false,
       "can_list_tables": false,
@@ -529,7 +529,7 @@
   },
   {
     "auth_required": true,
-    "banner": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0",
+    "banner": "Oracle AI Database 26ai Free Release 23.26.3.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.3.0.0",
     "capabilities": {
       "can_list_dblinks": false,
       "can_list_tables": false,

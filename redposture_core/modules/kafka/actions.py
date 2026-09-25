@@ -1042,9 +1042,6 @@ def _audit_kafka_host(
                 break
             except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
                 last_error = _friendly_error_from_exception(exc)
-                if use_tls is None and transport_use_tls is not True and _should_retry_kafka_tls(exc):
-                    transport_use_tls = True
-                    continue
                 if _is_sasl_probe_candidate(last_error):
                     fallback_record = _audit_kafka_via_sasl_fallback(
                         host=host,
@@ -1058,13 +1055,16 @@ def _audit_kafka_host(
                         dump=dump,
                         max_messages=max_messages,
                         credential_source=credential_source,
-                        use_tls=(transport_use_tls is True) or None,
+                        use_tls=transport_use_tls is True,
                         tls_config=tls_config,
                         probe_write=probe_write,
                         debug_emit=debug_emit,
                     )
                     if fallback_record is not None:
                         return fallback_record
+                if use_tls is None and transport_use_tls is not True and _should_retry_kafka_tls(exc):
+                    transport_use_tls = True
+                    continue
                 break  # break transport-loop; fall through to attempts retry
         if attempt >= attempts - 1:
             break
@@ -1213,7 +1213,7 @@ def _kafka_lifecycle_detection_record(
                     session.close()
                     api_error = api_probe.error or ""
                     if _is_sasl_probe_candidate(api_error):
-                        sasl_record = _sasl_required_record(use_tls=(state.transport_mode == "tls") or None)
+                        sasl_record = _sasl_required_record(use_tls=state.transport_mode == "tls")
                         if sasl_record is not None:
                             return sasl_record
                     state.is_kafka = False
@@ -1254,13 +1254,13 @@ def _kafka_lifecycle_detection_record(
                 if session is not None:
                     session.close()
                 last_error = _friendly_error_from_exception(exc)
+                if _is_sasl_probe_candidate(last_error):
+                    sasl_record = _sasl_required_record(use_tls=state.transport_mode == "tls")
+                    if sasl_record is not None:
+                        return sasl_record
                 if state.requested_use_tls is None and transport_use_tls is not True and _should_retry_kafka_tls(exc):
                     transport_use_tls = True
                     continue
-                if _is_sasl_probe_candidate(last_error):
-                    sasl_record = _sasl_required_record(use_tls=(transport_use_tls is True) or None)
-                    if sasl_record is not None:
-                        return sasl_record
                 break
         if attempt < attempts - 1:
             state.transport_retries += 1

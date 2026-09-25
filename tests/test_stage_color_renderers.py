@@ -175,7 +175,7 @@ def test_render_colored_postgres_colors_caps_and_dbs() -> None:
     )
     assert _render_colored_postgres_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(superuser:False)", "bright_green")
-    assert _contains_paint(console.paint_calls, "(execute:unknown)", "yellow")
+    assert _contains_paint(console.paint_calls, "(execute:unknown)", "orange")
     assert _contains_paint(console.paint_calls, "(read:True)", "red")
     assert _contains_paint(console.paint_calls, "(DBs:2)", "orange")
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
@@ -189,7 +189,7 @@ def test_render_colored_clickhouse_colors_caps_and_dbs() -> None:
     )
     assert _render_colored_clickhouse_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(read:false)", "bright_green")
-    assert _contains_paint(console.paint_calls, "(execute:unknown)", "yellow")
+    assert _contains_paint(console.paint_calls, "(execute:unknown)", "orange")
     assert _contains_paint(console.paint_calls, "(admin:true)", "red")
     assert _contains_paint(console.paint_calls, "(DBs:2)", "orange")
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
@@ -210,8 +210,8 @@ def test_render_colored_consul_colors_pwned_and_counts() -> None:
     assert _render_colored_consul_line(console, line) is True
     assert _contains_paint(console.paint_calls, "Pwned!", "orange")
     assert _contains_paint(console.paint_calls, "(kv:2)", "red")
-    assert _contains_paint(console.paint_calls, "(services:1)", "orange")
-    assert _contains_paint(console.paint_calls, "(agents:1)", "orange")
+    assert _contains_paint(console.paint_calls, "(services:1)", "red")
+    assert _contains_paint(console.paint_calls, "(agents:1)", "red")
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
 
 
@@ -222,7 +222,7 @@ def test_render_colored_consul_colors_detect_agent_count() -> None:
         "(kv:2) (services:1) (agent:1) (version:1.22.0)"
     )
     assert _render_colored_consul_line(console, line) is True
-    assert _contains_paint(console.paint_calls, "(agent:1)", "orange")
+    assert _contains_paint(console.paint_calls, "(agent:1)", "red")
 
 
 def test_render_colored_elastic_colors_access_and_capabilities() -> None:
@@ -239,22 +239,36 @@ def test_render_colored_elastic_colors_access_and_capabilities() -> None:
     assert _contains_paint(console.paint_calls, "(manage_security:False)", "bright_green")
 
 
+def test_render_colored_elastic_colors_verified_resource_access() -> None:
+    console = _RecordingConsole()
+    line = (
+        "ELASTIC\t127.0.0.1\t29201\t [+] observer:secret "
+        "(Indices:7) (Documents:Read) (Cluster:Access Denied) "
+        "(Nodes:1) (Users:Unknown)"
+    )
+
+    assert _render_colored_elastic_line(console, line) is True
+    assert _contains_paint(console.paint_calls, "(Indices:7)", "true_red")
+    assert _contains_paint(console.paint_calls, "(Documents:Read)", "true_red")
+    assert _contains_paint(console.paint_calls, "(Cluster:Access Denied)", "bright_green")
+    assert _contains_paint(console.paint_calls, "(Nodes:1)", "true_red")
+    assert _contains_paint(console.paint_calls, "(Users:Unknown)", "orange")
+    _assert_parentheses_are_not_colored(console.paint_calls)
+
+
 def test_render_colored_elastic_highlights_complete_secret_finding() -> None:
     console = _RecordingConsole()
     line = (
-        "ELASTIC\t127.0.0.1\t9200\t [+] secret_type=bearer_token "
-        'value="line one\\nsource_kind=\\"fake\\"" source_kind="document" '
-        'object="logs/doc-1" index="logs" id="doc-1" path="/event/original"'
+        "ELASTIC\t127.0.0.1\t9200\t [!] Token "
+        'Value="line one\\nsource_kind=\\"fake\\"" '
+        'Place="source_kind:document/object:logs/doc-1/index:logs/id:doc-1/path:/event/original"'
     )
 
     assert _render_colored_elastic_line(console, line) is True
     assert _contains_paint(
         console.paint_calls,
-        (
-            'secret_type=bearer_token value="line one\\nsource_kind=\\"fake\\"" '
-            'source_kind="document" object="logs/doc-1" index="logs" '
-            'id="doc-1" path="/event/original"'
-        ),
+        'Token Value="line one\\nsource_kind=\\"fake\\"" '
+        'Place="source_kind:document/object:logs/doc-1/index:logs/id:doc-1/path:/event/original"',
         "orange",
     )
 
@@ -262,14 +276,17 @@ def test_render_colored_elastic_highlights_complete_secret_finding() -> None:
 def test_render_colored_elastic_no_color_preserves_plain_finding(capsys: pytest.CaptureFixture[str]) -> None:
     console = Console(no_color=True)
     line = (
-        'ELASTIC\t127.0.0.1\t9200\t [+] secret_type=password value="S3cr3t!" '
-        'source_kind="document" object="logs/doc-1" path="/password"'
+        'ELASTIC\t127.0.0.1\t9200\t [!] Pass Value="S3cr3t!" '
+        'Place="source_kind:document/object:logs/doc-1/path:/password"'
     )
 
     assert _render_colored_elastic_line(console, line) is True
 
     captured = capsys.readouterr()
-    assert captured.out == f"{line}\n"
+    assert captured.out == (
+        'ELASTIC         127.0.0.1       9200    [!] Pass Value="S3cr3t!" '
+        'Place="source_kind:document/object:logs/doc-1/path:/password"\n'
+    )
     assert "\x1b[" not in captured.out
     assert captured.err == ""
 
@@ -278,8 +295,8 @@ def test_render_colored_kubeapi_colors_resources() -> None:
     console = _RecordingConsole()
     line = "KUBEAPI\t127.0.0.1\t6443\t [+] token access (pods:2) (namespaces:1) (secrets:5)"
     assert _render_colored_kubeapi_line(console, line) is True
-    assert _contains_paint(console.paint_calls, "(pods:2)", "orange")
-    assert _contains_paint(console.paint_calls, "(namespaces:1)", "orange")
+    assert _contains_paint(console.paint_calls, "(pods:2)", "red")
+    assert _contains_paint(console.paint_calls, "(namespaces:1)", "red")
     assert _contains_paint(console.paint_calls, "(secrets:5)", "red")
 
 
@@ -321,9 +338,13 @@ def test_render_colored_proxmox_colors_capabilities_and_finding_payload() -> Non
     assert _contains_paint(console_caps.paint_calls, "(read:true)", "red")
 
     console_finding = _RecordingConsole()
-    finding_line = "PROXMOX\t127.0.0.1\t8006\t [!] credential candidate reason=jwt path=$.token sample=abc"
+    finding_line = 'PROXMOX\t127.0.0.1\t8006\t [!] Token Value="abc" Place="/access$.token"'
     assert _render_colored_proxmox_line(console_finding, finding_line) is True
-    assert _contains_paint(console_finding.paint_calls, "credential candidate reason=jwt", "orange")
+    assert _contains_paint(
+        console_finding.paint_calls,
+        'Token Value="abc" Place="/access$.token"',
+        "orange",
+    )
 
 
 def test_render_colored_grpc_colors_status_and_protocol() -> None:

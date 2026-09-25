@@ -4,6 +4,10 @@
       "v2": false,
       "v3": false
     },
+    "api_has_access": {
+      "v2": true,
+      "v3": true
+    },
     "api_versions": "v2,v3",
     "auth_required": false,
     "defcreds_enabled": false,
@@ -13,10 +17,90 @@
     "error": null,
     "host": "127.0.0.1",
     "is_etcd": true,
-    "key_count": 11,
+    "key_count": 19,
+    "key_count_by_api": {
+      "v2": 11,
+      "v3": 8
+    },
     "key_count_error": null,
     "key_count_state": "known",
     "key_value_entries": null,
+    "key_value_entries_by_api": {
+      "v2": [
+        {
+          "error": null,
+          "key": "/inventory/services/grafana/url",
+          "value": "http://grafana:3000"
+        },
+        {
+          "error": null,
+          "key": "/inventory/services/kafka/bootstrap",
+          "value": "kafka-open:9092"
+        },
+        {
+          "error": null,
+          "key": "/inventory/services/prometheus/url",
+          "value": "http://prometheus:9090"
+        },
+        {
+          "error": null,
+          "key": "/redposture/app/api_key",
+          "value": "rp-demo-key-2026"
+        },
+        {
+          "error": null,
+          "key": "/redposture/cache/redis_uri",
+          "value": "redis://default:redis@redis:6379/0"
+        },
+        {
+          "error": null,
+          "key": "/redposture/db/password",
+          "value": "postgres"
+        },
+        {
+          "error": null,
+          "key": "/redposture/db/readonly_password",
+          "value": "readonly"
+        },
+        {
+          "error": null,
+          "key": "/redposture/env",
+          "value": "lab"
+        },
+        {
+          "error": null,
+          "key": "/redposture/feature_flags/new_ui",
+          "value": "true"
+        },
+        {
+          "error": null,
+          "key": "/redposture/integrations/pagerduty/routing_key",
+          "value": "pd_demo_routing_key_2026"
+        },
+        {
+          "error": null,
+          "key": "/redposture/integrations/slack/webhook",
+          "value": "https://hooks.slack.com/services/T000/B000/REDACTED"
+        }
+      ],
+      "v3": [
+        {
+          "error": null,
+          "key": "/redposture/v3/datasource/admin_password",
+          "value": "admin"
+        },
+        {
+          "error": null,
+          "key": "/redposture/v3/datasource/admin_user",
+          "value": "admin"
+        },
+        {
+          "error": null,
+          "key": "/redposture/v3/datasource/postgres_dsn",
+          "value": "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+        }
+      ]
+    },
     "key_values": null,
     "keys": [
       "/inventory/services/grafana/url",
@@ -30,6 +114,7 @@
     "provided_password": null,
     "provided_username": null,
     "query_key": null,
+    "query_key_entries_by_api": {},
     "query_key_entry": null,
     "query_key_value": null,
     "service": "etcd",

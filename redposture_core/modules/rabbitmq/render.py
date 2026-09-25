@@ -246,7 +246,7 @@ def _render_colored_rabbitmq_line(console: Console, line: str) -> bool:
             BooleanColorRule("admin", true_color="true_red", false_color="bright_green"),
             BooleanColorRule("truncated", true_color="yellow", false_color="white"),
         ),
-        counts=(CountColorRule("Count", "orange"),),
+        counts=(CountColorRule("Count", "red", unknown_color="orange", zero_color="bright_green"),),
         regexes=(
             (r"\(status:denied\)", "bright_green"),
             (r"\(status:ok\)", "bright_green"),

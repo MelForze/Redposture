@@ -2998,9 +2998,9 @@ def _render_colored_postgres_line(console: Console, line: str) -> bool:
         line,
         tag="POSTGRES",
         booleans=(
-            BooleanColorRule("superuser"),
-            BooleanColorRule("execute"),
-            BooleanColorRule("read"),
+            BooleanColorRule("superuser", unknown_color="orange"),
+            BooleanColorRule("execute", unknown_color="orange"),
+            BooleanColorRule("read", unknown_color="orange"),
         ),
         counts=(CountColorRule("DBs", "orange"),),
         extra_spans=_postgres_extra_color_spans,

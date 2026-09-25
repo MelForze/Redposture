@@ -189,3 +189,20 @@ def test_render_colored_marker_line_applies_declarative_rules_and_extra_spans() 
     assert ("[+]", "bright_green") in console.paint_calls
     assert any(text == "keys:2" and color == "red" for text, color in console.paint_calls)
     assert any("token=abc" in text and color == "orange" for text, color in console.paint_calls)
+
+
+def test_count_color_rule_can_distinguish_positive_zero_and_unknown() -> None:
+    console = _Console()
+    rule = CountColorRule("keys", "red", unknown_color="orange", zero_color="bright_green")
+
+    for value in ("7", "0", "unknown"):
+        assert render_colored_marker_line(
+            console,
+            f"REDIS\t127.0.0.1\t6379\t [+] qa:qa (keys:{value})",
+            tag="REDIS",
+            counts=(rule,),
+        )
+
+    assert any(text == "keys:7" and color == "red" for text, color in console.paint_calls)
+    assert any(text == "keys:0" and color == "bright_green" for text, color in console.paint_calls)
+    assert any(text == "keys:unknown" and color == "orange" for text, color in console.paint_calls)

@@ -646,7 +646,7 @@ def test_data_record_discover_computes_coverage_percent(monkeypatch: pytest.Monk
     assert out["secret_findings"] == [{"type": "x"}]
 
 
-def test_data_record_discover_self_emits_live_in_txt(monkeypatch: pytest.MonkeyPatch):
+def test_data_record_discover_streams_findings_live_in_txt(monkeypatch: pytest.MonkeyPatch):
     from redposture_core.modules.minio import actions as _a
     from redposture_core.modules.minio import discover as _disc
     from redposture_core.modules.minio import enumerate as _enum
@@ -706,17 +706,14 @@ def test_data_record_discover_self_emits_live_in_txt(monkeypatch: pytest.MonkeyP
     }
     out = _a.data_record(_Ctx(), prior)
 
-    assert out["_self_emitted"] is True
-    assert out["_self_emitted_lines"] == len(captured)
-    # ordered live output: detect, credential, findings (as found), then summary footer
-    assert captured[0] == "MINIO\t10.0.0.5\t19000\t [*] MinIO (auth required:True)"
-    assert captured[1] == "MINIO\t10.0.0.5\t19000\t [+] minioadmin (admin:True)"
-    assert any('[+] aws_access_key value="AKIAEXAMPLE"' in line for line in captured)
-    assert any('[+] password value="s3cr3t"' in line for line in captured)
-    summary_idx = next(i for i, line in enumerate(captured) if "Discover Secrets" in line)
-    finding_idx = next(i for i, line in enumerate(captured) if "aws_access_key value=" in line)
-    assert finding_idx < summary_idx  # findings stream before the final summary
-    assert "(status:complete) (coverage:100.00%) (findings:2) (objects:2)" in captured[summary_idx]
+    assert out["_discover_findings_streamed"] is True
+    assert "_self_emitted" not in out
+    # The data hook emits only findings. The common runtime owns detection,
+    # authentication and the final summary so they cannot be duplicated.
+    assert captured == [
+        'MINIO\t10.0.0.5\t19000\t [!] ApiKey Value="AKIAEXAMPLE" Place="b/app.env$"',
+        'MINIO\t10.0.0.5\t19000\t [!] Pass Value="s3cr3t" Place="b/cfg.yaml$"',
+    ]
 
 
 def test_data_record_discover_batches_when_no_live_sink(monkeypatch: pytest.MonkeyPatch):

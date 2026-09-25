@@ -5,7 +5,7 @@
         "error": "",
         "ok": true,
         "password": "admin",
-        "source": "default",
+        "source": "provided",
         "username": "admin"
       }
     ],
@@ -15,10 +15,11 @@
         "error": "",
         "ok": true,
         "password": "admin",
-        "source": "default",
+        "source": "provided",
         "username": "admin"
       }
     ],
+    "auth_method": null,
     "auth_required": false,
     "check_results": [],
     "check_urls": [],
@@ -31,7 +32,8 @@
         "username": "admin"
       }
     ],
-    "credentials_source": "default",
+    "credential_verification_status": "available",
+    "credentials_source": "provided",
     "datasource_count": 11,
     "datasources": [
       {
@@ -90,8 +92,8 @@
         "url": "http://tempo.internal:3200"
       }
     ],
-    "default_credentials": true,
-    "defcreds_enabled": true,
+    "default_credentials": false,
+    "defcreds_enabled": false,
     "effective_password": "admin",
     "effective_username": "admin",
     "error": null,
@@ -99,11 +101,14 @@
     "is_grafana": true,
     "module": "grafana",
     "port": 3000,
-    "provided_credentials": false,
-    "provided_credentials_ok": null,
+    "provided_credentials": true,
+    "provided_credentials_ok": true,
     "provided_username": "admin",
     "service": "grafana",
     "show_datasources": true,
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,

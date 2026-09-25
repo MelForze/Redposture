@@ -195,8 +195,8 @@
     ],
     "cluster_error": null,
     "cluster_health": {
-      "active_primary_shards": 7,
-      "active_shards": 7,
+      "active_primary_shards": 6,
+      "active_shards": 6,
       "active_shards_percent_as_number": 100.0,
       "cluster_name": "redposture-opensearch-open",
       "delayed_unassigned_shards": 0,
@@ -224,8 +224,20 @@
         "version": "2.19.1"
       }
     ],
+    "credential_accepted": false,
+    "credential_cluster_access": "unknown",
+    "credential_documents_access": "unknown",
+    "credential_indices_access": "unknown",
+    "credential_indices_count": null,
+    "credential_nodes_access": "unknown",
+    "credential_nodes_count": null,
+    "credential_resource_access_checked": false,
+    "credential_users_access": "unknown",
+    "credential_users_count": null,
     "credential_verification": {
       "capability": "not_requested",
+      "credential_accepted": false,
+      "identity_verified": false,
       "status": "not_requested",
       "supported_endpoint": null,
       "unsupported_endpoints": []
@@ -250,13 +262,13 @@
     "discover": true,
     "discover_coverage": {
       "complete": true,
-      "documents_scanned": 472,
+      "documents_scanned": 471,
       "duplicate_documents": 3,
       "indices_closed": 0,
       "indices_denied": 0,
-      "indices_enumerated": 7,
+      "indices_enumerated": 6,
       "indices_failed": 0,
-      "indices_scanned": 7,
+      "indices_scanned": 6,
       "limitations": [
         "secure keystore settings are not readable through the API",
         "closed indices, snapshots, Watcher, connectors, Alerting, Notifications and stored scripts are not scanned",
@@ -270,11 +282,11 @@
         "max_findings": 10000,
         "max_scalar_bytes": 262144,
         "max_seconds": 300.0,
-        "max_source_bytes": 134217728
+        "max_source_bytes": 52428800
       },
       "locations_dropped": 0,
       "missing_source_documents": 0,
-      "pages_scanned": 27,
+      "pages_scanned": 24,
       "query_candidates": 8,
       "scope": {
         "configuration": [
@@ -290,7 +302,7 @@
         "documents": "open and hidden indices plus resolved data-stream backing indices"
       },
       "shard_failures": [],
-      "source_bytes_scanned": 118765,
+      "source_bytes_scanned": 118564,
       "source_disabled_indices": [],
       "source_filtered_indices": [],
       "status": "complete",
@@ -312,8 +324,8 @@
           "status": "complete"
         },
         "index_settings": {
-          "objects_attempted": 7,
-          "objects_scanned": 7,
+          "objects_attempted": 6,
+          "objects_scanned": 6,
           "status": "complete"
         },
         "index_templates": {
@@ -337,8 +349,8 @@
           "status": "complete"
         },
         "mappings": {
-          "objects_attempted": 7,
-          "objects_scanned": 7,
+          "objects_attempted": 6,
+          "objects_scanned": 6,
           "status": "complete"
         },
         "node_settings": {
@@ -1259,19 +1271,6 @@
         "error": null,
         "error_detail": null,
         "hits": [],
-        "index": ".plugins-ml-config",
-        "partial_error_details": [],
-        "retried": false,
-        "retry_chunks": 0,
-        "shown_hits": 0,
-        "total_hits": 0,
-        "total_hits_relation": "exact",
-        "truncated": false
-      },
-      {
-        "error": null,
-        "error_detail": null,
-        "hits": [],
         "index": "finance-transactions-2026.05",
         "partial_error_details": [],
         "retried": false,
@@ -1595,6 +1594,7 @@
     "endpoints_error": null,
     "error": null,
     "host": "127.0.0.1",
+    "identity_verified": false,
     "insecure_effective": false,
     "is_elastic": true,
     "misconfig_error": null,

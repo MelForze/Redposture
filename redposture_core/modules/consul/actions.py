@@ -3986,10 +3986,10 @@ def _render_colored_consul_line(console: Console, line: str) -> bool:
             ("Pwned!", "orange"),
         ),
         counts=(
-            CountColorRule("kv", "red"),
-            CountColorRule("services", "orange"),
-            CountColorRule("agent", "orange"),
-            CountColorRule("agents", "orange"),
+            CountColorRule("kv", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("services", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("agent", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("agents", "red", unknown_color="orange", zero_color="bright_green"),
         ),
     ):
         return True

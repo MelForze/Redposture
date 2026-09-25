@@ -3,11 +3,28 @@
     "auth_db": "admin",
     "auth_required": false,
     "capabilities": {
-      "can_list_collections": true,
+      "can_list_collections": null,
       "can_list_databases": true,
       "can_list_indexes": true,
       "can_read_documents": true,
       "can_run_command": true
+    },
+    "capability_coverage": {
+      "can_list_indexes": {
+        "failures": 0,
+        "state": "allowed",
+        "successes": 1
+      },
+      "can_read_documents": {
+        "failures": 0,
+        "state": "allowed",
+        "successes": 2
+      },
+      "can_run_command": {
+        "failures": 0,
+        "state": "allowed",
+        "successes": 1
+      }
     },
     "collection_targets": [
       "demo_accounts"
@@ -74,6 +91,32 @@
       "totalSize": 184320.0,
       "views": 0
     },
+    "operation_results": [
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "list_indexes"
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "find_documents"
+      },
+      {
+        "database": "redposture",
+        "ok": true,
+        "operation": "run_command"
+      }
+    ],
+    "partial": false,
     "port": 27017,
     "projection": {
       "role": 1,

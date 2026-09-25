@@ -164,7 +164,7 @@ def test_detail_lines_buckets_header_and_streamed_objects_header_only():
     assert not any("/" in line.split("\t")[-1] and "size:" in line for line in lines)
     assert "[+] bucket" not in body and "[+] object" not in body
     # clickhouse-style finding line: type, then value=/place= (no "secret" word)
-    assert '[+] aws_access_key value="AKIA...MPLE" place="public/creds.env$"' in body
+    assert '[!] ApiKey Value="AKIA...MPLE" Place="public/creds.env$"' in body
     assert "[+] secret " not in body
     assert "[!] Discover partial: object_too_large" in body
 
@@ -195,8 +195,8 @@ def test_discover_summary_line_clickhouse_style():
     )
     lines = render._format_minio_detail_records(rec, "txt")
     assert f"{_PFX} [*] Discover Secrets (status:complete) (coverage:100.00%) (findings:2) (objects:3)" in lines
-    assert f'{_PFX} [+] aws_access_key value="AKIA...MPLE" place="creds/app.env$"' in lines
-    assert f'{_PFX} [+] password value="p***d" place="creds/db.yml.db.pass"' in lines
+    assert f'{_PFX} [!] ApiKey Value="AKIA...MPLE" Place="creds/app.env$"' in lines
+    assert f'{_PFX} [!] Pass Value="p***d" Place="creds/db.yml.db.pass"' in lines
 
 
 def test_discover_summary_partial_with_zero_findings():
@@ -229,9 +229,9 @@ def test_discover_summary_health_coloring():
     console = _Console()
     assert render._render_colored_minio_line(console, summary) is True
     out = console.lines[0]
+    assert "<white>Discover Secrets (</white>" in out
     assert "<bright_green>status:complete</bright_green>" in out
-    assert "<bright_green>coverage:100.00%</bright_green>" in out
-    assert "<true_red>findings:1</true_red>" in out  # any finding is exposure
+    assert "<true_red>findings:1</true_red>" in out
 
 
 def test_object_stream_line_txt_and_json():
@@ -308,10 +308,10 @@ def test_secret_finding_line_still_orange():
         ]
     )
     lines = render._format_minio_detail_records(rec, "txt")
-    secret_line = next(line for line in lines if " value=" in line and " place=" in line)
+    secret_line = next(line for line in lines if " Value=" in line and " Place=" in line)
     console = _Console()
     assert render._render_colored_minio_line(console, secret_line) is True
-    assert "<orange>" in console.lines[0]
+    assert '<orange>ApiKey Value="AKIA...MPLE" Place="b/creds.env$"</orange>' in console.lines[0]
 
 
 def test_detect_record_appends_version_when_known():

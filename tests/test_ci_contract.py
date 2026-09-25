@@ -56,7 +56,8 @@ def test_local_tox_and_github_ci_delegate_to_shared_runner() -> None:
     assert "bash scripts/run_ci_job.sh test" in tox
     assert "bash scripts/run_ci_job.sh lint" in workflow
     assert "bash scripts/run_ci_job.sh test" in workflow
-    assert "python scripts/run_mutation_smoke.py" in workflow
+    assert "run_mutation_smoke.py" not in workflow
+    assert "run_mutation_smoke.py" in (ROOT / "scripts/run_output_quality_audit.py").read_text(encoding="utf-8")
 
 
 def test_github_actions_and_runner_are_pinned() -> None:

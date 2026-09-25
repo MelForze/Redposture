@@ -1,0 +1,349 @@
+[
+  {
+    "admin": true,
+    "admin_evidence": {
+      "endpoint": "/api/users",
+      "http_status": 200,
+      "outcome": "ok"
+    },
+    "admin_status": "confirmed",
+    "anonymous": "denied",
+    "anonymous_endpoints": [],
+    "api_endpoint": "http://localhost:15672",
+    "auth_required": true,
+    "cluster_id": "rabbitmq-cluster-id-wi0grcsau4LzeVT98aGIpg",
+    "cluster_name": "redposture-commerce",
+    "credential_error": null,
+    "credential_http_status": 200,
+    "credential_state": "valid",
+    "credential_type": "basic",
+    "credential_username": "guest",
+    "credential_verification_status": "available",
+    "default_credentials": true,
+    "detection": {
+      "overview_status": 401,
+      "rabbitmq_realm": true
+    },
+    "detection_status": "confirmed",
+    "effective_username": "guest",
+    "enumeration": {
+      "bindings": {
+        "http_status": 200,
+        "items": [
+          {
+            "destination": "audit.archive",
+            "destination_type": "queue",
+            "routing_key": "audit.archive",
+            "source": "",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "billing.invoice",
+            "destination_type": "queue",
+            "routing_key": "billing.invoice",
+            "source": "",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "notifications.email",
+            "destination_type": "queue",
+            "routing_key": "notifications.email",
+            "source": "",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "notifications.webhook",
+            "destination_type": "queue",
+            "routing_key": "notifications.webhook",
+            "source": "",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "orders.process",
+            "destination_type": "queue",
+            "routing_key": "orders.process",
+            "source": "",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "orders.process.dlq",
+            "destination_type": "queue",
+            "routing_key": "orders.process.dlq",
+            "source": "",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "orders.retry.15s",
+            "destination_type": "queue",
+            "routing_key": "orders.retry.15s",
+            "source": "",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "notifications.email",
+            "destination_type": "queue",
+            "routing_key": "",
+            "source": "notifications",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "notifications.webhook",
+            "destination_type": "queue",
+            "routing_key": "",
+            "source": "notifications",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "audit.archive",
+            "destination_type": "queue",
+            "routing_key": "orders.#",
+            "source": "orders.events",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "billing.invoice",
+            "destination_type": "queue",
+            "routing_key": "orders.created",
+            "source": "orders.events",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "orders.process",
+            "destination_type": "queue",
+            "routing_key": "orders.created",
+            "source": "orders.events",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "orders.process.dlq",
+            "destination_type": "queue",
+            "routing_key": "rejected",
+            "source": "orders.failed",
+            "vhost": "prod/orders"
+          },
+          {
+            "destination": "orders.retry.15s",
+            "destination_type": "queue",
+            "routing_key": "retry",
+            "source": "orders.retry",
+            "vhost": "prod/orders"
+          }
+        ],
+        "status": "ok",
+        "truncated": false
+      },
+      "exchanges": {
+        "http_status": 200,
+        "items": [
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "direct",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "direct",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "fanout",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "headers",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "headers",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": true,
+            "type": "topic",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "topic",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "fanout",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "topic",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "direct",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "direct",
+            "vhost": "prod/orders"
+          }
+        ],
+        "status": "ok",
+        "truncated": false
+      },
+      "queues": {
+        "http_status": 200,
+        "items": [
+          {
+            "auto_delete": false,
+            "consumers": 0,
+            "durable": true,
+            "messages": 14,
+            "messages_ready": 14,
+            "messages_unacknowledged": 0,
+            "type": "classic",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "consumers": 1,
+            "durable": true,
+            "messages": 10,
+            "messages_ready": 9,
+            "messages_unacknowledged": 1,
+            "type": "quorum",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "consumers": 0,
+            "durable": true,
+            "messages": 4,
+            "messages_ready": 4,
+            "messages_unacknowledged": 0,
+            "type": "classic",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "consumers": 0,
+            "durable": true,
+            "messages": 4,
+            "messages_ready": 4,
+            "messages_unacknowledged": 0,
+            "type": "classic",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "consumers": 1,
+            "durable": true,
+            "messages": 10,
+            "messages_ready": 9,
+            "messages_unacknowledged": 1,
+            "type": "quorum",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "consumers": 0,
+            "durable": true,
+            "messages": 0,
+            "messages_ready": 0,
+            "messages_unacknowledged": 0,
+            "type": "quorum",
+            "vhost": "prod/orders"
+          },
+          {
+            "auto_delete": false,
+            "consumers": 0,
+            "durable": true,
+            "messages": 0,
+            "messages_ready": 0,
+            "messages_unacknowledged": 0,
+            "type": "classic",
+            "vhost": "prod/orders"
+          }
+        ],
+        "status": "ok",
+        "truncated": false
+      },
+      "vhosts": {
+        "http_status": 200,
+        "items": [
+          {}
+        ],
+        "status": "ok",
+        "truncated": false
+      }
+    },
+    "host": "localhost",
+    "module": "rabbitmq",
+    "permissions": [],
+    "permissions_status": "ok",
+    "permissions_truncated": false,
+    "port": 15672,
+    "provided_credentials_ok": true,
+    "service": "rabbitmq",
+    "show_permissions": true,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "tags": [
+      "administrator"
+    ],
+    "topic_permissions": [],
+    "topic_permissions_status": "ok",
+    "topic_permissions_truncated": false,
+    "version": "4.1.8"
+  }
+]

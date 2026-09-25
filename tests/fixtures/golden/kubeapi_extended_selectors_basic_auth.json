@@ -1,16 +1,19 @@
 [
   {
+    "anonymous_access": "open",
     "auth_error": null,
     "auth_mode": "basic",
     "auth_required": false,
     "auth_valid": true,
+    "auth_verification_method": "namespace_list",
+    "auth_verified_identity": null,
     "can_exec_pod": null,
     "can_list_namespaces": true,
     "can_list_pods": true,
     "can_list_secrets": null,
     "error": null,
     "exec_command": null,
-    "exec_pod": "redposture-api",
+    "exec_pod": null,
     "exec_result": null,
     "host": "127.0.0.1",
     "https": true,
@@ -30,6 +33,7 @@
       "redposture-lab"
     ],
     "namespaces_error": null,
+    "namespaces_partial": false,
     "pods": [
       {
         "containers": 1,
@@ -37,9 +41,11 @@
       }
     ],
     "pods_error": null,
+    "pods_partial": false,
     "port": 26443,
     "secrets": [],
     "secrets_error": null,
+    "secrets_partial": false,
     "service": "kubeapi",
     "show_namespaces": true,
     "show_pods": true,

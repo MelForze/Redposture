@@ -1,4 +1,4 @@
-"""Airflow detection / anonymous / auth / role actions (REST API, read-only)."""
+"""Airflow detection, authentication and resource-access actions (REST API, read-only)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,9 @@ from ...auth_detection import detect_browser_sso
 from ...clients.airflow_api import AirflowClient, AirflowResponse
 from ...clients.http_api import http_response_origin, http_response_requires_https, http_scheme_candidates
 from ...clients.http_session import HttpSessionPool
-from .discover import DiscoverConfig, discover_task_logs
-from .types import AirflowDetection, AnonymousResult, CredentialResult, RoleCapability
+from ...discovery_rendering import format_discovery_finding_line
+from .discover import DiscoverConfig, discover_task_logs, list_connections, list_variable_keys
+from .types import AirflowCapabilities, AirflowDetection, AnonymousResult, CredentialResult, ResourceAccess
 
 # Модуль использует detect/auth хуки, а не монолитный host_stage; None корректно и
 # удовлетворяет architecture-guard (наличие имени `host_stage = `).
@@ -21,20 +22,19 @@ _ENDPOINTS = {
     "v1": {  # Airflow 2.x
         "version": "/api/v1/version",
         "health": "/api/v1/health",
-        "viewer": "/api/v1/dags",
-        "op": "/api/v1/pools",
-        "admin": "/api/v1/eventLogs",
+        "dags": "/api/v1/dags",
+        "keys": "/api/v1/variables",
+        "connections": "/api/v1/connections",
     },
     "v2": {  # Airflow 3.x
         "version": "/api/v2/version",
         "health": "/api/v2/monitor/health",
-        "viewer": "/api/v2/dags",
-        "op": "/api/v2/pools",
-        "admin": "/api/v2/eventLogs",
+        "dags": "/api/v2/dags",
+        "keys": "/api/v2/variables",
+        "connections": "/api/v2/connections",
     },
 }
 _AUTH_TOKEN_PATH = "/auth/token"  # Airflow 3.x JWT exchange
-_ROLE_RUNGS = ("viewer", "op", "admin")
 
 _DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("airflow", "airflow"),  # real Airflow default
@@ -103,12 +103,18 @@ def _looks_like_health(resp: AirflowResponse) -> bool:
     return isinstance(data, dict) and ("metadatabase" in data or "scheduler" in data)
 
 
-def _looks_like_v1_dag_collection(resp: AirflowResponse) -> bool:
+def _looks_like_dag_collection(resp: AirflowResponse) -> bool:
     data = resp.json()
     if not isinstance(data, dict) or not isinstance(data.get("dags"), list):
         return False
+    dags = data["dags"]
     total_entries = data.get("total_entries")
-    return isinstance(total_entries, int) and not isinstance(total_entries, bool) and total_entries >= 0
+    return (
+        all(isinstance(item, dict) for item in dags)
+        and isinstance(total_entries, int)
+        and not isinstance(total_entries, bool)
+        and total_entries >= len(dags)
+    )
 
 
 def _looks_like_airflow_problem(resp: AirflowResponse, status: int) -> bool:
@@ -131,11 +137,9 @@ def _looks_like_airflow_problem(resp: AirflowResponse, status: int) -> bool:
 
 
 def classify_anonymous(client: AirflowClient, generation: str) -> AnonymousResult:
-    """Unauthenticated role ladder: viewer -> op -> admin. The highest rung that
-    returns 200 is the anonymous role; a 401/403 on the lowest rung means auth is
-    enforced."""
+    """Confirm anonymous DAG access only from a valid Airflow collection response."""
     endpoints = _ENDPOINTS.get(generation, _ENDPOINTS["v1"])
-    viewer = client.get(endpoints["viewer"], authed=False)
+    viewer = client.get(endpoints["dags"], authed=False)
     sso = detect_browser_sso(
         final_url=viewer.final_url,
         redirect_history=viewer.redirect_history,
@@ -146,7 +150,7 @@ def classify_anonymous(client: AirflowClient, generation: str) -> AnonymousResul
         return AnonymousResult(
             reachable=True,
             auth_required=True,
-            role="none",
+            dags_allowed=False,
             auth_method="sso",
             sso_provider=sso.provider,
             sso_protocol=sso.protocol,
@@ -155,15 +159,14 @@ def classify_anonymous(client: AirflowClient, generation: str) -> AnonymousResul
     if viewer.transport_error:
         return AnonymousResult(reachable=False)
     if viewer.http_status in {401, 403}:
-        return AnonymousResult(reachable=True, auth_required=True, role="none", auth_method="native")
+        return AnonymousResult(reachable=True, auth_required=True, dags_allowed=False, auth_method="native")
     if viewer.http_status != 200:
-        return AnonymousResult(reachable=True, auth_required=None, role="unknown")
-    role = "viewer"
-    for rung in ("op", "admin"):
-        resp = client.get(endpoints[rung], authed=False)
-        if not resp.transport_error and resp.http_status == 200:
-            role = rung
-    return AnonymousResult(reachable=True, auth_required=False, role=role, auth_method="anonymous")
+        return AnonymousResult(reachable=True, auth_required=None, dags_allowed=None)
+    if not _looks_like_dag_collection(viewer):
+        # A reverse proxy or an unrecognized login page may answer 200. Only an
+        # Airflow DAG collection proves anonymous DAG access.
+        return AnonymousResult(reachable=True, auth_required=None, dags_allowed=None)
+    return AnonymousResult(reachable=True, auth_required=False, dags_allowed=True, auth_method="anonymous")
 
 
 # --- credentials -----------------------------------------------------------
@@ -172,9 +175,9 @@ def classify_anonymous(client: AirflowClient, generation: str) -> AnonymousResul
 def verify_credential(pool_client_factory: Any, generation: str, username: str, password: str) -> CredentialResult:
     """Verify one credential for the pinned generation.
 
-    2.x: HTTP Basic against a Viewer endpoint (200 valid / 401 invalid / 403
+    2.x: HTTP Basic against the DAG collection (200 valid / 401 invalid / 403
     valid_but_restricted). 3.x: POST /auth/token (200 + access_token valid / 401
-    invalid); the issued JWT is kept for the role probe.
+    invalid); the issued JWT is kept for the resource-access probes.
     """
     if generation == "v2":
         client = pool_client_factory()
@@ -190,39 +193,60 @@ def verify_credential(pool_client_factory: Any, generation: str, username: str, 
         return CredentialResult(state="transient_failure", username=username, error_code=str(resp.http_status))
 
     client = pool_client_factory(basic_user=username, basic_password=password)
-    resp = client.get(_ENDPOINTS["v1"]["viewer"], authed=True)
+    resp = client.get(_ENDPOINTS["v1"]["dags"], authed=True)
     if resp.transport_error:
         return CredentialResult(state="transient_failure", username=username)
     if resp.http_status == 401 and _looks_like_airflow_problem(resp, 401):
         return CredentialResult(state="invalid", username=username, error_code="401")
     if resp.http_status == 403 and _looks_like_airflow_problem(resp, 403):
         return CredentialResult(state="valid_but_restricted", username=username, error_code="403")
-    if resp.http_status == 200 and _looks_like_v1_dag_collection(resp):
+    if resp.http_status == 200 and _looks_like_dag_collection(resp):
         return CredentialResult(state="valid", username=username)
     return CredentialResult(state="verification_unavailable", username=username, error_code=str(resp.http_status))
 
 
-# --- role capability -------------------------------------------------------
+# --- authenticated resource access ----------------------------------------
 
 
-def classify_role(client: AirflowClient, generation: str) -> RoleCapability:
-    """Authenticated role ladder (viewer -> op -> admin) with the winning credential."""
+def _resource_access(client: AirflowClient, path: str, collection_key: str) -> ResourceAccess:
+    """Return an exact collection count only for a validated Airflow response."""
+
+    resp = client.get(f"{path}?limit=1&offset=0", authed=True)
+    if resp.transport_error:
+        return ResourceAccess(status="unknown", error="transport_error")
+    if resp.http_status in {401, 403}:
+        return ResourceAccess(status="denied", http_status=resp.http_status)
+    if resp.http_status != 200:
+        return ResourceAccess(status="unknown", http_status=resp.http_status, error=f"http_{resp.http_status}")
+    if resp.truncated:
+        return ResourceAccess(status="unknown", http_status=200, error="response_truncated")
+    payload = resp.json()
+    if not isinstance(payload, dict):
+        return ResourceAccess(status="unknown", http_status=200, error="invalid_collection")
+    items = payload.get(collection_key)
+    total = payload.get("total_entries")
+    if (
+        not isinstance(items, list)
+        or any(not isinstance(item, dict) for item in items)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 0
+        or len(items) > 1
+        or len(items) > total
+    ):
+        return ResourceAccess(status="unknown", http_status=200, error="invalid_collection")
+    return ResourceAccess(status="allowed", count=total, http_status=200)
+
+
+def classify_capabilities(client: AirflowClient, generation: str) -> AirflowCapabilities:
+    """Measure authenticated read access without inferring an Airflow role."""
+
     endpoints = _ENDPOINTS.get(generation, _ENDPOINTS["v1"])
-    states: dict[str, str] = {}
-    role = "none"
-    reachable_any = False
-    for rung in _ROLE_RUNGS:
-        resp = client.get(endpoints[rung], authed=True)
-        if resp.transport_error:
-            states[rung] = "error"
-            continue
-        states[rung] = str(resp.http_status)
-        if resp.http_status == 200:
-            reachable_any = True
-            role = rung
-    if not reachable_any and all(v == "error" for v in states.values()):
-        role = "unknown"
-    return RoleCapability(role=role, evidence=states)
+    return AirflowCapabilities(
+        dags=_resource_access(client, endpoints["dags"], "dags"),
+        keys=_resource_access(client, endpoints["keys"], "variables"),
+        connections=_resource_access(client, endpoints["connections"], "connections"),
+    )
 
 
 # --- lifecycle + client ----------------------------------------------------
@@ -352,11 +376,12 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         record["version"] = detection.version
     if detection.status == "confirmed" and detection.api_generation:
         anon = classify_anonymous(client, detection.api_generation)
-        record["anonymous_role"] = anon.role
         record["auth_required"] = anon.auth_required
+        record["dags_allowed"] = anon.dags_allowed
+        record["anonymous_dags_allowed"] = anon.dags_allowed
         record["auth_method"] = anon.auth_method
         if anon.auth_required is False:
-            # A public Viewer endpoint returns the same successful response with
+            # A public DAG endpoint returns the same successful response with
             # or without Basic credentials.  Treating that response as proof of
             # a password would create false positives for every --defcreds pair.
             record["status"] = "open_no_auth"
@@ -383,6 +408,14 @@ def detect_record(ctx: Any) -> dict[str, Any]:
                 "findings": [],
                 "partial_reasons": ["api_generation_unconfirmed"],
             }
+    if bool(getattr(getattr(ctx, "args", None), "show_keys", False)):
+        record["show_keys_requested"] = True
+        if detection.status != "confirmed":
+            record["variable_keys_error"] = "api_generation_unconfirmed"
+    if bool(getattr(getattr(ctx, "args", None), "show_connections", False)):
+        record["show_connections_requested"] = True
+        if detection.status != "confirmed":
+            record["connections_error"] = "api_generation_unconfirmed"
     return record
 
 
@@ -403,8 +436,7 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     if result.bearer_token and isinstance(state, AirflowLifecycleState):
         state.bearer_token = result.bearer_token
         state.bearer_tokens[(str(username), str(password))] = result.bearer_token
-    anonymous_role = str(prior.get("anonymous_role") or "").strip().lower()
-    anonymous_open = prior.get("auth_required") is False or anonymous_role not in {"", "none", "unknown"}
+    anonymous_open = prior.get("auth_required") is False
     credential_state = result.state
     error_code = result.error_code
     if anonymous_open and credential_state in {"valid", "valid_but_restricted"}:
@@ -412,6 +444,7 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         error_code = "anonymous_access_already_succeeded"
     merged["credential_state"] = credential_state
     merged["credential_results"] = [{"username": result.username, "state": credential_state, "error_code": error_code}]
+    merged["_credential_capabilities_pending"] = credential_state in {"valid", "valid_but_restricted"}
     # Echoed on the TXT accepted line as user:pass; redacted from JSON output.
     if credential_state in {"valid", "valid_but_restricted"}:
         merged["credential_password"] = str(password)
@@ -429,6 +462,7 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
 def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     merged = dict(prior)
     if str(prior.get("credential_state") or "") not in {"valid", "valid_but_restricted"}:
+        merged.pop("_credential_capabilities_pending", None)
         return merged
     generation = str(prior.get("api_generation") or "v1")
     credential = ctx.credential
@@ -444,17 +478,36 @@ def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         client = _client_for(
             ctx, basic_user=getattr(credential, "username", None), basic_password=getattr(credential, "password", None)
         )
-    cap = classify_role(client, generation)
-    merged["role"] = cap.role
-    merged["role_evidence"] = cap.evidence
+    capabilities = classify_capabilities(client, generation)
+    for name, access in (
+        ("dags", capabilities.dags),
+        ("keys", capabilities.keys),
+        ("connections", capabilities.connections),
+    ):
+        merged[f"authenticated_{name}_access"] = access.status
+        merged[f"authenticated_{name}_count"] = access.count
+        merged[f"authenticated_{name}_http_status"] = access.http_status
+        if access.error:
+            merged[f"authenticated_{name}_error"] = access.error
+    merged.pop("_credential_capabilities_pending", None)
     return merged
 
 
 def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     merged = dict(prior)
-    if not bool(getattr(ctx.args, "discover", False)):
+    discover_requested = bool(getattr(ctx.args, "discover", False))
+    show_keys_value = getattr(ctx.args, "show_keys", False)
+    show_keys_requested = bool(show_keys_value)
+    show_connections_value = getattr(ctx.args, "show_connections", False)
+    show_connections_requested = bool(show_connections_value)
+    if not discover_requested and not show_keys_requested and not show_connections_requested:
         return merged
-    merged["discover_requested"] = True
+    if discover_requested:
+        merged["discover_requested"] = True
+    if show_keys_requested:
+        merged["show_keys_requested"] = True
+    if show_connections_requested:
+        merged["show_connections_requested"] = True
     generation = str(prior.get("api_generation") or "")
     if prior.get("detection_status") != "confirmed" or generation not in {"v1", "v2"}:
         return merged
@@ -482,12 +535,99 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             basic_user=str(credential.username) if credential_ok else None,
             basic_password=str(credential.password) if credential_ok else None,
         )
+
+    show_keys_limit = (
+        int(show_keys_value) if isinstance(show_keys_value, int) and not isinstance(show_keys_value, bool) else None
+    )
+    show_connections_limit = (
+        int(show_connections_value)
+        if isinstance(show_connections_value, int) and not isinstance(show_connections_value, bool)
+        else None
+    )
+    if not discover_requested:
+        if show_keys_requested:
+            keys = list_variable_keys(client, generation, limit=show_keys_limit)
+            merged["variable_keys"] = keys["keys"]
+            merged["variable_keys_count"] = keys["count"]
+            merged["variable_keys_total"] = keys["total"]
+            merged["variable_keys_truncated"] = keys["truncated"]
+            if keys.get("error"):
+                merged["variable_keys_error"] = keys["error"]
+        if show_connections_requested:
+            connections = list_connections(client, generation, limit=show_connections_limit)
+            merged["airflow_connections"] = connections["connections"]
+            merged["airflow_connections_count"] = connections["count"]
+            merged["airflow_connections_total"] = connections["total"]
+            merged["airflow_connections_truncated"] = connections["truncated"]
+            if connections.get("error"):
+                merged["connections_error"] = connections["error"]
+        return merged
+
     config = DiscoverConfig(
         max_bytes=int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024)),
         max_seconds=getattr(ctx.args, "discover_time", None),
+        include_dag_sources=True,
+        include_variables=True,
+        include_connections=True,
     )
-    merged["discover_report"] = discover_task_logs(client, generation, config)
+    live_emit = getattr(ctx, "live_emit", None)
+
+    if discover_requested and callable(live_emit):
+        live_emit([f"AIRFLOW\t{ctx.host}\t{int(ctx.port)}\t [*] Discover Secrets"])
+
+    def _on_finding(finding: dict[str, Any]) -> None:
+        if not callable(live_emit):
+            return
+        place = str(finding.get("place") or _legacy_discovery_place(finding))
+        live_emit(
+            [
+                format_discovery_finding_line(
+                    "AIRFLOW",
+                    ctx.host,
+                    ctx.port,
+                    severity=finding.get("confidence"),
+                    finding_type=finding.get("type"),
+                    value=finding.get("value") or finding.get("masked_value"),
+                    place=place,
+                )
+            ]
+        )
+
+    report = (
+        discover_task_logs(client, generation, config, on_finding=_on_finding)
+        if callable(live_emit)
+        else discover_task_logs(client, generation, config)
+    )
+    merged["discover_report"] = report
+    if show_keys_requested:
+        raw_variable_keys = report.get("variable_keys")
+        all_keys: list[Any] = raw_variable_keys if isinstance(raw_variable_keys, list) else []
+        shown_keys = all_keys if show_keys_limit is None else all_keys[:show_keys_limit]
+        merged["variable_keys"] = shown_keys
+        merged["variable_keys_count"] = len(shown_keys)
+        merged["variable_keys_total"] = len(all_keys)
+        merged["variable_keys_truncated"] = show_keys_limit is not None and len(all_keys) > show_keys_limit
+        if report.get("variables_error"):
+            merged["variable_keys_error"] = report["variables_error"]
+    if show_connections_requested:
+        connections = list_connections(client, generation, limit=show_connections_limit)
+        merged["airflow_connections"] = connections["connections"]
+        merged["airflow_connections_count"] = connections["count"]
+        merged["airflow_connections_total"] = connections["total"]
+        merged["airflow_connections_truncated"] = connections["truncated"]
+        if connections.get("error"):
+            merged["connections_error"] = connections["error"]
+    if callable(live_emit):
+        merged["_discover_findings_streamed"] = True
     return merged
+
+
+def _legacy_discovery_place(finding: dict[str, Any]) -> str:
+    return (
+        f"{finding.get('dag_id', '?')}/{finding.get('dag_run_id', '?')}/"
+        f"{finding.get('task_id', '?')}/try:{finding.get('try_number', '?')}"
+        f"/map:{finding.get('map_index', -1)}{finding.get('object_path', '$')}"
+    )
 
 
 def _build_credential_candidates(
@@ -512,7 +652,7 @@ __all__ = [
     "detect_airflow",
     "classify_anonymous",
     "verify_credential",
-    "classify_role",
+    "classify_capabilities",
     "detect_record",
     "auth_record",
     "capabilities_record",

@@ -981,13 +981,19 @@ def analyze_value(
 class FindingAccumulator:
     """Secret-level deduplication with bounded location retention."""
 
-    def __init__(self, max_findings: int = DEFAULT_MAX_FINDINGS, max_locations: int = DEFAULT_MAX_LOCATIONS) -> None:
+    def __init__(
+        self,
+        max_findings: int = DEFAULT_MAX_FINDINGS,
+        max_locations: int = DEFAULT_MAX_LOCATIONS,
+        on_finding: Callable[[Finding], None] | None = None,
+    ) -> None:
         self.max_findings = max(0, int(max_findings))
         self.max_locations = max(1, int(max_locations))
         self._items: dict[str, Finding] = {}
         self.limit_reached = False
         self.locations_dropped = 0
         self._lock = threading.RLock()
+        self._on_finding = on_finding
 
     @staticmethod
     def fingerprint(secret_type: str, value: str) -> str:
@@ -997,6 +1003,7 @@ class FindingAccumulator:
     def add(self, detection: DetectedSecret, location: FindingLocation) -> bool:
         if not detection.available or detection.score < 55:
             return False
+        created: Finding | None = None
         with self._lock:
             fingerprint = self.fingerprint(detection.secret_type, detection.value)
             existing = self._items.get(fingerprint)
@@ -1014,7 +1021,7 @@ class FindingAccumulator:
             if len(self._items) >= self.max_findings:
                 self.limit_reached = True
                 return False
-            self._items[fingerprint] = Finding(
+            created = Finding(
                 fingerprint=fingerprint,
                 value=detection.value,
                 secret_type=detection.secret_type,
@@ -1024,7 +1031,10 @@ class FindingAccumulator:
                 occurrence_count=1,
                 locations=[location],
             )
-            return True
+            self._items[fingerprint] = created
+        if created is not None and self._on_finding is not None:
+            self._on_finding(created)
+        return True
 
     def findings(self) -> list[Finding]:
         with self._lock:
@@ -1530,6 +1540,7 @@ class DiscoverEngine:
         monotonic: Callable[[], float] = time.monotonic,
         nested_scheduler: Any | None = None,
         scheduler_key: Any | None = None,
+        on_finding: Callable[[Finding], None] | None = None,
     ) -> None:
         self.request_callback = request
         self.vendor = vendor.strip().lower()
@@ -1573,6 +1584,7 @@ class DiscoverEngine:
         self.accumulator = FindingAccumulator(
             max_findings=self.options.max_findings,
             max_locations=self.options.max_locations,
+            on_finding=on_finding,
         )
         self._seen_documents: dict[tuple[str, str], bool] = {}
         self._seen_document_payloads: dict[tuple[str, str], set[str]] = {}
@@ -1871,6 +1883,26 @@ class DiscoverEngine:
             )
         return sorted(inventory.values(), key=lambda item: item.name)
 
+    def _parse_mapping_inventory(self, parsed: Any) -> list[IndexInfo] | None:
+        """Extract indices visible to the authenticated identity from mappings.
+
+        Restricted OpenSearch roles commonly allow reading documents and index
+        metadata while denying the cluster-level resolve and CAT APIs.  The
+        mapping endpoint is index-scoped, so it can still enumerate precisely
+        the indices that the supplied identity is allowed to discover.
+        """
+
+        if not isinstance(parsed, Mapping) or "error" in parsed:
+            return None
+        return sorted(
+            (
+                IndexInfo(name=str(name), status="open")
+                for name, definition in parsed.items()
+                if str(name).strip() and isinstance(definition, Mapping)
+            ),
+            key=lambda item: item.name,
+        )
+
     def _inventory(self) -> tuple[list[IndexInfo], str | None, JsonObject | None]:
         surface = self.coverage.surfaces.setdefault("index_inventory", SurfaceCoverage())
         surface.objects_attempted += 1
@@ -1903,11 +1935,26 @@ class DiscoverEngine:
                 cat_response, cat_parsed = legacy_response, legacy_parsed
                 if legacy_response.status not in {400, 404}:
                     break
-        if response.truncated or cat_response.truncated:
+
+        # OpenSearch security roles often deny both resolve and CAT despite
+        # granting index-level read access. Mapping enumeration is read-only
+        # and naturally filters the response to indices visible to the caller.
+        mapping_response, mapping_parsed = self._request("GET", "/_mapping?filter_path=*.mappings")
+        mapping_inventory = self._parse_mapping_inventory(mapping_parsed) if mapping_response.status == 200 else None
+        if mapping_inventory is not None and not mapping_response.truncated:
+            surface.objects_scanned += 1
+            return mapping_inventory, None, None
+
+        if response.truncated or cat_response.truncated or mapping_response.truncated:
             surface.status = "partial"
             self.coverage.mark_truncated("index_inventory:response_size_cap")
-        failed_response = cat_response if cat_response.status != 200 or cat_response.error else response
-        failed_parsed = cat_parsed if failed_response is cat_response else parsed
+        failed_response = mapping_response
+        failed_parsed = mapping_parsed
+        for candidate_response, candidate_parsed in ((cat_response, cat_parsed), (response, parsed)):
+            if candidate_response.status in {401, 403} or candidate_response.error:
+                failed_response = candidate_response
+                failed_parsed = candidate_parsed
+                break
         self._set_surface_failure("index_inventory", failed_response, failed_parsed, attempted=0)
         detail = _error_detail(failed_response, failed_parsed)
         return [], str(detail.get("reason") or "failed to enumerate indices"), detail
@@ -2669,6 +2716,7 @@ def run_discovery(
     monotonic: Callable[[], float] = time.monotonic,
     nested_scheduler: Any | None = None,
     scheduler_key: Any | None = None,
+    on_finding: Callable[[Finding], None] | None = None,
 ) -> DiscoverReport:
     """Convenience entry point used by the Elastic stage."""
 
@@ -2679,6 +2727,7 @@ def run_discovery(
         monotonic=monotonic,
         nested_scheduler=nested_scheduler,
         scheduler_key=scheduler_key,
+        on_finding=on_finding,
     ).run()
 
 

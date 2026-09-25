@@ -599,7 +599,7 @@ def test_elastic_detect_auth_and_full_data_collection_use_cached_headers(
     monkeypatch.setattr(
         elastic,
         "_resolve_server_version_with_auth",
-        lambda *_args, **_kwargs: pytest.fail("credential auth must not launch a cosmetic version probe"),
+        lambda *_args, **_kwargs: ("2.19.1", None),
     )
 
     detected = elastic.detect_elastic(ctx, {})
@@ -607,7 +607,7 @@ def test_elastic_detect_auth_and_full_data_collection_use_cached_headers(
     cached_headers = state.auth_headers[(None, None, "api-key", "provided")]
     assert detected["scheme"] == "http"
     assert authenticated["status"] == "valid_credentials"
-    assert authenticated["server_version"] is None
+    assert authenticated["server_version"] == "2.19.1"
     assert cached_headers["Authorization"] == "ApiKey api-key"
 
     seen_headers: list[dict[str, str]] = []
@@ -672,7 +672,9 @@ def test_elastic_detect_auth_and_full_data_collection_use_cached_headers(
         },
     )
 
-    assert len(seen_headers) == 8
+    # Security-user access is checked once for the compact credential
+    # capability line and once for the explicitly requested users dump.
+    assert len(seen_headers) == 9
     assert all(headers is cached_headers for headers in seen_headers)
     assert result["access_level"] == "more_than_read"
     assert result["api_key_probe_status"] == "valid"

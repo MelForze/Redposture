@@ -14,6 +14,8 @@ from typing import cast
 
 import pytest
 
+pytestmark = pytest.mark.local_output_audit
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

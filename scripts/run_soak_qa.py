@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from redposture_core.audit_models import AuditRecord
-from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, ModuleAuditSpec
+from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditHookContext, ModuleAuditSpec
 
 
 def _fd_count() -> int | None:
@@ -32,7 +32,7 @@ def _targets(count: int) -> tuple[str, ...]:
 
 
 def run_round(targets: tuple[str, ...], workers: int) -> int:
-    def detect(ctx: object) -> AuditRecord:
+    def detect(ctx: AuditHookContext) -> AuditRecord:
         return AuditRecord(host=str(ctx.host), port=1, module="soak", service="soak", status="not_soak")
 
     result = AuditCommandRunner(

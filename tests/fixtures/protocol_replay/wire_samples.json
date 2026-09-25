@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "samples": [
+    {
+      "name": "kafka-apiversions-v0",
+      "protocol": "kafka",
+      "capture_context": "ApiVersions response reduced from the local Kafka QA broker",
+      "payload_hex": "00000009000000000002001200000003000100000010",
+      "expected": {
+        "correlation_id": 9,
+        "fetch_min": 0,
+        "fetch_max": 16
+      }
+    },
+    {
+      "name": "zookeeper-connect-response",
+      "protocol": "zookeeper",
+      "capture_context": "ConnectResponse shape reduced from the local ZooKeeper QA server",
+      "payload_hex": "0000000000007530010203040506070800000010000102030405060708090a0b0c0d0e0f00",
+      "expected": {
+        "valid": true
+      }
+    },
+    {
+      "name": "oracle-tns-listener-data",
+      "protocol": "oracle_tns",
+      "capture_context": "TNS DATA response reduced from the local Oracle listener QA server",
+      "payload_hex": "0038000006000000284445534352495054494f4e3d284552523d3132353134292928534552564943455f4e414d453d465245455044423129",
+      "expected": {
+        "packet_type": 6,
+        "contains": "SERVICE_NAME=FREEPDB1"
+      }
+    }
+  ]
+}

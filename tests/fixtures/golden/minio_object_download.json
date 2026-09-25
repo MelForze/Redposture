@@ -1,0 +1,84 @@
+[
+  {
+    "admin_capability": "partial",
+    "admin_evidence": {
+      "accountinfo": "ok",
+      "list_canned_policies": "ok",
+      "list_users": "unknown"
+    },
+    "anonymous": "authentication_required",
+    "anonymous_buckets": [],
+    "api_endpoint": "http://127.0.0.1:19000",
+    "auth_required": true,
+    "console_endpoint": null,
+    "credential_results": [
+      {
+        "access_key": "minioadmin",
+        "error_code": null,
+        "state": "valid"
+      }
+    ],
+    "credential_state": "valid",
+    "credential_type": "access-key",
+    "credential_verification_status": "available",
+    "default_credentials": false,
+    "detection": {
+      "admin_plane": true,
+      "admin_s3_shape": true,
+      "health_live": true,
+      "root_status": 403,
+      "s3_shape": true,
+      "server_minio": true
+    },
+    "detection_status": "confirmed",
+    "host": "127.0.0.1",
+    "identity_kind": "delegated_admin",
+    "module": "minio",
+    "object_downloads": [
+      {
+        "bucket": "secrets-corpus",
+        "key": "app/.env",
+        "size": 102
+      }
+    ],
+    "permissions": {
+      "admin_plane": "ok",
+      "delete_objects": "unknown",
+      "list_buckets": "ok",
+      "list_objects": "unknown",
+      "read_objects": "unknown",
+      "write_objects": "unknown"
+    },
+    "port": 19000,
+    "provided_credentials_ok": true,
+    "service": "minio",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "version": "<ISO>"
+  }
+]

@@ -140,7 +140,7 @@ ClickHouse and Proxmox have no default time or item-count limit. Set
 
 | Module | Default `--discover-time` | Default `--discover-max-bytes` | Counted content |
 | --- | ---: | ---: | --- |
-| Airflow | Unlimited | 50 MiB | DAG task-log text |
+| Airflow | Unlimited | 50 MiB | DAG source, Variable/Connection data, and task-log text |
 | MinIO | Unlimited | 50 MiB | Object content |
 | Elasticsearch/OpenSearch | 300 s | 50 MiB | Document source content |
 | ClickHouse | Unlimited | 50 MiB | Returned row values |
@@ -151,6 +151,23 @@ When a limit interrupts discovery, the result is marked partial. ClickHouse
 are cooperative: requests already in flight may finish after the deadline. The
 50 MiB limit is a total per target, not a per-chunk quota; increase
 `--discover-max-bytes` when a larger target must be fully inspected.
+
+TXT discovery output is live. As soon as a target is confirmed, its service
+line is printed; a successful authentication line is printed before the longer
+content scan starts. Each new finding is then written immediately to both the
+terminal and `-o` file in one common form:
+
+```text
+AIRFLOW  10.0.0.1  8080  [!] Pass Value="secret" Place="dag/run/task/try:1/map:-1$"
+```
+
+The `[!]` finding marker is red and the finding payload is orange. Severity
+remains available in structured JSON but is omitted from compact TXT lines. The
+`Discover Secrets`, `Discover Complete`, and
+`CVE's Enumeration` labels are white; discovery status is green for complete,
+orange for partial, and red for failure, while a non-zero findings count is red
+and zero is green. JSON output stays one complete structured record per target
+and is emitted after that target finishes.
 
 Target examples:
 
@@ -225,10 +242,12 @@ redposture registry -t 127.0.0.1 --port 5000 --docker --repository redposture/de
 redposture grafana -t 127.0.0.1 --defcreds --show-datasources
 ```
 
-**Airflow** — search task-instance logs for secrets using anonymous access or verified credentials:
+**Airflow** — search DAG source, Variables, Connections, and task-instance logs for secrets using anonymous access or verified credentials:
 
 ```bash
 redposture airflow -t https://airflow.internal:8080 --discover -u auditor -p 'password' -o airflow_results.txt
+redposture airflow -t https://airflow.internal:8080 --show-keys 100 -u auditor -p 'password'
+redposture airflow -t https://airflow.internal:8080 --show-connections 100 -u auditor -p 'password'
 ```
 
 When a protected browser flow redirects to a recognized OIDC/SAML identity
@@ -249,11 +268,24 @@ redposture airflow -t http://127.0.0.1:18081 --defcreds
 docker compose -f tests/fixtures/airflow_sso_lab/docker-compose.yml down -v
 ```
 
-`--discover` uses read-only Airflow REST API v1/v2 endpoints. DAGs, runs, task
-instances, and all recorded attempts are paged without count limits. Log text
-is inspected up to the 50 MiB per-target content budget by default; an optional
-`--discover-time` sets a time limit. TXT and JSON include discovered values and
-their DAG/run/task locations. An incomplete scan reports its reason.
+The service line includes `(Dags allowed anonymously:True/False)` from an unauthenticated
+`/dags` request. A successful credential line reports exact read access as
+`(Dags:N) (Keys:N) (Connections:N)`. A 401/403 is shown as `Access Denied`;
+transport failures, unsupported endpoints, and malformed HTTP 200 responses are
+shown as `Unknown`. Counts are accepted only from a valid Airflow collection
+containing the expected list and a non-negative integer `total_entries`; the
+module does not infer Viewer, Operator, or Admin roles from endpoint access.
+Available access is red, denied access is green, and unknown access is orange.
+`--show-keys [count]` lists Airflow Variable names without printing their
+values. `--show-connections [count]` prints the complete Connection objects
+returned by Airflow, including any credentials present in them, and therefore
+should be written to an appropriately protected output file. `--discover` uses read-only Airflow REST API v1/v2
+endpoints and inspects DAG source code, Variable values, Connection data, and
+all recorded task attempts. Collections are paged without a default count
+limit. Inspected content shares the 50 MiB per-target budget; an optional
+`--discover-time` sets a time limit. TXT and JSON include each finding's source
+kind and exact location. An incomplete or permission-limited scan reports its
+reason.
 
 **GitLab** — public + token-backed:
 
@@ -298,7 +330,11 @@ redposture mongodb -t 127.0.0.1 --database redposture --collection demo_accounts
 
 ```bash
 redposture docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
+redposture docker -t 127.0.0.1 --port 2376 --insecure --tls-cert client-cert.pem --tls-key client-key.pem --system
 ```
+
+Docker retries the exact HTTP 400 `Client sent an HTTP request to an HTTPS server` over HTTPS. `--insecure`
+disables server-certificate verification only; an mTLS listener still requires `--tls-cert` and `--tls-key`.
 
 **Oracle** — listener + post-auth enumeration:
 
@@ -346,7 +382,7 @@ redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --show-buckets --show-
 redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --show-buckets --probe-write
 redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --bucket data --discover
 redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --object bulk/creds.env --dump
-redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --object bulk/creds.env --download /tmp/rp-dl
+redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --object bulk/creds.env --download
 ```
 
 - **Transport is automatic**: scheme (HTTP/HTTPS) is probed per target and TLS certificates are always accepted
@@ -358,7 +394,7 @@ redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --object bulk/creds.en
   host using unsigned discovery requests. Credentials are tested only after confirming the S3 API. If the API
   is on another host or a different port, include its URL in the targets file. MinIO Admin API JSON errors and
   the Console's canonical `S3 API Requests must be made to API port` response are handled during verification.
-- **Enumeration** (`--show-buckets`/`--show-objects`/`--bucket`/`--prefix`) is unbounded but memory-safe — objects
+- **Enumeration** (`--show-buckets`/`--show-objects`/`--bucket`) is unbounded but memory-safe — objects
   are streamed (no `--limit`; JSON is emitted as NDJSON). `--discover` scans interesting-by-name objects for secrets
   and prints findings after each scanned object (large objects are read in chunks, not skipped), then a
   clickhouse-style `[*] Discover Secrets` summary. Secret values are shown in full; the
@@ -368,7 +404,7 @@ redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --object bulk/creds.en
   chunk or endpoint. A partial result identifies a budget or read limit reached.
 - **`--probe-write`** is the only mutating action: a canary object is PUT then DELETEd per bucket, reporting
   `(write:True/False)`. Otherwise every operation is GET/HEAD only.
-- **`--object <bucket>/<key>`** with `--dump` prints content or `--download <dir>` saves it
+- **`--object <bucket>/<key>`** with `--dump` prints content or `--download` saves it below `./<bucket>/`
   (read-only, capped at 100 MiB per object).
 
 ### ZooKeeper and ClickHouse Keeper
@@ -427,15 +463,20 @@ cannot be proven from a banner alone.
 
 `PR:N` findings are matched from the confirmed product and version alone.
 `PR:L` findings are emitted only when the target reports
-`auth required:False`, or when the audit was started with explicitly supplied
-application credentials such as `-u/--username` and `-p/--password` (token and
-API-key forms count as credentials as well). A `--defcreds` sweep by itself
-does not enable `PR:L` findings. Structured findings record `PR:N`/`PR:L` in
-`privileges_required` and the decision in `access_basis`. Matching findings are
-printed by CVE identifier from newest to oldest (descending year and sequence).
+`auth required:False`, or after explicitly supplied application credentials
+such as `-u/--username` and `-p/--password` have been successfully verified
+(token and API-key forms count as credentials as well). Merely passing invalid
+credentials does not enable `PR:L`; a `--defcreds` sweep by itself does not
+enable them either. Structured findings record `PR:N`/`PR:L` in
+`privileges_required` and the decision in `access_basis`. Credential checks are
+completed before the CVE block. Every confirmed target then receives a
+`CVE's Enumeration` header, including no-match and unknown-version cases;
+matching findings follow it from newest to oldest (descending year and
+sequence).
 
 ```text
 GRAFANA         10.0.0.1        3000  [*] Grafana Service (auth required:False) (version:8.2.6)
+GRAFANA         10.0.0.1        3000  [*] CVE's Enumeration
 GRAFANA         10.0.0.1        3000  [!] CVE-2021-43798 potentially affected (HIGH 7.5) Unauthenticated path traversal and arbitrary file read
 ```
 
@@ -522,6 +563,34 @@ branches locally. Set `REDPOSTURE_MUTATION_STRICT=1` to fail when the optional
 ```bash
 python scripts/run_mutation_smoke.py
 ```
+
+The complete Docker release profile is intentionally local-only because it
+starts every service fixture, including the extended matrix. It runs the
+deterministic suite, CLI fuzzing, expanded mutations, real authentication,
+MinIO/Kubernetes transport, CVE boundary, proxy, and full service matrices:
+
+```bash
+./scripts/run_full_local_qa.sh
+# Optional explicit artifact directory:
+./scripts/run_full_local_qa.sh /tmp/redposture-full-qa
+```
+
+Weekly and manually dispatched GitHub workflows cover the minimum declared
+dependency versions, the newest versions allowed by `pyproject.toml`, nightly
+CLI parameter fuzzing, expanded mutation checks, and a free-threaded Python
+3.13t concurrency smoke. The same dependency profiles can be reproduced
+locally (they create and remove an isolated temporary virtual environment):
+
+```bash
+./scripts/run_dependency_compat.sh min
+./scripts/run_dependency_compat.sh max
+```
+
+The regular suite also replays stable Kafka, ZooKeeper, and Oracle binary wire
+samples, checks the detect/auth/capabilities/data lifecycle as a state machine,
+enforces at-most-once transport behavior for mutating requests, validates the
+common JSON contract for every audit module, and exercises the complete HTTP
+redirect matrix.
 
 ## License
 

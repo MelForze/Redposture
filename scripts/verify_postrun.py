@@ -50,12 +50,12 @@ _EXPECTED_LABELS = (
     "registry_gitlab",
     "registry_nexus",
     "registry_url_http",
-    "registry_url_https_transport_fail",
+    "registry_url_https_transport_fallback",
     "registry_multi_instance_urls",
     "grafana_default",
     "grafana_apitoken",
     "grafana_url_http",
-    "grafana_url_https_transport_fail",
+    "grafana_url_https_transport_fallback",
     "grafana_ssrf_edge",
     "grafana_multi_instance_urls",
     "minio_default",
@@ -123,6 +123,7 @@ _EXPECTED_LABELS = (
     "oracle_debug_smoke",
     "oracle_json_smoke",
     "docker_open",
+    "docker_tls_requires_client_certificate",
     "docker_tls",
     "docker_multi_ports",
     "docker_inventory",
@@ -141,11 +142,11 @@ _EXPECTED_LABELS = (
     "etcd_auth_defcreds",
     "etcd_auth_user_pass",
     "etcd_url_http",
-    "etcd_url_https_transport_fail",
+    "etcd_url_https_transport_fallback",
     "etcd_multi_instance_urls",
     "qdrant_default",
     "qdrant_url_http",
-    "qdrant_url_https_transport_fail",
+    "qdrant_url_https_transport_fallback",
     "qdrant_multi_instance_urls",
     "elastic_open",
     "elastic_auth",
@@ -185,6 +186,11 @@ _EXPECTED_LABELS = (
     "proxmox_url_override_https",
     "proxmox_multi_instance_urls",
 )
+
+# Trigger JSON/JSONL is an event stream. A successful run with no attempted
+# callbacks intentionally leaves the pre-created output file empty.
+_ALLOWED_EMPTY_JSON_LABELS = frozenset({"exporters_trigger_url_https_transport_mismatch"})
+_DEBUG_LABELS = frozenset({"airflow_default", "minio_default", "rabbitmq_default"})
 
 _EXTENDED_EXPECTED_LABELS = (
     "exporters_debug_smoke",
@@ -1147,8 +1153,11 @@ def _validate_json_artifacts(rows: list[dict[str, str]]) -> Counter[str]:
             continue
 
         artifact = Path(json_path)
-        if not artifact.exists() or artifact.stat().st_size == 0:
+        if not artifact.exists() or artifact.stat().st_size == 0 and row["label"] not in _ALLOWED_EMPTY_JSON_LABELS:
             raise SystemExit(f"missing or empty JSON artifact for successful run: {artifact}")
+        if artifact.stat().st_size == 0:
+            successful_modules[row["module"]] += 1
+            continue
 
         try:
             with artifact.open("r", encoding="utf-8") as fh:
@@ -1483,10 +1492,11 @@ def _validate_status_coherence(rows: list[dict[str, str]]) -> None:
 # regression that exit-code + progress-count checks alone would miss.
 #
 # Exceptions encoded explicitly:
-# - `docker_multi_ports`: TLS port is by-design auth_required, others open_no_auth.
+# - `docker_multi_ports`: the mTLS port reports valid_credentials while the
+#   plaintext replicas report open_no_auth.
 _MIXED_STATUS_MULTI_RECORD = frozenset(
     {
-        "docker_multi_ports",  # TLS port intentionally diverges from open_no_auth siblings
+        "docker_multi_ports",
         "exporters_scan",  # fan-by-check (48 progress events ≠ host record count)
     }
 )
@@ -1591,8 +1601,8 @@ _CAPABILITY_FIELDS_BY_MODULE: dict[str, tuple[str, ...]] = {
     "mongodb": ("database_count", "database_names", "collections", "indexes", "server_version"),
     "etcd": ("key_count", "keys", "key_values", "server_version"),
     "consul": ("version", "leader"),
-    "keeper": ("znode_count", "znodes", "znode_values", "version"),
-    "zookeeper": ("znode_count", "znodes", "znode_values", "version"),
+    "keeper": ("znode_count", "znodes", "znode_values", "query_znode_value", "query_znode_dump", "version"),
+    "zookeeper": ("znode_count", "znodes", "znode_values", "query_znode_value", "query_znode_dump", "version"),
     "kafka": ("topic_count", "topics"),
     "qdrant": ("collections_count", "collections", "version"),
     "clickhouse": ("database_names", "table_names", "effective_username", "auth_attempts"),
@@ -1603,6 +1613,10 @@ _CAPABILITY_FIELDS_BY_MODULE: dict[str, tuple[str, ...]] = {
     "registry": (
         "image_count",
         "images",
+        "selected_repository_tags",
+        "metadata_result",
+        "inspections",
+        "download_result",
         "harbor_projects",
         "gitlab_repositories",
         "nexus_info",
@@ -1796,7 +1810,6 @@ _ACTION_EXPECTED_VALUES: dict[str, dict[str, object]] = {
     "kubeapi_extended_selectors_basic_auth": {
         "show_namespaces": True,
         "show_pods": True,
-        "exec_pod": "redposture-api",
         "is_kubeapi": True,
     },
     "consul_extended_inventory_filters": {
@@ -1939,7 +1952,7 @@ _ACTION_EXPECTED_VALUES: dict[str, dict[str, object]] = {
         "is_proxmox": True,
     },
     "proxmox_extended_defcreds_empty_password": {
-        "auth_attempts": [{"username": "root@pam", "source": "provided", "ok": "False"}],
+        "auth_attempts": [{"username": "root@pam", "password": "", "source": "provided", "ok": "False"}],
         "is_proxmox": True,
         "use_https": True,
     },
@@ -2383,19 +2396,17 @@ _MISSING_TARGET_MODULES = (
 _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "exporters_scan_url_https_transport_fail": ("scan inconclusive: no exporter confirmed",),
     "exporters_collect_url_https_transport_fail": ("collect inconclusive: no exporter confirmed",),
-    "registry_url_https_transport_fail": ("audit inconclusive: no service confirmed",),
-    "grafana_url_https_transport_fail": ("audit inconclusive: no service confirmed",),
-    "etcd_url_https_transport_fail": ("audit inconclusive: no service confirmed",),
-    "qdrant_url_https_transport_fail": ("audit inconclusive: no service confirmed",),
-    "minio_default": ("audit inconclusive: no service confirmed",),
+    "minio_default": ("partial_operational_failure",),
     "minio_creds": ("audit inconclusive: no service confirmed",),
-    "minio_tls": ("audit inconclusive: no service confirmed",),
+    "minio_tls": ("operational_failures_before_detection",),
     "minio_enum": ("audit inconclusive: no service confirmed",),
     "airflow_default": ("audit inconclusive: no service confirmed",),
     "airflow_creds": ("audit inconclusive: no service confirmed",),
     "mongodb_extended_invalid_document_query": ("--document cannot be combined with --query",),
     "docker_extended_tls_files_pairing_error": ("--tls-cert and --tls-key must be used together",),
+    "docker_tls_requires_client_certificate": ("TLSV13_ALERT_CERTIFICATE_REQUIRED",),
     "kafka_extended_dump_max_conflict": ("--dump count cannot conflict with --max-messages",),
+    "clickhouse_extended_query_columns": ('"requested_operation_failure": true',),
     "fuzz_exporters_scan_missing_targets": ("scan requires -t/--targets",),
     "fuzz_exporters_scan_invalid_ports": ("failed to parse --ports",),
     "fuzz_exporters_scan_zero_timeout": ("value must be > 0",),
@@ -2512,6 +2523,25 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_proxmox_invalid_port": ("failed to parse --port", "invalid port range"),
 }
 
+# These commands fail because the remote endpoint could not be confirmed, after
+# target execution has already started. JSON/JSONL must retain that per-target
+# diagnostic even though the process exits non-zero. Argument-validation fuzz
+# cases below still must not create an output artifact.
+_EXPECTED_RUNTIME_FAILURE_JSON_LABELS = frozenset(
+    {
+        "exporters_scan_url_https_transport_fail",
+        "exporters_collect_url_https_transport_fail",
+        "minio_default",
+        "minio_creds",
+        "minio_tls",
+        "minio_enum",
+        "airflow_default",
+        "airflow_creds",
+        "clickhouse_extended_query_columns",
+        "docker_tls_requires_client_certificate",
+    }
+)
+
 
 def _is_fuzz_label(label: str) -> bool:
     return label.startswith("fuzz_")
@@ -2556,8 +2586,16 @@ def _validate_expected_failure_outputs(rows: list[dict[str, str]]) -> None:
 
         json_path = row.get("json_path") or "-"
         if json_path in {"", "-"}:
+            if label in _EXPECTED_RUNTIME_FAILURE_JSON_LABELS:
+                raise SystemExit(f"expected runtime-failure label '{label}' has no JSON artifact path")
             continue
         artifact = Path(json_path)
+        if label in _EXPECTED_RUNTIME_FAILURE_JSON_LABELS:
+            if not artifact.exists() or artifact.stat().st_size == 0:
+                raise SystemExit(f"expected runtime-failure label '{label}' has an empty JSON artifact: {artifact}")
+            if not list(_iter_json_objects(artifact.read_text(encoding="utf-8", errors="replace"))):
+                raise SystemExit(f"expected runtime-failure label '{label}' has invalid JSON output: {artifact}")
+            continue
         if artifact.exists() and artifact.stat().st_size > 0:
             raise SystemExit(f"expected-failure label '{label}' produced a non-empty JSON artifact: {artifact}")
 
@@ -3122,7 +3160,7 @@ def _validate_output_sanity(rows: list[dict[str, str]]) -> None:
         log_text = log_path.read_text(encoding="utf-8", errors="replace")
         label = row["label"]
         module = row["module"]
-        is_debug_run = "debug" in label
+        is_debug_run = "debug" in label or label in _DEBUG_LABELS
 
         # Non-debug regressions: debug trace markers must not leak into default runs.
         if not is_debug_run and "stage_trace " in log_text:

@@ -17,6 +17,7 @@ from uuid import UUID
 
 from ...clients import transport
 from ...console import Console
+from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
 from ...rendering import (
     BooleanColorRule,
     CountColorRule,
@@ -3256,10 +3257,15 @@ def _format_discover_finding_line(record: dict[str, Any], finding: dict[str, Any
         shown_value = finding.get("masked_value")
     if shown_value is None:
         shown_value = "<redacted>"
-    encoded_value = json.dumps(str(shown_value), ensure_ascii=False, separators=(",", ":"))
-    encoded_place = json.dumps(f"{location}{object_path}", ensure_ascii=False, separators=(",", ":"))
-    return (
-        f"{_nxc_prefix(record)} [+] {str(finding.get('type') or 'secret')} value={encoded_value} place={encoded_place}"
+    return format_discovery_finding_line(
+        "CLICKHOUSE",
+        record.get("host"),
+        record.get("port"),
+        severity=finding.get("confidence"),
+        score=finding.get("score"),
+        finding_type=finding.get("type"),
+        value=shown_value,
+        place=f"{location}{object_path}",
     )
 
 
@@ -3271,15 +3277,13 @@ _DISCOVER_FINDINGS_RE = re.compile(r"\(findings:(\d+)\)")
 def _clickhouse_finding_color_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
     """Color ClickHouse discover output.
 
-    Finding lines (`... value=... place=...`) are highlighted whole in orange.
-    The Discover Secrets summary line is ranked by health: ``status`` green when
-    complete / yellow when partial / red otherwise; ``coverage`` green at 100%,
-    yellow from 50%, red below; ``findings`` green at 0, red when anything was
-    found.
+    Findings use the shared orange payload color. Discover summaries retain
+    their status/count-specific colors.
     """
 
-    if " value=" in payload and " place=" in payload:
-        return [(0, len(payload), "orange")]
+    shared = discovery_color_spans(_marker, payload)
+    if shared:
+        return shared
     if not payload.startswith("Discover Secrets"):
         return []
     spans: list[tuple[int, int, str]] = []
@@ -3311,9 +3315,9 @@ def _render_colored_clickhouse_line(console: Console, line: str) -> bool:
         line,
         tag="CLICKHOUSE",
         booleans=(
-            BooleanColorRule("read"),
-            BooleanColorRule("execute"),
-            BooleanColorRule("admin"),
+            BooleanColorRule("read", unknown_color="orange"),
+            BooleanColorRule("execute", unknown_color="orange"),
+            BooleanColorRule("admin", unknown_color="orange"),
         ),
         counts=(CountColorRule("DBs", "orange"),),
         extra_spans=_clickhouse_finding_color_spans,

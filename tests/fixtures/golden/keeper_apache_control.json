@@ -15,23 +15,31 @@
     "connect_error": null,
     "credential_auth_probe_results": {},
     "credential_verdict": null,
+    "credential_verification_path": null,
+    "credential_verification_reason": null,
+    "credential_verification_requested": false,
+    "credential_verification_status": "not_requested",
     "defcreds_enabled": false,
     "dump": false,
     "dump_error": null,
     "dump_limit": null,
     "enum_error": null,
     "error": null,
+    "expected_implementation": "apache-zookeeper",
     "fingerprint_confidence": "rejected",
     "fingerprint_errors": {},
     "host": "127.0.0.1",
     "implementation": "apache-zookeeper",
     "implementation_confidence": "confirmed",
+    "implementation_evidence": "four_letter_word",
     "is_keeper": false,
     "is_zookeeper": true,
     "is_zookeeper_compatible": true,
+    "keeper_virtual_probe": null,
     "max_znodes": 5,
     "module": "zookeeper",
     "port": 12181,
+    "probe_write_requested": false,
     "protocol": "zookeeper",
     "provided_credentials": false,
     "provided_credentials_ok": null,
@@ -94,17 +102,42 @@
     "status": "open_no_auth",
     "transport": "plaintext",
     "vendor": "apache",
-    "verification_capability": "available",
+    "verification_capability": "not_requested",
     "version": "3.9.5",
     "znode_capability_error": null,
-    "znode_count": 0,
+    "znode_capability_identity": null,
+    "znode_capability_scope": null,
+    "znode_count": 3,
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
-    "znode_details": [],
+    "znode_details": [
+      {
+        "bytes": 0,
+        "children": 2,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
+      }
+    ],
     "znode_truncated_reason": null,
     "znode_values": null,
-    "znodes": [],
+    "znodes": [
+      "/zookeeper",
+      "/zookeeper/config",
+      "/zookeeper/quota"
+    ],
     "znodes_truncated": false
   }
 ]

@@ -17,26 +17,33 @@
     "cap_read": true,
     "checked_endpoints": 3,
     "credential_hits": 0,
+    "discover_bytes_scanned": 0,
     "discover_creds": false,
     "endpoint_results": [
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       }
     ],
     "error": null,
     "findings": [],
+    "grant_path": null,
+    "grant_propagate": null,
+    "grant_role": null,
     "host": "127.0.0.1",
     "is_proxmox": true,
     "module": "proxmox",
@@ -45,7 +52,10 @@
       "pve-core-02"
     ],
     "nodes_error": null,
+    "partial": false,
+    "partial_error": null,
     "port": 18006,
+    "responses_truncated": 0,
     "service": "proxmox",
     "show_nodes": true,
     "show_users": false,
@@ -99,26 +109,33 @@
     "cap_read": true,
     "checked_endpoints": 3,
     "credential_hits": 0,
+    "discover_bytes_scanned": 0,
     "discover_creds": false,
     "endpoint_results": [
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       }
     ],
     "error": null,
     "findings": [],
+    "grant_path": null,
+    "grant_propagate": null,
+    "grant_role": null,
     "host": "127.0.0.1",
     "is_proxmox": true,
     "module": "proxmox",
@@ -127,7 +144,10 @@
       "pve-core-02"
     ],
     "nodes_error": null,
+    "partial": false,
+    "partial_error": null,
     "port": 18061,
+    "responses_truncated": 0,
     "service": "proxmox",
     "show_nodes": true,
     "show_users": false,
@@ -181,26 +201,33 @@
     "cap_read": true,
     "checked_endpoints": 3,
     "credential_hits": 0,
+    "discover_bytes_scanned": 0,
     "discover_creds": false,
     "endpoint_results": [
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       }
     ],
     "error": null,
     "findings": [],
+    "grant_path": null,
+    "grant_propagate": null,
+    "grant_role": null,
     "host": "127.0.0.1",
     "is_proxmox": true,
     "module": "proxmox",
@@ -209,7 +236,10 @@
       "pve-core-02"
     ],
     "nodes_error": null,
+    "partial": false,
+    "partial_error": null,
     "port": 18062,
+    "responses_truncated": 0,
     "service": "proxmox",
     "show_nodes": true,
     "show_users": false,
@@ -263,26 +293,33 @@
     "cap_read": true,
     "checked_endpoints": 3,
     "credential_hits": 0,
+    "discover_bytes_scanned": 0,
     "discover_creds": false,
     "endpoint_results": [
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       }
     ],
     "error": null,
     "findings": [],
+    "grant_path": null,
+    "grant_propagate": null,
+    "grant_role": null,
     "host": "127.0.0.1",
     "is_proxmox": true,
     "module": "proxmox",
@@ -291,7 +328,10 @@
       "pve-core-02"
     ],
     "nodes_error": null,
+    "partial": false,
+    "partial_error": null,
     "port": 18063,
+    "responses_truncated": 0,
     "service": "proxmox",
     "show_nodes": true,
     "show_users": false,
@@ -345,26 +385,33 @@
     "cap_read": true,
     "checked_endpoints": 3,
     "credential_hits": 0,
+    "discover_bytes_scanned": 0,
     "discover_creds": false,
     "endpoint_results": [
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       }
     ],
     "error": null,
     "findings": [],
+    "grant_path": null,
+    "grant_propagate": null,
+    "grant_role": null,
     "host": "127.0.0.1",
     "is_proxmox": true,
     "module": "proxmox",
@@ -373,7 +420,10 @@
       "pve-core-02"
     ],
     "nodes_error": null,
+    "partial": false,
+    "partial_error": null,
     "port": 18064,
+    "responses_truncated": 0,
     "service": "proxmox",
     "show_nodes": true,
     "show_users": false,

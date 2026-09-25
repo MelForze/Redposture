@@ -45,6 +45,7 @@ class CountColorRule:
     color: str
     skip_zero: bool = True
     unknown_color: str = "yellow"
+    zero_color: str | None = None
 
 
 # Control characters (C0 range, DEL, and the C1 range) never belong in a TXT
@@ -80,6 +81,23 @@ def sanitize_report_line(line: str) -> str:
     if len(parts) < 4:
         return line
     parts[3] = sanitize_report_payload(parts[3])
+    return "\t".join(parts)
+
+
+def normalize_report_line_for_storage(line: str) -> str:
+    """Return a machine-friendly TXT/TSV record without display padding.
+
+    Several legacy renderers pad the module label before the first structural
+    tab so terminal columns line up. Keep that display form on stdout, while
+    storing the first field as the exact module label for reliable TSV tools.
+    JSON and run-level messages have fewer than four tab-separated fields and
+    remain unchanged.
+    """
+
+    parts = line.split("\t", 3)
+    if len(parts) < 4:
+        return line
+    parts[0] = parts[0].rstrip(" ")
     return "\t".join(parts)
 
 
@@ -172,7 +190,11 @@ def collect_count_spans(text: str, rules: Iterable[CountColorRule | tuple[str, s
                 spans.append((match.start(), match.end(), spec.unknown_color))
                 continue
             value = int(raw_value)
-            if spec.skip_zero and value == 0:
+            if value == 0:
+                if spec.zero_color is not None:
+                    spans.append((match.start(), match.end(), spec.zero_color))
+                elif not spec.skip_zero:
+                    spans.append((match.start(), match.end(), spec.color))
                 continue
             spans.append((match.start(), match.end(), spec.color))
     return spans
@@ -390,6 +412,10 @@ def render_colored_marker_line(
             booleans=booleans,
             counts=counts,
         )
+        if marker == "[!]" and re.match(r"^CVE-\d{4}-\d+ potentially affected\b", right):
+            # A version match is a warning, and its whole explanatory payload
+            # should remain visually grouped across every audit module.
+            spans.append((0, len(right), "orange"))
         if extra_spans is not None:
             spans.extend(extra_spans(marker, right))
         return render_module_marker_line(console, line, tag=tag, spans=spans)

@@ -21,7 +21,7 @@ from redposture_core.cve import (
     version_in_range,
 )
 from redposture_core.module_registry import AUDIT_MODULE_NAMES
-from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, ModuleAuditSpec
+from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun, ModuleAuditSpec
 
 
 def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
@@ -572,7 +572,10 @@ def test_runtime_inserts_cve_after_service_line_and_enriches_callbacks() -> None
         AuditCommandPlan(targets_by_port={3000: ("10.0.0.1",)}, output_format="txt")
     )
     assert emitted[0].endswith("[*] Grafana Service")
+    assert emitted[1].endswith("[*] CVE's Enumeration")
     assert any("CVE-2021-43798 potentially affected (HIGH 7.5)" in line for line in emitted[1:])
+    cve_line = next(line for line in emitted if "CVE-2021-43798" in line)
+    assert cve_line.startswith("GRAFANA\t10.0.0.1\t3000\t [!]")
     assert result.records[0]["cve_enumeration"]["status"] == "matched"
     assert "CVE-2021-43798" in {finding["id"] for finding in callbacks[0]["cve_enumeration"]["findings"]}
 
@@ -607,19 +610,81 @@ def test_runtime_enables_low_privilege_findings_for_explicit_credentials() -> No
             service="grafana",
         )
 
+    def auth(ctx: Any, record: AuditRecord) -> AuditRecord:
+        payload = record.to_dict()
+        payload["provided_credentials_ok"] = ctx.credential.username == "user" and ctx.credential.password == "pass"
+        payload["status"] = "auth_valid" if payload["provided_credentials_ok"] else "auth_required"
+        return AuditRecord.from_mapping(payload, module="grafana", service="grafana")
+
     spec = ModuleAuditSpec(
         module="grafana",
         label="GRAFANA",
         default_port=3000,
         detect=detect,
+        auth=auth,
         render=lambda record: [f"GRAFANA\t{record.host}\t{record.port}\t[*] Grafana Service"],
     )
     args = SimpleNamespace(enum_cve=True, debug=False, username="user", password="pass")
     result = AuditCommandRunner(args=args, spec=spec, emit_line=lambda _line: None).run_plan(
-        AuditCommandPlan(targets_by_port={3000: ("10.0.0.1",)}, output_format="json")
+        AuditCommandPlan(
+            targets_by_port={3000: ("10.0.0.1",)},
+            output_format="json",
+            credential_runs=(AuditCredentialRun(username="user", password="pass", source="cli"),),
+        )
     )
     findings = {finding["id"]: finding for finding in result.records[0]["cve_enumeration"]["findings"]}
     assert findings["CVE-2024-9264"]["access_basis"] == "provided_credentials"
+
+
+def test_runtime_rejects_low_privilege_findings_when_explicit_credentials_are_invalid() -> None:
+    def detect(ctx: Any) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            {
+                "host": ctx.host,
+                "port": ctx.port,
+                "service": "grafana",
+                "status": "auth_required",
+                "auth_required": True,
+                "is_grafana": True,
+                "server_version": "11.0.0",
+            },
+            module="grafana",
+            service="grafana",
+        )
+
+    def auth(ctx: Any, record: AuditRecord) -> AuditRecord:
+        payload = record.to_dict()
+        accepted = ctx.credential.source == "default"
+        payload.update(
+            {
+                "provided_credentials_ok": accepted,
+                "status": "auth_valid" if accepted else "auth_required",
+            }
+        )
+        return AuditRecord.from_mapping(payload, module="grafana", service="grafana")
+
+    spec = ModuleAuditSpec(
+        module="grafana",
+        label="GRAFANA",
+        default_port=3000,
+        detect=detect,
+        auth=auth,
+        render=lambda record: [f"GRAFANA\t{record.host}\t{record.port}\t[*] Grafana Service"],
+    )
+    args = SimpleNamespace(enum_cve=True, debug=False, username="user", password="wrong")
+    result = AuditCommandRunner(args=args, spec=spec, emit_line=lambda _line: None).run_plan(
+        AuditCommandPlan(
+            targets_by_port={3000: ("10.0.0.1",)},
+            output_format="json",
+            credential_runs=(
+                AuditCredentialRun(username="user", password="wrong", source="cli"),
+                AuditCredentialRun(username="admin", password="admin", source="default"),
+            ),
+        )
+    )
+
+    findings = {finding["id"] for finding in result.records[0]["cve_enumeration"]["findings"]}
+    assert "CVE-2024-9264" not in findings
 
 
 def test_default_credential_sweep_alone_does_not_enable_low_privilege_findings() -> None:
@@ -659,6 +724,7 @@ def test_runtime_without_flag_preserves_record_and_text() -> None:
     )
     assert emitted == ["GRAFANA\t10.0.0.1\t3000\t[*] Grafana Service"]
     assert "cve_enumeration" not in result.records[0]
+    assert "_cve_credentials_verified" not in result.records[0]
 
 
 def test_debug_reports_unknown_version_without_normal_txt_noise() -> None:
@@ -679,7 +745,7 @@ def test_debug_reports_unknown_version_without_normal_txt_noise() -> None:
     AuditCommandRunner(args=args, spec=spec, emit_line=emitted.append).run_plan(
         AuditCommandPlan(targets_by_port={3000: ("host",)}, output_format="txt")
     )
-    assert emitted == ["service"]
+    assert emitted == ["service", "GRAFANA\thost\t3000\t [*] CVE's Enumeration"]
     assert any("status=version_unknown" in line for line in debug)
 
 

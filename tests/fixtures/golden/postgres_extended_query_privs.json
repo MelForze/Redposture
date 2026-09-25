@@ -103,26 +103,30 @@
         "vulnerable": true
       },
       {
-        "description": "callable privileged functions may expose escalation paths",
+        "assessment": "not_observed",
+        "description": "inventory for manual owner/body/search_path review; accessibility alone is not privilege escalation",
         "error": null,
         "evidence": "accessible SECURITY DEFINER functions=0",
         "id": "security_definer_accessible",
+        "observed": false,
         "severity": "MEDIUM",
         "vulnerable": false
       },
       {
-        "description": "extension loading",
+        "assessment": "review_required",
+        "description": "inventory only; database CREATE does not prove unsafe extension loading or superuser execution",
         "error": null,
         "evidence": "has CREATE on current_database()=True",
         "id": "database_create_privilege",
+        "observed": true,
         "severity": "MEDIUM",
-        "vulnerable": true
+        "vulnerable": false
       }
     ],
     "privesc_summary": {
       "critical": 3,
       "high": 5,
-      "medium": 2,
+      "medium": 1,
       "total": 11,
       "unknown": 0
     },
@@ -146,6 +150,7 @@
       "admin | admin",
       "readonly | viewer"
     ],
+    "sslmode": "prefer",
     "stages": [
       {
         "attempt": 1,
@@ -227,6 +232,7 @@
     ],
     "table_targets": [
       "redposture.demo_accounts"
-    ]
+    ],
+    "tls_used": false
   }
 ]

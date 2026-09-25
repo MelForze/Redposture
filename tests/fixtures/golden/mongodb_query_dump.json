@@ -3,11 +3,18 @@
     "auth_db": "admin",
     "auth_required": false,
     "capabilities": {
-      "can_list_collections": true,
+      "can_list_collections": null,
       "can_list_databases": true,
       "can_list_indexes": null,
       "can_read_documents": true,
       "can_run_command": null
+    },
+    "capability_coverage": {
+      "can_read_documents": {
+        "failures": 0,
+        "state": "allowed",
+        "successes": 2
+      }
     },
     "collection_targets": [
       "demo_accounts"
@@ -47,6 +54,21 @@
     "nosql_command_database": null,
     "nosql_command_error": null,
     "nosql_command_result": null,
+    "operation_results": [
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "find_documents"
+      }
+    ],
+    "partial": false,
     "port": 27017,
     "projection": null,
     "provided_credentials": false,

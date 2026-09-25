@@ -102,11 +102,11 @@ class _AirflowQaHandler(BaseHTTPRequestHandler):
             return
 
         prefix = f"/api/{self.qa.generation}"
-        if path not in {f"{prefix}/dags", f"{prefix}/pools", f"{prefix}/eventLogs"}:
+        if path not in {f"{prefix}/dags", f"{prefix}/variables", f"{prefix}/connections"}:
             self._reply(404)
             return
         if self.qa.anonymous:
-            key = "dags" if path.endswith("/dags") else "items"
+            key = "dags" if path.endswith("/dags") else "variables" if path.endswith("/variables") else "connections"
             self._reply(200, {key: [], "total_entries": 0})
             return
 
@@ -119,7 +119,7 @@ class _AirflowQaHandler(BaseHTTPRequestHandler):
         if credential not in self.qa.valid:
             self._problem(401 if path.endswith("/dags") else 403)
             return
-        key = "dags" if path.endswith("/dags") else "items"
+        key = "dags" if path.endswith("/dags") else "variables" if path.endswith("/variables") else "connections"
         self._reply(200, {key: [], "total_entries": 0})
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
@@ -210,7 +210,7 @@ def test_airflow2_defcreds_checks_every_pair_and_continues_after_success_and_tra
     assert set(server.basic_dag_requests[: len(expected)]) == set(expected)
     credential_lines = [line for line in lines if "\t [+] " in line or "\t [-] " in line]
     assert len(credential_lines) == len(expected)
-    assert any("[+] admin:admin (role:admin)" in line for line in credential_lines)
+    assert any("[+] admin:admin (Dags:0) (Keys:0) (Connections:0)" in line for line in credential_lines)
     assert any("[+] airflow:airflow" in line for line in credential_lines)
     assert any("[-] service:service" in line for line in credential_lines)
     assert result.detected_count == 1 and result.operational_failure_count == 0
@@ -246,7 +246,10 @@ def test_airflow3_defcreds_deduplicates_provided_pair_uses_bearer_and_redacts_js
     assert any(auth and auth.startswith("Bearer qa-token-") for _method, _path, auth in server.calls)
     payload = next(json.loads(line) for line in lines if line.startswith("{") and '"service": "airflow"' in line)
     assert payload["credential_state"] == "valid"
-    assert payload["role"] == "admin"
+    assert payload["authenticated_dags_count"] == 0
+    assert payload["authenticated_keys_count"] == 0
+    assert payload["authenticated_connections_count"] == 0
+    assert "role" not in payload
     assert payload["default_credentials"] is False
     assert "credential_password" not in payload
     assert "attempted_credentials" not in payload

@@ -1,0 +1,59 @@
+[
+  {
+    "attempted_credentials": [],
+    "attempted_credentials_count": 0,
+    "auth_attempts": [],
+    "auth_method": null,
+    "auth_required": true,
+    "check_results": [],
+    "check_urls": [],
+    "credential_verification_status": "available",
+    "credentials_source": null,
+    "datasource_count": null,
+    "datasources": null,
+    "default_credentials": false,
+    "defcreds_enabled": false,
+    "effective_password": null,
+    "effective_username": null,
+    "error": "authentication required",
+    "host": "127.0.0.1",
+    "is_grafana": true,
+    "module": "grafana",
+    "port": 3000,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_username": null,
+    "service": "grafana",
+    "show_datasources": false,
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "authentication required",
+        "result": "error",
+        "stage_name": "data"
+      }
+    ],
+    "status": "auth_required"
+  }
+]

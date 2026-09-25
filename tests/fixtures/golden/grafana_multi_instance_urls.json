@@ -2,14 +2,77 @@
   {
     "attempted_credentials": [
       {
-        "error": "",
-        "ok": true,
+        "error": null,
         "password": "admin",
         "source": "default",
+        "status": "weak_default_creds",
         "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "changeme",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "grafana",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "grafana",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "grafana"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "grafana"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "root",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "user"
+      },
+      {
+        "error": null,
+        "password": "user",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "user"
       }
     ],
-    "attempted_credentials_count": 1,
+    "attempted_credentials_count": 10,
     "auth_attempts": [
       {
         "error": "",
@@ -17,8 +80,72 @@
         "password": "admin",
         "source": "default",
         "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "changeme",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "source": "default",
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "root",
+        "source": "default",
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "user"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "user",
+        "source": "default",
+        "username": "user"
       }
     ],
+    "auth_method": null,
     "auth_required": false,
     "check_results": [],
     "check_urls": [],
@@ -29,8 +156,72 @@
         "password": "admin",
         "token": null,
         "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "changeme",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "token": null,
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "root",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "user"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "user",
+        "token": null,
+        "username": "user"
       }
     ],
+    "credential_verification_status": "available",
     "credentials_source": "default",
     "datasource_count": 11,
     "datasources": [
@@ -104,6 +295,9 @@
     "provided_username": "admin",
     "service": "grafana",
     "show_datasources": false,
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,
@@ -130,19 +324,82 @@
         "stage_name": "data"
       }
     ],
-    "status": "valid_credentials"
+    "status": "weak_default_creds"
   },
   {
     "attempted_credentials": [
       {
-        "error": "",
-        "ok": true,
+        "error": null,
         "password": "admin",
         "source": "default",
+        "status": "weak_default_creds",
         "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "changeme",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "grafana",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "grafana",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "grafana"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "grafana"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "root",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "user"
+      },
+      {
+        "error": null,
+        "password": "user",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "user"
       }
     ],
-    "attempted_credentials_count": 1,
+    "attempted_credentials_count": 10,
     "auth_attempts": [
       {
         "error": "",
@@ -150,8 +407,72 @@
         "password": "admin",
         "source": "default",
         "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "changeme",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "source": "default",
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "root",
+        "source": "default",
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "user"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "user",
+        "source": "default",
+        "username": "user"
       }
     ],
+    "auth_method": null,
     "auth_required": false,
     "check_results": [],
     "check_urls": [],
@@ -162,8 +483,72 @@
         "password": "admin",
         "token": null,
         "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "changeme",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "token": null,
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "root",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "user"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "user",
+        "token": null,
+        "username": "user"
       }
     ],
+    "credential_verification_status": "available",
     "credentials_source": "default",
     "datasource_count": 11,
     "datasources": [
@@ -237,6 +622,9 @@
     "provided_username": "admin",
     "service": "grafana",
     "show_datasources": false,
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,
@@ -263,19 +651,82 @@
         "stage_name": "data"
       }
     ],
-    "status": "valid_credentials"
+    "status": "weak_default_creds"
   },
   {
     "attempted_credentials": [
       {
-        "error": "",
-        "ok": true,
+        "error": null,
         "password": "admin",
         "source": "default",
+        "status": "weak_default_creds",
         "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "changeme",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "grafana",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "grafana",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "grafana"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "grafana"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "root",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "user"
+      },
+      {
+        "error": null,
+        "password": "user",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "user"
       }
     ],
-    "attempted_credentials_count": 1,
+    "attempted_credentials_count": 10,
     "auth_attempts": [
       {
         "error": "",
@@ -283,8 +734,72 @@
         "password": "admin",
         "source": "default",
         "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "changeme",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "source": "default",
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "root",
+        "source": "default",
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "user"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "user",
+        "source": "default",
+        "username": "user"
       }
     ],
+    "auth_method": null,
     "auth_required": false,
     "check_results": [],
     "check_urls": [],
@@ -295,8 +810,72 @@
         "password": "admin",
         "token": null,
         "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "changeme",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "token": null,
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "root",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "user"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "user",
+        "token": null,
+        "username": "user"
       }
     ],
+    "credential_verification_status": "available",
     "credentials_source": "default",
     "datasource_count": 11,
     "datasources": [
@@ -370,6 +949,9 @@
     "provided_username": "admin",
     "service": "grafana",
     "show_datasources": false,
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,
@@ -396,19 +978,82 @@
         "stage_name": "data"
       }
     ],
-    "status": "valid_credentials"
+    "status": "weak_default_creds"
   },
   {
     "attempted_credentials": [
       {
-        "error": "",
-        "ok": true,
+        "error": null,
         "password": "admin",
         "source": "default",
+        "status": "weak_default_creds",
         "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "changeme",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "grafana",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "grafana",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "grafana"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "grafana"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "root",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "user"
+      },
+      {
+        "error": null,
+        "password": "user",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "user"
       }
     ],
-    "attempted_credentials_count": 1,
+    "attempted_credentials_count": 10,
     "auth_attempts": [
       {
         "error": "",
@@ -416,8 +1061,72 @@
         "password": "admin",
         "source": "default",
         "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "changeme",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "source": "default",
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "root",
+        "source": "default",
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "user"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "user",
+        "source": "default",
+        "username": "user"
       }
     ],
+    "auth_method": null,
     "auth_required": false,
     "check_results": [],
     "check_urls": [],
@@ -428,8 +1137,72 @@
         "password": "admin",
         "token": null,
         "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "changeme",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "token": null,
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "root",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "user"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "user",
+        "token": null,
+        "username": "user"
       }
     ],
+    "credential_verification_status": "available",
     "credentials_source": "default",
     "datasource_count": 11,
     "datasources": [
@@ -503,6 +1276,9 @@
     "provided_username": "admin",
     "service": "grafana",
     "show_datasources": false,
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,
@@ -529,19 +1305,82 @@
         "stage_name": "data"
       }
     ],
-    "status": "valid_credentials"
+    "status": "weak_default_creds"
   },
   {
     "attempted_credentials": [
       {
-        "error": "",
-        "ok": true,
+        "error": null,
         "password": "admin",
         "source": "default",
+        "status": "weak_default_creds",
         "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "changeme",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "grafana",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "grafana",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "grafana"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "grafana"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "root",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "user"
+      },
+      {
+        "error": null,
+        "password": "user",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "user"
       }
     ],
-    "attempted_credentials_count": 1,
+    "attempted_credentials_count": 10,
     "auth_attempts": [
       {
         "error": "",
@@ -549,8 +1388,72 @@
         "password": "admin",
         "source": "default",
         "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "changeme",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "source": "default",
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "root",
+        "source": "default",
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "source": "default",
+        "username": "user"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "user",
+        "source": "default",
+        "username": "user"
       }
     ],
+    "auth_method": null,
     "auth_required": false,
     "check_results": [],
     "check_urls": [],
@@ -561,8 +1464,72 @@
         "password": "admin",
         "token": null,
         "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "changeme",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "grafana",
+        "token": null,
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "grafana"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "root",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "user"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "user",
+        "token": null,
+        "username": "user"
       }
     ],
+    "credential_verification_status": "available",
     "credentials_source": "default",
     "datasource_count": 11,
     "datasources": [
@@ -636,6 +1603,9 @@
     "provided_username": "admin",
     "service": "grafana",
     "show_datasources": false,
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,
@@ -662,6 +1632,6 @@
         "stage_name": "data"
       }
     ],
-    "status": "valid_credentials"
+    "status": "weak_default_creds"
   }
 ]

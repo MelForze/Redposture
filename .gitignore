@@ -47,6 +47,8 @@ scan_results*.txt
 scan.txt
 trigger_events*.txt
 *_audit.txt
+*_discover.txt
+*_lab.txt
 collect_raw/
 registry_downloads/
 gitlab_clones/

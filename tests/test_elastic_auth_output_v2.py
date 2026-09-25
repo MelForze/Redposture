@@ -138,6 +138,117 @@ def test_verified_and_definitively_rejected_candidates_keep_markers() -> None:
     assert any("[-] elastic:bad" in line for line in lines)
 
 
+def test_selected_credential_renders_once_after_capabilities() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 29201,
+        "status": "valid_credentials",
+        "provided_credentials": True,
+        "provided_username": "observer",
+        "provided_password": "V13w-Only!2026",
+        "provided_token": False,
+        "can_read": None,
+        "can_write": None,
+        "can_manage": None,
+        "can_manage_security": None,
+        "attempted_credentials": [
+            {
+                "username": "observer",
+                "password": "V13w-Only!2026",
+                "source": "provided",
+                "status": "valid_credentials",
+                "auth_probe_status": "verified",
+            }
+        ],
+    }
+
+    assert actions._format_record({**record, "_credential_capabilities_pending": True}, "txt") == ""
+    assert actions._format_record(record, "txt").endswith("[+] observer:V13w-Only!2026")
+    assert actions._format_credential_attempts_records(record, "txt") == []
+    assert "unknown" not in actions._format_record(record, "txt")
+
+
+def test_selected_credential_renders_verified_resource_access() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 29201,
+        "status": "valid_credentials",
+        "provided_credentials": True,
+        "provided_username": "observer",
+        "provided_password": "V13w-Only!2026",
+        "provided_token": False,
+        "credential_resource_access_checked": True,
+        "credential_indices_access": "allowed",
+        "credential_indices_count": 7,
+        "credential_documents_access": "allowed",
+        "credential_cluster_access": "denied",
+        "credential_nodes_access": "denied",
+        "credential_nodes_count": None,
+        "credential_users_access": "denied",
+        "credential_users_count": None,
+    }
+
+    assert actions._format_record(record, "txt").endswith(
+        "[+] observer:V13w-Only!2026 (Indices:7) (Documents:Read) "
+        "(Cluster:Access Denied) (Nodes:Access Denied) (Users:Access Denied)"
+    )
+
+
+def test_opensearch_resource_access_uses_only_read_only_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[tuple[str, str]] = []
+
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        *,
+        method: str = "GET",
+        **_kwargs: Any,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        requests.append((method, path))
+        if path.startswith("/_resolve/index/"):
+            return 200, b'{"indices":[{"name":"logs-a"},{"name":"logs-b"}]}', {}, None
+        if path.startswith("/logs-a/_search"):
+            return 403, b'{"error":"denied"}', {}, None
+        if path.startswith("/logs-b/_search"):
+            return 200, b'{"hits":{"total":0,"hits":[]}}', {}, None
+        if path == "/_cluster/health":
+            return 403, b'{"error":"denied"}', {}, None
+        if path.startswith("/_nodes?"):
+            return 200, b'{"nodes":{"node-1":{"name":"one"}}}', {}, None
+        if path == "/_plugins/_security/api/internalusers":
+            return 403, b'{"error":"denied"}', {}, None
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    monkeypatch.setattr(actions, "_elastic_request", fake_request)
+
+    result = actions._probe_credential_resource_access(
+        "127.0.0.1",
+        29201,
+        1.0,
+        scheme="https",
+        insecure=True,
+        ca_file=None,
+        auth_headers={"Authorization": "Basic redacted"},
+        vendor="opensearch",
+    )
+
+    assert result == {
+        "credential_resource_access_checked": True,
+        "credential_indices_access": "allowed",
+        "credential_indices_count": 2,
+        "credential_documents_access": "allowed",
+        "credential_cluster_access": "denied",
+        "credential_nodes_access": "allowed",
+        "credential_nodes_count": 1,
+        "credential_users_access": "denied",
+        "credential_users_count": None,
+    }
+    assert requests
+    assert {method for method, _path in requests} == {"GET"}
+
+
 def test_debug_renderer_never_reveals_api_token() -> None:
     attempt = {
         "username": None,
@@ -594,6 +705,66 @@ def test_cluster_action_promotes_already_fetched_node_version(monkeypatch: pytes
 
     assert result["server_version"] == "2.19.1"
     assert result["cluster_nodes"][0]["version"] == "2.19.1"
+
+
+def test_discovery_streams_start_before_collecting_and_renders_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emitted: list[str] = []
+
+    class FakePool:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(actions, "HttpSessionPool", FakePool)
+    monkeypatch.setattr(
+        actions,
+        "_collect_discover_report",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            error=None,
+            error_detail=None,
+            to_dict=lambda: {
+                "discover_results": [],
+                "discover_findings": [],
+                "discover_coverage": {
+                    "complete": True,
+                    "status": "complete",
+                    "indices_enumerated": 0,
+                    "indices_scanned": 0,
+                },
+            },
+        ),
+    )
+    state = actions.ElasticLifecycleState()
+    ctx = _ctx(state, "works")
+    ctx.args.discover_time = 30.0
+    ctx.args.discover_max_bytes = 50 * 1024 * 1024
+    ctx.args._audit_nested_workers = 8
+    ctx.args._proxy_config = None
+    ctx.nested_scheduler = None
+    ctx.debug_emit = None
+    ctx.live_emit = emitted.extend
+    record = {**_detected_record(), "status": "valid_credentials", "auth_valid": True}
+
+    result = actions.collect_elastic_data(
+        ctx,
+        record,
+        {
+            "show_endpoints": False,
+            "show_plugins": False,
+            "show_cluster": False,
+            "show_users": False,
+            "discover": True,
+        },
+    )
+
+    assert emitted == ["ELASTIC\t127.0.0.1\t9200\t [*] Discover Secrets"]
+    assert result["_discover_findings_streamed"] is True
+    rendered = actions._format_detail_records(result, "txt")
+    assert any("Discover Complete (status:complete) (findings:0)" in line for line in rendered)
 
 
 def test_unsupported_users_api_does_not_fail_other_actions(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,7 +1,7 @@
 [
   {
     "auth_required": true,
-    "banner": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0",
+    "banner": "Oracle AI Database 26ai Free Release 23.26.3.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.3.0.0",
     "capabilities": {
       "can_list_dblinks": false,
       "can_list_tables": false,
@@ -129,7 +129,7 @@
         "bytes": 66,
         "data": "FAKE-LAB-CWALLET wallet_password=WalletPass!2026 service=FREEPDB1\n",
         "directory": "DATA_PUMP_DIR",
-        "directory_path": "/opt/oracle/admin/FREE/dpdump/53103950E62B1258E0636402000A0818",
+        "directory_path": "/opt/oracle/admin/FREE/dpdump/5A4CCE5363111260E0633400010A8219",
         "file_name": "cwallet.sso",
         "method": "bfilename"
       },
@@ -137,7 +137,7 @@
         "bytes": 74,
         "data": "FAKE-LAB-P12 p12_password=WalletPass!2026 api_key=ora-wallet-api-key-2026\n",
         "directory": "DATA_PUMP_DIR",
-        "directory_path": "/opt/oracle/admin/FREE/dpdump/53103950E62B1258E0636402000A0818",
+        "directory_path": "/opt/oracle/admin/FREE/dpdump/5A4CCE5363111260E0633400010A8219",
         "file_name": "ewallet.p12",
         "method": "bfilename"
       },
@@ -145,7 +145,7 @@
         "bytes": 127,
         "data": "wallet=cwallet.sso path=/opt/oracle/admin/FREE/wallet password=WalletPass!2026\np12=ewallet.p12 api_key=ora-wallet-api-key-2026\n",
         "directory": "DATA_PUMP_DIR",
-        "directory_path": "/opt/oracle/admin/FREE/dpdump/53103950E62B1258E0636402000A0818",
+        "directory_path": "/opt/oracle/admin/FREE/dpdump/5A4CCE5363111260E0633400010A8219",
         "file_name": "redposture_wallet_hint.txt",
         "method": "bfilename"
       }

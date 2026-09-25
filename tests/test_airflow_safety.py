@@ -106,12 +106,15 @@ def test_password_redacted_from_json_but_echoed_in_txt():
         "status": "detected",
         "credential_state": "valid",
         "credential_password": "S3CRET",
-        "role": "admin",
+        "authenticated_dags_access": "allowed",
+        "authenticated_dags_count": 1,
+        "authenticated_keys_access": "denied",
+        "authenticated_connections_access": "denied",
         "credential_results": [{"username": "airflow", "state": "valid", "error_code": None}],
     }
     # TXT accepted line echoes user:pass (house convention).
     txt = render._format_record(record, "txt")
-    assert "airflow:S3CRET" in txt and "(role:admin)" in txt
+    assert "airflow:S3CRET" in txt and "(Dags:1)" in txt
     # The JSON path emits nothing from the renderer; the field is stripped by the
     # framework via structured_output_redact_fields (mirrored here).
     assert render._format_record(record, "json") == ""

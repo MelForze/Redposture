@@ -1,5 +1,6 @@
 [
   {
+    "auth_method": null,
     "auth_required": null,
     "clone_dir": null,
     "clone_requested": false,
@@ -120,6 +121,9 @@
     ],
     "public_projects_error": null,
     "service": "gitlab",
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,
@@ -156,6 +160,7 @@
     "version": "17.8.1"
   },
   {
+    "auth_method": null,
     "auth_required": null,
     "clone_dir": null,
     "clone_requested": false,
@@ -276,6 +281,9 @@
     ],
     "public_projects_error": null,
     "service": "gitlab",
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,
@@ -312,6 +320,7 @@
     "version": "17.8.1"
   },
   {
+    "auth_method": null,
     "auth_required": null,
     "clone_dir": null,
     "clone_requested": false,
@@ -432,6 +441,9 @@
     ],
     "public_projects_error": null,
     "service": "gitlab",
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,
@@ -468,6 +480,7 @@
     "version": "17.8.1"
   },
   {
+    "auth_method": null,
     "auth_required": null,
     "clone_dir": null,
     "clone_requested": false,
@@ -588,6 +601,9 @@
     ],
     "public_projects_error": null,
     "service": "gitlab",
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,
@@ -624,6 +640,7 @@
     "version": "17.8.1"
   },
   {
+    "auth_method": null,
     "auth_required": null,
     "clone_dir": null,
     "clone_requested": false,
@@ -744,6 +761,9 @@
     ],
     "public_projects_error": null,
     "service": "gitlab",
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,

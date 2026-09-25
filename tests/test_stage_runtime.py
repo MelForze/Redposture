@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -68,6 +69,151 @@ class _ConsoleRecorder:
 
     def error(self, message: str) -> None:
         self.errors.append(message)
+
+
+def test_discover_streams_detection_and_auth_before_data_and_avoids_final_duplicates(tmp_path: Path) -> None:
+    emitted: list[str] = []
+    output_path = tmp_path / "discover.txt"
+
+    def _record(ctx, status: str, **extra: object) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status=status,
+            extra={"is_demo": True, **extra},
+        )
+
+    def detect(ctx) -> AuditRecord:
+        return _record(ctx, "auth_required")
+
+    def auth(ctx, _prior) -> AuditRecord:
+        return _record(ctx, "valid_credentials", credential_state="valid")
+
+    def capabilities(ctx, _prior) -> AuditRecord:
+        return _record(ctx, "valid_credentials", credential_state="valid", capabilities_ready=True)
+
+    def data(ctx, _prior) -> AuditRecord:
+        assert emitted == ["DEMO host detected", "DEMO host authenticated", "DEMO host capabilities"]
+        assert output_path.read_text(encoding="utf-8").splitlines() == emitted
+        return _record(
+            ctx,
+            "valid_credentials",
+            credential_state="valid",
+            capabilities_ready=True,
+            discover_done=True,
+        )
+
+    def render(record: AuditRecord) -> list[str]:
+        lines = [f"DEMO {record.host} detected"]
+        if record.extra.get("credential_state") == "valid":
+            lines.append(f"DEMO {record.host} authenticated")
+        if record.extra.get("capabilities_ready"):
+            lines.append(f"DEMO {record.host} capabilities")
+        if record.extra.get("discover_done"):
+            lines.append(f"DEMO {record.host} discovery complete")
+        return lines
+
+    runner = AuditCommandRunner(
+        args=SimpleNamespace(discover=True, debug=False),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            auth=auth,
+            capabilities=capabilities,
+            data=data,
+            render=render,
+            credential_gate=lambda _credential, record: (
+                record.extra.get("credential_state") == "valid",
+                "credential verified",
+            ),
+            deep_gate=lambda _record: (True, "run"),
+        ),
+        emit_line=emitted.append,
+    )
+
+    result = runner.run_plan(
+        AuditCommandPlan(
+            targets_by_port={1234: ("host",)},
+            credential_runs=(AuditCredentialRun(username="user", password="pass", source="provided"),),
+            output_path=str(output_path),
+            output_format="txt",
+            workers=1,
+        )
+    )
+
+    assert emitted == [
+        "DEMO host detected",
+        "DEMO host authenticated",
+        "DEMO host capabilities",
+        "DEMO host discovery complete",
+    ]
+    assert output_path.read_text(encoding="utf-8").splitlines() == emitted
+    assert result.emitted_lines == 4
+
+
+def test_streaming_can_defer_enrichable_detect_line_until_auth(tmp_path: Path) -> None:
+    emitted: list[str] = []
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="auth_required",
+            extra={"is_demo": True, "version": None},
+        )
+
+    def auth(ctx, prior) -> AuditRecord:
+        assert emitted == []
+        payload = prior.to_dict()
+        payload.update(status="valid_credentials", credential_state="valid", version="2.0.0")
+        return AuditRecord.from_mapping(payload, module="demo", service="demo")
+
+    def data(_ctx, prior) -> AuditRecord:
+        return prior
+
+    def render(record: AuditRecord) -> list[str]:
+        lines = [f"DEMO {record.host} version:{record.extra.get('version') or '-'}"]
+        if record.extra.get("credential_state") == "valid":
+            lines.append(f"DEMO {record.host} authenticated")
+        return lines
+
+    runner = AuditCommandRunner(
+        args=SimpleNamespace(discover=True, debug=False),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            auth=auth,
+            data=data,
+            render=render,
+            defer_detect_output_until_auth=True,
+            credential_gate=lambda _credential, record: (
+                record.extra.get("credential_state") == "valid",
+                "credential verified",
+            ),
+            deep_gate=lambda _record: (True, "run"),
+        ),
+        emit_line=emitted.append,
+    )
+
+    runner.run_plan(
+        AuditCommandPlan(
+            targets_by_port={1234: ("host",)},
+            credential_runs=(AuditCredentialRun(username="user", password="pass", source="provided"),),
+            output_path=str(tmp_path / "deferred.txt"),
+            output_format="txt",
+            workers=1,
+        )
+    )
+
+    assert emitted == ["DEMO host version:2.0.0", "DEMO host authenticated"]
 
 
 def test_cli_audit_worker_profile_uses_expanded_endpoint_count() -> None:
@@ -409,6 +555,19 @@ def test_line_output_sink_emits_to_callback_and_file(tmp_path) -> None:
     # -o now tees: lines are written to the file AND echoed to the console callback.
     assert output_path.read_text(encoding="utf-8").splitlines() == ["first", "second"]
     assert emitted == ["one", "two", "first", "second"]
+
+
+def test_line_output_sink_removes_module_padding_only_from_stored_tsv(tmp_path) -> None:
+    output_path = tmp_path / "result.txt"
+    emitted: list[str] = []
+    sink = LineOutputSink(str(output_path), emitted.append)
+
+    display_line = "DOCKER  \t127.0.0.1\t2376\t [*] Docker Engine API"
+    sink.emit_many([display_line])
+    sink.close()
+
+    assert emitted == [display_line]
+    assert output_path.read_text(encoding="utf-8") == "DOCKER\t127.0.0.1\t2376\t [*] Docker Engine API\n"
 
 
 def test_line_output_sink_emit_stream_file_streams_in_bounded_batches(tmp_path) -> None:
@@ -1927,6 +2086,53 @@ def test_audit_pipeline_streams_when_record_retention_is_disabled() -> None:
     assert result.typed_records == []
     assert result.record_count == 2
     assert result.record_retention_truncated is True
+
+
+def test_enum_cve_streams_service_and_findings_before_data_phase_without_duplicates(tmp_path) -> None:
+    from redposture_core.cve import DetectedProduct
+
+    emitted: list[str] = []
+    output_path = tmp_path / "enum-cve.txt"
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="open_no_auth",
+            auth_required=False,
+            extra={"version": "2.8.0", "is_demo": True},
+        )
+
+    def data(_ctx, record: AuditRecord) -> AuditRecord:
+        assert emitted[0] == "DEMO service detected"
+        assert emitted[1].endswith("[*] CVE's Enumeration")
+        assert any("CVE-2024-39877 potentially affected" in line for line in emitted)
+        assert "CVE-2024-39877 potentially affected" in output_path.read_text(encoding="utf-8")
+        return record
+
+    spec = ModuleAuditSpec(
+        module="demo",
+        label="DEMO",
+        default_port=1234,
+        detect=detect,
+        data=data,
+        render=lambda _record: ["DEMO service detected"],
+        cve_product_resolver=lambda payload: [
+            DetectedProduct("apache_airflow", "Apache Airflow", str(payload.get("version")), "high"),
+        ],
+    )
+
+    AuditCommandRunner(
+        args=SimpleNamespace(enum_cve=True, discover=False),
+        spec=spec,
+        emit_line=emitted.append,
+    ).run_plan(AuditCommandPlan(targets_by_port={1234: ("host",)}, output_format="txt", output_path=str(output_path)))
+
+    assert emitted.count("DEMO service detected") == 1
+    assert sum("CVE's Enumeration" in line for line in emitted) == 1
+    assert sum("CVE-2024-39877 potentially affected" in line for line in emitted) == 1
 
 
 def test_audit_model_optional_fields_and_render_events_are_serialized() -> None:

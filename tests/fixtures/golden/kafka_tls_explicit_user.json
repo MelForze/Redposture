@@ -1,6 +1,5 @@
 [
   {
-    "auth_flow": "sasl_fallback",
     "auth_required": true,
     "cluster_permissions": {
       "create": true,
@@ -17,8 +16,33 @@
     ],
     "defcreds_enabled": false,
     "dump": true,
+    "dump_coverage": {
+      "complete": true,
+      "error": null,
+      "failed_count": 0,
+      "not_attempted_count": 0,
+      "partial_count": 0,
+      "requested_count": 2,
+      "status": "complete",
+      "successful_count": 2,
+      "topics": [
+        {
+          "error": null,
+          "message_count": 1,
+          "status": "success",
+          "topic": "tls.audit"
+        },
+        {
+          "error": null,
+          "message_count": 2,
+          "status": "success",
+          "topic": "tls.orders"
+        }
+      ]
+    },
     "dump_error": null,
     "dump_errors": {},
+    "dump_partial": false,
     "dump_results": {
       "tls.audit": [
         "<KAFKA_OFFSET> {\"event\":\"sasl_ssl_login\",\"user\":\"admin\",\"broker\":\"kafka-tls\"}"
@@ -39,6 +63,7 @@
     "max_messages": 5,
     "max_messages_explicit": true,
     "module": "kafka",
+    "partial": false,
     "port": 29093,
     "provided_credentials": true,
     "provided_credentials_ok": true,

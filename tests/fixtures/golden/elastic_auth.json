@@ -72,8 +72,8 @@
     "cat_plugins": null,
     "cluster_error": null,
     "cluster_health": {
-      "active_primary_shards": 7,
-      "active_shards": 7,
+      "active_primary_shards": 5,
+      "active_shards": 5,
       "active_shards_percent_as_number": 100.0,
       "cluster_name": "redposture-elastic-auth",
       "delayed_unassigned_shards": 0,
@@ -106,8 +106,20 @@
         "version": "8.13.4"
       }
     ],
+    "credential_accepted": true,
+    "credential_cluster_access": "allowed",
+    "credential_documents_access": "allowed",
+    "credential_indices_access": "allowed",
+    "credential_indices_count": 5,
+    "credential_nodes_access": "allowed",
+    "credential_nodes_count": 1,
+    "credential_resource_access_checked": true,
+    "credential_users_access": "allowed",
+    "credential_users_count": 8,
     "credential_verification": {
       "capability": "identity_endpoint_supported",
+      "credential_accepted": true,
+      "identity_verified": true,
       "status": "verified",
       "supported_endpoint": "/_security/_authenticate",
       "unsupported_endpoints": []
@@ -134,13 +146,13 @@
     "discover": true,
     "discover_coverage": {
       "complete": true,
-      "documents_scanned": 23,
+      "documents_scanned": 18,
       "duplicate_documents": 3,
       "indices_closed": 0,
       "indices_denied": 0,
-      "indices_enumerated": 7,
+      "indices_enumerated": 5,
       "indices_failed": 0,
-      "indices_scanned": 7,
+      "indices_scanned": 5,
       "limitations": [
         "secure keystore settings are not readable through the API",
         "closed indices, snapshots, Watcher, connectors, Alerting, Notifications and stored scripts are not scanned",
@@ -154,11 +166,11 @@
         "max_findings": 10000,
         "max_scalar_bytes": 262144,
         "max_seconds": 300.0,
-        "max_source_bytes": 134217728
+        "max_source_bytes": 52428800
       },
       "locations_dropped": 0,
       "missing_source_documents": 0,
-      "pages_scanned": 27,
+      "pages_scanned": 21,
       "query_candidates": 8,
       "scope": {
         "configuration": [
@@ -174,7 +186,7 @@
         "documents": "open and hidden indices plus resolved data-stream backing indices"
       },
       "shard_failures": [],
-      "source_bytes_scanned": 15614,
+      "source_bytes_scanned": 9213,
       "source_disabled_indices": [],
       "source_filtered_indices": [],
       "status": "complete",
@@ -196,8 +208,8 @@
           "status": "complete"
         },
         "index_settings": {
-          "objects_attempted": 7,
-          "objects_scanned": 7,
+          "objects_attempted": 5,
+          "objects_scanned": 5,
           "status": "complete"
         },
         "index_templates": {
@@ -221,8 +233,8 @@
           "status": "complete"
         },
         "mappings": {
-          "objects_attempted": 7,
-          "objects_scanned": 7,
+          "objects_attempted": 5,
+          "objects_scanned": 5,
           "status": "complete"
         },
         "node_settings": {
@@ -704,16 +716,14 @@
         "fingerprint": "sha256:<DOCKER_ID>",
         "locations": [
           {
-            "id": "user-observer",
-            "index": ".security-7",
-            "object": ".security-7/user-observer",
-            "source_kind": "document"
+            "object": "/_cluster/settings",
+            "source_kind": "cluster_settings"
           }
         ],
         "occurrence_count": 1,
         "score": 90,
         "secret_type": "password",
-        "value": "<BCRYPT>"
+        "value": "CorpusClusterSettingPassword!2026"
       },
       {
         "confidence": "very_high",
@@ -724,14 +734,16 @@
         "fingerprint": "sha256:<DOCKER_ID>",
         "locations": [
           {
-            "object": "/_cluster/settings",
-            "source_kind": "cluster_settings"
+            "id": "user-observer",
+            "index": ".security-7",
+            "object": ".security-7/user-observer",
+            "source_kind": "document"
           }
         ],
         "occurrence_count": 1,
         "score": 90,
         "secret_type": "password",
-        "value": "CorpusClusterSettingPassword!2026"
+        "value": "<BCRYPT>"
       },
       {
         "confidence": "very_high",
@@ -1137,32 +1149,6 @@
         "error": null,
         "error_detail": null,
         "hits": [],
-        "index": ".ds-.logs-deprecation.elasticsearch-default-2026.08.09-000001",
-        "partial_error_details": [],
-        "retried": false,
-        "retry_chunks": 0,
-        "shown_hits": 0,
-        "total_hits": 0,
-        "total_hits_relation": "exact",
-        "truncated": false
-      },
-      {
-        "error": null,
-        "error_detail": null,
-        "hits": [],
-        "index": ".ds-ilm-history-7-2026.08.09-000001",
-        "partial_error_details": [],
-        "retried": false,
-        "retry_chunks": 0,
-        "shown_hits": 0,
-        "total_hits": 0,
-        "total_hits_relation": "exact",
-        "truncated": false
-      },
-      {
-        "error": null,
-        "error_detail": null,
-        "hits": [],
         "index": ".security-7",
         "partial_error_details": [],
         "retried": false,
@@ -1529,6 +1515,7 @@
     "endpoints_error": null,
     "error": null,
     "host": "127.0.0.1",
+    "identity_verified": true,
     "insecure_effective": false,
     "is_elastic": true,
     "misconfig_error": null,
@@ -1553,6 +1540,8 @@
     "provided_username": "elastic",
     "rights_error": null,
     "scheme": "http",
+    "server_version_error": null,
+    "server_version_source": "authenticated",
     "service": "elastic",
     "show_cluster": true,
     "show_endpoints": true,

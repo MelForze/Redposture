@@ -1,5 +1,6 @@
 [
   {
+    "auth_method": null,
     "auth_required": null,
     "clone_dir": "<OUT_DIR>/gitlab_clones",
     "clone_requested": true,
@@ -48,6 +49,9 @@
     ],
     "public_projects_error": null,
     "service": "gitlab",
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,
@@ -95,6 +99,7 @@
         "wiki_enabled": true
       }
     ],
+    "token_capability": "identity",
     "token_projects": [
       {
         "archived": false,

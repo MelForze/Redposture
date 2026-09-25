@@ -1,0 +1,111 @@
+[
+  {
+    "admin": true,
+    "admin_evidence": {
+      "endpoint": "/api/users",
+      "http_status": 200,
+      "outcome": "ok"
+    },
+    "admin_status": "confirmed",
+    "anonymous": "denied",
+    "anonymous_endpoints": [],
+    "api_endpoint": "http://localhost:15672",
+    "auth_required": true,
+    "cluster_id": "rabbitmq-cluster-id-wi0grcsau4LzeVT98aGIpg",
+    "cluster_name": "redposture-commerce",
+    "credential_error": null,
+    "credential_http_status": 200,
+    "credential_state": "valid",
+    "credential_type": "basic",
+    "credential_username": "guest",
+    "credential_verification_status": "available",
+    "default_credentials": true,
+    "detection": {
+      "overview_status": 401,
+      "rabbitmq_realm": true
+    },
+    "detection_status": "confirmed",
+    "effective_username": "guest",
+    "enumeration": {
+      "nodes": {
+        "http_status": 200,
+        "items": [
+          {
+            "disk_free_alarm": false,
+            "mem_alarm": false,
+            "partitions": [],
+            "running": true,
+            "type": "disc"
+          },
+          {
+            "disk_free_alarm": false,
+            "mem_alarm": false,
+            "partitions": [],
+            "running": true,
+            "type": "disc"
+          },
+          {
+            "disk_free_alarm": false,
+            "mem_alarm": false,
+            "partitions": [],
+            "running": true,
+            "type": "disc"
+          }
+        ],
+        "status": "ok",
+        "truncated": false
+      }
+    },
+    "host": "localhost",
+    "module": "rabbitmq",
+    "permissions": [
+      {
+        "configure": ".*",
+        "read": ".*",
+        "user": "guest",
+        "vhost": "/",
+        "write": ".*"
+      }
+    ],
+    "permissions_status": "ok",
+    "permissions_truncated": false,
+    "port": 15672,
+    "provided_credentials_ok": true,
+    "service": "rabbitmq",
+    "show_permissions": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "tags": [
+      "administrator"
+    ],
+    "topic_permissions": [],
+    "topic_permissions_status": "ok",
+    "topic_permissions_truncated": false,
+    "version": "4.1.8"
+  }
+]

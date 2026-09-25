@@ -1,0 +1,201 @@
+[
+  {
+    "anonymous_dags_allowed": false,
+    "api_endpoint": "http://127.0.0.1:18080",
+    "api_generation": "v1",
+    "auth_method": "native",
+    "auth_required": true,
+    "authenticated_connections_access": "allowed",
+    "authenticated_connections_count": 1,
+    "authenticated_connections_http_status": 200,
+    "authenticated_dags_access": "allowed",
+    "authenticated_dags_count": 1,
+    "authenticated_dags_http_status": 200,
+    "authenticated_keys_access": "allowed",
+    "authenticated_keys_count": 1,
+    "authenticated_keys_http_status": 200,
+    "credential_results": [
+      {
+        "error_code": null,
+        "state": "valid",
+        "username": "airflow"
+      }
+    ],
+    "credential_state": "valid",
+    "credential_verification_status": "available",
+    "cve_enumeration": {
+      "additional_evidence": [],
+      "catalog_version": "2026-09-20",
+      "findings": [
+        {
+          "access_basis": "provided_credentials",
+          "affected_range": "<2.10.1",
+          "detected_version": "2.9.2",
+          "fixed_version": "2.10.1",
+          "id": "CVE-2024-45034",
+          "impact": "rce",
+          "privileges_required": "L",
+          "product": "apache_airflow",
+          "references": [
+            "https://github.com/apache/airflow/pull/41672",
+            "https://lists.apache.org/thread/b4fcw33vh60yfg9990n5vmc7sy2dcgjx",
+            "https://nvd.nist.gov/vuln/detail/CVE-2024-45034"
+          ],
+          "score": 8.8,
+          "severity": "HIGH",
+          "title": "Airflow remote code execution requiring low privileges",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"
+        },
+        {
+          "access_basis": "provided_credentials",
+          "affected_range": ">=2.4.0,<2.9.3",
+          "detected_version": "2.9.2",
+          "fixed_version": "2.9.3",
+          "id": "CVE-2024-39877",
+          "impact": "rce",
+          "privileges_required": "L",
+          "product": "apache_airflow",
+          "references": [
+            "https://github.com/apache/airflow/pull/40522",
+            "https://lists.apache.org/thread/1xhj9dkp37d6pzn24ll2mf94wbqnb2y1",
+            "https://nvd.nist.gov/vuln/detail/CVE-2024-39877"
+          ],
+          "score": 8.8,
+          "severity": "HIGH",
+          "title": "Airflow scheduler remote code execution requiring DAG-author privileges",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"
+        }
+      ],
+      "products": [
+        {
+          "confidence": "confirmed",
+          "normalized_version": "2.9.2",
+          "product_key": "apache_airflow",
+          "version": "2.9.2"
+        }
+      ],
+      "status": "matched"
+    },
+    "dags_allowed": false,
+    "default_credentials": false,
+    "detection": {
+      "git_version": ".release:f56f13442613912725d307aafc537cc76277c2d1",
+      "v1_version_status": 200,
+      "v2_version_status": 404
+    },
+    "detection_status": "confirmed",
+    "discover_report": {
+      "api_generation": "v1",
+      "bytes_scanned": 966,
+      "connection_bytes_scanned": 155,
+      "connections_scanned": 1,
+      "dag_source_bytes_scanned": 651,
+      "dag_sources_scanned": 1,
+      "dags_scanned": 1,
+      "errors": [],
+      "finding_count": 4,
+      "findings": [
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "masked_value": "Vari...9pQ2",
+          "object_path": "$.warehouse_password",
+          "place": "variable:warehouse_password$.warehouse_password",
+          "source_kind": "variable",
+          "type": "password",
+          "value": "VariableSecret-A7x9pQ2"
+        },
+        {
+          "confidence": "high",
+          "dag_id": "redposture_discovery",
+          "fingerprint": "<DOCKER_ID>",
+          "masked_value": "sour...t123",
+          "object_path": "$",
+          "place": "dag_source:redposture_discovery$",
+          "source_kind": "dag_source",
+          "type": "password",
+          "value": "sourceSecret123"
+        },
+        {
+          "confidence": "high",
+          "dag_id": "redposture_discovery",
+          "fingerprint": "<DOCKER_ID>",
+          "masked_value": "sk_l...6kP8",
+          "object_path": "$",
+          "place": "dag_source:redposture_discovery$",
+          "source_kind": "dag_source",
+          "type": "stripe_key",
+          "value": "sk_live_RedpostureTaskLogD4w6kP8"
+        },
+        {
+          "confidence": "high",
+          "dag_id": "redposture_discovery",
+          "dag_run_id": "manual__<ISO>+00:00",
+          "fingerprint": "<DOCKER_ID>",
+          "map_index": -1,
+          "masked_value": "sk_l...6kP8",
+          "object_path": "$",
+          "place": "log:redposture_discovery/manual__<ISO>+00:00/emit_test_secret/try:1/map:-1$",
+          "source_kind": "task_log",
+          "task_id": "emit_test_secret",
+          "try_number": 1,
+          "type": "stripe_key",
+          "value": "sk_live_RedpostureTaskLogD4w6kP8"
+        }
+      ],
+      "log_bytes_scanned": 75,
+      "logs_scanned": 1,
+      "partial_reasons": [],
+      "runs_scanned": 1,
+      "status": "complete",
+      "task_instances_seen": 1,
+      "variable_bytes_scanned": 85,
+      "variable_keys": [
+        "warehouse_password"
+      ],
+      "variables_error": null,
+      "variables_scanned": 1
+    },
+    "discover_requested": true,
+    "host": "127.0.0.1",
+    "module": "airflow",
+    "port": 18080,
+    "provided_credentials_ok": true,
+    "service": "airflow",
+    "show_keys_requested": true,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "variable_keys": [
+      "warehouse_password"
+    ],
+    "variable_keys_count": 1,
+    "variable_keys_total": 1,
+    "variable_keys_truncated": false,
+    "version": "2.9.2"
+  }
+]

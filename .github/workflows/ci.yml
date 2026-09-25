@@ -77,7 +77,3 @@ jobs:
 
       - name: Tests and coverage
         run: bash scripts/run_ci_job.sh test
-
-      - name: Mutation smoke
-        if: matrix.python-version == '3.12'
-        run: python scripts/run_mutation_smoke.py

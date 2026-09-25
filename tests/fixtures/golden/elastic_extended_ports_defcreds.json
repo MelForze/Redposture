@@ -6,6 +6,75 @@
     "api_key_probe_status": "not_run",
     "attempted_credentials": [
       {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [admin] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [admin] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "admin",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [admin] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [admin] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "changeme",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [admin] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [admin] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "password",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
         "auth_error_detail": null,
         "auth_probe_endpoint": "/_security/_authenticate",
         "auth_probe_http_status": 200,
@@ -16,6 +85,190 @@
         "source": "default",
         "status": "weak_default_creds",
         "username": "elastic",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [elastic] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [elastic] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "elastic",
+        "source": "default",
+        "status": "auth_required",
+        "username": "elastic",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [elastic] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [elastic] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "password",
+        "source": "default",
+        "status": "auth_required",
+        "username": "elastic",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [kibana] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [kibana] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "changeme",
+        "source": "default",
+        "status": "auth_required",
+        "username": "kibana",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [kibana] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [kibana] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "kibana",
+        "source": "default",
+        "status": "auth_required",
+        "username": "kibana",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [logstash] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [logstash] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "logstash",
+        "source": "default",
+        "status": "auth_required",
+        "username": "logstash",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [logstash_system] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [logstash_system] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "changeme",
+        "source": "default",
+        "status": "auth_required",
+        "username": "logstash_system",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [opensearch] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [opensearch] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "opensearch",
+        "source": "default",
+        "status": "auth_required",
+        "username": "opensearch",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [opensearch] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [opensearch] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "password",
+        "source": "default",
+        "status": "auth_required",
+        "username": "opensearch",
         "verification_capability": "identity_endpoint_supported"
       }
     ],
@@ -73,8 +326,20 @@
     "cluster_error": null,
     "cluster_health": null,
     "cluster_nodes": null,
+    "credential_accepted": true,
+    "credential_cluster_access": "allowed",
+    "credential_documents_access": "allowed",
+    "credential_indices_access": "allowed",
+    "credential_indices_count": 5,
+    "credential_nodes_access": "allowed",
+    "credential_nodes_count": 1,
+    "credential_resource_access_checked": true,
+    "credential_users_access": "allowed",
+    "credential_users_count": 8,
     "credential_verification": {
       "capability": "identity_endpoint_supported",
+      "credential_accepted": true,
+      "identity_verified": true,
       "status": "verified",
       "supported_endpoint": "/_security/_authenticate",
       "unsupported_endpoints": []
@@ -313,6 +578,7 @@
     "endpoints_error": null,
     "error": null,
     "host": "127.0.0.1",
+    "identity_verified": true,
     "insecure_effective": false,
     "is_elastic": true,
     "misconfig_error": null,
@@ -326,6 +592,8 @@
     "provided_username": "elastic",
     "rights_error": null,
     "scheme": "http",
+    "server_version_error": null,
+    "server_version_source": "authenticated",
     "service": "elastic",
     "show_cluster": false,
     "show_endpoints": true,

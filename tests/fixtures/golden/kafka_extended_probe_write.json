@@ -1,6 +1,5 @@
 [
   {
-    "auth_flow": "sasl_fallback",
     "auth_required": true,
     "cluster_permissions": {
       "create": true,
@@ -17,8 +16,10 @@
     ],
     "defcreds_enabled": false,
     "dump": false,
+    "dump_coverage": null,
     "dump_error": null,
     "dump_errors": null,
+    "dump_partial": false,
     "dump_results": null,
     "dump_topics": null,
     "effective_username": "admin",
@@ -28,6 +29,7 @@
     "max_messages": null,
     "max_messages_explicit": false,
     "module": "kafka",
+    "partial": false,
     "port": 29092,
     "provided_credentials": true,
     "provided_credentials_ok": true,

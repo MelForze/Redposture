@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -20,7 +21,7 @@ from .audit_models import StageTrace
 from .clients.tls_cache import tls_context_cache_stats
 from .cve import CveCatalog, ProductResolver, enumerate_record, load_catalog, render_finding_lines
 from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle
-from .rendering import sanitize_report_line
+from .rendering import normalize_report_line_for_storage, sanitize_report_line
 from .scheduler import BoundedScheduler, SharedNestedScheduler
 from .show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from .targeting import (
@@ -358,20 +359,21 @@ class LineOutputSink:
         # the record payload so a target-supplied name cannot forge a report line,
         # add a TSV field, or drive the operator's terminal. A no-op for JSON and
         # run-level lines, which carry no target data (see sanitize_report_line).
-        buffered = [sanitize_report_line(line) for line in lines if line]
-        if not buffered:
+        console_lines = [sanitize_report_line(line) for line in lines if line]
+        if not console_lines:
             return
         with self._lock:
             if self.output_path:
                 self._prepare_unlocked()
-                for line in buffered:
+                for line in console_lines:
+                    line = normalize_report_line_for_storage(line)
                     self._handle.write(line + "\n")
                 self._handle.flush()
             # Emit to console inside the lock too: without it a second thread's
             # `print()` can splice its output into the first thread's partial
             # write on POSIX (write(2) is atomic per-syscall but Python's
             # `print(...)` performs two writes).
-            for line in buffered:
+            for line in console_lines:
                 self.emit_line(line)
             self.output_written = True
 
@@ -444,9 +446,9 @@ class AuditHookContext:
     credential_runs: tuple[AuditCredentialRun, ...] = ()
     lifecycle_state: Any = None
     nested_scheduler: SharedNestedScheduler | None = None
-    # Live output sink (tees console + `-o` file). When set, a data hook may emit
-    # lines in real time during the scan; it then marks its record `_self_emitted`
-    # so the runtime does not render the record again (TXT only). None disables it.
+    # Live TXT sink (tees console + `-o` file). The runtime uses it for staged
+    # detect/auth/capability output; data hooks may use the same sink for findings.
+    # JSON remains one complete record per target. None disables live output.
     live_emit: Callable[[Iterable[str]], None] | None = None
 
 
@@ -531,6 +533,11 @@ class ModuleAuditSpec:
     # Minimum time between TTY progress renders. ``None`` preserves immediate
     # refresh behavior for existing modules.
     progress_refresh_interval_s: float | None = None
+    # A module whose authenticated probe enriches the primary service line may
+    # defer that line until the first auth result. This avoids printing an
+    # interim ``version:-`` line followed by a second, corrected service line
+    # while discovery/CVE output is streamed.
+    defer_detect_output_until_auth: bool = False
     # Optional module-specific product/version resolver for offline CVE
     # enumeration. The shared resolver covers standard record fields.
     cve_product_resolver: ProductResolver | None = None
@@ -715,16 +722,15 @@ class AuditCommandResult:
 
 
 def command_result_exit_code(result: AuditCommandResult) -> int:
-    """Return a shell status that preserves inconclusive audit outcomes.
+    """Return a shell status that preserves incomplete audit outcomes.
 
     A negative service result is still a successful audit. A run where no
     service was confirmed and at least one target failed before detection is
-    operationally inconclusive, so callers must not report a clean exit.
+    operationally inconclusive. A mixed run with confirmed services and a
+    pre-detection operational failure is partial. Both outcomes return nonzero.
     """
 
-    detected_count = int(getattr(result, "detected_count", 0) or 0)
     operational_failure_count = int(getattr(result, "operational_failure_count", 0) or 0)
-    _ = detected_count
     return 1 if operational_failure_count > 0 else 0
 
 
@@ -1888,29 +1894,66 @@ class AuditCommandRunner:
         if self._cve_catalog is None:
             return record
         payload = record.to_dict()
+        credentials_marker = payload.pop("_cve_credentials_verified", None)
+        credentials_verified = (
+            credentials_marker is True
+            if credentials_marker is not None
+            else self._record_reports_verified_credentials(payload)
+        )
         payload["cve_enumeration"] = enumerate_record(
             self.spec.module,
             payload,
             catalog=self._cve_catalog,
             confirmed=self._is_detected(record),
             resolver=self.spec.cve_product_resolver,
-            credentials_provided=self._cve_credentials_provided(),
+            credentials_provided=credentials_verified,
         )
         return AuditRecord.from_mapping(payload, module=self.spec.module, service=record.service)
 
-    def _cve_credentials_provided(self) -> bool:
-        """Whether the operator explicitly supplied application credentials.
-
-        PR:L catalog entries are relevant when an authenticated audit was
-        requested.  Default-credential sweeps are intentionally excluded: an
-        entry is enabled by explicit credentials or by confirmed anonymous
-        access on the target record.
-        """
-
+    def _cve_explicit_credentials_requested(self) -> bool:
         return any(
             getattr(self.args, field, None) is not None
             for field in ("username", "password", "token", "api_token", "apitoken", "api_key", "pve_api_token")
         )
+
+    def _record_reports_verified_credentials(self, payload: dict[str, Any]) -> bool:
+        """Accept PR:L CVEs only after explicitly supplied credentials verify."""
+
+        if not self._cve_explicit_credentials_requested():
+            return False
+        if any(
+            payload.get(field) is True
+            for field in (
+                "provided_credentials_ok",
+                "auth_valid",
+                "credential_accepted",
+                "credentials_valid",
+                "login_success",
+            )
+        ):
+            return True
+        credential_state = str(payload.get("credential_state") or "").strip().lower()
+        if credential_state in {"valid", "valid_but_restricted", "authenticated"}:
+            return True
+        return str(payload.get("status") or "").strip().lower() in {"auth_valid", "authenticated"}
+
+    def _mark_cve_credentials_verified(
+        self,
+        record: AuditRecord,
+        credential: AuditCredentialRun,
+        *,
+        accepted: bool,
+    ) -> AuditRecord:
+        if self._cve_catalog is None:
+            return record
+        explicit_candidate = (
+            credential.source != "default"
+            and any(value is not None for value in (credential.username, credential.password, credential.token))
+            and self._cve_explicit_credentials_requested()
+        )
+        payload = record.to_dict()
+        payload["_cve_credentials_verified"] = bool(accepted and explicit_candidate)
+        return AuditRecord.from_mapping(payload, module=self.spec.module, service=record.service)
 
     def _suppress_in_normal_text(self, record: AuditRecord) -> bool:
         if not self.spec.suppress_undetected_records_in_text or self._is_detected(record):
@@ -2049,11 +2092,14 @@ class AuditCommandRunner:
                     # A data hook already streamed this record's TXT lines live
                     # (real-time discovery); do not render it again.
                     emitted_lines += int(record.extra.get("_self_emitted_lines") or 0)
-                    cve_lines = render_finding_lines(
-                        record.to_dict(), label=self.spec.label, host=record.host, port=record.port
-                    )
-                    emitted_lines += len(cve_lines)
-                    sink.emit_many(cve_lines)
+                    if not record.extra.get("_cve_self_emitted"):
+                        cve_lines = render_finding_lines(
+                            record.to_dict(), label=self.spec.label, host=record.host, port=record.port
+                        )
+                        emitted_lines += len(cve_lines)
+                        sink.emit_many(cve_lines)
+                    if stream_file:
+                        emitted_lines += sink.emit_stream_file(stream_file)
                     return
                 if self.spec.render is None and self.spec.render_module is None:
                     return
@@ -2385,10 +2431,47 @@ class AuditCommandRunner:
     ) -> _AuditPipelineOutcome:
         """Run one target's entire lifecycle in a single scheduler worker."""
 
+        phase_emit: Callable[[AuditRecord, bool], None] | None = None
+        phase_line_counts: Counter[str] = Counter()
+        phase_emitted_lines = 0
+        live_emit = getattr(self, "_live_emit", None)
+        if (
+            (bool(getattr(self.args, "discover", False)) or bool(getattr(self.args, "enum_cve", False)))
+            and callable(live_emit)
+            and (self.spec.render is not None or self.spec.render_module is not None)
+        ):
+            render_plan = build_render_plan(self.spec.render_module) if self.spec.render_module is not None else None
+            debug = bool(getattr(self.args, "debug", False))
+
+            def _emit_phase(record: AuditRecord, include_cve: bool = False) -> None:
+                nonlocal phase_emitted_lines
+                phase_record = self._with_cve_enumeration(record) if include_cve else record
+                rendered = self._render_record(phase_record, render_plan, "txt", debug)
+                current_counts: Counter[str] = Counter()
+                new_lines: list[str] = []
+                for line in rendered:
+                    current_counts[line] += 1
+                    if current_counts[line] > phase_line_counts[line]:
+                        new_lines.append(line)
+                for line, count in current_counts.items():
+                    phase_line_counts[line] = max(phase_line_counts[line], count)
+                if new_lines:
+                    live_emit(new_lines)
+                    phase_emitted_lines += len(new_lines)
+
+            phase_emit = _emit_phase
+
         detect_outcome = self._run_detect_with_state(host, port, target, debug_emit)
         detect_record = detect_outcome.record
         detected = self._is_detected(detect_record)
         deep_candidate = detected and self._deep_gate(detect_record)[0]
+        has_credential_candidate = any(
+            any(value is not None for value in (credential.username, credential.password, credential.token))
+            for credential in credential_runs
+        )
+        defer_detect_output = bool(self.spec.defer_detect_output_until_auth and has_credential_candidate)
+        if detected and phase_emit is not None and not defer_detect_output:
+            phase_emit(detect_record, False)
         if debug_emit is not None:
             debug_emit(
                 format_pass_marker(
@@ -2431,7 +2514,19 @@ class AuditCommandRunner:
             detect_outcome,
             credential_runs,
             debug_emit,
+            phase_emit,
         )
+        if phase_emit is not None:
+            phase_emit(final_record, True)
+            payload = final_record.to_dict()
+            payload["_self_emitted"] = True
+            payload["_self_emitted_lines"] = phase_emitted_lines
+            payload["_cve_self_emitted"] = bool(getattr(self.args, "enum_cve", False))
+            final_record = AuditRecord.from_mapping(
+                payload,
+                module=self.spec.module,
+                service=final_record.service or self.spec.module,
+            )
         deep_processed = self._deep_gate(final_record)[0]
         if debug_emit is not None:
             debug_emit(
@@ -2460,6 +2555,7 @@ class AuditCommandRunner:
         detect_outcome: _AuditDetectOutcome,
         credential_runs: tuple[AuditCredentialRun, ...],
         debug_emit: Callable[[str], None] | None,
+        phase_emit: Callable[[AuditRecord, bool], None] | None = None,
     ) -> AuditRecord:
         try:
             return self._safe_record(
@@ -2474,6 +2570,7 @@ class AuditCommandRunner:
                     debug_emit,
                     lifecycle_state=detect_outcome.lifecycle_state,
                     runtime_stage_telemetry=detect_outcome.runtime_stage_telemetry,
+                    phase_emit=phase_emit,
                 ),
                 prior_record=detect_outcome.record,
             )
@@ -2565,6 +2662,7 @@ class AuditCommandRunner:
         debug_emit: Callable[[str], None] | None,
         lifecycle_state: Any = None,
         runtime_stage_telemetry: bool = False,
+        phase_emit: Callable[[AuditRecord, bool], None] | None = None,
     ) -> AuditRecord:
         if self._host_stage_is_monolithic:
             return self._run_monolithic_deep_lifecycle(
@@ -2575,6 +2673,7 @@ class AuditCommandRunner:
                 credential_runs,
                 debug_emit,
                 lifecycle_state,
+                phase_emit,
             )
 
         auth_records: list[tuple[AuditCredentialRun, AuditRecord]] = []
@@ -2634,6 +2733,8 @@ class AuditCommandRunner:
                             debug_emit=debug_emit,
                         )
                     auth_records.append((credential, auth_record))
+                    if phase_emit is not None:
+                        phase_emit(auth_record, False)
                     if self.spec.continue_after_credential_error:
                         continue
                     failed_record = self._preserve_detected_deep_failure(detect_record, auth_record)
@@ -2652,12 +2753,20 @@ class AuditCommandRunner:
                         debug_emit=debug_emit,
                     )
                 auth_records.append((credential, auth_record))
+                if phase_emit is not None:
+                    phase_emit(auth_record, False)
                 if (
                     self._credential_gate(credential, auth_record)[0]
                     and not self.spec.continue_after_credential_success
                 ):
                     break
             selected_credential, selected_record, gate_reason = self._select_deep_record(detect_record, auth_records)
+        credentials_verified = self._credential_gate(selected_credential, selected_record)[0]
+        selected_record = self._mark_cve_credentials_verified(
+            selected_record,
+            selected_credential,
+            accepted=credentials_verified,
+        )
         if retain_all_attempts:
             selected_record = self._with_attempted_credentials(selected_record, auth_records, force=True)
         gate = self._deep_gate(selected_record)
@@ -2676,6 +2785,8 @@ class AuditCommandRunner:
                     reason="deep checks disabled",
                     debug_emit=debug_emit,
                 )
+            if phase_emit is not None:
+                phase_emit(selected_record, True)
             return self._preserve_detected_deep_failure(detect_record, selected_record)
         if debug_emit is not None:
             debug_emit(format_stage2_gate(host, int(port), "run", gate[1] or gate_reason))
@@ -2729,6 +2840,14 @@ class AuditCommandRunner:
                 error=error,
                 debug_emit=debug_emit,
             )
+        record = self._mark_cve_credentials_verified(
+            record,
+            selected_credential,
+            accepted=credentials_verified,
+        )
+        if phase_emit is not None:
+            phase_emit(record, False)
+            phase_emit(record, True)
         data_ctx = self._ctx(
             host,
             port,
@@ -2773,6 +2892,11 @@ class AuditCommandRunner:
                 debug_emit=debug_emit,
             )
         final_record = self._preserve_detected_deep_failure(detect_record, record)
+        final_record = self._mark_cve_credentials_verified(
+            final_record,
+            selected_credential,
+            accepted=credentials_verified,
+        )
         if retain_all_attempts:
             return self._with_attempted_credentials(final_record, auth_records, force=True)
         return final_record
@@ -2786,6 +2910,7 @@ class AuditCommandRunner:
         credential_runs: tuple[AuditCredentialRun, ...],
         debug_emit: Callable[[str], None] | None,
         lifecycle_state: Any,
+        phase_emit: Callable[[AuditRecord, bool], None] | None = None,
     ) -> AuditRecord:
         """Run each monolithic credential attempt once with actions enabled.
 
@@ -2825,6 +2950,13 @@ class AuditCommandRunner:
             )
             record = self._host_stage(ctx, run_deep_checks=True)
             gate = self._deep_gate(record)
+            record = self._mark_cve_credentials_verified(
+                record,
+                selected,
+                accepted=self._credential_gate(selected, record)[0],
+            )
+            if phase_emit is not None:
+                phase_emit(record, False)
             if debug_emit is not None:
                 debug_emit(
                     format_stage2_gate(
@@ -2870,6 +3002,10 @@ class AuditCommandRunner:
                 )
             attempts.append((credential, record))
             gate = self._credential_gate(credential, record)
+            record = self._mark_cve_credentials_verified(record, credential, accepted=gate[0])
+            attempts[-1] = (credential, record)
+            if phase_emit is not None:
+                phase_emit(record, False)
             if gate[0]:
                 if debug_emit is not None:
                     debug_emit(format_stage2_gate(host, int(port), "run", gate[1]))
@@ -2882,6 +3018,11 @@ class AuditCommandRunner:
         if not attempts:
             return detect_record
         selected_credential, selected_record, _reason = self._select_deep_record(detect_record, attempts)
+        selected_record = self._mark_cve_credentials_verified(
+            selected_record,
+            selected_credential,
+            accepted=self._credential_gate(selected_credential, selected_record)[0],
+        )
         if (
             selected_credential.username is None
             and selected_credential.password is None

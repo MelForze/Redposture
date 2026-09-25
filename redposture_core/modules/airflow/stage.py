@@ -74,7 +74,11 @@ def build_airflow_spec(args: Any) -> ModuleAuditSpec:
         colorize=render._render_colored_airflow_line,
         credential_gate=_airflow_credential_gate,
         skip_credentials_without_verifier=True,
-        structured_output_redact_fields=("attempted_credentials", "credential_password"),
+        structured_output_redact_fields=(
+            "attempted_credentials",
+            "credential_password",
+            "_credential_capabilities_pending",
+        ),
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         # `--defcreds` is exhaustive (house convention): try every default pair and
         # render each attempt, instead of stopping at the first accepted one.

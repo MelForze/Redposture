@@ -19,7 +19,7 @@ class AirflowDetection:
 class AnonymousResult:
     reachable: bool
     auth_required: bool | None = None
-    role: str = "unknown"  # none | viewer | op | admin | unknown
+    dags_allowed: bool | None = None
     auth_method: str | None = None  # native | sso
     sso_provider: str | None = None
     sso_protocol: str | None = None
@@ -35,9 +35,18 @@ class CredentialResult:
 
 
 @dataclass(frozen=True)
-class RoleCapability:
-    role: str = "unknown"  # none | viewer | op | admin | unknown
-    evidence: dict[str, Any] = field(default_factory=dict)
+class ResourceAccess:
+    status: str  # allowed | denied | unknown
+    count: int | None = None
+    http_status: int | None = None
+    error: str | None = None
 
 
-__all__ = ["AirflowDetection", "AnonymousResult", "CredentialResult", "RoleCapability"]
+@dataclass(frozen=True)
+class AirflowCapabilities:
+    dags: ResourceAccess
+    keys: ResourceAccess
+    connections: ResourceAccess
+
+
+__all__ = ["AirflowCapabilities", "AirflowDetection", "AnonymousResult", "CredentialResult", "ResourceAccess"]

@@ -218,6 +218,14 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
             result = actions.collect_elastic_data(ctx, record, options)
         return AuditRecord.from_mapping(result, module="elastic", service="elastic")
 
+    def _capabilities(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        with http_target_context(
+            ctx.target,
+            api_prefixes=("/_security", "/_plugins", "/_cluster", "/_cat", "/_nodes"),
+        ):
+            result = actions.inspect_elastic_capabilities(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="elastic", service="elastic")
+
     return ModuleAuditSpec(
         module="elastic",
         label="ELASTIC",
@@ -226,6 +234,7 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
         host_stage_options=options,
         detect=_detect if use_lifecycle_hooks else None,
         auth=_auth if use_lifecycle_hooks else None,
+        capabilities=_capabilities if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
         lifecycle_state_close=actions.close_elastic_lifecycle_state if use_lifecycle_hooks else None,
@@ -248,6 +257,7 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
         ),
         record_retention_limit=_ELASTIC_RECORD_RETENTION_LIMIT,
         progress_refresh_interval_s=_ELASTIC_PROGRESS_REFRESH_INTERVAL_S,
+        defer_detect_output_until_auth=True,
     )
 
 

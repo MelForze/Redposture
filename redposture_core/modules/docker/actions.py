@@ -15,6 +15,7 @@ from ...clients.docker_engine import (
     find_container_id,
     normalize_docker_error,
 )
+from ...clients.http_api import http_response_requires_https
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...stage_runtime import (
@@ -127,6 +128,8 @@ def _probe_docker(
     tls_key: str | None,
 ) -> tuple[DockerEngineClient | None, dict[str, Any] | None, str | None, str | None, bool | None]:
     last_error: str | None = None
+    tls_error: str | None = None
+    https_required = False
     auth_required = False
     for transport in _transport_order(port):
         client = _docker_client(
@@ -182,18 +185,27 @@ def _probe_docker(
             if exc.status in {401, 403} and _docker_http_error_has_fingerprint(exc):
                 auth_required = True
                 return client, None, transport, normalize_docker_error(exc), auth_required
-            if exc.status in {404, 405}:
+            if transport == "plaintext" and http_response_requires_https(exc.status, exc.body):
+                https_required = True
+                last_error = "HTTPS required by peer"
+            elif exc.status in {404, 405}:
                 last_error = f"not Docker Engine API endpoint (status:{exc.status})"
             else:
                 last_error = normalize_docker_error(exc)
         except DockerEngineConnectionError as exc:
             last_error = normalize_docker_error(exc)
+            if transport == "tls":
+                tls_error = last_error
             # A TLS client-certificate alert proves only that the peer uses
             # mTLS, not that it is Docker. Confirm auth-required Docker only
             # from a Docker-fingerprinted HTTP response above.
         except (DockerEngineError, ValueError, json.JSONDecodeError) as exc:
             last_error = normalize_docker_error(exc)
+            if transport == "tls":
+                tls_error = last_error
         _close_docker_client(client)
+    if https_required and tls_error:
+        last_error = f"HTTPS required by peer; TLS retry failed: {tls_error}"
     return None, None, None, last_error, auth_required
 
 
@@ -349,6 +361,8 @@ def _audit_docker_host(
         error = last_error or "connection failed"
         status = "not_docker" if "not Docker" in error or "status:404" in error else "fail"
         record.update({"status": status, "error": error, "auth_required": None})
+        if error.startswith("HTTPS required by peer; TLS retry failed:"):
+            record["operational_failure"] = True
         return record
 
     if auth_required is None:

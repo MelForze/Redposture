@@ -1535,7 +1535,7 @@ def test_format_discovered_urls_detail_records_for_discover_creds() -> None:
     url_index = next(
         idx for idx, line in enumerate(lines) if line.endswith("[*] https://10.10.10.10:8006/api2/json/access")
     )
-    finding_index = next(idx for idx, line in enumerate(lines) if "credential candidate reason=text_password" in line)
+    finding_index = next(idx for idx, line in enumerate(lines) if "[!] Pass Value=" in line)
     assert finding_index == url_index + 1
     assert not any(line.endswith("[*] https://10.10.10.10:8006/api2/json/nodes") for line in lines)
 
@@ -1589,7 +1589,7 @@ def test_proxmox_detail_renderers_cover_findings_nodes_users_text_and_json() -> 
     }
 
     finding_lines = _format_findings_detail_records(record, "txt")
-    assert any("credential candidate reason=text_password" in line for line in finding_lines)
+    assert any("[!] Pass Value=" in line for line in finding_lines)
     assert any('"type": "credential_hit"' in line for line in _format_findings_detail_records(record, "json"))
 
     node_lines = _format_nodes_detail_records(record, "txt")
@@ -1753,7 +1753,7 @@ def test_audit_proxmox_targets_streams_discovery_and_suppresses_duplicate_status
     assert sum(1 for line in lines if "Proxmox API" in line) == 1
     assert sum(1 for line in lines if "Discovered Credentials" in line) == 1
     assert any("/api2/json/access" in line for line in lines)
-    assert any("credential candidate reason=text_password" in line for line in lines)
+    assert any("[!] Pass Value=" in line for line in lines)
 
 
 def test_audit_proxmox_targets_can_suppress_fail_status_lines(monkeypatch) -> None:

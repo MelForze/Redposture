@@ -1,5 +1,6 @@
 [
   {
+    "_credential_capabilities_pending": false,
     "access_level": "unknown",
     "anonymous_root_status": 401,
     "api_key_probe_error": null,
@@ -54,8 +55,11 @@
     "cluster_error": null,
     "cluster_health": null,
     "cluster_nodes": null,
+    "credential_accepted": false,
     "credential_verification": {
       "capability": "identity_endpoint_supported",
+      "credential_accepted": false,
+      "identity_verified": false,
       "status": "rejected",
       "supported_endpoint": "/_security/_authenticate",
       "unsupported_endpoints": []
@@ -88,6 +92,7 @@
     "endpoints_error": null,
     "error": "authentication failed",
     "host": "127.0.0.1",
+    "identity_verified": false,
     "insecure_effective": false,
     "is_elastic": true,
     "misconfig_error": null,
@@ -101,6 +106,8 @@
     "provided_username": null,
     "rights_error": null,
     "scheme": "http",
+    "server_version_error": null,
+    "server_version_source": null,
     "service": "elastic",
     "show_cluster": false,
     "show_endpoints": false,

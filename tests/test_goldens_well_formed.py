@@ -2,7 +2,8 @@
 
 Catches accidental hand-edits or merge-conflict markers in `tests/fixtures/golden/*.json`
 without needing to run the full lab matrix. Every golden must parse as a non-empty list
-of dicts, each carrying the audit identity contract (`status` as a non-empty string).
+of dicts. Audit records carry `status`; typed companion records such as streamed
+objects carry `type`.
 
 Parametrised: each golden file produces its own test ID, so a regression points at the
 specific file.
@@ -33,8 +34,9 @@ def test_golden_is_well_formed(golden_path: Path) -> None:
     for index, record in enumerate(payload):
         assert isinstance(record, dict), f"{golden_path.name}[{index}]: record must be an object"
         status = record.get("status")
-        assert isinstance(status, str) and status, (
-            f"{golden_path.name}[{index}]: missing or empty 'status' (audit contract violated)"
+        record_type = record.get("type")
+        assert (isinstance(status, str) and status) or (isinstance(record_type, str) and record_type), (
+            f"{golden_path.name}[{index}]: missing both audit 'status' and companion-record 'type'"
         )
 
 

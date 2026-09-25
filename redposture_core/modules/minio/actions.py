@@ -928,28 +928,16 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             )
             scan_iter = _enum.iter_objects_multi(client, target_buckets)
 
-            # Real-time output: when TXT and a live sink is available (and we are not
-            # also streaming an object listing), emit the target's static lines now,
-            # stream each finding as it is discovered, then a summary footer — instead
-            # of letting the runtime render the whole record at the end.
+            # Findings are streamed immediately. Detection/auth and the final summary
+            # are emitted by the common staged runtime so every discovery module has
+            # the same lifecycle and no target lines are duplicated.
             live_emit: Any = getattr(ctx, "live_emit", None)
-            self_emit = output_format == "txt" and not want_objects and live_emit is not None
+            self_emit = output_format == "txt" and callable(live_emit)
             on_finding: Any = None
-            emitted = 0
             if self_emit:
-                pre = [
-                    _render._format_detect_record(merged, "txt"),
-                    _render._format_record(merged, "txt"),
-                    *_render._format_minio_detail_records(merged, "txt"),
-                ]
-                pre = [line for line in pre if line]
-                live_emit(pre)
-                emitted += len(pre)
 
                 def on_finding(finding: dict[str, Any]) -> None:
-                    nonlocal emitted
                     live_emit([_render.format_finding_line(ctx.host, ctx.port, finding)])
-                    emitted += 1
 
             debug_emit = getattr(ctx, "debug_emit", None)
             nested_scheduler = getattr(ctx, "nested_scheduler", None)
@@ -989,25 +977,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             merged["discover_bytes_read"] = result.bytes_read
 
             if self_emit:
-                tail = [
-                    _render.format_discover_summary(
-                        ctx.host,
-                        ctx.port,
-                        status=status,
-                        coverage_percent=coverage_percent,
-                        findings=len(result.findings),
-                        objects_scanned=result.objects_scanned,
-                    )
-                ]
-                if result.partial_reasons:
-                    tail.append(
-                        f"MINIO\t{ctx.host}\t{int(ctx.port)}\t "
-                        f"[!] Discover partial: {','.join(str(r) for r in result.partial_reasons)}"
-                    )
-                live_emit(tail)
-                emitted += len(tail)
-                merged["_self_emitted"] = True
-                merged["_self_emitted_lines"] = emitted
+                merged["_discover_findings_streamed"] = True
     return merged
 
 

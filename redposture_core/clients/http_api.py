@@ -598,7 +598,13 @@ class HttpApiClient:
         )
 
     def _send_with_retries(self, request: HttpRequest, *, timeout: float | None = None) -> HttpResponse:
-        attempts = max(1, int(self.config.retries) + 1)
+        # A transport failure does not tell us whether the peer applied a
+        # request before the connection disappeared.  Replaying GET/HEAD is
+        # safe; replaying a mutating request may execute an operator-approved
+        # action twice. Redirect handling remains separate and follows the
+        # explicit HTTP redirect policy.
+        replay_safe = str(request.method or "GET").upper() in {"GET", "HEAD"}
+        attempts = max(1, int(self.config.retries) + 1) if replay_safe else 1
         base_timeout = self.config.timeout if timeout is None else float(timeout)
         last_error = ""
         for attempt in range(1, attempts + 1):

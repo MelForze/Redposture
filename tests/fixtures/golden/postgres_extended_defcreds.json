@@ -1,5 +1,142 @@
 [
   {
+    "attempted_credentials": [
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"admin\"",
+        "password": "admin",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"admin\"",
+        "password": "password",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"admin\"",
+        "password": "postgres",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"dev\"",
+        "password": "dev",
+        "source": "default",
+        "status": "auth_required",
+        "username": "dev"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"pgbouncer\"",
+        "password": "pgbouncer",
+        "source": "default",
+        "status": "auth_required",
+        "username": "pgbouncer"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"pgbouncer_exporter\"",
+        "password": "pgbouncer_exporter",
+        "source": "default",
+        "status": "auth_required",
+        "username": "pgbouncer_exporter"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"pgsql\"",
+        "password": "pgsql",
+        "source": "default",
+        "status": "auth_required",
+        "username": "pgsql"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"postgres\"",
+        "password": "admin",
+        "source": "default",
+        "status": "auth_required",
+        "username": "postgres"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"postgres\"",
+        "password": "changeme",
+        "source": "default",
+        "status": "auth_required",
+        "username": "postgres"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"postgres\"",
+        "password": "password",
+        "source": "default",
+        "status": "auth_required",
+        "username": "postgres"
+      },
+      {
+        "credential_verification": "verified",
+        "credential_verified": true,
+        "error": null,
+        "password": "postgres",
+        "source": "default",
+        "status": "weak_default_creds",
+        "username": "postgres"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"service\"",
+        "password": "service",
+        "source": "default",
+        "status": "auth_required",
+        "username": "service"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"test\"",
+        "password": "test",
+        "source": "default",
+        "status": "auth_required",
+        "username": "test"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"user\"",
+        "password": "password",
+        "source": "default",
+        "status": "auth_required",
+        "username": "user"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"user\"",
+        "password": "user",
+        "source": "default",
+        "status": "auth_required",
+        "username": "user"
+      }
+    ],
     "auth_database": "postgres",
     "auth_method": "scram-sha-256",
     "auth_required": true,
@@ -50,6 +187,7 @@
     "sql_error": null,
     "sql_ok": null,
     "sql_output": null,
+    "sslmode": "prefer",
     "stages": [
       {
         "attempt": 1,
@@ -84,6 +222,7 @@
     "table_dumps": [],
     "table_names": null,
     "table_row_counts": [],
-    "table_targets": []
+    "table_targets": [],
+    "tls_used": false
   }
 ]

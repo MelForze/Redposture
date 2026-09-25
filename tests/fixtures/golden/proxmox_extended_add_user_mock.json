@@ -3,8 +3,8 @@
     "add_user": "rp-matrix@pve",
     "add_user_error": null,
     "add_user_privileges_error": null,
-    "add_user_privileges_granted": true,
-    "add_user_privileges_role": "Administrator",
+    "add_user_privileges_granted": null,
+    "add_user_privileges_role": null,
     "added_user": "rp-matrix@pve",
     "auth_attempts": [],
     "auth_method": "pveapitoken",
@@ -15,44 +15,50 @@
     "cap_backup": true,
     "cap_modify": true,
     "cap_read": true,
-    "checked_endpoints": 5,
+    "checked_endpoints": 4,
     "credential_hits": 0,
+    "discover_bytes_scanned": 0,
     "discover_creds": false,
     "endpoint_results": [
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "POST",
-        "status": 200
-      },
-      {
-        "error": null,
-        "method": "PUT",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       }
     ],
     "error": null,
     "findings": [],
+    "grant_path": null,
+    "grant_propagate": null,
+    "grant_role": null,
     "host": "127.0.0.1",
     "is_proxmox": true,
     "module": "proxmox",
     "nodes": null,
     "nodes_error": null,
+    "partial": false,
+    "partial_error": null,
     "port": 18006,
+    "responses_truncated": 0,
     "service": "proxmox",
     "show_nodes": false,
     "show_users": true,
@@ -83,7 +89,7 @@
       }
     ],
     "status": "token_ok",
-    "successful_endpoints": 5,
+    "successful_endpoints": 4,
     "use_https": true,
     "users": [
       "root@pam",

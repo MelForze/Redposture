@@ -266,9 +266,14 @@ run_case oracle oracle_hashes 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --se
 run_case oracle oracle_dblink 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --dblink-check
 run_text_case oracle oracle_debug_smoke 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --debug
 run_case oracle oracle_json_smoke 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --show-pdbs
+DOCKER_CLIENT_CERT="${OUT_DIR}/docker-client-cert.pem"
+DOCKER_CLIENT_KEY="${OUT_DIR}/docker-client-key.pem"
+docker cp redposture-lab-docker-tls:/certs/client/cert.pem "${DOCKER_CLIENT_CERT}" >/dev/null
+docker cp redposture-lab-docker-tls:/certs/client/key.pem "${DOCKER_CLIENT_KEY}" >/dev/null
 run_case docker docker_open 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
-run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --insecure --system
-run_case docker docker_multi_ports 0 docker -t 127.0.0.1 --ports "2375,2376,24243,24244,24245" --insecure --containers
+run_case docker docker_tls_requires_client_certificate 1 docker -t 127.0.0.1 --port 2376 --insecure --system
+run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --insecure --tls-cert "${DOCKER_CLIENT_CERT}" --tls-key "${DOCKER_CLIENT_KEY}" --system
+run_case docker docker_multi_ports 0 docker -t 127.0.0.1 --ports "2375,2376,24243,24244,24245" --insecure --tls-cert "${DOCKER_CLIENT_CERT}" --tls-key "${DOCKER_CLIENT_KEY}" --containers
 run_case docker docker_inventory 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
 run_case docker docker_exec 0 docker -t 127.0.0.1 --port 2375 --container redposture-web --exec-cmd "id"
 run_text_case docker docker_debug_smoke 0 docker -t 127.0.0.1 --port 2375 --debug
@@ -301,8 +306,8 @@ run_case elastic elastic_plugins_edge 0 elastic -t 127.0.0.1 --port 19201 -u ela
 run_case elastic elastic_multi_instance_urls 0 elastic -t "http://127.0.0.1:19200/,http://127.0.0.1:19202/,http://127.0.0.1:19203/,http://127.0.0.1:19204/,http://127.0.0.1:19205/" --endpoints
 
 run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051 --plaintext --analyze
-run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --token "grpc-lab-token-2026" --analyze
-run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --defcreds --analyze
+run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --tls --insecure --token "grpc-lab-token-2026" --analyze
+run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --tls --insecure --defcreds --analyze
 run_case grpc grpc_multi_ports 0 grpc -t 127.0.0.1 --ports "50051,25052,25053,25054,25055" --analyze
 run_text_case grpc grpc_debug_smoke 0 grpc -t 127.0.0.1 --port 50051 --debug
 GRPC_PROTOSET="${OUT_DIR}/grpc_health.protoset"
@@ -328,7 +333,7 @@ run_case keeper keeper_no4lw 0 keeper -t 127.0.0.1 --port 39181 -u lab -p lab --
 run_case zookeeper keeper_apache_control 0 zookeeper -t 127.0.0.1 --port 12181 --show-znodes 5
 
 run_case proxmox proxmox_audit 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
-run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover-creds --nodes --users
+run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover --nodes --users
 run_case proxmox proxmox_url_override_https 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket" --no-https --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
 run_case proxmox proxmox_multi_instance_urls 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket,https://127.0.0.1:18061/api2/json/access/ticket,https://127.0.0.1:18062/api2/json/access/ticket,https://127.0.0.1:18063/api2/json/access/ticket,https://127.0.0.1:18064/api2/json/access/ticket" --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
 

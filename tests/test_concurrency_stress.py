@@ -12,6 +12,8 @@ from redposture_core.cli_args import parse_args
 from redposture_core.scheduler import SharedNestedScheduler
 from redposture_core.stage_runtime import AuditCommandRunner, ModuleAuditSpec, build_basic_audit_plan
 
+pytestmark = pytest.mark.local_output_audit
+
 
 @pytest.mark.parametrize(
     ("target_range", "expected_count", "expected_workers"),

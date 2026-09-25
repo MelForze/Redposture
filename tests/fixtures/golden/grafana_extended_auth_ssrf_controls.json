@@ -19,6 +19,7 @@
         "username": "admin"
       }
     ],
+    "auth_method": null,
     "auth_required": false,
     "check_results": [
       {
@@ -46,6 +47,7 @@
         "username": "admin"
       }
     ],
+    "credential_verification_status": "available",
     "credentials_source": "provided",
     "datasource_count": 11,
     "datasources": [
@@ -119,6 +121,9 @@
     "provided_username": "admin",
     "service": "grafana",
     "show_datasources": true,
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,

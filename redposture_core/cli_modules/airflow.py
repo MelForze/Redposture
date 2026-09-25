@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Callable
 
 from ..discovery_options import add_discovery_budget_flags
+from ..show_limits import optional_show_count_kwargs
 
 
 def configure_airflow_parser(
@@ -65,7 +66,22 @@ def configure_airflow_parser(
         help="Try a curated catalog of Airflow default credentials (incl. airflow:airflow).",
     )
     discover.add_argument(
-        "--discover", action="store_true", help="Search DAG task-instance logs for secrets (read-only)."
+        "--discover",
+        action="store_true",
+        help="Search DAG sources, Variables, Connections and task-instance logs for secrets (read-only).",
+    )
+    discover.add_argument(
+        "--show-keys",
+        **optional_show_count_kwargs(
+            "Show Airflow Variable keys after successful access/auth. Optional count limits output."
+        ),
+    )
+    discover.add_argument(
+        "--show-connections",
+        **optional_show_count_kwargs(
+            "Show Airflow Connection objects and their contents after successful access/auth. "
+            "Optional count limits output."
+        ),
     )
     add_discovery_budget_flags(discover, default_time=None, default_bytes=50 * 1024 * 1024)
     # Transport is automatic (scheme probed per target; TLS certificates always

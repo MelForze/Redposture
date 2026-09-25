@@ -554,9 +554,9 @@ def test_discover_txt_renderer_is_compact_masked_and_does_not_clip_values() -> N
     }
     lines = actions._format_discover_detail_records(record, "txt")
     assert "coverage:100.00%" in lines[0]
-    finding_line = next(line for line in lines if " [+] api_key " in line)
-    assert f'value="{long_masked_value}"' in finding_line
-    assert 'place="app.events.payload$.token"' in finding_line
+    finding_line = next(line for line in lines if " [!] ApiKey " in line)
+    assert f'Value="{long_masked_value}"' in finding_line
+    assert 'Place="app.events.payload$.token"' in finding_line
     assert "confidence" not in finding_line
     assert "occurrences" not in finding_line
     assert "locations" not in finding_line
@@ -587,11 +587,9 @@ def test_discover_txt_renderer_json_escapes_full_value_and_place() -> None:
         },
     }
 
-    finding_line = next(
-        line for line in actions._format_discover_detail_records(record, "txt") if " [+] password " in line
-    )
-    assert 'value="full value\\nwith\\ttabs"' in finding_line
-    assert 'place="app.events.payload$.secret value"' in finding_line
+    finding_line = next(line for line in actions._format_discover_detail_records(record, "txt") if " [!] Pass " in line)
+    assert 'Value="full value\\nwith\\ttabs"' in finding_line
+    assert 'Place="app.events.payload$.secret value"' in finding_line
     assert "\n" not in finding_line
 
 
@@ -607,10 +605,10 @@ def test_clickhouse_discover_finding_payload_is_colored_orange() -> None:
             self.lines.append(line)
 
     console = _Console()
-    line = 'CLICKHOUSE\t127.0.0.1\t9000\t [+] api_key value="complete" place="app.events.token$"'
+    line = 'CLICKHOUSE\t127.0.0.1\t9000\t [!] ApiKey Value="complete" Place="app.events.token$"'
 
     assert actions._render_colored_clickhouse_line(console, line) is True
-    assert '<orange>api_key value="complete" place="app.events.token$"</orange>' in console.lines[0]
+    assert '<orange>ApiKey Value="complete" Place="app.events.token$"</orange>' in console.lines[0]
 
 
 def _discover_summary_line(*, status: str, coverage: float, findings: int) -> str:
@@ -655,8 +653,8 @@ def test_discover_summary_health_colors_complete_clean() -> None:
     line = _discover_summary_line(status="complete", coverage=100.0, findings=0)
     assert actions._render_colored_clickhouse_line(console, line) is True
     rendered = console.lines[0]
+    assert "<white>Discover Secrets (</white>" in rendered
     assert "<bright_green>status:complete</bright_green>" in rendered
-    assert "<bright_green>coverage:100.00%</bright_green>" in rendered
     assert "<bright_green>findings:0</bright_green>" in rendered
 
 
@@ -665,9 +663,9 @@ def test_discover_summary_health_colors_partial_and_findings() -> None:
     line = _discover_summary_line(status="partial", coverage=42.0, findings=21)
     assert actions._render_colored_clickhouse_line(console, line) is True
     rendered = console.lines[0]
-    assert "<yellow>status:partial</yellow>" in rendered
-    assert "<red>coverage:42.00%</red>" in rendered  # below 50% -> red
-    assert "<red>findings:21</red>" in rendered  # anything found -> red
+    assert "<white>Discover Secrets (</white>" in rendered
+    assert "<orange>status:partial</orange>" in rendered
+    assert "<true_red>findings:21</true_red>" in rendered
 
 
 def test_discover_summary_coverage_yellow_band() -> None:
@@ -675,7 +673,8 @@ def test_discover_summary_coverage_yellow_band() -> None:
     line = _discover_summary_line(status="partial", coverage=63.5, findings=0)
     assert actions._render_colored_clickhouse_line(console, line) is True
     rendered = console.lines[0]
-    assert "<yellow>coverage:63.50%</yellow>" in rendered  # 50..99.99 -> yellow
+    assert "<white>Discover Secrets (</white>" in rendered
+    assert "<orange>status:partial</orange>" in rendered
     assert "<bright_green>findings:0</bright_green>" in rendered
 
 

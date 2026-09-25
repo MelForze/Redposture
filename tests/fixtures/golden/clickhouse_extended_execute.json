@@ -1,32 +1,40 @@
 [
   {
-    "admin_capability": true,
-    "attempted_credentials": 1,
-    "auth_attempts": [
+    "_discover_findings_streamed": false,
+    "action_statuses": {
+      "columns": "not_requested",
+      "databases": "not_requested",
+      "discover": "not_requested",
+      "dump": "not_requested",
+      "execute": "ok",
+      "sql": "not_requested",
+      "tables": "not_requested"
+    },
+    "admin_capability": false,
+    "auth_required": true,
+    "auth_status": "valid",
+    "auth_transport_attempts": 1,
+    "credential_attempt_count": 1,
+    "credential_attempts": [
       {
-        "error": "",
+        "error": null,
         "ok": true,
         "password": "default",
-        "source": "provided",
+        "token": null,
         "username": "default"
       }
     ],
-    "auth_required": true,
-    "auth_transport_attempts": 1,
     "credentials_source": "provided",
     "database": "default",
     "database_count": 7,
-    "database_names": [
-      "INFORMATION_SCHEMA",
-      "billing",
-      "default",
-      "information_schema",
-      "secure",
-      "system",
-      "warehouse"
-    ],
+    "database_fallback": false,
+    "database_names": null,
     "default_credentials": false,
     "defcreds_enabled": false,
+    "detection_error_kind": "auth",
+    "discover_report": null,
+    "discover_requested": false,
+    "effective_database": "default",
     "effective_password": "default",
     "effective_username": "default",
     "error": null,
@@ -41,6 +49,9 @@
     "host": "127.0.0.1",
     "is_clickhouse": true,
     "module": "clickhouse",
+    "operational_failure": false,
+    "partial": false,
+    "partial_reasons": [],
     "port": 19000,
     "protocol": "native",
     "provided_credentials": true,
@@ -48,6 +59,8 @@
     "provided_password": "default",
     "provided_username": "default",
     "read_capability": true,
+    "requested_database": "default",
+    "requested_operation_failure": false,
     "service": "clickhouse",
     "show_columns": false,
     "show_columns_limit": null,
@@ -87,6 +100,7 @@
       }
     ],
     "status": "valid_credentials",
+    "table_access": [],
     "table_columns": [],
     "table_columns_info": [],
     "table_dump_enabled": false,

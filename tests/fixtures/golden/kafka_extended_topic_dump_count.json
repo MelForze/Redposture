@@ -7,8 +7,27 @@
     },
     "defcreds_enabled": false,
     "dump": true,
+    "dump_coverage": {
+      "complete": true,
+      "error": null,
+      "failed_count": 0,
+      "not_attempted_count": 0,
+      "partial_count": 0,
+      "requested_count": 1,
+      "status": "complete",
+      "successful_count": 1,
+      "topics": [
+        {
+          "error": null,
+          "message_count": 3,
+          "status": "success",
+          "topic": "orders"
+        }
+      ]
+    },
     "dump_error": null,
     "dump_errors": {},
+    "dump_partial": false,
     "dump_results": {
       "orders": [
         "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
@@ -26,6 +45,7 @@
     "max_messages": 3,
     "max_messages_explicit": true,
     "module": "kafka",
+    "partial": false,
     "port": 9092,
     "provided_credentials": false,
     "provided_credentials_ok": null,

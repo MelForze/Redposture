@@ -4,23 +4,159 @@
       "v2": false,
       "v3": true
     },
+    "api_has_access": {
+      "v2": true,
+      "v3": true
+    },
     "api_versions": "v2,v3",
     "auth_required": false,
+    "credential_attempts": [
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "admin",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "changeme",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "etcd",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "etcd",
+        "token": null,
+        "username": "etcd"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "etcd"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "admin",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "etcd",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "root",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": null,
+        "ok": true,
+        "password": "rootpass",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "service",
+        "token": null,
+        "username": "service"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "user"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "user",
+        "token": null,
+        "username": "user"
+      }
+    ],
     "defcreds_enabled": true,
     "dump_keys": false,
-    "effective_password": null,
-    "effective_username": null,
+    "effective_password": "rootpass",
+    "effective_username": "root",
     "error": null,
     "host": "127.0.0.1",
     "is_etcd": true,
-    "key_count": 2,
+    "key_count": 4,
+    "key_count_by_api": {
+      "v2": 2,
+      "v3": 2
+    },
     "key_count_error": null,
     "key_count_state": "known",
     "key_value_entries": null,
+    "key_value_entries_by_api": {
+      "v2": [
+        {
+          "error": null,
+          "key": "/secure/bootstrap",
+          "value": "1"
+        },
+        {
+          "error": null,
+          "key": "/secure/proxmox/token",
+          "value": "pve-redposture-token-2026"
+        }
+      ],
+      "v3": [
+        {
+          "error": null,
+          "key": "/secure/v3/bootstrap",
+          "value": "1"
+        },
+        {
+          "error": null,
+          "key": "/secure/v3/kafka/sasl_password",
+          "value": "metricspass"
+        }
+      ]
+    },
     "key_values": null,
     "keys": [
       "/secure/bootstrap",
-      "/secure/proxmox/token"
+      "/secure/proxmox/token",
+      "/secure/v3/bootstrap",
+      "/secure/v3/kafka/sasl_password"
     ],
     "module": "etcd",
     "port": 22379,
@@ -29,6 +165,7 @@
     "provided_password": null,
     "provided_username": null,
     "query_key": null,
+    "query_key_entries_by_api": {},
     "query_key_entry": null,
     "query_key_value": null,
     "service": "etcd",
@@ -60,6 +197,6 @@
         "stage_name": "data"
       }
     ],
-    "status": "open_no_auth"
+    "status": "weak_default_creds"
   }
 ]

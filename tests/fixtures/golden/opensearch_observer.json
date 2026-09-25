@@ -58,9 +58,9 @@
     "cat_plugins": null,
     "cluster_error": null,
     "cluster_health": {
-      "active_primary_shards": 9,
-      "active_shards": 9,
-      "active_shards_percent_as_number": 90.0,
+      "active_primary_shards": 8,
+      "active_shards": 8,
+      "active_shards_percent_as_number": 88.88888888888889,
       "cluster_name": "redposture-opensearch-auth",
       "delayed_unassigned_shards": 0,
       "discovered_cluster_manager": true,
@@ -87,8 +87,20 @@
         "version": "2.19.1"
       }
     ],
+    "credential_accepted": true,
+    "credential_cluster_access": "allowed",
+    "credential_documents_access": "allowed",
+    "credential_indices_access": "allowed",
+    "credential_indices_count": 8,
+    "credential_nodes_access": "allowed",
+    "credential_nodes_count": 1,
+    "credential_resource_access_checked": true,
+    "credential_users_access": "denied",
+    "credential_users_count": null,
     "credential_verification": {
       "capability": "identity_endpoint_supported",
+      "credential_accepted": true,
+      "identity_verified": true,
       "status": "verified",
       "supported_endpoint": "/_plugins/_security/authinfo",
       "unsupported_endpoints": []
@@ -116,8 +128,8 @@
     "discover_coverage": {
       "complete": false,
       "indices_closed": 0,
-      "indices_denied": 5,
-      "indices_enumerated": 9,
+      "indices_denied": 4,
+      "indices_enumerated": 8,
       "indices_failed": 0,
       "indices_scanned": 4,
       "limitations": [
@@ -133,7 +145,7 @@
         "max_findings": 10000,
         "max_scalar_bytes": 262144,
         "max_seconds": 300.0,
-        "max_source_bytes": 134217728
+        "max_source_bytes": 52428800
       },
       "locations_dropped": 0,
       "missing_source_documents": 0,
@@ -183,8 +195,8 @@
           "status": "complete"
         },
         "index_settings": {
-          "objects_attempted": 9,
-          "objects_scanned": 9,
+          "objects_attempted": 8,
+          "objects_scanned": 8,
           "status": "complete"
         },
         "index_templates": {
@@ -244,8 +256,8 @@
           "status": "complete"
         },
         "mappings": {
-          "objects_attempted": 9,
-          "objects_scanned": 9,
+          "objects_attempted": 8,
+          "objects_scanned": 8,
           "status": "complete"
         },
         "node_settings": {
@@ -1227,6 +1239,7 @@
     "endpoints_error": null,
     "error": null,
     "host": "127.0.0.1",
+    "identity_verified": true,
     "insecure_effective": true,
     "is_elastic": true,
     "misconfig_error": null,
@@ -1246,6 +1259,8 @@
     "provided_username": "observer",
     "rights_error": "privilege verification unsupported for OpenSearch",
     "scheme": "https",
+    "server_version_error": null,
+    "server_version_source": "authenticated",
     "service": "elastic",
     "show_cluster": true,
     "show_endpoints": true,

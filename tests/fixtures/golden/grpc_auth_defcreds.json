@@ -2,6 +2,184 @@
   {
     "action_access_satisfied": true,
     "analysis_performed": true,
+    "attempted_credentials": [
+      {
+        "error": null,
+        "password": null,
+        "provided_credential_type": "token",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": null
+      },
+      {
+        "error": null,
+        "password": null,
+        "provided_credential_type": "token",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": null
+      },
+      {
+        "error": null,
+        "password": null,
+        "provided_credential_type": "token",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": null
+      },
+      {
+        "error": null,
+        "password": null,
+        "provided_credential_type": "token",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": null
+      },
+      {
+        "error": null,
+        "password": null,
+        "provided_credential_type": "token",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": null
+      },
+      {
+        "error": null,
+        "password": null,
+        "provided_credential_type": "token",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": null
+      },
+      {
+        "error": null,
+        "password": "admin",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "weak_default_creds",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "changeme",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "dev",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "dev"
+      },
+      {
+        "error": null,
+        "password": "admin",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "grpc"
+      },
+      {
+        "error": null,
+        "password": "grpc",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "grpc"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "grpc"
+      },
+      {
+        "error": null,
+        "password": "guest",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "guest"
+      },
+      {
+        "error": null,
+        "password": "admin",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "root",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "service"
+      },
+      {
+        "error": null,
+        "password": "service",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "service"
+      },
+      {
+        "error": null,
+        "password": "test",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "test"
+      },
+      {
+        "error": null,
+        "password": "password",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "user"
+      },
+      {
+        "error": null,
+        "password": "user",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "user"
+      }
+    ],
     "auth_required": null,
     "auth_used": {
       "password": "admin",

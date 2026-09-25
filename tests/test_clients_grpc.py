@@ -1153,7 +1153,11 @@ def test_grpc_h2_chunks_large_request_at_frame_and_flow_control_limits(monkeypat
                 self.window = 4096
                 self.window_updates += 1
                 return []
-            event = grpc_client.StreamEnded(stream_id=1)
+            try:
+                event = grpc_client.StreamEnded(stream_id=1)
+            except TypeError:
+                event = grpc_client.StreamEnded()  # type: ignore[call-arg]
+                event.stream_id = 1
             return [event]
 
         def acknowledge_received_data(self, *_args) -> None:

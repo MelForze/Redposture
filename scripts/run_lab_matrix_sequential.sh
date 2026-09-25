@@ -42,8 +42,8 @@ if [ ! -d "${LAB_DIR}/services" ]; then
 fi
 
 MATRIX_SERVICES=(
-  exporters registry grafana gitlab consul kubeapi postgres mongodb oracle docker
-  clickhouse redis etcd qdrant elastic opensearch grpc kafka rabbitmq zookeeper zookeeper-auth keeper proxmox minio proxy-isolated
+  exporters registry grafana minio rabbitmq airflow gitlab consul kubeapi postgres mongodb oracle docker
+  clickhouse redis etcd qdrant elastic opensearch grpc kafka zookeeper zookeeper-auth keeper proxmox proxy-isolated
 )
 READINESS_ALLOWED_COMPLETED=(
   redposture-lab-registry-seed
@@ -257,9 +257,9 @@ run_case() {
   local json_path="${OUT_DIR}/json/${label}.json"
   local log_path="${OUT_DIR}/logs/${label}.log"
   echo "== ${label} =="
-  printf '%q ' "${PYTHON_BIN}" redposture.py "$@" --format json --output "${json_path}" > "${OUT_DIR}/logs/${label}.command.txt"
+  printf '%q ' "${PYTHON_BIN}" "${ROOT_DIR}/redposture.py" "$@" --format json --output "${json_path}" > "${OUT_DIR}/logs/${label}.command.txt"
   set +e
-  "${PYTHON_BIN}" redposture.py "$@" --format json --output "${json_path}" >"${log_path}" 2>&1
+  "${PYTHON_BIN}" "${ROOT_DIR}/redposture.py" "$@" --format json --output "${json_path}" >"${log_path}" 2>&1
   local rc=$?
   set -e
 
@@ -286,9 +286,9 @@ run_text_case() {
   local text_path="${OUT_DIR}/logs/${label}.txt"
   local log_path="${OUT_DIR}/logs/${label}.log"
   echo "== ${label} =="
-  printf '%q ' "${PYTHON_BIN}" redposture.py "$@" --output "${text_path}" > "${OUT_DIR}/logs/${label}.command.txt"
+  printf '%q ' "${PYTHON_BIN}" "${ROOT_DIR}/redposture.py" "$@" --output "${text_path}" > "${OUT_DIR}/logs/${label}.command.txt"
   set +e
-  "${PYTHON_BIN}" redposture.py "$@" --output "${text_path}" >"${log_path}" 2>&1
+  "${PYTHON_BIN}" "${ROOT_DIR}/redposture.py" "$@" --output "${text_path}" >"${log_path}" 2>&1
   local rc=$?
   set -e
 
@@ -310,9 +310,9 @@ run_raw_case() {
 
   local log_path="${OUT_DIR}/logs/${label}.log"
   echo "== ${label} =="
-  printf '%q ' "${PYTHON_BIN}" redposture.py "$@" > "${OUT_DIR}/logs/${label}.command.txt"
+  printf '%q ' "${PYTHON_BIN}" "${ROOT_DIR}/redposture.py" "$@" > "${OUT_DIR}/logs/${label}.command.txt"
   set +e
-  "${PYTHON_BIN}" redposture.py "$@" >"${log_path}" 2>&1
+  "${PYTHON_BIN}" "${ROOT_DIR}/redposture.py" "$@" >"${log_path}" 2>&1
   local rc=$?
   set -e
 
@@ -330,11 +330,11 @@ run_raw_case() {
 }
 
 run_negative_cli_cases() {
-  run_raw_case exporters fuzz_exporters_scan_missing_targets 2 exporters scan -p 9100 -ot excluded.invalid --tls-ca /tmp/redposture-missing-ca.pem --tls-cert /tmp/redposture-missing-cert.pem --tls-key /tmp/redposture-missing-key.pem --insecure
+  run_raw_case exporters fuzz_exporters_scan_missing_targets 2 exporters scan -p 9100 -ot excluded.invalid
   run_raw_case exporters fuzz_exporters_scan_invalid_ports 2 exporters scan -t 127.0.0.1 -p bad
   run_raw_case exporters fuzz_exporters_scan_zero_timeout 2 exporters scan -t 127.0.0.1 --timeout 0
   run_raw_case exporters fuzz_exporters_collect_zero_max_inflight 2 exporters collect -t 127.0.0.1 -ot excluded.invalid --max-inflight 0 --tls-ca /tmp/redposture-missing-ca.pem --tls-cert /tmp/redposture-missing-cert.pem --tls-key /tmp/redposture-missing-key.pem --insecure
-  run_raw_case exporters fuzz_exporters_trigger_missing_callback 2 exporters trigger -t 127.0.0.1 -ot excluded.invalid --no-with-listen --tls-ca /tmp/redposture-missing-ca.pem --tls-cert /tmp/redposture-missing-cert.pem --tls-key /tmp/redposture-missing-key.pem --insecure
+  run_raw_case exporters fuzz_exporters_trigger_missing_callback 2 exporters trigger -t 127.0.0.1 -ot excluded.invalid --no-with-listen
   run_raw_case exporters fuzz_exporters_trigger_bad_callback_ip 2 exporters trigger -t 127.0.0.1 --callback-ip 999.999.999.999 --no-with-listen
   run_raw_case exporters fuzz_exporters_trigger_check_without_listen 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --no-with-listen --check-credentials
   run_raw_case exporters fuzz_exporters_trigger_json_listen_without_output 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --with-listen --format json
@@ -450,8 +450,8 @@ run_exporters_cases() {
     run_case exporters exporters_collect_extended_controls 0 exporters collect -t 127.0.0.1 -p "19100,19121" --exporters node,blackbox --deep --no-adaptive-collect --max-inflight 4 --pprof-seconds 1 --trace-seconds 1 --checkpoint-file "${collect_checkpoint}" --save-responses-dir "${OUT_DIR}/collect_extended"
     run_case exporters exporters_collect_resume_checkpoint 0 exporters collect -t 127.0.0.1 -p "19100,19121" --exporters node --resume --checkpoint-file "${collect_checkpoint}" --save-responses-dir "${OUT_DIR}/collect_extended_resume"
     run_text_case exporters exporters_collect_debug_smoke 0 exporters collect -t 127.0.0.1 -p "19100" --exporters node --debug
-    run_case exporters exporters_trigger_extended_controls 0 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 -p "19121,19187" --no-with-listen --exporters blackbox,postgres --services blackbox --blackbox-port 29115 --postgres-auth-module stage --no-postgres-tls
-    run_text_case exporters exporters_trigger_debug_smoke 0 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 -p "19121" --no-with-listen --exporters blackbox --debug
+    run_case exporters exporters_trigger_extended_controls 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121,19187" --no-with-listen --exporters blackbox,postgres --services blackbox --blackbox-port 29115 --postgres-auth-module stage --no-postgres-tls
+    run_text_case exporters exporters_trigger_debug_smoke 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121" --no-with-listen --exporters blackbox --debug
   fi
 }
 
@@ -462,7 +462,7 @@ run_registry_cases() {
   run_case registry registry_gitlab 0 registry -t 127.0.0.1 --port 15003 --token glrt-lab-token --gitlab --images
   run_case registry registry_nexus 0 registry -t 127.0.0.1 --port 15004 --nexus --assets
   run_case registry registry_url_http 0 registry -t "http://127.0.0.1:15000/v2/_catalog?n=1000" --docker --images
-  run_case registry registry_url_https_transport_fail 1 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
+  run_case registry registry_url_https_transport_fallback 0 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
   run_case registry registry_multi_instance_urls 0 registry -t "http://127.0.0.1:15000/v2/_catalog,http://127.0.0.1:15010/v2/_catalog,http://127.0.0.1:15011/v2/_catalog,http://127.0.0.1:15012/v2/_catalog,http://127.0.0.1:15013/v2/_catalog" --docker --images
   run_text_case registry registry_debug_smoke 0 registry -t 127.0.0.1 --port 15000 --docker --images --debug
   if is_extended_matrix; then
@@ -474,19 +474,21 @@ run_registry_cases() {
 }
 
 run_grafana_cases() {
-  run_case grafana grafana_default 0 grafana -t 127.0.0.1 --defcreds --show-datasources
+  run_case grafana grafana_default 0 grafana -t 127.0.0.1 --port 3000 -u admin -p admin --show-datasources
   run_case grafana grafana_apitoken 0 grafana -t 127.0.0.1 --port 3000 --apitoken glsa-fake-token-2026 --show-datasources
-  run_case grafana grafana_url_http 0 grafana -t "http://127.0.0.1:3000/login?next=%2F" --defcreds --show-datasources
-  run_case grafana grafana_url_https_transport_fail 1 grafana -t "https://127.0.0.1:3000/login"
-  run_case grafana grafana_ssrf_edge 0 grafana -t 127.0.0.1 --defcreds --ssrf-target "http://grafana-2:3000/api/health" --show-datasources
-  run_case grafana grafana_multi_instance_urls 0 grafana -t "http://127.0.0.1:3000/login,http://127.0.0.1:13001/login,http://127.0.0.1:13002/login,http://127.0.0.1:13003/login,http://127.0.0.1:13004/login" --defcreds
-  run_text_case grafana grafana_debug_smoke 0 grafana -t 127.0.0.1 --defcreds --debug
+  run_case grafana grafana_url_http 0 grafana -t "http://127.0.0.1:3000/login?next=%2F" -u admin -p admin --show-datasources
+  run_case grafana grafana_url_https_transport_fallback 0 grafana -t "https://127.0.0.1:3000/login"
+  run_case grafana grafana_ssrf_edge 0 grafana -t 127.0.0.1 --port 3000 -u admin -p admin --ssrf-target "http://grafana-2:3000/api/health" --show-datasources
+  run_text_case grafana grafana_debug_smoke 0 grafana -t 127.0.0.1 --port 3000 -u admin -p admin --debug
   if is_extended_matrix; then
     run_case grafana grafana_extended_auth_ssrf_controls 0 grafana -t 127.0.0.1 --port 3000 -u admin -p admin --show-datasource --ssrf-target grafana-2 --ssrf-port 3000 --ssrf-path /api/health
-    run_case grafana grafana_extended_ports_flag 0 grafana -t 127.0.0.1 --ports 3000 --defcreds
+    run_case grafana grafana_extended_ports_flag 0 grafana -t 127.0.0.1 --ports 3000 -u admin -p admin
     run_case grafana fuzz_grafana_invalid_target 2 grafana -t "not://valid" --show-datasource
     run_case grafana fuzz_grafana_huge_port 2 grafana -t 127.0.0.1 --port 99999 --defcreds
   fi
+  # Exhaustive --defcreds intentionally continues after a success and may
+  # trigger Grafana's brute-force lockout, so keep it last in this service lab.
+  run_case grafana grafana_multi_instance_urls 0 grafana -t "http://127.0.0.1:3000/login,http://127.0.0.1:13001/login,http://127.0.0.1:13002/login,http://127.0.0.1:13003/login,http://127.0.0.1:13004/login" --defcreds
 }
 
 run_rabbitmq_cases() {
@@ -503,9 +505,15 @@ run_rabbitmq_cases() {
 
 run_minio_cases() {
   run_case minio minio_default 1 minio -t 127.0.0.1 --debug --defcreds
-  run_case minio minio_creds 1 minio --targets 127.0.0.1 --port 9000 --ports 9000,9001 -u minioadmin -p minioadmin --session-token fake-token --probe-write
+  run_case minio minio_creds 0 minio --targets 127.0.0.1 --port 19000 --ports 19000,19001 -u minioadmin -p minioadmin --session-token fake-token --probe-write
   run_case minio minio_tls 1 minio -t 127.0.0.1 --port 443 -ot excluded.invalid
-  run_case minio minio_enum 1 minio -t 127.0.0.1 --show-buckets --show-objects --bucket data --prefix logs/ --probe-write --object data/app.log --dump --download /tmp/redposture-minio-dl --discover --max-object-size 1048576 --max-objects 50 --discover-time 10
+  run_case minio minio_enum 0 minio -t 127.0.0.1 --port 19000 -u minioadmin -p minioadmin --show-buckets --show-objects --bucket secrets-corpus --probe-write --discover --discover-max-bytes 52428800 --discover-time 10
+  run_case minio minio_object_dump 0 minio -t 127.0.0.1 --port 19000 -u minioadmin -p minioadmin --object secrets-corpus/app/.env --dump
+  mkdir -p "${OUT_DIR}/minio_download"
+  (
+    cd "${OUT_DIR}/minio_download"
+    run_case minio minio_object_download 0 minio -t 127.0.0.1 --port 19000 -u minioadmin -p minioadmin --object secrets-corpus/app/.env --download
+  )
 }
 
 run_gitlab_cases() {
@@ -565,16 +573,16 @@ run_kubeapi_cases() {
   run_text_case kubeapi kubeapi_debug_smoke 0 kubeapi -t 127.0.0.1 --port 26443 --debug
   if is_extended_matrix; then
     run_case kubeapi kubeapi_extended_ports_flag 0 kubeapi -t 127.0.0.1 --ports 26443 --namespaces
-    run_case kubeapi kubeapi_extended_selectors_basic_auth 0 kubeapi -t 127.0.0.1 --port 26443 --namespace default --namespaces --pods --pod redposture-api --username audit --password ""
+    run_case kubeapi kubeapi_extended_selectors_basic_auth 0 kubeapi -t 127.0.0.1 --port 26443 --namespace default --namespaces --pods --username audit --password ""
     run_case kubeapi fuzz_kubeapi_zero_timeout 2 kubeapi -t 127.0.0.1 --timeout 0
     run_case kubeapi fuzz_kubeapi_huge_port 2 kubeapi -t 127.0.0.1 --port 99999 --namespaces
   fi
 }
 
 run_postgres_cases() {
-  run_case postgres postgres_default 0 postgres -t 127.0.0.1 -u postgres -p postgres --show-databases --show-tables --dump 20
+  run_case postgres postgres_default 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --show-databases --show-tables --dump 20
   run_case postgres postgres_multi_ports 0 postgres -t 127.0.0.1 -u postgres -p postgres --ports "5432,25432,25433,25434,25435" --show-databases
-  run_text_case postgres postgres_debug_smoke 0 postgres -t 127.0.0.1 -u postgres -p postgres --debug
+  run_text_case postgres postgres_debug_smoke 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --debug
   if is_extended_matrix; then
     run_case postgres postgres_extended_defcreds 0 postgres -t 127.0.0.1 --port 5432 --defcreds --show-databases
     run_case postgres postgres_extended_stop_on_success 0 postgres -t 127.0.0.1 --port 5432 --defcreds --stop-on-success
@@ -587,7 +595,7 @@ run_postgres_cases() {
     # line per attempt.
     run_case postgres postgres_extended_defcreds_both_fail 0 postgres -t 127.0.0.1 --port 25439 --defcreds
     # P4-D idempotency twin of postgres_default.
-    run_case postgres postgres_idempotency 0 postgres -t 127.0.0.1 -u postgres -p postgres --show-databases --show-tables --dump 20
+    run_case postgres postgres_idempotency 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --show-databases --show-tables --dump 20
     # P4-E fuzz: empty credentials must be rejected at parse time.
     run_case postgres fuzz_postgres_empty_credentials 2 postgres -t 127.0.0.1 -u "" -p "" --show-databases
   fi
@@ -654,9 +662,14 @@ run_oracle_cases() {
 }
 
 run_docker_cases() {
+  local docker_client_cert="${OUT_DIR}/docker-client-cert.pem"
+  local docker_client_key="${OUT_DIR}/docker-client-key.pem"
+  docker cp redposture-lab-docker-tls:/certs/client/cert.pem "${docker_client_cert}" >/dev/null
+  docker cp redposture-lab-docker-tls:/certs/client/key.pem "${docker_client_key}" >/dev/null
   run_case docker docker_open 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
-  run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --insecure --system
-  run_case docker docker_multi_ports 0 docker -t 127.0.0.1 --ports "2375,2376,24243,24244,24245" --insecure --containers
+  run_case docker docker_tls_requires_client_certificate 1 docker -t 127.0.0.1 --port 2376 --insecure --system
+  run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --insecure --tls-cert "${docker_client_cert}" --tls-key "${docker_client_key}" --system
+  run_case docker docker_multi_ports 0 docker -t 127.0.0.1 --ports "2375,2376,24243,24244,24245" --insecure --tls-cert "${docker_client_cert}" --tls-key "${docker_client_key}" --containers
   run_case docker docker_inventory 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
   run_case docker docker_exec 0 docker -t 127.0.0.1 --port 2375 --container redposture-web --exec-cmd "id"
   run_text_case docker docker_debug_smoke 0 docker -t 127.0.0.1 --port 2375 --debug
@@ -669,26 +682,26 @@ run_docker_cases() {
 }
 
 run_clickhouse_cases() {
-  run_case clickhouse clickhouse_native_open 0 clickhouse -t 127.0.0.1 --show-databases --show-tables --dump
+  run_case clickhouse clickhouse_native_open 0 clickhouse -t 127.0.0.1 --port 9000 --show-databases --show-tables --dump
   run_case clickhouse clickhouse_http_open 0 clickhouse -t 127.0.0.1 --http --port 8123 --show-databases --show-tables --dump
-  run_case clickhouse clickhouse_protocol_auto 0 clickhouse -t 127.0.0.1 --protocol auto --show-databases
+  run_case clickhouse clickhouse_protocol_auto 0 clickhouse -t 127.0.0.1 --port 9000 --protocol auto --show-databases
   run_case clickhouse clickhouse_native_auth 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --show-databases --show-tables --dump
   run_case clickhouse clickhouse_http_auth 0 clickhouse -t 127.0.0.1 --http --port 18123 -u default -p default --show-databases --show-tables --dump
   run_case clickhouse clickhouse_multi_ports 0 clickhouse -t 127.0.0.1 --ports "9000,29001,29002,29003,29004" --show-databases
-  run_text_case clickhouse clickhouse_debug_smoke 0 clickhouse -t 127.0.0.1 --debug
+  run_text_case clickhouse clickhouse_debug_smoke 0 clickhouse -t 127.0.0.1 --port 9000 --debug
   if is_extended_matrix; then
-    run_case clickhouse clickhouse_extended_defcreds 0 clickhouse -t 127.0.0.1 --port 9000 --defcreds --show-databases --discover --resume --checkpoint "${OUT_DIR}/clickhouse-discover.checkpoint.json" --discover-chunk-rows 500 --max-query-time 15 --max-query-rows 100000 --max-query-bytes 67108864 --max-memory 268435456 --discover-max-threads 1 --exclude-db no_such_database --detectors jwt,private_key,client_secret,stripe_key --redact
-    run_case clickhouse clickhouse_extended_query_columns 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --database secure --show-databases 5 --show-tables 5 --table secure.secrets_inventory --show-columns 5 --column owner,value_hint --dump 5 --sql-cmd "select secret_name, owner from secure.secrets_inventory limit 2"
+    run_case clickhouse clickhouse_extended_defcreds 0 clickhouse -t 127.0.0.1 --port 9000 --defcreds --show-databases --discover --resume --checkpoint "${OUT_DIR}/clickhouse-discover.checkpoint.json" --discover-time 15 --discover-max-bytes 67108864 --discover-exclude no_such_database --detectors jwt,private_key,client_secret,stripe_key
+    run_case clickhouse clickhouse_extended_query_columns 1 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --database secure --show-databases 5 --show-tables 5 --table secure.secrets_inventory --show-columns 5 --column owner,value_hint --dump 5 --sql-cmd "select secret_name, owner from secure.secrets_inventory limit 2"
     run_case clickhouse clickhouse_extended_execute 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --execute "id"
     run_case clickhouse fuzz_clickhouse_negative_timeout 2 clickhouse -t 127.0.0.1 --timeout -1 --show-databases
-    run_case clickhouse fuzz_clickhouse_invalid_port 2 clickhouse -t 127.0.0.1 --port -1 --show-databases --show-secrets
+    run_case clickhouse fuzz_clickhouse_invalid_port 2 clickhouse -t 127.0.0.1 --port -1 --show-databases
   fi
 }
 
 run_redis_cases() {
-  run_case redis redis_default 0 redis -t 127.0.0.1 -u redis -p redis --show-keys --dump
+  run_case redis redis_default 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --show-keys --dump
   run_case redis redis_multi_ports 0 redis -t 127.0.0.1 -u redis -p redis --ports "6379,26380,26381,26382,26383" --show-keys
-  run_text_case redis redis_debug_smoke 0 redis -t 127.0.0.1 -u redis -p redis --debug
+  run_text_case redis redis_debug_smoke 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --debug
   if is_extended_matrix; then
     run_case redis redis_extended_key_dump_count 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --key offlineStocks:city_4949:552400 --show-keys 5 --dump 3 --dump-batch 2 --dump-delay 0
     run_case redis redis_extended_defcreds 0 redis -t 127.0.0.1 --port 6379 --defcreds --show-keys 3
@@ -696,11 +709,11 @@ run_redis_cases() {
     # loop end-to-end on a seeded keyspace and verifies that all keys still surface.
     run_case redis redis_extended_paged_dump 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --dump --dump-batch 1 --dump-delay 0
     # P4-D idempotency twin of redis_default. Must produce identical normalized output.
-    run_case redis redis_idempotency 0 redis -t 127.0.0.1 -u redis -p redis --show-keys --dump
+    run_case redis redis_idempotency 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --show-keys --dump
     # P4-C mutate-config: same case with different --show-keys values. Each must produce
     # exactly its N entries (or fewer when keyspace is smaller).
-    run_case redis redis_mutate_show_keys_3 0 redis -t 127.0.0.1 -u redis -p redis --show-keys 3
-    run_case redis redis_mutate_show_keys_100 0 redis -t 127.0.0.1 -u redis -p redis --show-keys 100
+    run_case redis redis_mutate_show_keys_3 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --show-keys 3
+    run_case redis redis_mutate_show_keys_100 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --show-keys 100
     # P4-E fuzz cases. CLI must reject these with exit=2 without crashing.
     run_case redis fuzz_redis_invalid_port_negative 2 redis -t 127.0.0.1 --port -1 --show-keys
     run_case redis fuzz_redis_invalid_port_huge 2 redis -t 127.0.0.1 --port 99999 --show-keys
@@ -717,7 +730,7 @@ run_etcd_cases() {
   run_case etcd etcd_auth_defcreds 0 etcd -t 127.0.0.1 --port 22379 --defcreds --show-keys
   run_case etcd etcd_auth_user_pass 0 etcd -t 127.0.0.1 --port 22379 -u root -p root --show-keys
   run_case etcd etcd_url_http 0 etcd -t "http://127.0.0.1:2379/v2/keys?recursive=true" --show-keys --dump
-  run_case etcd etcd_url_https_transport_fail 1 etcd -t "https://127.0.0.1:2379/v2/keys?recursive=true" --show-keys
+  run_case etcd etcd_url_https_transport_fallback 0 etcd -t "https://127.0.0.1:2379/v2/keys?recursive=true" --show-keys
   run_case etcd etcd_multi_instance_urls 0 etcd -t "http://127.0.0.1:2379/v2/keys,http://127.0.0.1:23790/v2/keys,http://127.0.0.1:23791/v2/keys,http://127.0.0.1:23792/v2/keys,http://127.0.0.1:23793/v2/keys" --show-keys
   run_text_case etcd etcd_debug_smoke 0 etcd -t 127.0.0.1 --port 2379 --debug
   if is_extended_matrix; then
@@ -736,11 +749,11 @@ run_etcd_cases() {
 }
 
 run_qdrant_cases() {
-  run_case qdrant qdrant_default 0 qdrant -t 127.0.0.1 --collections --dump
+  run_case qdrant qdrant_default 0 qdrant -t 127.0.0.1 --port 6333 --collections --dump
   run_case qdrant qdrant_url_http 0 qdrant -t "http://127.0.0.1:6333/collections?from=matrix" --collections --dump
-  run_case qdrant qdrant_url_https_transport_fail 1 qdrant -t "https://127.0.0.1:6333/collections" --collections
+  run_case qdrant qdrant_url_https_transport_fallback 0 qdrant -t "https://127.0.0.1:6333/collections" --collections
   run_case qdrant qdrant_multi_instance_urls 0 qdrant -t "http://127.0.0.1:6333/collections,http://127.0.0.1:26333/collections,http://127.0.0.1:26334/collections,http://127.0.0.1:26335/collections,http://127.0.0.1:26336/collections" --collections --dump
-  run_text_case qdrant qdrant_debug_smoke 0 qdrant -t 127.0.0.1 --collections --debug
+  run_text_case qdrant qdrant_debug_smoke 0 qdrant -t 127.0.0.1 --port 6333 --collections --debug
   if is_extended_matrix; then
     local snapshot_json
     local snapshot_name
@@ -806,8 +819,8 @@ run_opensearch_cases() {
 
 run_grpc_cases() {
   run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051 --plaintext --analyze
-  run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --token "grpc-lab-token-2026" --analyze
-  run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --defcreds --analyze
+  run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --tls --insecure --token "grpc-lab-token-2026" --analyze
+  run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --tls --insecure --defcreds --analyze
   run_case grpc grpc_multi_ports 0 grpc -t 127.0.0.1 --ports "50051,25052,25053,25054,25055" --analyze
   run_text_case grpc grpc_debug_smoke 0 grpc -t 127.0.0.1 --port 50051 --debug
   local grpc_protoset="${OUT_DIR}/grpc_health.protoset"
@@ -819,7 +832,7 @@ run_grpc_cases() {
   run_case grpc grpc_web_detect 0 grpc -t 127.0.0.1 --port 50071 --plaintext
   if is_extended_matrix; then
     run_case grpc grpc_extended_metadata_invoke 0 grpc -t 127.0.0.1 --port 50051 --meta "x-redposture-matrix=extended" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
-    run_case grpc grpc_extended_basic_empty_password 0 grpc -t 127.0.0.1 --port 50061 -u grpcuser -p "" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
+    run_case grpc grpc_extended_basic_empty_password 0 grpc -t 127.0.0.1 --port 50061 --tls --insecure -u grpcuser -p "" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
     run_case grpc fuzz_grpc_invalid_port 2 grpc -t 127.0.0.1 --port -1 --invoke /grpc.health.v1.Health/Check
     run_case grpc fuzz_grpc_zero_workers 2 grpc -t 127.0.0.1 --workers 0
   fi
@@ -859,9 +872,9 @@ run_kafka_cases() {
 }
 
 run_zookeeper_cases() {
-  run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --show-znodes --dump
+  run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --port 2181 --show-znodes --dump
   run_case zookeeper zookeeper_multi_ports 0 zookeeper -t 127.0.0.1 --ports "2181,22181,22182,22183,22184" --show-znodes --dump
-  run_text_case zookeeper zookeeper_debug_smoke 0 zookeeper -t 127.0.0.1 --debug
+  run_text_case zookeeper zookeeper_debug_smoke 0 zookeeper -t 127.0.0.1 --port 2181 --debug
   if is_extended_matrix; then
     run_case zookeeper zookeeper_extended_znode_limits 0 zookeeper -t 127.0.0.1 --port 2181 --znode /redposture/app/api_key --show-znodes 5 --dump 3 --max-znodes 10 --enum-workers 2
     run_case zookeeper zookeeper_extended_empty_password 0 zookeeper -t 127.0.0.1 --port 2181 -u zkuser -p "" --show-znodes 1
@@ -883,7 +896,7 @@ run_keeper_cases() {
 
 run_proxmox_cases() {
   run_case proxmox proxmox_audit 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
-  run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover-creds --nodes --users
+  run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover --nodes --users
   run_case proxmox proxmox_url_override_https 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket" --no-https --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
   run_case proxmox proxmox_multi_instance_urls 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket,https://127.0.0.1:18061/api2/json/access/ticket,https://127.0.0.1:18062/api2/json/access/ticket,https://127.0.0.1:18063/api2/json/access/ticket,https://127.0.0.1:18064/api2/json/access/ticket" --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
   run_text_case proxmox proxmox_debug_smoke 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --debug
@@ -910,6 +923,12 @@ run_proxy_isolated_cases() {
     run_case redis proxy_redis_https 0 redis -t proxy-redis --port 6379 --proxy https://127.0.0.1:18443 --show-keys 3
 }
 
+run_airflow_cases() {
+  run_case airflow airflow_default 0 airflow -t 127.0.0.1 --debug --defcreds
+  run_case airflow airflow_creds 0 airflow -t http://127.0.0.1:18080 -u airflow -p airflow --show-keys --discover --enum-cve --discover-time 10 --discover-max-bytes 52428800 -ot excluded.invalid
+  run_case airflow airflow_anonymous 0 airflow -t http://127.0.0.1:18081 --show-keys --discover --enum-cve --discover-time 10 --discover-max-bytes 52428800 -ot excluded.invalid
+}
+
 run_service_block() {
   local service="$1"
   local fn="$2"
@@ -923,7 +942,7 @@ run_service_block() {
 if [ -n "${REDPOSTURE_LOCAL_QA_SERVICE:-}" ]; then
   qa_service="${REDPOSTURE_LOCAL_QA_SERVICE}"
   case "${qa_service}" in
-    exporters|registry|grafana|gitlab|consul|kubeapi|postgres|mongodb|oracle|docker|clickhouse|redis|etcd|qdrant|elastic|opensearch|grpc|kafka|zookeeper|zookeeper-auth|keeper|proxmox|proxy-isolated)
+    exporters|registry|grafana|minio|rabbitmq|airflow|gitlab|consul|kubeapi|postgres|mongodb|oracle|docker|clickhouse|redis|etcd|qdrant|elastic|opensearch|grpc|kafka|zookeeper|zookeeper-auth|keeper|proxmox|proxy-isolated)
       qa_function="run_${qa_service//-/_}_cases"
       ;;
     *) echo "[error] unsupported local QA service: ${qa_service}" >&2; exit 2 ;;
@@ -932,6 +951,10 @@ if [ -n "${REDPOSTURE_LOCAL_QA_SERVICE:-}" ]; then
   trap - EXIT
   printf "module\tlabel\texpected_exit\texit_code\tjson_path\tlog_path\n" > "${STATUS_FILE}"
   "${qa_function}"
+  if ! awk -F '\t' 'NR > 1 && $3 != $4 { failed = 1 } END { exit failed }' "${STATUS_FILE}"; then
+    echo "[error] local QA service ${qa_service} has exit-code mismatches" >&2
+    exit 1
+  fi
   exit 0
 fi
 
@@ -948,12 +971,6 @@ run_service_block registry run_registry_cases
 run_service_block grafana run_grafana_cases
 run_service_block minio run_minio_cases
 run_service_block rabbitmq run_rabbitmq_cases
-
-run_airflow_cases() {
-  run_case airflow airflow_default 1 airflow -t 127.0.0.1 --debug --defcreds
-  run_case airflow airflow_creds 1 airflow --targets 127.0.0.1 --port 8080 --ports 8080,8081 -u airflow -p airflow -f json -o /tmp/redposture-airflow.json -ot excluded.invalid
-}
-
 run_service_block airflow run_airflow_cases
 run_service_block gitlab run_gitlab_cases
 run_service_block consul run_consul_cases

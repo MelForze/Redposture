@@ -6,14 +6,146 @@
     "add_user_privileges_granted": null,
     "add_user_privileges_role": null,
     "added_user": null,
+    "attempted_credentials": [
+      {
+        "auth_method": "password",
+        "error": "permission denied",
+        "password": "admin",
+        "source": "default",
+        "status": "auth_failed",
+        "username": "admin@pam"
+      },
+      {
+        "auth_method": "password",
+        "error": "permission denied",
+        "password": "admin",
+        "source": "default",
+        "status": "auth_failed",
+        "username": "admin@pve"
+      },
+      {
+        "auth_method": "password",
+        "error": "permission denied",
+        "password": "password",
+        "source": "default",
+        "status": "auth_failed",
+        "username": "admin@pve"
+      },
+      {
+        "auth_method": "password",
+        "error": null,
+        "password": "admin",
+        "source": "default",
+        "status": "weak_default_creds",
+        "username": "root@pam"
+      },
+      {
+        "auth_method": "password",
+        "error": "permission denied",
+        "password": "changeme",
+        "source": "default",
+        "status": "auth_failed",
+        "username": "root@pam"
+      },
+      {
+        "auth_method": "password",
+        "error": "permission denied",
+        "password": "password",
+        "source": "default",
+        "status": "auth_failed",
+        "username": "root@pam"
+      },
+      {
+        "auth_method": "password",
+        "error": "permission denied",
+        "password": "proxmox",
+        "source": "default",
+        "status": "auth_failed",
+        "username": "root@pam"
+      },
+      {
+        "auth_method": "password",
+        "error": "permission denied",
+        "password": "Proxmox123",
+        "source": "default",
+        "status": "auth_failed",
+        "username": "root@pam"
+      },
+      {
+        "auth_method": "password",
+        "error": "permission denied",
+        "password": "root",
+        "source": "default",
+        "status": "auth_failed",
+        "username": "root@pam"
+      },
+      {
+        "auth_method": "password",
+        "error": "permission denied",
+        "password": "toor",
+        "source": "default",
+        "status": "auth_failed",
+        "username": "root@pam"
+      }
+    ],
     "auth_attempts": [
       {
         "ok": "False",
+        "password": "admin",
+        "source": "defcreds",
+        "username": "admin@pam"
+      },
+      {
+        "ok": "False",
+        "password": "admin",
+        "source": "defcreds",
+        "username": "admin@pve"
+      },
+      {
+        "ok": "False",
+        "password": "password",
+        "source": "defcreds",
+        "username": "admin@pve"
+      },
+      {
+        "ok": "True",
+        "password": "admin",
         "source": "defcreds",
         "username": "root@pam"
       },
       {
-        "ok": "True",
+        "ok": "False",
+        "password": "changeme",
+        "source": "defcreds",
+        "username": "root@pam"
+      },
+      {
+        "ok": "False",
+        "password": "password",
+        "source": "defcreds",
+        "username": "root@pam"
+      },
+      {
+        "ok": "False",
+        "password": "proxmox",
+        "source": "defcreds",
+        "username": "root@pam"
+      },
+      {
+        "ok": "False",
+        "password": "Proxmox123",
+        "source": "defcreds",
+        "username": "root@pam"
+      },
+      {
+        "ok": "False",
+        "password": "root",
+        "source": "defcreds",
+        "username": "root@pam"
+      },
+      {
+        "ok": "False",
+        "password": "toor",
         "source": "defcreds",
         "username": "root@pam"
       }
@@ -29,26 +161,33 @@
     "checked_endpoints": 3,
     "credential_hits": 0,
     "defcreds_enabled": true,
+    "discover_bytes_scanned": 0,
     "discover_creds": false,
     "endpoint_results": [
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       }
     ],
     "error": null,
     "findings": [],
+    "grant_path": null,
+    "grant_propagate": null,
+    "grant_role": null,
     "host": "127.0.0.1",
     "is_proxmox": true,
     "module": "proxmox",
@@ -57,7 +196,10 @@
       "pve-core-02"
     ],
     "nodes_error": null,
+    "partial": false,
+    "partial_error": null,
     "port": 18006,
+    "responses_truncated": 0,
     "service": "proxmox",
     "show_nodes": true,
     "show_users": false,

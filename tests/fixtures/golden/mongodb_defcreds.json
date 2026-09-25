@@ -9,6 +9,18 @@
       "can_read_documents": true,
       "can_run_command": null
     },
+    "capability_coverage": {
+      "can_list_collections": {
+        "failures": 0,
+        "state": "allowed",
+        "successes": 2
+      },
+      "can_read_documents": {
+        "failures": 0,
+        "state": "allowed",
+        "successes": 4
+      }
+    },
     "collection_targets": [],
     "collections": [
       {
@@ -34,11 +46,130 @@
     ],
     "credential_attempts": [
       {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "admin",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "changeme",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "mongo",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "mongodb",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "dev",
+        "token": null,
+        "username": "dev"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "mongo",
+        "token": null,
+        "username": "mongo"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "mongo"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "mongodb",
+        "token": null,
+        "username": "mongodb"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "mongodb"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "admin",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "mongo",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "mongodb",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "root"
+      },
+      {
         "error": null,
         "ok": true,
         "password": "root",
         "token": null,
         "username": "root"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "test",
+        "token": null,
+        "username": "test"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "user"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
+        "password": "user",
+        "token": null,
+        "username": "user"
       }
     ],
     "database": null,
@@ -75,6 +206,43 @@
     "nosql_command_database": null,
     "nosql_command_error": null,
     "nosql_command_result": null,
+    "operation_results": [
+      {
+        "database": "billing",
+        "ok": true,
+        "operation": "list_collections"
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "database": "redposture",
+        "ok": true,
+        "operation": "list_collections"
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "ok": true,
+        "operation": "count_documents"
+      }
+    ],
+    "partial": false,
     "port": 27018,
     "projection": null,
     "provided_credentials": true,

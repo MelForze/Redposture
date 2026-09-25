@@ -1,0 +1,52 @@
+[
+  {
+    "anonymous": "denied",
+    "anonymous_endpoints": [],
+    "api_endpoint": "http://127.0.0.1:15672",
+    "auth_required": true,
+    "credential_error": null,
+    "credential_http_status": 401,
+    "credential_state": "rejected",
+    "credential_type": "basic",
+    "credential_username": "guest",
+    "credential_verification_status": "available",
+    "default_credentials": false,
+    "detection": {
+      "overview_status": 401,
+      "rabbitmq_realm": true
+    },
+    "detection_status": "confirmed",
+    "host": "127.0.0.1",
+    "module": "rabbitmq",
+    "port": 15672,
+    "provided_credentials_ok": false,
+    "service": "rabbitmq",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected"
+  }
+]

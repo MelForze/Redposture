@@ -22,6 +22,16 @@ def test_airflow_output_format_and_file():
     assert parse_args(["airflow", "-t", "127.0.0.1"]).output_format == "txt"
 
 
+def test_airflow_show_keys_accepts_optional_limit():
+    assert parse_args(["airflow", "-t", "127.0.0.1", "--show-keys"]).show_keys is True
+    assert parse_args(["airflow", "-t", "127.0.0.1", "--show-keys", "7"]).show_keys == 7
+
+
+def test_airflow_show_connections_accepts_optional_limit():
+    assert parse_args(["airflow", "-t", "127.0.0.1", "--show-connections"]).show_connections is True
+    assert parse_args(["airflow", "-t", "127.0.0.1", "--show-connections", "7"]).show_connections == 7
+
+
 @pytest.mark.parametrize("flag", ["--https", "--insecure", "--session-token"])
 def test_airflow_has_no_transport_or_token_flags(flag):
     with pytest.raises(SystemExit):

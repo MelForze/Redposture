@@ -1,0 +1,110 @@
+[
+  {
+    "anonymous": "authentication_required",
+    "anonymous_buckets": [],
+    "api_endpoint": "http://127.0.0.1:19000",
+    "auth_required": true,
+    "console_endpoint": null,
+    "credential_results": [
+      {
+        "access_key": "minioadmin",
+        "error_code": "InvalidTokenId",
+        "state": "verification_unavailable"
+      }
+    ],
+    "credential_state": "verification_unavailable",
+    "credential_type": "session-token",
+    "credential_verification_status": "available",
+    "default_credentials": false,
+    "detection": {
+      "admin_plane": true,
+      "admin_s3_shape": true,
+      "health_live": true,
+      "root_status": 403,
+      "s3_shape": true,
+      "server_minio": true
+    },
+    "detection_status": "confirmed",
+    "host": "127.0.0.1",
+    "module": "minio",
+    "port": 19000,
+    "provided_credentials_ok": null,
+    "service": "minio",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected"
+  },
+  {
+    "api_endpoint": null,
+    "auth_required": null,
+    "console_endpoint": "http://127.0.0.1:19001",
+    "credential_verification_status": "unavailable",
+    "detection": {
+      "admin_plane": false,
+      "admin_s3_shape": false,
+      "console": true,
+      "health_live": true,
+      "root_status": 200,
+      "s3_shape": false,
+      "server_minio": true
+    },
+    "detection_status": "console",
+    "host": "127.0.0.1",
+    "module": "minio",
+    "port": 19001,
+    "service": "minio",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "write_probe": {},
+    "write_probe_leftovers": []
+  }
+]

@@ -9,6 +9,23 @@
       "can_read_documents": true,
       "can_run_command": null
     },
+    "capability_coverage": {
+      "can_list_collections": {
+        "failures": 0,
+        "state": "allowed",
+        "successes": 2
+      },
+      "can_list_indexes": {
+        "failures": 0,
+        "state": "allowed",
+        "successes": 4
+      },
+      "can_read_documents": {
+        "failures": 0,
+        "state": "allowed",
+        "successes": 8
+      }
+    },
     "collection_targets": [],
     "collections": [
       {
@@ -304,6 +321,91 @@
     "nosql_command_database": null,
     "nosql_command_error": null,
     "nosql_command_result": null,
+    "operation_results": [
+      {
+        "database": "billing",
+        "ok": true,
+        "operation": "list_collections"
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "ok": true,
+        "operation": "list_indexes"
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "ok": true,
+        "operation": "find_documents"
+      },
+      {
+        "database": "redposture",
+        "ok": true,
+        "operation": "list_collections"
+      },
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "ok": true,
+        "operation": "list_indexes"
+      },
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "ok": true,
+        "operation": "find_documents"
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "list_indexes"
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "find_documents"
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "ok": true,
+        "operation": "list_indexes"
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "ok": true,
+        "operation": "find_documents"
+      }
+    ],
+    "partial": false,
     "port": 27017,
     "projection": null,
     "provided_credentials": false,

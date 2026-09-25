@@ -75,19 +75,13 @@ def test_detect_line_missing_auth_required_renders_unknown():
     assert "(auth required:unknown)" in render._format_detect_record(record, "txt")
 
 
-# --- detect line: anonymous role suffix rules -----------------------------
+# --- detect line: no inferred role suffix ---------------------------------
 
 
-@pytest.mark.parametrize("role", ["none", "unknown", None])
-def test_detect_line_hides_anon_for_benign_or_unknown_roles(role):
+@pytest.mark.parametrize("role", ["none", "unknown", None, "viewer", "op", "admin"])
+def test_detect_line_never_renders_inferred_anonymous_role(role):
     line = render._format_detect_record(_record(auth_required=False, anonymous_role=role), "txt")
     assert "(anon:" not in line
-
-
-@pytest.mark.parametrize("role", ["viewer", "op", "admin"])
-def test_detect_line_shows_anon_for_real_exposure(role):
-    line = render._format_detect_record(_record(auth_required=False, anonymous_role=role), "txt")
-    assert f"(anon:{role})" in line
 
 
 def test_detect_line_hides_anon_when_auth_required_is_unknown():
@@ -146,29 +140,32 @@ def test_record_line_rendered_for_restricted_state():
         credential_state="valid_but_restricted",
         credential_results=[{"username": "u", "state": "valid_but_restricted"}],
         credential_password="p",
-        role="viewer",
     )
-    assert render._format_record(record, "txt") == f"{_PFX} [+] u:p (role:viewer)"
+    assert render._format_record(record, "txt") == (
+        f"{_PFX} [+] u:p (Dags:Unknown) (Keys:Unknown) (Connections:Unknown)"
+    )
 
 
 def test_record_line_unknown_username_placeholder():
     record = _record(credential_state="valid", credential_results=[], credential_password="p")
-    assert render._format_record(record, "txt") == f"{_PFX} [+] ?:p"
+    assert render._format_record(record, "txt") == f"{_PFX} [+] ?:p (Dags:Unknown) (Keys:Unknown) (Connections:Unknown)"
 
 
 def test_record_line_username_placeholder_when_results_missing():
     record = _record(credential_state="valid", credential_password="p")
-    assert render._format_record(record, "txt") == f"{_PFX} [+] ?:p"
+    assert render._format_record(record, "txt") == f"{_PFX} [+] ?:p (Dags:Unknown) (Keys:Unknown) (Connections:Unknown)"
 
 
 def test_record_line_username_placeholder_when_entry_lacks_username():
     record = _record(credential_state="valid", credential_results=[{"state": "valid"}], credential_password="p")
-    assert render._format_record(record, "txt") == f"{_PFX} [+] ?:p"
+    assert render._format_record(record, "txt") == f"{_PFX} [+] ?:p (Dags:Unknown) (Keys:Unknown) (Connections:Unknown)"
 
 
 def test_record_line_without_password_shows_username_only():
     record = _record(credential_state="valid", credential_results=[{"username": "airflow", "state": "valid"}])
-    assert render._format_record(record, "txt") == f"{_PFX} [+] airflow"
+    assert render._format_record(record, "txt") == (
+        f"{_PFX} [+] airflow (Dags:Unknown) (Keys:Unknown) (Connections:Unknown)"
+    )
 
 
 def test_record_line_empty_password_still_shows_colon():
@@ -177,18 +174,22 @@ def test_record_line_empty_password_still_shows_colon():
         credential_results=[{"username": "airflow", "state": "valid"}],
         credential_password="",
     )
-    assert render._format_record(record, "txt") == f"{_PFX} [+] airflow:"
+    assert render._format_record(record, "txt") == (
+        f"{_PFX} [+] airflow: (Dags:Unknown) (Keys:Unknown) (Connections:Unknown)"
+    )
 
 
-@pytest.mark.parametrize("role", [None, "", 0])
-def test_record_line_omits_falsy_role_suffix(role):
+@pytest.mark.parametrize("role", [None, "", 0, "admin"])
+def test_record_line_ignores_legacy_role_field(role):
     record = _record(
         credential_state="valid",
         credential_results=[{"username": "u", "state": "valid"}],
         credential_password="p",
         role=role,
     )
-    assert render._format_record(record, "txt") == f"{_PFX} [+] u:p"
+    line = render._format_record(record, "txt")
+    assert line == f"{_PFX} [+] u:p (Dags:Unknown) (Keys:Unknown) (Connections:Unknown)"
+    assert "role:" not in line
 
 
 def test_record_line_suppressed_for_json():
@@ -312,20 +313,6 @@ def test_attempts_missing_username_renders_empty_user():
 
 
 # --- coloring --------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("role", "color"),
-    [("admin", "true_red"), ("op", "yellow"), ("viewer", "bright_green"), ("none", "bright_green")],
-)
-def test_role_span_colors(role, color):
-    spans = render._airflow_role_spans("[+]", f"airflow:pw (role:{role})")
-    assert spans and spans[0][2] == color
-
-
-def test_unknown_role_falls_back_to_yellow():
-    spans = render._airflow_role_spans("[*]", "Airflow (anon:weird)")
-    assert spans and spans[0][2] == "yellow"
 
 
 def test_auth_required_true_is_green():

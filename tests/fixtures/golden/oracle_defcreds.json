@@ -1,7 +1,7 @@
 [
   {
     "auth_required": true,
-    "banner": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0",
+    "banner": "Oracle AI Database 26ai Free Release 23.26.3.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.3.0.0",
     "capabilities": {
       "can_list_dblinks": false,
       "can_list_tables": false,
@@ -16,16 +16,149 @@
     "connect_sid": null,
     "credential_attempts": [
       {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "admin",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "changeme",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "oracle",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "password",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "account locked",
+        "ok": false,
+        "password": "dbsnmp",
+        "token": null,
+        "username": "dbsnmp"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "dev",
+        "token": null,
+        "username": "dev"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "hr",
+        "token": null,
+        "username": "hr"
+      },
+      {
+        "error": "account locked",
+        "ok": false,
+        "password": "outln",
+        "token": null,
+        "username": "outln"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "oracle",
+        "token": null,
+        "username": "pdbadmin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "pdbadmin",
+        "token": null,
+        "username": "pdbadmin"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "scott",
+        "token": null,
+        "username": "scott"
+      },
+      {
+        "error": null,
+        "ok": true,
+        "password": "tiger",
+        "token": null,
+        "username": "scott"
+      },
+      {
+        "error": "ORA-28009: connection as SYS should be as SYSDBA or SYSOPER\nHelp: https://docs.oracle.com/error-help/db/ora-28009/",
+        "ok": false,
+        "password": "change_on_install",
+        "token": null,
+        "username": "sys"
+      },
+      {
+        "error": "ORA-28009: connection as SYS should be as SYSDBA or SYSOPER\nHelp: https://docs.oracle.com/error-help/db/ora-28009/",
+        "ok": false,
+        "password": "oracle",
+        "token": null,
+        "username": "sys"
+      },
+      {
+        "error": "ORA-28009: connection as SYS should be as SYSDBA or SYSOPER\nHelp: https://docs.oracle.com/error-help/db/ora-28009/",
+        "ok": false,
+        "password": "sys",
+        "token": null,
+        "username": "sys"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "manager",
+        "token": null,
+        "username": "system"
+      },
+      {
         "error": null,
         "ok": true,
         "password": "oracle",
         "token": null,
         "username": "system"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "system",
+        "token": null,
+        "username": "system"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "test",
+        "token": null,
+        "username": "test"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "user",
+        "token": null,
+        "username": "user"
       }
     ],
     "db_links": [],
     "defcreds_enabled": true,
-    "effective_username": "system",
+    "effective_username": "scott",
     "error": null,
     "exec_result": null,
     "file_results": [],
@@ -76,8 +209,8 @@
     "privesc_findings": [],
     "privileges": [],
     "provided_credentials": true,
-    "provided_password": "oracle",
-    "provided_username": "system",
+    "provided_password": "tiger",
+    "provided_username": "scott",
     "query_rows": [],
     "roles": [],
     "rows": [],
@@ -125,220 +258,7 @@
     "transport_mode": "tcp",
     "users": [
       {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "ANONYMOUS"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "APPQOSSYS"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "AUDSYS"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "BAASSYS"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "DBSFWUSER"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "DBSNMP"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "DGPDB_INT"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "DIP"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "DVF"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "DVSYS"
-      },
-      {
-        "account_status": "EXPIRED",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "EXPIRED_USER"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "GGSHAREDCAP"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "GGSYS"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "GSMADMIN_INTERNAL"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "GSMCATUSER"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "GSMUSER"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSTEM",
-        "profile": "DEFAULT",
-        "username": "LBACSYS"
-      },
-      {
-        "account_status": "OPEN",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "LIMITED"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "LOCKED_USER"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSTEM",
-        "profile": "DEFAULT",
-        "username": "OUTLN"
-      },
-      {
-        "account_status": "OPEN",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "PDBADMIN"
-      },
-      {
-        "account_status": "OPEN",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "PRIVESC"
-      },
-      {
-        "account_status": "OPEN",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "READONLY"
-      },
-      {
-        "account_status": "OPEN",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "REDPOSTURE"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "REMOTE_SCHEDULER_AGENT"
-      },
-      {
-        "account_status": "OPEN",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
         "username": "SCOTT"
-      },
-      {
-        "account_status": "OPEN",
-        "default_tablespace": "SYSTEM",
-        "profile": "DEFAULT",
-        "username": "SYS"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "SYS$UMF"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "SYSBACKUP"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "SYSDG"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "SYSKM"
-      },
-      {
-        "account_status": "OPEN",
-        "default_tablespace": "USERS",
-        "profile": "DEFAULT",
-        "username": "SYSRAC"
-      },
-      {
-        "account_status": "OPEN",
-        "default_tablespace": "SYSTEM",
-        "profile": "DEFAULT",
-        "username": "SYSTEM"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "VECSYS"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSAUX",
-        "profile": "DEFAULT",
-        "username": "XDB"
-      },
-      {
-        "account_status": "LOCKED",
-        "default_tablespace": "SYSTEM",
-        "profile": "DEFAULT",
-        "username": "XS$NULL"
       }
     ],
     "wallet_findings": []

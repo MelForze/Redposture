@@ -7,8 +7,51 @@
     },
     "defcreds_enabled": false,
     "dump": true,
+    "dump_coverage": {
+      "complete": true,
+      "error": null,
+      "failed_count": 0,
+      "not_attempted_count": 0,
+      "partial_count": 0,
+      "requested_count": 5,
+      "status": "complete",
+      "successful_count": 5,
+      "topics": [
+        {
+          "error": null,
+          "message_count": 3,
+          "status": "success",
+          "topic": "audit.logs"
+        },
+        {
+          "error": null,
+          "message_count": 3,
+          "status": "success",
+          "topic": "inventory.events"
+        },
+        {
+          "error": null,
+          "message_count": 3,
+          "status": "success",
+          "topic": "orders"
+        },
+        {
+          "error": null,
+          "message_count": 3,
+          "status": "success",
+          "topic": "payments.events"
+        },
+        {
+          "error": null,
+          "message_count": 3,
+          "status": "success",
+          "topic": "security.alerts"
+        }
+      ]
+    },
     "dump_error": null,
     "dump_errors": {},
+    "dump_partial": false,
     "dump_results": {
       "audit.logs": [
         "<KAFKA_OFFSET> {\"event\":\"login\",\"user\":\"admin\",\"source_ip\":\"10.0.1.11\"}",
@@ -50,6 +93,7 @@
     "max_messages": 50,
     "max_messages_explicit": true,
     "module": "kafka",
+    "partial": false,
     "port": 9092,
     "provided_credentials": false,
     "provided_credentials_ok": null,

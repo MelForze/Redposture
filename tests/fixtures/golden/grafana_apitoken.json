@@ -19,6 +19,7 @@
         "username": null
       }
     ],
+    "auth_method": null,
     "auth_required": true,
     "check_results": [],
     "check_urls": [],
@@ -31,6 +32,7 @@
         "username": null
       }
     ],
+    "credential_verification_status": "available",
     "credentials_source": null,
     "datasource_count": null,
     "datasources": null,
@@ -48,6 +50,9 @@
     "provided_username": null,
     "service": "grafana",
     "show_datasources": true,
+    "sso_evidence": [],
+    "sso_protocol": null,
+    "sso_provider": null,
     "stages": [
       {
         "attempt": 1,

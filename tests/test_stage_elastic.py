@@ -847,7 +847,7 @@ def test_audit_elastic_host_does_not_switch_scheme_after_valid_http_response(mon
     assert schemes and all(schemes)
 
 
-def test_audit_elastic_host_does_not_run_cosmetic_authenticated_version_probe(
+def test_audit_elastic_host_resolves_version_after_verified_authentication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -878,7 +878,7 @@ def test_audit_elastic_host_does_not_run_cosmetic_authenticated_version_probe(
     monkeypatch.setattr(
         elastic_stage,
         "_resolve_server_version_with_auth",
-        lambda *_args, **_kwargs: pytest.fail("cosmetic version probe must not run"),
+        lambda *_args, **_kwargs: ("2.19.1", None),
     )
     monkeypatch.setattr(
         elastic_stage,
@@ -908,7 +908,7 @@ def test_audit_elastic_host_does_not_run_cosmetic_authenticated_version_probe(
     )
 
     assert record["status"] == "valid_credentials"
-    assert record["server_version"] is None
+    assert record["server_version"] == "2.19.1"
     assert record["api_key_probe_status"] == "not_run"
     assert record["api_key_probe_error"] is None
 
@@ -1265,10 +1265,10 @@ def test_audit_elastic_host_with_auth_and_features(monkeypatch: pytest.MonkeyPat
     assert "[*] Misconfig Findings" in detail_text
     assert "key=xpack.security.enabled value=false reason=security is disabled" in detail_text
     assert "[*] 1 Users" in detail_text
-    assert "[*] 1 Secret Findings" in detail_text
+    assert "[*] Discover Secrets (status:partial) (findings:1)" in detail_text
     assert "(high:1)" not in detail_text
-    assert 'value="secret"' in detail_text
-    assert "Discover coverage status=partial" in detail_text
+    assert 'Value="secret"' in detail_text
+    assert "Discover coverage" not in detail_text
     assert '{"password": "secret"}' not in detail_text
 
     detail_json = [_json for _json in _format_detail_records(record, "json")]
@@ -2888,7 +2888,7 @@ def test_elastic_record_and_renderer_variants() -> None:
     assert any("node=n1 component=c1" in line for line in txt_details)
     assert any("cluster unavailable" in line for line in txt_details)
     assert any("users unavailable" in line for line in txt_details)
-    assert any("discover error" in line for line in txt_details)
+    assert any("Discover partial: indices_failed:1" in line for line in txt_details)
 
     console = _Console()
     assert elastic_stage._render_colored_elastic_line(console, "OTHER\tline") is False

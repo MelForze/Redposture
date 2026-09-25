@@ -28,6 +28,7 @@ from ...clients.http_api import (
 from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
+from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
 from ...rendering import BooleanColorRule, render_colored_marker_line
 from ...stage_runtime import (
     StageTelemetryBuilder,
@@ -1853,24 +1854,39 @@ def _format_findings_detail_records(record: dict[str, Any], output_format: str) 
             )
         return lines
 
-    prefix = _nxc_prefix(record)
     lines = []
     for finding in findings:
         if not isinstance(finding, dict):
             continue
-        reason = _clip(str(finding.get("reason") or "-"), 80)
-        path = _clip(str(finding.get("path") or "-"), 100)
-        sample = _clip(str(finding.get("sample") or "-"), 100)
-        lines.append(f"{prefix} [!] credential candidate reason={reason} path={path} sample={sample}")
+        lines.append(_format_single_finding_detail_line(record, finding))
     return lines
 
 
 def _format_single_finding_detail_line(record: dict[str, Any], finding: dict[str, Any]) -> str:
-    prefix = _nxc_prefix(record)
-    reason = _clip(str(finding.get("reason") or "-"), 80)
+    reason = str(finding.get("reason") or "credential")
     path = _clip(str(finding.get("path") or "-"), 100)
     sample = _clip(str(finding.get("sample") or "-"), 100)
-    return f"{prefix} [!] credential candidate reason={reason} path={path} sample={sample}"
+    endpoint = _clip(str(finding.get("endpoint") or "-"), 100)
+    normalized_reason = reason.lower()
+    if "password" in normalized_reason or "passwd" in normalized_reason:
+        finding_type = "password"
+    elif "token" in normalized_reason:
+        finding_type = "token"
+    elif "api" in normalized_reason and "key" in normalized_reason:
+        finding_type = "api_key"
+    elif "key" in normalized_reason:
+        finding_type = "private_key"
+    else:
+        finding_type = "credential_pair"
+    return format_discovery_finding_line(
+        "PROXMOX",
+        record.get("host"),
+        record.get("port"),
+        severity=finding.get("confidence") or "high",
+        finding_type=finding_type,
+        value=sample,
+        place=f"{endpoint}{path}",
+    )
 
 
 def _credential_finding_endpoints(record: dict[str, Any]) -> set[str]:
@@ -2088,9 +2104,7 @@ def _format_add_user_detail_records(record: dict[str, Any], output_format: str) 
 
 def _render_colored_proxmox_line(console: Console, line: str) -> bool:
     def _extra_spans(marker: str, payload: str) -> list[tuple[int, int, str]]:
-        if marker == "[!]" and payload.startswith("credential candidate "):
-            return [(0, len(payload), "orange")]
-        return []
+        return discovery_color_spans(marker, payload)
 
     return render_colored_marker_line(
         console,

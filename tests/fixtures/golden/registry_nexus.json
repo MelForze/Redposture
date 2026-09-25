@@ -21,7 +21,7 @@
     "harbor_repositories": null,
     "host": "127.0.0.1",
     "image": null,
-    "image_count": 0,
+    "image_count": null,
     "images": null,
     "images_error": null,
     "inspect": false,

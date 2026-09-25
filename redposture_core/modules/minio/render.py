@@ -16,6 +16,7 @@ import re
 from typing import Any
 
 from ...console import Console
+from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
 from ...rendering import (
     BooleanColorRule,
     CountColorRule,
@@ -184,7 +185,7 @@ def _prefix_hp(host: Any, port: Any) -> str:
 
 
 def format_finding_line(host: Any, port: Any, finding: dict[str, Any]) -> str:
-    """One discovered-secret line `[+] <type> value=<full> place=<bucket/key$>`.
+    """One common discovery line with severity, type, value and object location.
 
     Shows the full value (like clickhouse/elastic discover), falling back to the
     masked form only if no full value was retained. Reused by the batch renderer
@@ -193,13 +194,15 @@ def format_finding_line(host: Any, port: Any, finding: dict[str, Any]) -> str:
     shown = finding.get("value")
     if shown is None:
         shown = finding.get("masked_value")
-    value = json.dumps(str(shown or ""), ensure_ascii=False, separators=(",", ":"))
-    place = json.dumps(
-        f"{finding.get('bucket', '?')}/{finding.get('key', '?')}{finding.get('object_path', '$')}",
-        ensure_ascii=False,
-        separators=(",", ":"),
+    return format_discovery_finding_line(
+        "MINIO",
+        host,
+        port,
+        severity=finding.get("confidence"),
+        finding_type=finding.get("type"),
+        value=shown or "",
+        place=f"{finding.get('bucket', '?')}/{finding.get('key', '?')}{finding.get('object_path', '$')}",
     )
-    return f"{_prefix_hp(host, port)} [+] {finding.get('type', 'secret')} value={value} place={place}"
 
 
 def format_discover_summary(
@@ -251,7 +254,7 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
         if isinstance(leftover, dict):
             lines.append(f"{prefix} [!] canary left behind: {leftover.get('bucket', '?')}/{leftover.get('key', '?')}")
     # Secret discovery follows clickhouse's shape: a `[*] Discover Secrets` summary
-    # (colored by health) over `[+] <type> value= place=` finding lines. The same
+    # over common severity/type/value/place finding lines. The same
     # formatters are reused for real-time (self-emitted) discovery output.
     host, port = record.get("host"), record.get("port")
     if record.get("discover_requested"):
@@ -265,9 +268,10 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
                 objects_scanned=int(record.get("discover_objects_scanned") or 0),
             )
         )
-    for finding in record.get("secret_findings") or []:
-        if isinstance(finding, dict):
-            lines.append(format_finding_line(host, port, finding))
+    if not record.get("_discover_findings_streamed"):
+        for finding in record.get("secret_findings") or []:
+            if isinstance(finding, dict):
+                lines.append(format_finding_line(host, port, finding))
     reasons = record.get("discover_partial_reasons") or []
     if reasons:
         lines.append(f"{prefix} [!] Discover partial: {','.join(str(r) for r in reasons)}")
@@ -316,12 +320,11 @@ _DISCOVER_FINDINGS_RE = re.compile(r"\(findings:(\d+)\)")
 
 
 def _minio_extra_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
-    # A discovered secret finding line -> whole payload orange (like clickhouse).
-    if " value=" in payload and " place=" in payload:
-        return [(0, len(payload), "orange")]
-    # The `Discover Secrets` summary is ranked by health, mirroring clickhouse:
-    # status complete=green/partial=yellow/else red; coverage green>=100/yellow>=50/red;
-    # findings green at 0, red once anything is found.
+    shared = discovery_color_spans(_marker, payload)
+    if shared:
+        return shared
+    # Legacy field-specific summary spans remain as a fallback for callers that
+    # provide a non-standard summary; common summaries are fully orange above.
     if not payload.startswith("Discover Secrets"):
         return []
     spans: list[tuple[int, int, str]] = []

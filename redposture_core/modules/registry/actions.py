@@ -3568,7 +3568,7 @@ def _render_colored_registry_line(console: Console, line: str) -> bool:
         console,
         line,
         tag="REGISTRY",
-        counts=(CountColorRule("images", "red"),),
+        counts=(CountColorRule("images", "red", unknown_color="orange", zero_color="bright_green"),),
     ):
         return True
     if line.startswith("REGISTRY") and "\t" in line:

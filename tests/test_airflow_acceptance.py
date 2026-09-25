@@ -15,7 +15,7 @@ import pytest
 
 from redposture_core.clients.airflow_api import AirflowResponse
 from redposture_core.modules.airflow import actions
-from redposture_core.modules.airflow.types import CredentialResult, RoleCapability
+from redposture_core.modules.airflow.types import AirflowCapabilities, CredentialResult, ResourceAccess
 
 
 class FakeClient:
@@ -121,28 +121,30 @@ def test_detect_probable_on_scheduler_only_health():
 # --- anonymous ladder: partial transport, ambiguous codes ------------------
 
 
-def test_anonymous_partial_transport_in_ladder_still_admin():
-    client = FakeClient({"/api/v1/dags": (200, b"[]"), "/api/v1/pools": "TRANSPORT", "/api/v1/eventLogs": (200, b"[]")})
+def test_anonymous_valid_dag_collection_proves_access_without_role_inference():
+    client = FakeClient({"/api/v1/dags": (200, b'{"dags":[],"total_entries":0}')})
     result = actions.classify_anonymous(client, "v1")
-    assert result.auth_required is False and result.role == "admin"
+    assert result.auth_required is False and result.dags_allowed is True
+    assert client.calls == [("GET", "/api/v1/dags", False)]
 
 
-def test_anonymous_non200_rungs_not_promoted():
-    client = FakeClient({"/api/v1/dags": (200, b"[]"), "/api/v1/pools": (500, b""), "/api/v1/eventLogs": (500, b"")})
-    assert actions.classify_anonymous(client, "v1").role == "viewer"
+def test_anonymous_malformed_http_200_does_not_prove_dag_access():
+    client = FakeClient({"/api/v1/dags": (200, b"<html>proxy page</html>")})
+    result = actions.classify_anonymous(client, "v1")
+    assert result.auth_required is None and result.dags_allowed is None
 
 
 @pytest.mark.parametrize("status", [500, 429, 302, 418])
 def test_anonymous_ambiguous_viewer_status_is_unknown(status):
     client = FakeClient({"/api/v1/dags": (status, b"")})
     result = actions.classify_anonymous(client, "v1")
-    assert result.auth_required is None and result.role == "unknown"
+    assert result.auth_required is None and result.dags_allowed is None
 
 
 def test_anonymous_unknown_generation_falls_back_to_v1():
     client = FakeClient({"/api/v1/dags": (401, b"")})
     result = actions.classify_anonymous(client, "v9")
-    assert result.auth_required is True and result.role == "none"
+    assert result.auth_required is True and result.dags_allowed is False
     assert ("GET", "/api/v1/dags", False) in client.calls
 
 
@@ -221,41 +223,58 @@ def test_unknown_generation_uses_v1_basic():
     assert result.state == "valid" and captured == {"u": "airflow", "p": "pw"}
 
 
-# --- authenticated role ladder: none vs unknown, partial transport ---------
+# --- authenticated resource capabilities ----------------------------------
 
 
-def test_role_all_admin():
+def test_capability_counts_require_valid_airflow_collection_schemas():
     client = FakeClient(
-        {"/api/v1/dags": (200, b"[]"), "/api/v1/pools": (200, b"[]"), "/api/v1/eventLogs": (200, b"[]")}
+        {
+            "/api/v1/dags?limit=1&offset=0": (200, b'{"dags":[{"dag_id":"one"}],"total_entries":7}'),
+            "/api/v1/variables?limit=1&offset=0": (200, b'{"variables":[],"total_entries":0}'),
+            "/api/v1/connections?limit=1&offset=0": (
+                200,
+                b'{"connections":[{"connection_id":"db"}],"total_entries":2}',
+            ),
+        }
     )
-    assert actions.classify_role(client, "v1").role == "admin"
+    result = actions.classify_capabilities(client, "v1")
+    assert (result.dags.status, result.dags.count) == ("allowed", 7)
+    assert (result.keys.status, result.keys.count) == ("allowed", 0)
+    assert (result.connections.status, result.connections.count) == ("allowed", 2)
 
 
-def test_role_viewer_only():
-    client = FakeClient({"/api/v1/dags": (200, b"[]"), "/api/v1/pools": (403, b""), "/api/v1/eventLogs": (403, b"")})
-    assert actions.classify_role(client, "v1").role == "viewer"
+def test_capability_denied_is_distinct_from_unknown():
+    client = FakeClient(
+        {
+            "/api/v1/dags?limit=1&offset=0": (403, b""),
+            "/api/v1/variables?limit=1&offset=0": "TRANSPORT",
+            "/api/v1/connections?limit=1&offset=0": (500, b""),
+        }
+    )
+    result = actions.classify_capabilities(client, "v1")
+    assert result.dags.status == "denied"
+    assert result.keys.status == "unknown" and result.keys.error == "transport_error"
+    assert result.connections.status == "unknown" and result.connections.error == "http_500"
 
 
-def test_role_none_when_all_denied():
-    client = FakeClient({"/api/v1/dags": (403, b""), "/api/v1/pools": (403, b""), "/api/v1/eventLogs": (403, b"")})
-    assert actions.classify_role(client, "v1").role == "none"
-
-
-def test_role_unknown_when_all_transport_error():
-    client = FakeClient({"/api/v1/dags": "TRANSPORT", "/api/v1/pools": "TRANSPORT", "/api/v1/eventLogs": "TRANSPORT"})
-    assert actions.classify_role(client, "v1").role == "unknown"
-
-
-def test_role_none_distinct_from_unknown_on_server_error():
-    # 5xx across the board is "reachable but denied" (none), not the all-transport
-    # "unknown" — the two must not collapse.
-    client = FakeClient({"/api/v1/dags": (500, b""), "/api/v1/pools": (500, b""), "/api/v1/eventLogs": (500, b"")})
-    assert actions.classify_role(client, "v1").role == "none"
-
-
-def test_role_admin_survives_partial_transport():
-    client = FakeClient({"/api/v1/dags": (200, b"[]"), "/api/v1/pools": "TRANSPORT", "/api/v1/eventLogs": (200, b"[]")})
-    assert actions.classify_role(client, "v1").role == "admin"
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"<html>proxy login</html>",
+        b'{"dags":[],"total_entries":true}',
+        b'{"dags":{},"total_entries":1}',
+        b'{"dags":[{}],"total_entries":0}',
+    ],
+)
+def test_capability_rejects_malformed_http_200(body):
+    client = FakeClient(
+        {
+            "/api/v1/dags?limit=1&offset=0": (200, body),
+            "/api/v1/variables?limit=1&offset=0": (403, b""),
+            "/api/v1/connections?limit=1&offset=0": (403, b""),
+        }
+    )
+    assert actions.classify_capabilities(client, "v1").dags.status == "unknown"
 
 
 # --- detect_record shaping -------------------------------------------------
@@ -279,7 +298,8 @@ def test_detect_record_confirmed_includes_anon_and_version(monkeypatch):
     assert record["detection_status"] == "confirmed"
     assert record["version"] == "3.0.1"
     assert record["api_generation"] == "v2"
-    assert record["auth_required"] is True and record["anonymous_role"] == "none"
+    assert record["auth_required"] is True and "anonymous_role" not in record
+    assert record["dags_allowed"] is False
     assert record["credential_verification_status"] == "available"
 
 
@@ -367,24 +387,76 @@ def test_auth_record_restricted_counts_as_ok(monkeypatch):
 
 def test_capabilities_skipped_when_credential_not_valid():
     ctx = SimpleNamespace(credential=_cred("u", "p"), lifecycle_state=None)
-    out = actions.capabilities_record(ctx, {"api_generation": "v1", "credential_state": "invalid"})
+    out = actions.capabilities_record(
+        ctx,
+        {"api_generation": "v1", "credential_state": "invalid", "_credential_capabilities_pending": False},
+    )
     assert "role" not in out
+    assert "_credential_capabilities_pending" not in out
 
 
-def test_capabilities_sets_role_for_valid_v1(monkeypatch):
+def test_capabilities_sets_resource_counts_for_valid_v1(monkeypatch):
     monkeypatch.setattr(
-        actions, "classify_role", lambda client, gen: RoleCapability(role="admin", evidence={"viewer": "200"})
+        actions,
+        "classify_capabilities",
+        lambda client, gen: AirflowCapabilities(
+            dags=ResourceAccess(status="allowed", count=5, http_status=200),
+            keys=ResourceAccess(status="allowed", count=2, http_status=200),
+            connections=ResourceAccess(status="denied", http_status=403),
+        ),
     )
     captured: dict = {}
     monkeypatch.setattr(actions, "_client_for", lambda ctx, **kw: captured.update(kw) or FakeClient())
     ctx = SimpleNamespace(credential=_cred("airflow", "airflow"), lifecycle_state=None)
     out = actions.capabilities_record(ctx, {"api_generation": "v1", "credential_state": "valid"})
-    assert out["role"] == "admin" and out["role_evidence"] == {"viewer": "200"}
+    assert out["authenticated_dags_access"] == "allowed"
+    assert out["authenticated_dags_count"] == 5
+    assert out["authenticated_keys_count"] == 2
+    assert out["authenticated_connections_access"] == "denied"
+    assert "role" not in out and "role_evidence" not in out
     assert captured.get("basic_user") == "airflow" and captured.get("basic_password") == "airflow"
 
 
+def test_capabilities_reports_authenticated_dag_denial_separately(monkeypatch):
+    monkeypatch.setattr(
+        actions,
+        "classify_capabilities",
+        lambda client, gen: AirflowCapabilities(
+            dags=ResourceAccess(status="denied", http_status=403),
+            keys=ResourceAccess(status="denied", http_status=403),
+            connections=ResourceAccess(status="denied", http_status=403),
+        ),
+    )
+    monkeypatch.setattr(actions, "_client_for", lambda ctx, **kw: FakeClient())
+    ctx = SimpleNamespace(credential=_cred("restricted", "secret"), lifecycle_state=None)
+
+    out = actions.capabilities_record(
+        ctx,
+        {
+            "api_generation": "v1",
+            "credential_state": "valid_but_restricted",
+            "dags_allowed": False,
+            "anonymous_dags_allowed": False,
+            "_credential_capabilities_pending": True,
+        },
+    )
+
+    assert out["authenticated_dags_access"] == "denied"
+    assert out["dags_allowed"] is False
+    assert out["anonymous_dags_allowed"] is False
+    assert "_credential_capabilities_pending" not in out
+
+
 def test_capabilities_uses_bearer_for_v2(monkeypatch):
-    monkeypatch.setattr(actions, "classify_role", lambda client, gen: RoleCapability(role="op", evidence={}))
+    monkeypatch.setattr(
+        actions,
+        "classify_capabilities",
+        lambda client, gen: AirflowCapabilities(
+            dags=ResourceAccess(status="allowed", count=0, http_status=200),
+            keys=ResourceAccess(status="denied", http_status=403),
+            connections=ResourceAccess(status="denied", http_status=403),
+        ),
+    )
     captured: dict = {}
     monkeypatch.setattr(actions, "_client_for", lambda ctx, **kw: captured.update(kw) or FakeClient())
     state = actions.AirflowLifecycleState(SimpleNamespace(timeout=5.0, retries=0), "h", 8080)
@@ -394,7 +466,7 @@ def test_capabilities_uses_bearer_for_v2(monkeypatch):
         out = actions.capabilities_record(ctx, {"api_generation": "v2", "credential_state": "valid"})
     finally:
         state.close()
-    assert out["role"] == "op" and captured.get("bearer_token") == "JWT-XYZ"
+    assert out["authenticated_dags_count"] == 0 and captured.get("bearer_token") == "JWT-XYZ"
 
 
 # --- credential candidate building -----------------------------------------

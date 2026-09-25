@@ -15,17 +15,19 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any
+from urllib.parse import quote
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, http_response_origin
 from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
-from ...rendering import BooleanColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
+from ...rendering import BooleanColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
 )
-from .discover import DiscoverOptions, DiscoverReport, DiscoverRequest, DiscoverResponse, run_discovery
+from .discover import DiscoverOptions, DiscoverReport, DiscoverRequest, DiscoverResponse, Finding, run_discovery
 from .http_session import ElasticHttpSession
 
 _ELASTIC_TAG = "ELASTIC"
@@ -2105,6 +2107,195 @@ def _check_privileges(
     return can_read, can_write, can_manage, can_manage_security, None
 
 
+def _resource_access_from_response(
+    status: int,
+    error: str | None,
+    *,
+    parsed: bool,
+) -> str:
+    """Classify a read-only capability probe without overstating access."""
+
+    if error:
+        return "unknown"
+    if status in {401, 403}:
+        return "denied"
+    if status == 200 and parsed:
+        return "allowed"
+    return "unknown"
+
+
+def _parse_visible_indices(payload: bytes, *, cat: bool) -> list[str] | None:
+    """Return exact visible index names from a resolve-index or cat response."""
+
+    names: set[str] = set()
+    if cat:
+        rows = _load_json_list(payload)
+        if rows is None:
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            value = row.get("index")
+            if isinstance(value, str) and value.strip():
+                names.add(value.strip())
+        return sorted(names)
+
+    body = _load_json_dict(payload)
+    if body is None:
+        return None
+    indices = body.get("indices")
+    if not isinstance(indices, list):
+        return None
+    for item in indices:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("name")
+        if isinstance(value, str) and value.strip():
+            names.add(value.strip())
+    return sorted(names)
+
+
+def _probe_credential_resource_access(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    scheme: str,
+    insecure: bool,
+    ca_file: str | None,
+    auth_headers: dict[str, str],
+    vendor: str | None,
+) -> dict[str, Any]:
+    """Measure useful credential access through safe, read-only requests.
+
+    OpenSearch does not expose Elasticsearch's ``_has_privileges`` contract.
+    These probes therefore report only access demonstrated by real reads and
+    never attempt to create, modify, or delete data.
+    """
+
+    result: dict[str, Any] = {
+        "credential_resource_access_checked": True,
+        "credential_indices_access": "unknown",
+        "credential_indices_count": None,
+        "credential_documents_access": "unknown",
+        "credential_cluster_access": "unknown",
+        "credential_nodes_access": "unknown",
+        "credential_nodes_count": None,
+        "credential_users_access": "unknown",
+        "credential_users_count": None,
+    }
+
+    visible_indices: list[str] | None = None
+    inventory_denied = False
+    for path, cat in (
+        ("/_resolve/index/*?expand_wildcards=all", False),
+        ("/_cat/indices?format=json&h=index,status&expand_wildcards=all", True),
+    ):
+        status, payload, _headers, error = _elastic_request(
+            host,
+            port,
+            path,
+            timeout,
+            use_https=scheme == "https",
+            insecure=insecure,
+            ca_file=ca_file,
+            headers=auth_headers,
+        )
+        if status in {401, 403}:
+            inventory_denied = True
+        parsed_indices = _parse_visible_indices(payload, cat=cat) if status == 200 and not error else None
+        if parsed_indices is not None:
+            visible_indices = parsed_indices
+            result["credential_indices_access"] = "allowed"
+            result["credential_indices_count"] = len(parsed_indices)
+            break
+    if visible_indices is None and inventory_denied:
+        result["credential_indices_access"] = "denied"
+
+    document_paths = [
+        f"/{quote(index_name, safe='')}/_search?size=0&track_total_hits=false"
+        for index_name in (visible_indices or [])[:8]
+    ]
+    if not document_paths:
+        document_paths = ["/_search?size=0&track_total_hits=false"]
+    document_denied = False
+    for path in document_paths:
+        status, payload, _headers, error = _elastic_request(
+            host,
+            port,
+            path,
+            timeout,
+            use_https=scheme == "https",
+            insecure=insecure,
+            ca_file=ca_file,
+            headers=auth_headers,
+        )
+        if status in {401, 403}:
+            document_denied = True
+            continue
+        parsed = _load_json_dict(payload) if status == 200 and not error else None
+        if parsed is not None:
+            result["credential_documents_access"] = "allowed"
+            break
+    else:
+        if document_denied:
+            result["credential_documents_access"] = "denied"
+
+    cluster_status, cluster_payload, _headers, cluster_error = _elastic_request(
+        host,
+        port,
+        "/_cluster/health",
+        timeout,
+        use_https=scheme == "https",
+        insecure=insecure,
+        ca_file=ca_file,
+        headers=auth_headers,
+    )
+    cluster_parsed = _load_json_dict(cluster_payload) if cluster_status == 200 and not cluster_error else None
+    result["credential_cluster_access"] = _resource_access_from_response(
+        cluster_status,
+        cluster_error,
+        parsed=cluster_parsed is not None,
+    )
+
+    nodes_status, nodes_payload, _headers, nodes_error = _elastic_request(
+        host,
+        port,
+        "/_nodes?filter_path=nodes.*.name",
+        timeout,
+        use_https=scheme == "https",
+        insecure=insecure,
+        ca_file=ca_file,
+        headers=auth_headers,
+    )
+    nodes_parsed = _load_json_dict(nodes_payload) if nodes_status == 200 and not nodes_error else None
+    result["credential_nodes_access"] = _resource_access_from_response(
+        nodes_status,
+        nodes_error,
+        parsed=nodes_parsed is not None and isinstance(nodes_parsed.get("nodes"), dict),
+    )
+    if result["credential_nodes_access"] == "allowed" and nodes_parsed is not None:
+        result["credential_nodes_count"] = len(nodes_parsed["nodes"])
+
+    users, users_error = _fetch_security_users(
+        host,
+        port,
+        timeout,
+        scheme=scheme,
+        insecure=insecure,
+        ca_file=ca_file,
+        auth_headers=auth_headers,
+        vendor=vendor,
+    )
+    if users is not None:
+        result["credential_users_access"] = "allowed"
+        result["credential_users_count"] = len(users)
+    elif users_error == "Access Denied":
+        result["credential_users_access"] = "denied"
+
+    return result
+
+
 def _list_index_names_detailed(
     host: str,
     port: int,
@@ -2290,6 +2481,7 @@ def _collect_discover_report(
     nested_scheduler: Any | None = None,
     scheduler_key: Any | None = None,
     options: DiscoverOptions | None = None,
+    on_finding: Callable[[Finding], None] | None = None,
 ) -> DiscoverReport:
     """Run the v2 discovery engine while preserving the module HTTP policy."""
 
@@ -2347,6 +2539,8 @@ def _collect_discover_report(
         discover_kwargs["options"] = options
     if nested_scheduler is not None:
         discover_kwargs.update({"nested_scheduler": nested_scheduler, "scheduler_key": scheduler_key})
+    if on_finding is not None:
+        discover_kwargs["on_finding"] = on_finding
     return run_discovery(_request, **discover_kwargs)
 
 
@@ -3325,6 +3519,27 @@ def _audit_elastic_host(
             network_attempted = auth_probe.network_attempted
             verification_capability = auth_probe.verification_capability
 
+            # Anonymous detection often proves the product from a 401/403
+            # response, but those responses normally omit the server version.
+            # Once the supplied identity has been verified, repeat only the
+            # read-only version probes with that identity so discovery and CVE
+            # matching use the actual Elasticsearch/OpenSearch release.
+            if auth_valid is True and version is None:
+                resolved_version, version_error = _resolve_server_version_with_auth(
+                    host,
+                    port,
+                    timeout,
+                    scheme=scheme,
+                    insecure=effective_insecure,
+                    ca_file=ca_file,
+                    auth_headers=auth_headers,
+                )
+                if resolved_version is not None:
+                    version = resolved_version
+                    _debug(f"authenticated version resolved version={resolved_version}")
+                elif version_error:
+                    _debug(f"authenticated version unavailable error={version_error}")
+
         deep_auth_headers = (
             auth_headers if auth_valid is True else _elastic_headers(username=None, password=None, api_token=None)
         )
@@ -3869,6 +4084,9 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
     scheme = str(payload.get("scheme") or "https")
     insecure = bool(payload.get("insecure_effective"))
     ca_file = str(getattr(ctx.args, "ca_file", "") or "").strip() or None
+    version = payload.get("server_version")
+    version_error: str | None = None
+    authenticated_version_resolved = False
     with _elastic_session_scope(session, state):
         auth_probe = _probe_authenticate(
             str(ctx.host),
@@ -3885,6 +4103,17 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
             expected_username=credential.username,
             capability_state=state,
         )
+        if auth_probe.valid is True and version is None:
+            version, version_error = _resolve_server_version_with_auth(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                scheme=scheme,
+                insecure=insecure,
+                ca_file=ca_file,
+                auth_headers=headers,
+            )
+            authenticated_version_resolved = version is not None
     auth_probe = _redact_auth_probe_result(auth_probe, credential.token)
     _redact_auth_state_details(state, credential.token)
     auth_valid = auth_probe.valid
@@ -3902,18 +4131,20 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
     else:
         status = "unknown_auth"
 
-    version = payload.get("server_version")
-
     payload.update(
         {
             "timestamp": utc_now_iso(),
             "status": status,
             "server_version": version,
+            "server_version_source": (
+                "authenticated" if authenticated_version_resolved else payload.get("server_version_source")
+            ),
+            "server_version_error": version_error,
             "provided_credentials": (
                 credential.source != "default" and credential.username is not None and credential.password is not None
             ),
             "provided_username": credential.username,
-            "provided_password": credential.password if credential.source != "default" else None,
+            "provided_password": credential.password,
             "provided_token": credential.token is not None,
             "api_token": None,
             "effective_username": effective_username,
@@ -3929,27 +4160,57 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
             "credential_verification": _credential_verification_payload(state, auth_probe),
             "defcreds_enabled": credential.source == "default",
             "credentials_source": str(credential.source),
+            "_credential_capabilities_pending": bool(
+                auth_valid is True
+                and any(
+                    bool(options.get(name))
+                    for name in ("show_endpoints", "show_plugins", "show_cluster", "show_users", "discover")
+                )
+            ),
             "error": None if auth_valid is True or status == "invalid_credentials_anonymous" else auth_error,
         }
     )
     return payload
 
 
-def _collect_elastic_data_with_session(
+def _inspect_elastic_capabilities_with_session(
     ctx: Any,
     record: Any,
     options: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Run capabilities and requested Elastic actions inside an active session scope."""
+    """Resolve credential capabilities once, before data/discovery starts."""
 
     state = ctx.lifecycle_state
     if not isinstance(state, ElasticLifecycleState):
         raise TypeError("elastic lifecycle state is unavailable")
     payload = dict(record.to_dict() if hasattr(record, "to_dict") else record)
     credential = ctx.credential
-    status = str(payload.get("status") or "")
-    use_authenticated = status in {"valid_credentials", "weak_default_creds"}
-    if use_authenticated:
+    requested_actions = any(
+        bool(options[name]) for name in ("show_endpoints", "show_plugins", "show_cluster", "show_users", "discover")
+    )
+    use_authenticated = str(payload.get("status") or "") in {"valid_credentials", "weak_default_creds"}
+
+    can_read = payload.get("can_read")
+    can_write = payload.get("can_write")
+    can_manage = payload.get("can_manage")
+    can_manage_security = payload.get("can_manage_security")
+    rights_error = payload.get("rights_error")
+    access_level = str(payload.get("access_level") or "unknown")
+    api_key_probe_status = str(payload.get("api_key_probe_status") or "not_run")
+    api_key_probe_error = payload.get("api_key_probe_error")
+    resource_access = {
+        "credential_resource_access_checked": bool(payload.get("credential_resource_access_checked")),
+        "credential_indices_access": payload.get("credential_indices_access", "unknown"),
+        "credential_indices_count": payload.get("credential_indices_count"),
+        "credential_documents_access": payload.get("credential_documents_access", "unknown"),
+        "credential_cluster_access": payload.get("credential_cluster_access", "unknown"),
+        "credential_nodes_access": payload.get("credential_nodes_access", "unknown"),
+        "credential_nodes_count": payload.get("credential_nodes_count"),
+        "credential_users_access": payload.get("credential_users_access", "unknown"),
+        "credential_users_count": payload.get("credential_users_count"),
+    }
+
+    if use_authenticated and requested_actions:
         auth_headers = state.auth_headers.get(_elastic_lifecycle_key(ctx))
         if auth_headers is None:
             auth_headers = _elastic_headers(
@@ -3957,28 +4218,12 @@ def _collect_elastic_data_with_session(
                 password=credential.password,
                 api_token=credential.token,
             )
-    else:
-        auth_headers = _elastic_headers(username=None, password=None, api_token=None)
-
-    host = str(ctx.host)
-    port = int(ctx.port)
-    timeout = float(getattr(ctx.args, "timeout", 5.0))
-    scheme = str(payload.get("scheme") or "https")
-    insecure = bool(payload.get("insecure_effective"))
-    ca_file = str(getattr(ctx.args, "ca_file", "") or "").strip() or None
-
-    can_read: bool | None = None
-    can_write: bool | None = None
-    can_manage: bool | None = None
-    can_manage_security: bool | None = None
-    rights_error: str | None = None
-    access_level = "unknown"
-    api_key_probe_status = "not_run"
-    api_key_probe_error: str | None = None
-    requested_actions = any(
-        bool(options[name]) for name in ("show_endpoints", "show_plugins", "show_cluster", "show_users", "discover")
-    )
-    if use_authenticated and requested_actions:
+        host = str(ctx.host)
+        port = int(ctx.port)
+        timeout = float(getattr(ctx.args, "timeout", 5.0))
+        scheme = str(payload.get("scheme") or "https")
+        insecure = bool(payload.get("insecure_effective"))
+        ca_file = str(getattr(ctx.args, "ca_file", "") or "").strip() or None
         can_read, can_write, can_manage, can_manage_security, rights_error = _check_privileges(
             host,
             port,
@@ -4005,6 +4250,88 @@ def _collect_elastic_data_with_session(
                 ca_file=ca_file,
                 auth_headers=auth_headers,
             )
+        resource_access = _probe_credential_resource_access(
+            host,
+            port,
+            timeout,
+            scheme=scheme,
+            insecure=insecure,
+            ca_file=ca_file,
+            auth_headers=auth_headers,
+            vendor=str(payload.get("vendor") or "compatible"),
+        )
+
+    payload.update(
+        {
+            "can_read": can_read,
+            "can_write": can_write,
+            "can_manage": can_manage,
+            "can_manage_security": can_manage_security,
+            "access_level": access_level,
+            "rights_error": rights_error,
+            "api_key_probe_status": api_key_probe_status,
+            "api_key_probe_error": api_key_probe_error,
+            **resource_access,
+            "_elastic_capabilities_checked": True,
+            "_credential_capabilities_pending": False,
+        }
+    )
+    return payload
+
+
+def inspect_elastic_capabilities(ctx: Any, record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Run the capability phase using the target's reusable session."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, ElasticLifecycleState):
+        raise TypeError("elastic lifecycle state is unavailable")
+    session = _activate_lifecycle_session(ctx, state)
+    with _elastic_session_scope(session, state):
+        return _inspect_elastic_capabilities_with_session(ctx, record, options)
+
+
+def _collect_elastic_data_with_session(
+    ctx: Any,
+    record: Any,
+    options: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Run capabilities and requested Elastic actions inside an active session scope."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, ElasticLifecycleState):
+        raise TypeError("elastic lifecycle state is unavailable")
+    payload = dict(record.to_dict() if hasattr(record, "to_dict") else record)
+    if not bool(payload.get("_elastic_capabilities_checked")):
+        payload = _inspect_elastic_capabilities_with_session(ctx, payload, options)
+    credential = ctx.credential
+    status = str(payload.get("status") or "")
+    use_authenticated = status in {"valid_credentials", "weak_default_creds"}
+    if use_authenticated:
+        auth_headers = state.auth_headers.get(_elastic_lifecycle_key(ctx))
+        if auth_headers is None:
+            auth_headers = _elastic_headers(
+                username=credential.username,
+                password=credential.password,
+                api_token=credential.token,
+            )
+    else:
+        auth_headers = _elastic_headers(username=None, password=None, api_token=None)
+
+    host = str(ctx.host)
+    port = int(ctx.port)
+    timeout = float(getattr(ctx.args, "timeout", 5.0))
+    scheme = str(payload.get("scheme") or "https")
+    insecure = bool(payload.get("insecure_effective"))
+    ca_file = str(getattr(ctx.args, "ca_file", "") or "").strip() or None
+
+    can_read = payload.get("can_read")
+    can_write = payload.get("can_write")
+    can_manage = payload.get("can_manage")
+    can_manage_security = payload.get("can_manage_security")
+    rights_error = payload.get("rights_error")
+    access_level = str(payload.get("access_level") or "unknown")
+    api_key_probe_status = str(payload.get("api_key_probe_status") or "not_run")
+    api_key_probe_error = payload.get("api_key_probe_error")
 
     cat_endpoints: list[str] | None = None
     endpoint_diagnostics: list[dict[str, Any]] | None = None
@@ -4088,6 +4415,14 @@ def _collect_elastic_data_with_session(
             proxy=getattr(ctx.args, "_proxy_config", None),
             max_idle_per_origin=8,
         )
+        live_emit = getattr(ctx, "live_emit", None)
+        if callable(live_emit):
+            live_emit([f"{_nxc_prefix(payload)} [*] Discover Secrets"])
+
+        def _on_finding(finding: Finding) -> None:
+            if callable(live_emit):
+                live_emit([_format_elastic_discovery_finding(host, port, finding.to_dict())])
+
         try:
             discover_report = _collect_discover_report(
                 host,
@@ -4105,6 +4440,7 @@ def _collect_elastic_data_with_session(
                     max_seconds=float(getattr(ctx.args, "discover_time", 300.0)),
                     max_source_bytes=int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024)),
                 ),
+                on_finding=_on_finding if callable(live_emit) else None,
             )
         finally:
             discover_pool.close()
@@ -4177,6 +4513,10 @@ def _collect_elastic_data_with_session(
                 "discover_coverage": discover_coverage or {},
             }
         )
+        if callable(getattr(ctx, "live_emit", None)):
+            payload["_discover_findings_streamed"] = True
+    payload.pop("_elastic_capabilities_checked", None)
+    payload.pop("_credential_capabilities_pending", None)
     redacted_payload = _redact_api_token(payload, credential.token)
     if not isinstance(redacted_payload, dict):
         raise TypeError("elastic data payload must remain a mapping")
@@ -4277,7 +4617,7 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 def _nxc_prefix(record: dict[str, Any]) -> str:
     host = _clip(str(record.get("host") or "-"), 64)
     port = str(record.get("port") or "-")
-    return f"{_ELASTIC_TAG:<8}\t{host}\t{port}\t"
+    return f"{_ELASTIC_TAG}\t{host}\t{port}\t"
 
 
 def _bool_text(value: bool | None) -> str:
@@ -4291,11 +4631,41 @@ def _bool_text(value: bool | None) -> str:
 def _caps_suffix(record: dict[str, Any]) -> str:
     if not bool(record.get("provided_credentials") or record.get("provided_token")):
         return ""
+    if all(record.get(field) is None for field in ("can_read", "can_write", "can_manage", "can_manage_security")):
+        return ""
     can_read = _bool_text(record.get("can_read"))
     can_write = _bool_text(record.get("can_write"))
     can_manage = _bool_text(record.get("can_manage"))
     can_manage_security = _bool_text(record.get("can_manage_security"))
     return f" (read:{can_read}) (write:{can_write}) (manage:{can_manage}) (manage_security:{can_manage_security})"
+
+
+def _credential_resource_text(record: dict[str, Any], name: str, *, count_field: str | None = None) -> str:
+    status = str(record.get(f"credential_{name.lower()}_access") or "unknown").strip().lower()
+    if status == "denied":
+        return "Access Denied"
+    if status != "allowed":
+        return "Unknown"
+    if count_field is not None:
+        count = record.get(count_field)
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            return str(count)
+    if name == "Documents":
+        return "Read"
+    return "Allowed"
+
+
+def _credential_resource_suffix(record: dict[str, Any]) -> str:
+    if not bool(record.get("credential_resource_access_checked")):
+        return ""
+    values = (
+        ("Indices", _credential_resource_text(record, "Indices", count_field="credential_indices_count")),
+        ("Documents", _credential_resource_text(record, "Documents")),
+        ("Cluster", _credential_resource_text(record, "Cluster")),
+        ("Nodes", _credential_resource_text(record, "Nodes", count_field="credential_nodes_count")),
+        ("Users", _credential_resource_text(record, "Users", count_field="credential_users_count")),
+    )
+    return "".join(f" ({name}:{value})" for name, value in values)
 
 
 def _counts_suffix(record: dict[str, Any]) -> str:
@@ -4351,6 +4721,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 96)
     counts = _counts_suffix(record)
     caps = _caps_suffix(record)
+    resources = _credential_resource_suffix(record)
     attempted_credentials = record.get("attempted_credentials")
     has_attempt_history = isinstance(attempted_credentials, list) and bool(attempted_credentials)
 
@@ -4367,10 +4738,10 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{line} err={err}" if err != "-" else line
 
     if status in {"valid_credentials", "weak_default_creds"}:
-        if has_attempt_history:
+        if record.get("_credential_capabilities_pending"):
             return ""
         if bool(record.get("provided_token")):
-            return f"{prefix} [+] apikey auth{counts}{caps}"
+            return f"{prefix} [+] apikey auth{counts}{resources}{caps}"
         username = str(record.get("provided_username") or record.get("effective_username") or "elastic")
         provided_password = record.get("provided_password")
         password_text = (
@@ -4380,7 +4751,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             if provided_password is not None
             else "<verified-default>"
         )
-        return f"{prefix} [+] {username}:{password_text}{counts}{caps}"
+        return f"{prefix} [+] {username}:{password_text}{counts}{resources}{caps}"
 
     if status == "auth_required":
         if has_attempt_history:
@@ -4444,6 +4815,8 @@ def _format_credential_attempts_records(
     )
     accepted_statuses = {"valid_credentials", "weak_default_creds"}
     rejected_statuses = {"auth_required", "invalid_credentials_anonymous"}
+    selected_username = str(record.get("provided_username") or record.get("effective_username") or "")
+    winner_skipped = False
     for attempt in attempts:
         if not isinstance(attempt, dict):
             continue
@@ -4452,6 +4825,11 @@ def _format_credential_attempts_records(
         password = attempt.get("password")
         status = str(attempt.get("status") or "unknown_auth")
         error = str(attempt.get("error") or "").strip()
+        accepted = status in accepted_statuses or str(attempt.get("auth_probe_status") or "") == "verified"
+        selected_token_attempt = username is None and password is None and bool(record.get("provided_token"))
+        if accepted and not winner_skipped and (str(username or "") == selected_username or selected_token_attempt):
+            winner_skipped = True
+            continue
         if username is None and password is None:
             credential_text = f"API token (source:{source})"
         else:
@@ -4498,6 +4876,27 @@ def _format_credential_attempts_records(
                 suffix = f" {' '.join(diagnostics)}{suffix}"
         lines.append(f"{prefix} {marker} {credential_text}{suffix}")
     return lines
+
+
+def _format_elastic_discovery_finding(host: Any, port: Any, finding: Mapping[str, Any]) -> str:
+    locations = finding.get("locations")
+    first_location = locations[0] if isinstance(locations, list) and locations else None
+    place_parts: list[str] = []
+    if isinstance(first_location, Mapping):
+        for key in ("source_kind", "object", "index", "id", "path"):
+            location_value = first_location.get(key)
+            if location_value is not None and str(location_value).strip():
+                place_parts.append(f"{key}:{location_value}")
+    return format_discovery_finding_line(
+        _ELASTIC_TAG,
+        host,
+        port,
+        severity=finding.get("confidence"),
+        score=finding.get("score"),
+        finding_type=finding.get("secret_type"),
+        value=finding.get("value"),
+        place="/".join(place_parts) or "unknown",
+    )
 
 
 def _format_detail_records(record: dict[str, Any], output_format: str, *, debug: bool = False) -> list[str]:
@@ -4756,42 +5155,11 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
         )
         coverage = record.get("discover_coverage")
         complete = bool(coverage.get("complete")) if isinstance(coverage, dict) else False
-        if findings:
-            suffix = f" ({confidence_text})" if debug and confidence_text else ""
-            lines.append(f"{prefix} [*] {len(findings)} Secret Findings{suffix}")
-            for finding in findings:
-                secret_type = str(finding.get("secret_type") or "secret")
-                confidence = str(finding.get("confidence") or "unknown")
-                score = int(finding.get("score") or 0)
-                occurrence_count = int(finding.get("occurrence_count") or 1)
-                encoded_value = json.dumps(finding.get("value"), ensure_ascii=False, separators=(",", ":"))
-                locations = finding.get("locations")
-                first_location = locations[0] if isinstance(locations, list) and locations else None
-                location_parts: list[str] = []
-                if isinstance(first_location, dict):
-                    for key in ("source_kind", "object", "index", "id", "path"):
-                        location_value = first_location.get(key)
-                        if location_value is not None and str(location_value).strip():
-                            location_parts.append(f"{key}={json.dumps(str(location_value), ensure_ascii=False)}")
-                location_text = " ".join(location_parts) or "location=unknown"
-                finding_line = f"{prefix} [+] secret_type={secret_type} value={encoded_value} {location_text}"
-                if debug:
-                    detectors = finding.get("detectors")
-                    detector_text = json.dumps(
-                        [str(item) for item in detectors] if isinstance(detectors, list) else [],
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
-                    finding_line += (
-                        f" confidence={confidence} score={score} detectors={detector_text} "
-                        f"occurrences={occurrence_count}"
-                    )
-                lines.append(finding_line)
-        elif complete:
-            lines.append(f"{prefix} [*] 0 Secret Findings")
-        else:
-            lines.append(f"{prefix} [*] 0 Secret Findings in scanned scope")
-
+        discover_error = str(record.get("discover_error") or "").strip()
+        indices_discovered = 0
+        indices_scanned = 0
+        inventory_surface: dict[str, Any] | None = None
+        inventory_status = "unknown"
         if isinstance(coverage, dict):
             indices_discovered = int(
                 coverage.get("indices_discovered")
@@ -4806,6 +5174,37 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
                 or coverage.get("indices_completed")
                 or 0
             )
+            surfaces = coverage.get("surfaces")
+            raw_inventory_surface = surfaces.get("index_inventory") if isinstance(surfaces, dict) else None
+            if isinstance(raw_inventory_surface, dict):
+                inventory_surface = raw_inventory_surface
+                inventory_status = str(inventory_surface.get("status") or "unknown").strip().lower()
+
+        inventory_unavailable = (
+            indices_discovered == 0
+            and indices_scanned == 0
+            and inventory_status in {"denied", "error", "timeout", "unsupported"}
+        )
+        if complete:
+            discover_status = "complete"
+        elif inventory_unavailable or (discover_error and indices_discovered == 0 and indices_scanned == 0):
+            discover_status = "unavailable"
+        else:
+            discover_status = "partial"
+
+        summary_label = "Discover Complete" if record.get("_discover_findings_streamed") else "Discover Secrets"
+        summary_suffix = f" ({confidence_text})" if debug and confidence_text else ""
+        lines.append(
+            f"{prefix} [*] {summary_label} (status:{discover_status}) (findings:{len(findings)}){summary_suffix}"
+        )
+        if findings and not record.get("_discover_findings_streamed"):
+            for finding in findings:
+                lines.append(_format_elastic_discovery_finding(record.get("host"), record.get("port"), finding))
+
+        if inventory_unavailable:
+            lines.append(f"{prefix} [-] Discover unavailable: index inventory access {inventory_status}")
+
+        if isinstance(coverage, dict):
             documents_analyzed = int(
                 coverage.get("documents_analyzed")
                 or coverage.get("documents_examined")
@@ -4824,8 +5223,6 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
             reasons = ",".join(str(reason) for reason in reasons_raw) if isinstance(reasons_raw, list) else ""
             coverage_status = str(coverage.get("status") or ("complete" if complete else "partial"))
             reason_suffix = f" reasons={reasons}" if reasons else ""
-            surfaces = coverage.get("surfaces")
-            inventory_surface = surfaces.get("index_inventory") if isinstance(surfaces, dict) else None
             inventory_suffix = ""
             if indices_discovered == 0 and isinstance(inventory_surface, dict):
                 raw_inventory_status = str(inventory_surface.get("status") or "error").strip().lower()
@@ -4835,11 +5232,12 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
                     else "error"
                 )
                 inventory_suffix = f" inventory={inventory_status}"
-            lines.append(
-                f"{prefix} [*] Discover coverage status={coverage_status}{inventory_suffix} "
-                f"indices={indices_scanned}/{indices_discovered} pages={pages} "
-                f"documents={documents_analyzed} source_bytes={source_bytes}{reason_suffix}"
-            )
+            if debug:
+                lines.append(
+                    f"{prefix} [debug] Discover coverage status={coverage_status}{inventory_suffix} "
+                    f"indices={indices_scanned}/{indices_discovered} pages={pages} "
+                    f"documents={documents_analyzed} source_bytes={source_bytes}{reason_suffix}"
+                )
             if debug and isinstance(inventory_surface, dict):
                 inventory_error = str(inventory_surface.get("error") or "").strip()
                 if not inventory_error:
@@ -4853,7 +5251,6 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
                     f"{inventory_reason_suffix}"
                 )
 
-        discover_error = str(record.get("discover_error") or "").strip()
         if isinstance(discover_results, list) and discover_results:
             grouped_errors: dict[tuple[int, str, str, str], list[str]] = {}
             for item in discover_results:
@@ -4912,20 +5309,24 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
                                 f"{prefix} [debug] discover retry index={index_name}: "
                                 f"{_clip(_format_elastic_error_detail(partial_detail), 240)}"
                             )
-            if not debug:
-                for (error_status, error_type, error_reason, root_cause_signature), indices in grouped_errors.items():
-                    index_preview = ",".join(indices[:4])
-                    if len(indices) > 4:
-                        index_preview += ",..."
-                    root_cause_suffix = (
-                        f" root_cause={_clip(root_cause_signature, 160)}" if root_cause_signature != "[]" else ""
-                    )
-                    lines.append(
-                        f"{prefix} [!] discover error: count={len(indices)} indices={index_preview} "
-                        f"status={error_status or '-'} type={error_type} reason={_clip(error_reason, 120)}"
-                        f"{root_cause_suffix}"
-                    )
-        elif discover_error:
+            if not debug and grouped_errors:
+                denied_count = sum(
+                    len(indices)
+                    for (error_status, _type, _reason, _root), indices in grouped_errors.items()
+                    if error_status in {401, 403}
+                )
+                failed_count = sum(
+                    len(indices)
+                    for (error_status, _type, _reason, _root), indices in grouped_errors.items()
+                    if error_status not in {401, 403}
+                )
+                partial_reasons: list[str] = []
+                if denied_count:
+                    partial_reasons.append(f"indices_denied:{denied_count}")
+                if failed_count:
+                    partial_reasons.append(f"indices_failed:{failed_count}")
+                lines.append(f"{prefix} [!] Discover partial: {','.join(partial_reasons)}")
+        elif discover_error and not inventory_unavailable:
             detail = record.get("discover_error_detail")
             detail_text = _format_elastic_error_detail(detail) or discover_error
             lines.append(f"{prefix} [!] discover unavailable: {_clip(detail_text, 180)}")
@@ -4934,23 +5335,41 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
 
 
 def _elastic_finding_color_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
-    """Highlight the complete Elastic secret-finding payload in orange."""
+    """Apply the common discovery finding colors."""
 
-    if "secret_type=" not in payload or "value=" not in payload:
-        return []
-    return [(0, len(payload), "orange")]
+    return discovery_color_spans(_marker, payload)
+
+
+def _console_aligned_line(line: str) -> str:
+    """Align Elastic console columns while preserving TSV output files."""
+
+    parts = line.split("\t", 3)
+    if len(parts) != 4 or parts[0] != _ELASTIC_TAG:
+        return line
+    tag, host, port, payload = parts
+    return f"{tag:<15} {host:<15} {port:<7}{payload}"
 
 
 def _render_colored_elastic_line(console: Console, line: str) -> bool:
+    console_line = _console_aligned_line(line)
     if render_colored_marker_line(
         console,
-        line,
+        console_line,
         tag=_ELASTIC_TAG,
         booleans=(
             BooleanColorRule("read"),
             BooleanColorRule("write"),
             BooleanColorRule("manage"),
             BooleanColorRule("manage_security"),
+        ),
+        regexes=tuple(
+            rule
+            for resource in ("Indices", "Documents", "Cluster", "Nodes", "Users")
+            for rule in (
+                RegexColorRule(rf"\({resource}:(?:\d+|Read|Allowed)\)", "true_red"),
+                RegexColorRule(rf"\({resource}:Access Denied\)", "bright_green"),
+                RegexColorRule(rf"\({resource}:Unknown\)", "orange"),
+            )
         ),
         extra_spans=_elastic_finding_color_spans,
     ):

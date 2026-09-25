@@ -50,6 +50,10 @@ def mtls_material(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
             "basicConstraints=critical,CA:TRUE",
             "-addext",
             "keyUsage=critical,keyCertSign,cRLSign",
+            "-addext",
+            "subjectKeyIdentifier=hash",
+            "-addext",
+            "authorityKeyIdentifier=keyid:always",
             "-keyout",
             str(key),
             "-out",
@@ -63,7 +67,10 @@ def mtls_material(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
             root / f"{name}.csr",
             root / f"{name}.ext",
         )
-        ext.write_text(extensions, encoding="utf-8")
+        ext.write_text(
+            "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always,issuer\n" + extensions,
+            encoding="utf-8",
+        )
         run(
             "req",
             "-newkey",

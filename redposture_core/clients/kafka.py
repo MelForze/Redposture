@@ -581,6 +581,7 @@ def _is_sasl_probe_candidate(message: str | None) -> bool:
         return False
     needles = (
         "unexpected eof",
+        "connection closed",
         "connection reset",
         "connection aborted",
         "broken pipe",

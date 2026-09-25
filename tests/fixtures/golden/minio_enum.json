@@ -1,0 +1,329 @@
+[
+  {
+    "admin_capability": "partial",
+    "admin_evidence": {
+      "accountinfo": "ok",
+      "list_canned_policies": "ok",
+      "list_users": "unknown"
+    },
+    "anonymous": "authentication_required",
+    "anonymous_buckets": [],
+    "api_endpoint": "http://127.0.0.1:19000",
+    "auth_required": true,
+    "buckets": [
+      {
+        "creation_date": "<ISO>"
+      },
+      {
+        "creation_date": "<ISO>"
+      },
+      {
+        "creation_date": "<ISO>"
+      },
+      {
+        "creation_date": "<ISO>"
+      },
+      {
+        "creation_date": "<ISO>"
+      },
+      {
+        "creation_date": "<ISO>"
+      },
+      {
+        "creation_date": "<ISO>"
+      }
+    ],
+    "console_endpoint": null,
+    "credential_results": [
+      {
+        "access_key": "minioadmin",
+        "error_code": null,
+        "state": "valid"
+      }
+    ],
+    "credential_state": "valid",
+    "credential_type": "access-key",
+    "credential_verification_status": "available",
+    "default_credentials": false,
+    "detection": {
+      "admin_plane": true,
+      "admin_s3_shape": true,
+      "health_live": true,
+      "root_status": 403,
+      "s3_shape": true,
+      "server_minio": true
+    },
+    "detection_status": "confirmed",
+    "discover_bytes_read": 20972050,
+    "discover_candidates_count": 8,
+    "discover_coverage": "complete",
+    "discover_coverage_percent": 100.0,
+    "discover_findings_count": 11,
+    "discover_objects_scanned": 8,
+    "discover_partial_reasons": [],
+    "discover_requested": true,
+    "host": "127.0.0.1",
+    "identity_kind": "delegated_admin",
+    "module": "minio",
+    "objects_count": 10,
+    "objects_streamed": true,
+    "permissions": {
+      "admin_plane": "ok",
+      "delete_objects": "unknown",
+      "list_buckets": "ok",
+      "list_objects": "unknown",
+      "read_objects": "unknown",
+      "write_objects": "unknown"
+    },
+    "port": 19000,
+    "provided_credentials_ok": true,
+    "secret_candidates": [
+      {
+        "bucket": "secrets-corpus",
+        "key": "app/.env",
+        "reason": "suffix:.env"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "app/config.json",
+        "reason": "suffix:.json"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "app/config.yaml",
+        "reason": "suffix:.yaml"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "dup/copy.env",
+        "reason": "suffix:.env"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "infra/terraform.tfstate",
+        "reason": "suffix:.tfstate"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "keys/id_rsa",
+        "reason": "name:id_rsa"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "misc/harmless-name-with-secret.log",
+        "reason": "name:secret"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "misc/huge.env",
+        "reason": "suffix:.env"
+      }
+    ],
+    "secret_findings": [
+      {
+        "bucket": "secrets-corpus",
+        "key": "app/.env",
+        "masked_value": "AKIA...MPLE",
+        "object_path": "$",
+        "type": "aws_access_key",
+        "value": "AKIAIOSFODNN7EXAMPLE"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "app/.env",
+        "masked_value": "AWS_...EKEY",
+        "object_path": "$",
+        "type": "high_entropy",
+        "value": "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "app/config.json",
+        "masked_value": "post...ouse",
+        "object_path": "$.db",
+        "type": "connection_string",
+        "value": "postgresql://reporter:lab-password@db.internal:5432/warehouse"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "app/config.json",
+        "masked_value": "post...ouse",
+        "object_path": "$.db",
+        "type": "url_credentials",
+        "value": "postgresql://reporter:lab-password@db.internal:5432/warehouse"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "app/config.yaml",
+        "masked_value": "back...word",
+        "object_path": "$",
+        "type": "password",
+        "value": "backup-lab-password"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "app/config.yaml",
+        "masked_value": "glpa...stuv",
+        "object_path": "$",
+        "type": "gitlab_token",
+        "value": "glpat-abcdefghijklmnopqrstuv"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "dup/copy.env",
+        "masked_value": "AKIA...MPLE",
+        "object_path": "$",
+        "type": "aws_access_key",
+        "value": "AKIAIOSFODNN7EXAMPLE"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "dup/copy.env",
+        "masked_value": "AWS_...EKEY",
+        "object_path": "$",
+        "type": "high_entropy",
+        "value": "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "infra/terraform.tfstate",
+        "masked_value": "tf-l...8f99",
+        "object_path": "$.resources[0].instances[0].attributes.secret",
+        "type": "generic_secret",
+        "value": "tf-lab-secret-8f99"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "keys/id_rsa",
+        "masked_value": "<private-key:redacted>",
+        "object_path": "$",
+        "type": "private_key",
+        "value": "-----BEGIN PRIVATE KEY-----\nTEFCUFJJVkFURUtFWURBVEE=\n-----END PRIVATE KEY-----"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "misc/harmless-name-with-secret.log",
+        "masked_value": "AKIA...MPLE",
+        "object_path": "$",
+        "type": "aws_access_key",
+        "value": "AKIAIOSFODNN7EXAMPLE"
+      }
+    ],
+    "service": "minio",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "version": "<ISO>",
+    "write_probe": {
+      "secrets-corpus": {
+        "cleanup": "ok",
+        "write": true
+      }
+    },
+    "write_probe_leftovers": []
+  },
+  {
+    "bucket": "secrets-corpus",
+    "host": "127.0.0.1",
+    "key": "app/.env",
+    "port": 19000,
+    "size": 102,
+    "type": "object"
+  },
+  {
+    "bucket": "secrets-corpus",
+    "host": "127.0.0.1",
+    "key": "app/config.json",
+    "port": 19000,
+    "size": 70,
+    "type": "object"
+  },
+  {
+    "bucket": "secrets-corpus",
+    "host": "127.0.0.1",
+    "key": "app/config.yaml",
+    "port": 19000,
+    "size": 66,
+    "type": "object"
+  },
+  {
+    "bucket": "secrets-corpus",
+    "host": "127.0.0.1",
+    "key": "dup/copy.env",
+    "port": 19000,
+    "size": 102,
+    "type": "object"
+  },
+  {
+    "bucket": "secrets-corpus",
+    "host": "127.0.0.1",
+    "key": "infra/terraform.tfstate",
+    "port": 19000,
+    "size": 90,
+    "type": "object"
+  },
+  {
+    "bucket": "secrets-corpus",
+    "host": "127.0.0.1",
+    "key": "keys/id_rsa",
+    "port": 19000,
+    "size": 79,
+    "type": "object"
+  },
+  {
+    "bucket": "secrets-corpus",
+    "host": "127.0.0.1",
+    "key": "misc/blob.bin",
+    "port": 19000,
+    "size": 4096,
+    "type": "object"
+  },
+  {
+    "bucket": "secrets-corpus",
+    "host": "127.0.0.1",
+    "key": "misc/harmless-name-with-secret.log",
+    "port": 19000,
+    "size": 21,
+    "type": "object"
+  },
+  {
+    "bucket": "secrets-corpus",
+    "host": "127.0.0.1",
+    "key": "misc/huge.env",
+    "port": 19000,
+    "size": 20971520,
+    "type": "object"
+  },
+  {
+    "bucket": "secrets-corpus",
+    "host": "127.0.0.1",
+    "key": "misc/notes.txt",
+    "port": 19000,
+    "size": 24,
+    "type": "object"
+  }
+]

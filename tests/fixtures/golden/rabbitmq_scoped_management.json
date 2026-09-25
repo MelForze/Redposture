@@ -1,0 +1,206 @@
+[
+  {
+    "admin": false,
+    "admin_evidence": {
+      "endpoint": "/api/users",
+      "http_status": 401,
+      "outcome": "denied"
+    },
+    "admin_status": "denied",
+    "anonymous": "denied",
+    "anonymous_endpoints": [],
+    "api_endpoint": "http://localhost:15672",
+    "auth_required": true,
+    "cluster_name": "redposture-commerce",
+    "credential_error": null,
+    "credential_http_status": 200,
+    "credential_state": "valid",
+    "credential_type": "basic",
+    "credential_username": "admin",
+    "credential_verification_status": "available",
+    "default_credentials": true,
+    "detection": {
+      "overview_status": 401,
+      "rabbitmq_realm": true
+    },
+    "detection_status": "confirmed",
+    "effective_username": "admin",
+    "enumeration": {
+      "bindings": {
+        "http_status": 200,
+        "items": [
+          {
+            "destination": "demo.idle",
+            "destination_type": "queue",
+            "routing_key": "demo.idle",
+            "source": "",
+            "vhost": "staging"
+          },
+          {
+            "destination": "demo.jobs",
+            "destination_type": "queue",
+            "routing_key": "demo.jobs",
+            "source": "",
+            "vhost": "staging"
+          },
+          {
+            "destination": "demo.jobs",
+            "destination_type": "queue",
+            "routing_key": "demo.#",
+            "source": "demo.events",
+            "vhost": "staging"
+          }
+        ],
+        "status": "ok",
+        "truncated": false
+      },
+      "exchanges": {
+        "http_status": 200,
+        "items": [
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "direct",
+            "vhost": "staging"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "direct",
+            "vhost": "staging"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "fanout",
+            "vhost": "staging"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "headers",
+            "vhost": "staging"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "headers",
+            "vhost": "staging"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": true,
+            "type": "topic",
+            "vhost": "staging"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "topic",
+            "vhost": "staging"
+          },
+          {
+            "auto_delete": false,
+            "durable": true,
+            "internal": false,
+            "type": "topic",
+            "vhost": "staging"
+          }
+        ],
+        "status": "ok",
+        "truncated": false
+      },
+      "nodes": {
+        "http_status": 401,
+        "items": [],
+        "status": "denied",
+        "truncated": false
+      },
+      "queues": {
+        "http_status": 200,
+        "items": [
+          {
+            "auto_delete": false,
+            "consumers": 0,
+            "durable": true,
+            "messages": 0,
+            "messages_ready": 0,
+            "messages_unacknowledged": 0,
+            "type": "classic",
+            "vhost": "staging"
+          },
+          {
+            "auto_delete": false,
+            "consumers": 0,
+            "durable": true,
+            "messages": 5,
+            "messages_ready": 5,
+            "messages_unacknowledged": 0,
+            "type": "classic",
+            "vhost": "staging"
+          }
+        ],
+        "status": "ok",
+        "truncated": false
+      },
+      "vhosts": {
+        "http_status": 200,
+        "items": [
+          {}
+        ],
+        "status": "ok",
+        "truncated": false
+      }
+    },
+    "host": "localhost",
+    "module": "rabbitmq",
+    "permissions": [],
+    "permissions_status": "denied",
+    "permissions_truncated": false,
+    "port": 15672,
+    "provided_credentials_ok": true,
+    "service": "rabbitmq",
+    "show_permissions": true,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "tags": [
+      "management"
+    ],
+    "topic_permissions": [],
+    "topic_permissions_status": "denied",
+    "topic_permissions_truncated": false,
+    "version": "4.1.8"
+  }
+]

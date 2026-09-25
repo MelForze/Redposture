@@ -565,6 +565,21 @@ def test_finding_accumulator_does_not_count_same_location_twice() -> None:
     assert accumulator.findings()[0].locations == [location]
 
 
+def test_finding_accumulator_streams_only_new_unique_findings() -> None:
+    streamed: list[dict[str, object]] = []
+    accumulator = FindingAccumulator(on_finding=lambda finding: streamed.append(finding.to_dict()))
+    location = FindingLocation("document", "logs/doc-1", "/password", index="logs", id="doc-1")
+
+    assert accumulator.add(DetectedSecret("same-secret", "password", 85, ("field",)), location)
+    assert accumulator.add(DetectedSecret("same-secret", "password", 90, ("format",)), location)
+    assert accumulator.add(DetectedSecret("other-secret", "api_key", 75, ("field",)), location)
+
+    assert [(item["secret_type"], item["value"]) for item in streamed] == [
+        ("password", "same-secret"),
+        ("api_key", "other-secret"),
+    ]
+
+
 def test_finding_accumulator_enforces_finding_and_location_caps() -> None:
     accumulator = FindingAccumulator(max_findings=1, max_locations=2)
     first_secret = DetectedSecret("first-secret", "password", 85, ("sensitive_field",))
@@ -1762,6 +1777,11 @@ def test_legacy_cat_inventory_fallback_does_not_mask_authorization_failure() -> 
                 {"error": {"type": "security_exception", "reason": "action denied"}},
                 status=403,
             )
+        if item.path == "/_mapping?filter_path=*.mappings":
+            return _response(
+                {"error": {"type": "security_exception", "reason": "mapping access denied"}},
+                status=403,
+            )
         raise AssertionError(f"unexpected denied inventory request: {item.method} {item.path}")
 
     engine = DiscoverEngine(request, vendor="elasticsearch")
@@ -1774,7 +1794,44 @@ def test_legacy_cat_inventory_fallback_does_not_mask_authorization_failure() -> 
     assert paths == [
         "/_resolve/index/*?expand_wildcards=all",
         "/_cat/indices?format=json&expand_wildcards=all&h=index,status",
+        "/_mapping?filter_path=*.mappings",
     ]
+
+
+def test_restricted_opensearch_inventory_falls_back_to_visible_mappings() -> None:
+    paths: list[str] = []
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        paths.append(item.path)
+        if item.path in {
+            "/_resolve/index/*?expand_wildcards=all",
+            "/_cat/indices?format=json&expand_wildcards=all&h=index,status",
+        }:
+            return _response(
+                {"error": {"type": "security_exception", "reason": "cluster metadata denied"}},
+                status=403,
+            )
+        if item.path == "/_mapping?filter_path=*.mappings":
+            return _response(
+                {
+                    "logstash-2026.09.24": {"mappings": {"properties": {"message": {"type": "text"}}}},
+                    "logstash-security": {"mappings": {"properties": {"password": {"type": "keyword"}}}},
+                }
+            )
+        raise AssertionError(item.path)
+
+    engine = DiscoverEngine(request, vendor="opensearch")
+    inventory, error, detail = engine._inventory()
+
+    assert error is None
+    assert detail is None
+    assert [item.name for item in inventory] == ["logstash-2026.09.24", "logstash-security"]
+    assert paths == [
+        "/_resolve/index/*?expand_wildcards=all",
+        "/_cat/indices?format=json&expand_wildcards=all&h=index,status",
+        "/_mapping?filter_path=*.mappings",
+    ]
+    assert engine.coverage.surfaces["index_inventory"].status == "complete"
 
 
 def test_elasticsearch_1x_run_falls_back_to_legacy_resources_and_scans_documents() -> None:
@@ -2021,27 +2078,25 @@ def test_normal_text_exports_full_findings_but_hides_raw_candidate_documents() -
     normal = "\n".join(normal_lines)
     debug = "\n".join(debug_lines)
 
-    assert "1 Secret Findings" in normal
-    finding_line = next(line for line in normal_lines if "secret_type=" in line)
+    assert "Discover Secrets (status:complete) (findings:1)" in normal
+    finding_line = next(line for line in normal_lines if " Value=" in line and " Place=" in line)
     assert (
-        'secret_type=password value="full-exported-secret" source_kind="document" '
-        'object="logs/doc-1" index="logs" id="doc-1" path="/password"'
+        '[!] Pass Value="full-exported-secret" '
+        'Place="source_kind:document/object:logs/doc-1/index:logs/id:doc-1/path:/password"'
     ) in finding_line
     assert "confidence=" not in finding_line
     assert "score=" not in finding_line
     assert "detectors=" not in finding_line
     assert "occurrences=" not in finding_line
     assert "(very_high:1)" not in normal
-    assert "Discover coverage status=complete" in normal
+    assert "Discover coverage" not in normal
     assert "raw-candidate-document" not in normal
     assert "raw-candidate-document" in debug
 
-    debug_finding_line = next(line for line in debug_lines if "secret_type=" in line)
-    assert "confidence=very_high" in debug_finding_line
-    assert "score=90" in debug_finding_line
-    assert 'detectors=["sensitive_field"]' in debug_finding_line
-    assert "occurrences=1" in debug_finding_line
-    assert "1 Secret Findings (very_high:1)" in debug
+    debug_finding_line = next(line for line in debug_lines if " Value=" in line and " Place=" in line)
+    assert debug_finding_line == finding_line
+    assert "Discover Secrets (status:complete) (findings:1) (very_high:1)" in debug
+    assert "Discover coverage status=complete" in debug
 
     json_lines = elastic_actions._format_detail_records(record, "json", debug=False)
     discover_dump = next(json.loads(line) for line in json_lines if json.loads(line).get("type") == "discover_dump")
@@ -2084,11 +2139,11 @@ def test_finding_renderer_json_escapes_value_without_confusing_origin() -> None:
     }
 
     lines = elastic_actions._format_detail_records(record, "txt", debug=False)
-    finding_line = next(line for line in lines if "secret_type=" in line)
+    finding_line = next(line for line in lines if " Value=" in line and " Place=" in line)
 
-    assert 'value="line one\\nsource_kind=\\"fake\\" \\\\ tail"' in finding_line
+    assert 'Value="line one\\nsource_kind=\\"fake\\" \\\\ tail"' in finding_line
     assert finding_line.endswith(
-        'source_kind="document" object="robot-logs/doc-1" index="robot-logs" id="doc-1" path="/event/original"'
+        'Place="source_kind:document/object:robot-logs/doc-1/index:robot-logs/id:doc-1/path:/event/original"'
     )
     assert "\n" not in finding_line
 
@@ -2118,24 +2173,65 @@ def test_incomplete_empty_scan_does_not_claim_that_no_secrets_exist() -> None:
     lines = elastic_actions._format_detail_records(record, "txt", debug=False)
     rendered = "\n".join(lines)
 
-    assert "0 Secret Findings in scanned scope" in rendered
-    assert "status=partial" in rendered
-    assert "reasons=max_documents" in rendered
+    assert "Discover Secrets (status:partial) (findings:0)" in rendered
+    assert "0 Secret Findings" not in rendered
+    assert "Discover coverage" not in rendered
+
+    debug_rendered = "\n".join(elastic_actions._format_detail_records(record, "txt", debug=True))
+    assert "Discover coverage status=partial" in debug_rendered
+    assert "reasons=max_documents" in debug_rendered
+
+
+def test_denied_system_indices_use_compact_partial_reason_outside_debug() -> None:
+    detail = {
+        "status": 403,
+        "type": "security_exception",
+        "reason": "no permissions for indices:data/read/search",
+        "root_cause": [{"type": "security_exception", "reason": "no permissions"}],
+    }
+    record = {
+        "host": "127.0.0.1",
+        "port": 29201,
+        "status": "valid_credentials",
+        "discover": True,
+        "discover_findings": [],
+        "discover_coverage": {
+            "complete": False,
+            "status": "partial",
+            "indices_enumerated": 8,
+            "indices_scanned": 4,
+        },
+        "discover_results": [
+            {"index": f".system-{index}", "error": detail["reason"], "error_detail": detail} for index in range(4)
+        ],
+        "discover_error": None,
+    }
+
+    normal = "\n".join(elastic_actions._format_detail_records(record, "txt", debug=False))
+    assert "Discover Secrets (status:partial) (findings:0)" in normal
+    assert "Discover partial: indices_denied:4" in normal
+    assert "security_exception" not in normal
+    assert "no permissions" not in normal
+
+    debug = "\n".join(elastic_actions._format_detail_records(record, "txt", debug=True))
+    assert "security_exception" in debug
+    assert "no permissions" in debug
 
 
 @pytest.mark.parametrize(
-    ("surface_status", "rendered_status"),
+    ("surface_status", "expected_summary_status", "expected_unavailable"),
     [
-        ("complete", "complete"),
-        ("unsupported", "unsupported"),
-        ("denied", "denied"),
-        ("error", "error"),
-        ("timeout", "error"),
+        ("complete", "partial", False),
+        ("unsupported", "unavailable", True),
+        ("denied", "unavailable", True),
+        ("error", "unavailable", True),
+        ("timeout", "unavailable", True),
     ],
 )
-def test_zero_index_coverage_exposes_inventory_status_without_verbose_normal_line(
+def test_zero_index_coverage_reports_inventory_unavailable_without_false_negative(
     surface_status: str,
-    rendered_status: str,
+    expected_summary_status: str,
+    expected_unavailable: bool,
 ) -> None:
     record = {
         "host": "127.0.0.1",
@@ -2165,13 +2261,17 @@ def test_zero_index_coverage_exposes_inventory_status_without_verbose_normal_lin
     }
 
     normal_lines = elastic_actions._format_detail_records(record, "txt", debug=False)
-    coverage_line = next(line for line in normal_lines if "Discover coverage" in line)
+    rendered = "\n".join(normal_lines)
 
-    assert f"status=partial inventory={rendered_status} indices=0/0" in coverage_line
+    assert f"Discover Secrets (status:{expected_summary_status}) (findings:0)" in rendered
+    assert ("Discover unavailable: index inventory access" in rendered) is expected_unavailable
+    assert "0 Secret Findings" not in rendered
+    assert "Discover coverage" not in rendered
     assert "inventory endpoint rejected" not in "\n".join(normal_lines)
     assert not any("surface=index_inventory" in line for line in normal_lines)
 
     debug_lines = elastic_actions._format_detail_records(record, "txt", debug=True)
+    assert any("Discover coverage status=partial" in line for line in debug_lines)
     assert any(
         f"surface=index_inventory status={surface_status}" in line
         and "reason=inventory endpoint rejected the request" in line
@@ -2179,7 +2279,7 @@ def test_zero_index_coverage_exposes_inventory_status_without_verbose_normal_lin
     )
 
 
-def test_nonempty_inventory_does_not_repeat_inventory_status_in_coverage_line() -> None:
+def test_nonempty_inventory_keeps_detailed_coverage_in_debug_only() -> None:
     record = {
         "host": "127.0.0.1",
         "port": 9200,
@@ -2198,8 +2298,11 @@ def test_nonempty_inventory_does_not_repeat_inventory_status_in_coverage_line() 
     }
 
     normal_lines = elastic_actions._format_detail_records(record, "txt", debug=False)
-    coverage_line = next(line for line in normal_lines if "Discover coverage" in line)
+    assert any("Discover Secrets (status:complete) (findings:0)" in line for line in normal_lines)
+    assert not any("Discover coverage" in line for line in normal_lines)
 
+    debug_lines = elastic_actions._format_detail_records(record, "txt", debug=True)
+    coverage_line = next(line for line in debug_lines if "Discover coverage" in line)
     assert "indices=2/2" in coverage_line
     assert "inventory=" not in coverage_line
 

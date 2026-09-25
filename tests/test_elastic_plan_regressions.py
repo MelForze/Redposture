@@ -37,6 +37,7 @@ def _detected_record(
     status: str = "open_no_auth",
     auth_required: bool | None = False,
     vendor: str = "elasticsearch",
+    server_version: str | None = "8.17.3",
 ) -> dict[str, Any]:
     return {
         "host": "127.0.0.1",
@@ -46,7 +47,7 @@ def _detected_record(
         "status": status,
         "is_elastic": True,
         "auth_required": auth_required,
-        "server_version": "8.17.3",
+        "server_version": server_version,
         "vendor": vendor,
         "scheme": "http",
         "insecure_effective": False,
@@ -275,6 +276,50 @@ def test_opensearch_auth_uses_vendor_endpoint_and_confirms_identity(
     assert record["effective_username"] == "elastic"
     assert record["auth_probe_endpoint"] == "/_plugins/_security/authinfo"
     assert record["auth_probe_status"] == "verified"
+
+
+def test_opensearch_auth_resolves_version_hidden_from_anonymous_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        **_kwargs: Any,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        paths.append(path)
+        if path == "/_plugins/_security/authinfo":
+            return 200, b'{"user_name":"logstash"}', {"Content-Type": "application/json"}, None
+        if path == "/":
+            return (
+                200,
+                (
+                    b'{"name":"os-01","cluster_name":"opensearch-cluster",'
+                    b'"version":{"number":"2.19.1","distribution":"opensearch"},'
+                    b'"tagline":"The OpenSearch Project: https://opensearch.org/"}'
+                ),
+                {"Content-Type": "application/json"},
+                None,
+            )
+        raise AssertionError(path)
+
+    monkeypatch.setattr(actions, "_elastic_request", fake_request)
+    ctx = _auth_context(username="logstash", password="logstash")
+
+    record = actions.authenticate_elastic(
+        ctx,
+        _detected_record(status="auth_required", auth_required=True, vendor="opensearch", server_version=None),
+        {},
+    )
+
+    assert paths == ["/_plugins/_security/authinfo", "/"]
+    assert record["auth_valid"] is True
+    assert record["server_version"] == "2.19.1"
+    assert record["server_version_source"] == "authenticated"
+    assert record["server_version_error"] is None
 
 
 def test_auth_400_uses_root_fallback_but_does_not_accept_unverified_identity(
@@ -1016,12 +1061,22 @@ def test_discover_detailed_compat_adapter_preserves_structured_terminal_error(
         },
         "txt",
     )
-    error_lines = [line for line in lines if "discover error" in line]
+    error_lines = [line for line in lines if "Discover partial" in line]
     assert len(error_lines) == 1
-    assert "2" in error_lines[0]
-    assert "search_phase_execution_exception" in error_lines[0]
-    assert "all shards failed" in error_lines[0]
-    assert "circuit_breaking_exception" in error_lines[0]
+    assert "indices_failed:2" in error_lines[0]
+
+    debug_lines = actions._format_detail_records(
+        {
+            **_detected_record(),
+            "discover": True,
+            "discover_results": results,
+            "discover_error": None,
+            "discover_error_detail": None,
+        },
+        "txt",
+        debug=True,
+    )
+    assert any("search_phase_execution_exception" in line and "all shards failed" in line for line in debug_lines)
 
 
 def test_negative_debug_output_keeps_transport_and_probe_diagnostics() -> None:

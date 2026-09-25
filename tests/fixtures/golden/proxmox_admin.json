@@ -17,212 +17,254 @@
     "cap_read": true,
     "checked_endpoints": 41,
     "credential_hits": 44,
+    "discover_bytes_scanned": 7413,
     "discover_creds": true,
     "endpoint_results": [
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       },
       {
         "error": null,
         "method": "GET",
-        "status": 200
+        "status": 200,
+        "truncated": false
       }
     ],
     "error": null,
@@ -263,91 +305,6 @@
         "sample": "https://backupsvc:BackupSvc!2026@"
       },
       {
-        "endpoint": "/nodes/pve-edge-01/qemu/101/config",
-        "reason": "json_cipassword",
-        "sample": "GitLabCloudInit!2026"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/qemu/102/config",
-        "reason": "json_cipassword",
-        "sample": "KubeNodeCloudInit!2026"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/lxc/301/config",
-        "reason": "json_password",
-        "sample": "RedisLxcRoot!2026"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
-        "reason": "text_db_password",
-        "sample": "db_password=GitlabDB-Internal-2026"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
-        "reason": "text_db_password",
-        "sample": "db_password=GitlabDB-Internal-2026"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
-        "reason": "text_ndownload_token",
-        "sample": "ndownload_token=proxmox-download-token-2026\\nsigned_url=https://pbs.lab.internal/download?token=p..."
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
-        "reason": "authorization_bearer",
-        "sample": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.mock-signature"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
-        "reason": "uri_with_auth",
-        "sample": "redis://default:RedisApp!2026@redis-lxc-01:6379/0"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
-        "reason": "url_basic_auth",
-        "sample": "redis://default:RedisApp!2026@"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
-        "reason": "uri_with_auth",
-        "sample": "redis://default:RedisApp!2026@redis-lxc-01:6379/0"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
-        "reason": "url_basic_auth",
-        "sample": "redis://default:RedisApp!2026@"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
-        "reason": "text_ndownload_token",
-        "sample": "ndownload_token=proxmox-download-token-2026\\nsigned_url=https://pbs.lab.internal/download?token=p..."
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
-        "reason": "authorization_bearer",
-        "sample": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.mock-signature"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/content/nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
-        "reason": "text_kube_token",
-        "sample": "kube_token=sha256~k8s-bootstrap-token-2026"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/content/nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
-        "reason": "text_kube_token",
-        "sample": "kube_token=sha256~k8s-bootstrap-token-2026"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
-        "reason": "text_ndownload_token",
-        "sample": "ndownload_token=proxmox-download-token-2026\\nsigned_url=https://pbs.lab.internal/download?token=p..."
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
-        "reason": "authorization_bearer",
-        "sample": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.mock-signature"
-      },
-      {
         "endpoint": "/nodes/pve-core-02/syslog",
         "reason": "text_pbs_password",
         "sample": "pbs_password=PBSPipelinePassword!2026"
@@ -368,6 +325,21 @@
         "sample": "smtp://alerting:SMTPRelay!2026@"
       },
       {
+        "endpoint": "/nodes/pve-edge-01/qemu/101/config",
+        "reason": "json_cipassword",
+        "sample": "GitLabCloudInit!2026"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/qemu/102/config",
+        "reason": "json_cipassword",
+        "sample": "KubeNodeCloudInit!2026"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/lxc/301/config",
+        "reason": "json_password",
+        "sample": "RedisLxcRoot!2026"
+      },
+      {
         "endpoint": "/nodes/pve-core-02/qemu/201/config",
         "reason": "json_cipassword",
         "sample": "PostgresVmInit!2026"
@@ -376,6 +348,76 @@
         "endpoint": "/nodes/pve-core-02/lxc/401/config",
         "reason": "json_password",
         "sample": "BackupAgentRoot!2026"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+        "reason": "text_db_password",
+        "sample": "db_password=GitlabDB-Internal-2026"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+        "reason": "text_db_password",
+        "sample": "db_password=GitlabDB-Internal-2026"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+        "reason": "text_ndownload_token",
+        "sample": "ndownload_token=proxmox-download-token-2026\\nsigned_url=https://pbs.lab.internal/download?token=p..."
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+        "reason": "authorization_bearer",
+        "sample": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.mock-signature"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+        "reason": "uri_with_auth",
+        "sample": "redis://default:RedisApp!2026@redis-lxc-01:6379/0"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+        "reason": "url_basic_auth",
+        "sample": "redis://default:RedisApp!2026@"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+        "reason": "uri_with_auth",
+        "sample": "redis://default:RedisApp!2026@redis-lxc-01:6379/0"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+        "reason": "url_basic_auth",
+        "sample": "redis://default:RedisApp!2026@"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+        "reason": "text_ndownload_token",
+        "sample": "ndownload_token=proxmox-download-token-2026\\nsigned_url=https://pbs.lab.internal/download?token=p..."
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+        "reason": "authorization_bearer",
+        "sample": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.mock-signature"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/content/nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+        "reason": "text_kube_token",
+        "sample": "kube_token=sha256~k8s-bootstrap-token-2026"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/content/nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+        "reason": "text_kube_token",
+        "sample": "kube_token=sha256~k8s-bootstrap-token-2026"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+        "reason": "text_ndownload_token",
+        "sample": "ndownload_token=proxmox-download-token-2026\\nsigned_url=https://pbs.lab.internal/download?token=p..."
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+        "reason": "authorization_bearer",
+        "sample": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.mock-signature"
       },
       {
         "endpoint": "/nodes/pve-core-02/storage/local-zfs/content/local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
@@ -448,6 +490,9 @@
         "sample": "pbs-job-password-2026"
       }
     ],
+    "grant_path": null,
+    "grant_propagate": null,
+    "grant_role": null,
     "host": "127.0.0.1",
     "is_proxmox": true,
     "module": "proxmox",
@@ -456,7 +501,10 @@
       "pve-core-02"
     ],
     "nodes_error": null,
+    "partial": false,
+    "partial_error": null,
     "port": 18006,
+    "responses_truncated": 0,
     "service": "proxmox",
     "show_nodes": true,
     "show_users": true,

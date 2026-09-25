@@ -58,8 +58,8 @@
     "cat_plugins": null,
     "cluster_error": null,
     "cluster_health": {
-      "active_primary_shards": 6,
-      "active_shards": 6,
+      "active_primary_shards": 4,
+      "active_shards": 4,
       "active_shards_percent_as_number": 100.0,
       "cluster_name": "redposture-elastic-open",
       "delayed_unassigned_shards": 0,
@@ -92,8 +92,20 @@
         "version": "8.13.4"
       }
     ],
+    "credential_accepted": false,
+    "credential_cluster_access": "unknown",
+    "credential_documents_access": "unknown",
+    "credential_indices_access": "unknown",
+    "credential_indices_count": null,
+    "credential_nodes_access": "unknown",
+    "credential_nodes_count": null,
+    "credential_resource_access_checked": false,
+    "credential_users_access": "unknown",
+    "credential_users_count": null,
     "credential_verification": {
       "capability": "not_requested",
+      "credential_accepted": false,
+      "identity_verified": false,
       "status": "not_requested",
       "supported_endpoint": null,
       "unsupported_endpoints": []
@@ -122,13 +134,13 @@
     "discover": true,
     "discover_coverage": {
       "complete": true,
-      "documents_scanned": 20,
+      "documents_scanned": 16,
       "duplicate_documents": 3,
       "indices_closed": 0,
       "indices_denied": 0,
-      "indices_enumerated": 6,
+      "indices_enumerated": 4,
       "indices_failed": 0,
-      "indices_scanned": 6,
+      "indices_scanned": 4,
       "limitations": [
         "secure keystore settings are not readable through the API",
         "closed indices, snapshots, Watcher, connectors, Alerting, Notifications and stored scripts are not scanned",
@@ -142,11 +154,11 @@
         "max_findings": 10000,
         "max_scalar_bytes": 262144,
         "max_seconds": 300.0,
-        "max_source_bytes": 134217728
+        "max_source_bytes": 52428800
       },
       "locations_dropped": 0,
       "missing_source_documents": 0,
-      "pages_scanned": 23,
+      "pages_scanned": 17,
       "query_candidates": 8,
       "scope": {
         "configuration": [
@@ -162,7 +174,7 @@
         "documents": "open and hidden indices plus resolved data-stream backing indices"
       },
       "shard_failures": [],
-      "source_bytes_scanned": 13179,
+      "source_bytes_scanned": 8443,
       "source_disabled_indices": [],
       "source_filtered_indices": [],
       "status": "complete",
@@ -184,8 +196,8 @@
           "status": "complete"
         },
         "index_settings": {
-          "objects_attempted": 6,
-          "objects_scanned": 6,
+          "objects_attempted": 4,
+          "objects_scanned": 4,
           "status": "complete"
         },
         "index_templates": {
@@ -209,8 +221,8 @@
           "status": "complete"
         },
         "mappings": {
-          "objects_attempted": 6,
-          "objects_scanned": 6,
+          "objects_attempted": 4,
+          "objects_scanned": 4,
           "status": "complete"
         },
         "node_settings": {
@@ -1105,32 +1117,6 @@
         "error": null,
         "error_detail": null,
         "hits": [],
-        "index": ".ds-.logs-deprecation.elasticsearch-default-2026.08.09-000001",
-        "partial_error_details": [],
-        "retried": false,
-        "retry_chunks": 0,
-        "shown_hits": 0,
-        "total_hits": 0,
-        "total_hits_relation": "exact",
-        "truncated": false
-      },
-      {
-        "error": null,
-        "error_detail": null,
-        "hits": [],
-        "index": ".ds-ilm-history-7-2026.08.09-000001",
-        "partial_error_details": [],
-        "retried": false,
-        "retry_chunks": 0,
-        "shown_hits": 0,
-        "total_hits": 0,
-        "total_hits_relation": "exact",
-        "truncated": false
-      },
-      {
-        "error": null,
-        "error_detail": null,
-        "hits": [],
         "index": "finance-transactions-2026.05",
         "partial_error_details": [],
         "retried": false,
@@ -1484,6 +1470,7 @@
     "endpoints_error": null,
     "error": null,
     "host": "127.0.0.1",
+    "identity_verified": false,
     "insecure_effective": false,
     "is_elastic": true,
     "misconfig_error": null,

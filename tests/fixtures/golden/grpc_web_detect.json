@@ -9,9 +9,9 @@
     "descriptors": null,
     "detect_probe_trace": [
       {
-        "access": "unknown",
-        "error": "truncated gRPC-Web frame",
-        "grpc_status": null,
+        "access": "anonymous",
+        "error": null,
+        "grpc_status": 0,
         "http_status": 200,
         "probe": "grpc-web-health",
         "scheme": "http"
@@ -19,7 +19,7 @@
     ],
     "error": null,
     "grpc_web_detected": true,
-    "health_access": "unknown",
+    "health_access": "anonymous",
     "health_checks": null,
     "health_supported": true,
     "host": "127.0.0.1",

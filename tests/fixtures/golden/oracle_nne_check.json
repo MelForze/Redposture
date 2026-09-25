@@ -1,7 +1,7 @@
 [
   {
     "auth_required": true,
-    "banner": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0",
+    "banner": "Oracle AI Database 26ai Free Release 23.26.3.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.3.0.0",
     "capabilities": {
       "can_list_dblinks": false,
       "can_list_tables": false,
@@ -70,10 +70,10 @@
     "module": "oracle",
     "nne_check": {
       "banners": [
-        "TCP/IP NT Protocol Adapter for Linux: Version 23.26.2.0.0 - Production",
-        "Authentication service for Linux: Version 23.26.2.0.0 - Production",
-        "Encryption service for Linux: Version 23.26.2.0.0 - Production",
-        "Crypto-checksumming service for Linux: Version 23.26.2.0.0 - Production"
+        "TCP/IP NT Protocol Adapter for Linux: Version 23.26.3.0.0 - Production",
+        "Authentication service for Linux: Version 23.26.3.0.0 - Production",
+        "Encryption service for Linux: Version 23.26.3.0.0 - Production",
+        "Crypto-checksumming service for Linux: Version 23.26.3.0.0 - Production"
       ],
       "crypto_checksum": true,
       "encrypted": true,
@@ -81,6 +81,7 @@
       "status": "encrypted",
       "tcp_available": true,
       "tcps_available": false,
+      "transport_observation": "tcp_only",
       "weak": false,
       "weak_reasons": []
     },

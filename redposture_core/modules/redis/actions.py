@@ -1580,7 +1580,12 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
 
 
 def _render_colored_redis_line(console: Console, line: str) -> bool:
-    if render_colored_marker_line(console, line, tag="REDIS", counts=(CountColorRule("keys", "red"),)):
+    if render_colored_marker_line(
+        console,
+        line,
+        tag="REDIS",
+        counts=(CountColorRule("keys", "red", unknown_color="orange", zero_color="bright_green"),),
+    ):
         return True
     if line.startswith("REDIS") and "\t" in line:
         return render_tagged_detail_line(console, line, tag="REDIS", default_color="orange")

@@ -1,0 +1,164 @@
+[
+  {
+    "anonymous_dags_allowed": false,
+    "api_endpoint": "http://127.0.0.1:18080",
+    "api_generation": "v1",
+    "auth_method": "native",
+    "auth_required": true,
+    "authenticated_connections_access": "allowed",
+    "authenticated_connections_count": 1,
+    "authenticated_connections_http_status": 200,
+    "authenticated_dags_access": "allowed",
+    "authenticated_dags_count": 1,
+    "authenticated_dags_http_status": 200,
+    "authenticated_keys_access": "allowed",
+    "authenticated_keys_count": 1,
+    "authenticated_keys_http_status": 200,
+    "credential_results": [
+      {
+        "error_code": null,
+        "state": "valid",
+        "username": "airflow"
+      }
+    ],
+    "credential_state": "valid",
+    "credential_verification_status": "available",
+    "dags_allowed": false,
+    "default_credentials": true,
+    "detection": {
+      "git_version": ".release:f56f13442613912725d307aafc537cc76277c2d1",
+      "v1_version_status": 200,
+      "v2_version_status": 404
+    },
+    "detection_status": "confirmed",
+    "host": "127.0.0.1",
+    "module": "airflow",
+    "port": 18080,
+    "provided_credentials_ok": true,
+    "service": "airflow",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "version": "2.9.2"
+  },
+  {
+    "api_endpoint": "http://127.0.0.1:8443",
+    "api_generation": null,
+    "auth_required": null,
+    "credential_verification_status": "unavailable",
+    "detection": {
+      "v1_transport_error": "[Errno 61] Connection refused",
+      "v2_transport_error": "[Errno 61] Connection refused"
+    },
+    "detection_status": "transport_failure",
+    "host": "127.0.0.1",
+    "module": "airflow",
+    "port": 8443,
+    "service": "airflow",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "phase failed",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      }
+    ],
+    "status": "fail"
+  },
+  {
+    "api_endpoint": "https://127.0.0.1:28080",
+    "api_generation": null,
+    "auth_required": null,
+    "credential_verification_status": "unavailable",
+    "detection": {
+      "v1_transport_error": "[Errno 61] Connection refused",
+      "v2_transport_error": "[Errno 61] Connection refused"
+    },
+    "detection_status": "transport_failure",
+    "host": "127.0.0.1",
+    "module": "airflow",
+    "port": 28080,
+    "service": "airflow",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "phase failed",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      }
+    ],
+    "status": "fail"
+  },
+  {
+    "api_endpoint": "https://127.0.0.1:8080",
+    "api_generation": null,
+    "auth_required": null,
+    "credential_verification_status": "unavailable",
+    "detection": {
+      "v1_transport_error": "[Errno 61] Connection refused",
+      "v2_transport_error": "[Errno 61] Connection refused"
+    },
+    "detection_status": "transport_failure",
+    "host": "127.0.0.1",
+    "module": "airflow",
+    "port": 8080,
+    "service": "airflow",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "phase failed",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      }
+    ],
+    "status": "fail"
+  },
+  {
+    "api_endpoint": "https://127.0.0.1:8081",
+    "api_generation": null,
+    "auth_required": null,
+    "credential_verification_status": "unavailable",
+    "detection": {
+      "v1_transport_error": "[Errno 61] Connection refused",
+      "v2_transport_error": "[Errno 61] Connection refused"
+    },
+    "detection_status": "transport_failure",
+    "host": "127.0.0.1",
+    "module": "airflow",
+    "port": 8081,
+    "service": "airflow",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "phase failed",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      }
+    ],
+    "status": "fail"
+  }
+]

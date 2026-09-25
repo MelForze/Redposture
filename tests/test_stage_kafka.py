@@ -2211,6 +2211,45 @@ def test_audit_kafka_host_switches_to_tls_on_prelude(monkeypatch: pytest.MonkeyP
     assert open_calls[1]["use_tls"] is True  # fallback: forced TLS
 
 
+def test_kafka_lifecycle_checks_sasl_plaintext_before_tls_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    open_modes: list[bool | None] = []
+
+    class FakeSession:
+        def __init__(self, *, transport_mode: str, fail_detect: bool) -> None:
+            self.transport_mode = transport_mode
+            self.fail_detect = fail_detect
+            self.correlation_id = 1
+            self.sock = object()
+
+        def detect(self):
+            if self.fail_detect:
+                raise ConnectionError("connection closed by broker")
+            raise AssertionError("SASL confirmation session must not send ApiVersions first")
+
+        def close(self) -> None:
+            return None
+
+    def fake_open(_host, _port, _timeout, *, use_tls=None, tls_config=None):
+        _ = tls_config
+        open_modes.append(use_tls)
+        return FakeSession(transport_mode="tls" if use_tls else "plaintext", fail_detect=len(open_modes) == 1)
+
+    monkeypatch.setattr(kafka_actions.KafkaSession, "open", fake_open)
+    monkeypatch.setattr(
+        kafka_actions, "_sasl_handshake_plain", lambda _sock, correlation: (True, correlation + 1, None)
+    )
+    state = kafka_actions.KafkaLifecycleState(requested_use_tls=None)
+    ctx = argparse.Namespace(host="127.0.0.1", port=29092, args=argparse.Namespace(timeout=1.0, retries=0))
+
+    record = kafka_actions._kafka_lifecycle_detection_record(ctx, state)
+
+    assert record["is_kafka"] is True
+    assert record["status"] == "auth_required"
+    assert record["transport_mode"] == "plaintext"
+    assert state.sasl_first is True
+    assert open_modes == [None, False]
+
+
 def test_kafka_tls_marker_only_on_detect_line() -> None:
     """`_format_detect_record` must annotate the detect line with
     `(tls:true)` / `(tls:false)` per `transport_mode`. `_format_record`
@@ -2358,7 +2397,7 @@ def test_audit_kafka_host_retries_tls_after_plaintext_reset_on_arbitrary_port(
         dump=False,
         max_messages=1,
     )
-    assert open_modes == [None, True]
+    assert open_modes == [None, False, True]
     assert record["status"] == "open_no_auth"
     assert record["transport_mode"] == "tls"
 

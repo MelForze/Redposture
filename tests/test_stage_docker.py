@@ -323,7 +323,98 @@ def test_probe_docker_transport_error_branches(monkeypatch: pytest.MonkeyPatch) 
     assert auth_required is False
     assert clients == ["tls"]
 
-    class ForbiddenClient(InfoFallbackClient):
+
+def test_probe_docker_upgrades_canonical_http_400_to_tls(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: list[str] = []
+
+    class SchemeClient(_FakeDockerClient):
+        def __init__(self, transport: str) -> None:
+            self.transport = transport
+
+        def ping(self) -> None:
+            if self.transport == "plaintext":
+                raise docker_stage.DockerEngineHTTPError(
+                    400,
+                    "Bad Request",
+                    b"Client sent an HTTP request to an HTTPS server.\n",
+                )
+
+        def close(self) -> None:
+            return None
+
+    def fake_client(_host: str, _port: int, transport: str, *_args: object, **_kwargs: object) -> SchemeClient:
+        created.append(transport)
+        return SchemeClient(transport)
+
+    monkeypatch.setattr(docker_stage, "_docker_client", fake_client)
+    client, version, transport, error, auth_required = docker_stage._probe_docker(
+        "127.0.0.1",
+        12376,
+        1.0,
+        insecure=True,
+        tls_ca=None,
+        tls_cert=None,
+        tls_key=None,
+    )
+
+    assert isinstance(client, SchemeClient)
+    assert version == {"Version": "25.0.5", "ApiVersion": "1.45", "Os": "linux"}
+    assert transport == "tls"
+    assert error is None
+    assert auth_required is False
+    assert created == ["plaintext", "tls"]
+
+
+def test_probe_docker_preserves_mtls_error_after_plaintext_https_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class SchemeClient:
+        def __init__(self, transport: str) -> None:
+            self.transport = transport
+
+        def ping(self) -> None:
+            if self.transport == "tls":
+                raise docker_stage.DockerEngineConnectionError("peer requires client certificate")
+            raise docker_stage.DockerEngineHTTPError(
+                400,
+                "Bad Request",
+                b"Client sent an HTTP request to an HTTPS server.",
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        docker_stage,
+        "_docker_client",
+        lambda _host, _port, transport, *_args, **_kwargs: SchemeClient(transport),
+    )
+
+    _client, _version, _transport, error, _auth_required = docker_stage._probe_docker(
+        "127.0.0.1",
+        2376,
+        1.0,
+        insecure=True,
+        tls_ca=None,
+        tls_cert=None,
+        tls_key=None,
+    )
+    assert error == "HTTPS required by peer; TLS retry failed: peer requires client certificate"
+
+    record = docker_stage._audit_docker_host("127.0.0.1", 2376, 1.0, 0, insecure=True)
+    assert record["status"] == "fail"
+    assert record["operational_failure"] is True
+    assert "peer requires client certificate" in record["error"]
+
+    rc = docker_stage.run_docker_stage(_args(port=2376, insecure=True), logger=object())
+    assert rc == 1
+    assert "audit inconclusive" in capsys.readouterr().out
+
+    class ForbiddenClient:
+        def __init__(self, _transport: str) -> None:
+            pass
+
         def ping(self) -> None:
             raise docker_stage.DockerEngineHTTPError(
                 403,
@@ -347,7 +438,10 @@ def test_probe_docker_transport_error_branches(monkeypatch: pytest.MonkeyPatch) 
     assert "client certificate required" in str(error)
     assert auth_required is True
 
-    class GenericForbiddenClient(InfoFallbackClient):
+    class GenericForbiddenClient:
+        def __init__(self, _transport: str) -> None:
+            pass
+
         def ping(self) -> None:
             raise docker_stage.DockerEngineHTTPError(403, "client certificate required")
 

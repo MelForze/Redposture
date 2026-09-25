@@ -2576,10 +2576,10 @@ def _render_colored_kubeapi_line(console: Console, line: str) -> bool:
         line,
         tag=_KUBE_TAG,
         counts=(
-            CountColorRule("secrets", "red"),
-            CountColorRule("pods", "orange"),
-            CountColorRule("namespaces", "orange"),
-            CountColorRule("keys", "red"),
+            CountColorRule("secrets", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("pods", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("namespaces", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("keys", "red", unknown_color="orange", zero_color="bright_green"),
         ),
     ):
         return True
