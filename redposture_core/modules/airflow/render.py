@@ -23,7 +23,7 @@ from ...rendering import (
     render_tagged_detail_line,
 )
 
-_UNDETECTED = {"not_airflow", "transport_failure", ""}
+_UNDETECTED = {"probable", "not_airflow", "transport_failure", ""}
 _AUTHENTICATED_RESOURCES = ("Dags", "Keys", "Connections")
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ...auth_detection import detect_browser_sso
@@ -35,6 +36,12 @@ _ENDPOINTS = {
     },
 }
 _AUTH_TOKEN_PATH = "/auth/token"  # Airflow 3.x JWT exchange
+_AIRFLOW_VERSION_RE = re.compile(
+    r"^[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:[._+-]?(?:a|b|rc|dev|post)?[0-9A-Za-z][0-9A-Za-z._+-]*)?$",
+    re.IGNORECASE,
+)
+_AIRFLOW_HEALTH_COMPONENTS = frozenset({"metadatabase", "scheduler", "triggerer", "dag_processor"})
+_AIRFLOW_HEALTH_STATUSES = frozenset({"healthy", "unhealthy"})
 
 _DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("airflow", "airflow"),  # real Airflow default
@@ -66,6 +73,7 @@ def detect_airflow(client: AirflowClient) -> AirflowDetection:
     version, and pin the API generation used for later auth."""
     evidence: dict[str, Any] = {}
     transport_failures = 0
+    version_candidates: list[tuple[str, str, dict[str, Any]]] = []
     for generation in ("v2", "v1"):
         resp = client.get(_ENDPOINTS[generation]["version"], authed=False)
         if resp.transport_error:
@@ -74,33 +82,95 @@ def detect_airflow(client: AirflowClient) -> AirflowDetection:
             continue
         evidence[f"{generation}_version_status"] = resp.http_status
         data = resp.json()
-        if resp.http_status == 200 and isinstance(data, dict) and data.get("version"):
+        version = _airflow_version(data)
+        if resp.http_status == 200 and version is not None:
+            git_version = data.get("git_version") if isinstance(data, dict) else None
+            candidate_evidence = {**evidence, "git_version": git_version}
+            if isinstance(git_version, str) and bool(git_version.strip()):
+                return AirflowDetection(
+                    status="confirmed",
+                    api_generation=generation,
+                    version=version,
+                    api_endpoint=client.base_url,
+                    evidence=candidate_evidence,
+                )
+            version_candidates.append((generation, version, candidate_evidence))
+    if transport_failures == 2:
+        return AirflowDetection(status="transport_failure", api_endpoint=client.base_url, evidence=evidence)
+    # A version-only JSON document is easy for an unrelated API to imitate.  It
+    # becomes conclusive only when the same API generation supplies a second,
+    # independently validated Airflow response.
+    for generation, version, candidate_evidence in version_candidates:
+        corroborated, detail = _corroborate_airflow(client, generation)
+        evidence.update(detail)
+        if corroborated:
             return AirflowDetection(
                 status="confirmed",
                 api_generation=generation,
-                version=str(data.get("version")),
+                version=version,
                 api_endpoint=client.base_url,
-                evidence={**evidence, "git_version": data.get("git_version")},
+                evidence={**candidate_evidence, **detail},
             )
-    if transport_failures == 2:
-        return AirflowDetection(status="transport_failure", api_endpoint=client.base_url, evidence=evidence)
-    # Version endpoint did not answer with a version. Fall back to health as a weak
-    # signal (auth-gated version, or an Airflow behind a stricter config).
+
+    # A strict health or DAG shape without a validated version is useful
+    # diagnostic evidence, but remains probable and cannot start auth/CVE/data.
     for generation in ("v2", "v1"):
-        health = client.get(_ENDPOINTS[generation]["health"], authed=False)
-        if not health.transport_error and health.http_status == 200 and _looks_like_health(health):
+        corroborated, detail = _corroborate_airflow(client, generation)
+        evidence.update(detail)
+        if corroborated:
             return AirflowDetection(
                 status="probable",
                 api_generation=generation,
                 api_endpoint=client.base_url,
-                evidence={**evidence, f"{generation}_health": True},
+                evidence=evidence,
             )
     return AirflowDetection(status="not_airflow", api_endpoint=client.base_url, evidence=evidence)
 
 
 def _looks_like_health(resp: AirflowResponse) -> bool:
     data = resp.json()
-    return isinstance(data, dict) and ("metadatabase" in data or "scheduler" in data)
+    if not isinstance(data, dict):
+        return False
+    components = [data.get(name) for name in _AIRFLOW_HEALTH_COMPONENTS if name in data]
+    if len(components) < 2:
+        return False
+    return all(
+        isinstance(component, dict)
+        and isinstance(component.get("status"), str)
+        and component["status"].strip().lower() in _AIRFLOW_HEALTH_STATUSES
+        for component in components
+    )
+
+
+def _airflow_version(data: Any) -> str | None:
+    if not isinstance(data, dict):
+        return None
+    value = data.get("version")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or len(normalized) > 128 or _AIRFLOW_VERSION_RE.fullmatch(normalized) is None:
+        return None
+    return normalized
+
+
+def _corroborate_airflow(client: AirflowClient, generation: str) -> tuple[bool, dict[str, Any]]:
+    detail: dict[str, Any] = {}
+    health = client.get(_ENDPOINTS[generation]["health"], authed=False)
+    health_valid = not health.transport_error and health.http_status == 200 and _looks_like_health(health)
+    detail[f"{generation}_health"] = health_valid
+    if health_valid:
+        return True, detail
+    dags = client.get(_ENDPOINTS[generation]["dags"], authed=False)
+    dags_valid = not dags.transport_error and dags.http_status == 200 and _looks_like_dag_collection(dags)
+    problem_valid = (
+        not dags.transport_error
+        and dags.http_status in {401, 403}
+        and _looks_like_airflow_problem(dags, int(dags.http_status))
+    )
+    detail[f"{generation}_dags"] = dags_valid
+    detail[f"{generation}_problem"] = problem_valid
+    return dags_valid or problem_valid, detail
 
 
 def _looks_like_dag_collection(resp: AirflowResponse) -> bool:
@@ -365,6 +435,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
     record: dict[str, Any] = {
         "host": str(ctx.host),
         "port": int(ctx.port),
+        "is_airflow": detection.status == "confirmed",
         "status": status_word,
         "detection_status": detection.status,
         "api_generation": detection.api_generation,

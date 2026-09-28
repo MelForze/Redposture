@@ -60,6 +60,15 @@ def test_fixed_action_modules_use_complete_strict_host_stage_specs() -> None:
         assert parameters - _HOST_STAGE_RUNTIME_ARGUMENTS == set(options), module
 
 
+def test_every_audit_module_declares_an_explicit_product_detection_predicate() -> None:
+    for module in AUDIT_MODULE_NAMES:
+        args = parse_args([module, "-t", "127.0.0.1"])
+        stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
+        spec = getattr(stage, f"build_{module}_spec")(args)
+
+        assert spec.is_detected is not None, module
+
+
 def test_basic_audit_plan_does_not_call_credential_tcp_prefilter() -> None:
     tree = ast.parse(inspect.getsource(build_basic_audit_plan))
 

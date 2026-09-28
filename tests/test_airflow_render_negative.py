@@ -55,9 +55,8 @@ def test_detect_line_suppressed_for_non_txt_formats(fmt):
     assert render._format_detect_record(_record(), fmt) == ""
 
 
-def test_detect_line_rendered_for_probable_detection():
-    line = render._format_detect_record(_record(detection_status="probable"), "txt")
-    assert line.startswith(f"{_PFX} [*] Airflow (auth required:True)")
+def test_detect_line_suppressed_for_probable_detection():
+    assert render._format_detect_record(_record(detection_status="probable"), "txt") == ""
 
 
 # --- detect line: auth_required is a tri-state ----------------------------

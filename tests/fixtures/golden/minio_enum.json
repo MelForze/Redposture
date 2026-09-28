@@ -64,6 +64,7 @@
     "discover_requested": true,
     "host": "127.0.0.1",
     "identity_kind": "delegated_admin",
+    "is_minio": true,
     "module": "minio",
     "objects_count": 10,
     "objects_streamed": true,

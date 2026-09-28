@@ -54,7 +54,7 @@ def _patch_client(monkeypatch, client: FakeClient) -> None:
 
 
 def test_detect_short_circuits_on_v2_and_skips_v1():
-    client = FakeClient({"/api/v2/version": (200, b'{"version":"3.0.0"}')})
+    client = FakeClient({"/api/v2/version": (200, b'{"version":"3.0.0","git_version":"abc123"}')})
     detection = actions.detect_airflow(client)
     assert detection.status == "confirmed" and detection.api_generation == "v2"
     assert ("GET", "/api/v1/version", False) not in client.calls
@@ -80,14 +80,19 @@ def test_detect_ignores_json_array_version_body():
     assert actions.detect_airflow(client).status == "not_airflow"
 
 
-def test_detect_coerces_non_string_version():
+def test_detect_rejects_non_string_version():
     client = FakeClient({"/api/v2/version": (200, b'{"version":2}')})
     detection = actions.detect_airflow(client)
-    assert detection.status == "confirmed" and detection.version == "2"
+    assert detection.status == "not_airflow" and detection.version is None
 
 
 def test_detect_confirms_v1_when_only_v2_transport_fails():
-    client = FakeClient({"/api/v2/version": "TRANSPORT", "/api/v1/version": (200, b'{"version":"2.10.5"}')})
+    client = FakeClient(
+        {
+            "/api/v2/version": "TRANSPORT",
+            "/api/v1/version": (200, b'{"version":"2.10.5","git_version":"abc123"}'),
+        }
+    )
     detection = actions.detect_airflow(client)
     assert detection.status == "confirmed" and detection.api_generation == "v1"
 
@@ -106,7 +111,7 @@ def test_detect_probable_requires_health_shape():
     assert actions.detect_airflow(client).status == "not_airflow"
 
 
-def test_detect_probable_on_scheduler_only_health():
+def test_detect_rejects_scheduler_only_health():
     client = FakeClient(
         {
             "/api/v2/version": (401, b""),
@@ -115,7 +120,7 @@ def test_detect_probable_on_scheduler_only_health():
         }
     )
     detection = actions.detect_airflow(client)
-    assert detection.status == "probable" and detection.api_generation == "v2"
+    assert detection.status == "not_airflow"
 
 
 # --- anonymous ladder: partial transport, ambiguous codes ------------------
@@ -292,7 +297,12 @@ def test_detect_record_not_airflow_shape(monkeypatch):
 def test_detect_record_confirmed_includes_anon_and_version(monkeypatch):
     _patch_client(
         monkeypatch,
-        FakeClient({"/api/v2/version": (200, b'{"version":"3.0.1"}'), "/api/v2/dags": (401, b"")}),
+        FakeClient(
+            {
+                "/api/v2/version": (200, b'{"version":"3.0.1","git_version":"abc123"}'),
+                "/api/v2/dags": (401, b""),
+            }
+        ),
     )
     record = actions.detect_record(SimpleNamespace(host="h", port=8080))
     assert record["detection_status"] == "confirmed"

@@ -100,6 +100,7 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_kubeapi_line,
+        is_detected=lambda record: record.extra.get("is_kubeapi") is True,
         deep_gate=_deep_gate,
         credential_gate=_credential_gate,
         # E3 opt-in: kubeapi anon-open (system:anonymous binding, common on

@@ -33,6 +33,11 @@ fi
 
 EXPORTER_PORTS="7777,9100,9102,9104,9113,9114,9116,9117,9119,9121,9127,9128,9131,9150,9182,9187,9216,9221,9256,9290,9308,9342,9349,9399,9419,9427,9854,19101,19119,19854,29854,17777,19100,19102,19104,19113,19114,19115,19117,19121,19128,19131,19150,19182,19187,19219,19221,19290,19308,19399,19419"
 
+if [ -d "${OUT_DIR}" ] && [ -n "$(ls -A "${OUT_DIR}")" ]; then
+  echo "[error] matrix output directory is not empty: ${OUT_DIR}" >&2
+  echo "[error] use a fresh directory so checkpoints and JSON cannot mix across runs" >&2
+  exit 2
+fi
 mkdir -p "${OUT_DIR}/logs" "${OUT_DIR}/json"
 
 if [ ! -d "${LAB_DIR}/services" ]; then
@@ -42,8 +47,8 @@ if [ ! -d "${LAB_DIR}/services" ]; then
 fi
 
 MATRIX_SERVICES=(
-  exporters registry grafana minio rabbitmq airflow gitlab consul kubeapi postgres mongodb oracle docker
-  clickhouse redis etcd qdrant elastic opensearch grpc kafka zookeeper zookeeper-auth keeper proxmox proxy-isolated
+  exporters registry registry-harbor grafana minio rabbitmq airflow gitlab consul kubeapi postgres mongodb oracle docker
+  clickhouse redis valkey etcd qdrant elastic opensearch grpc kafka zookeeper zookeeper-auth keeper proxmox proxy-isolated
 )
 READINESS_ALLOWED_COMPLETED=(
   redposture-lab-registry-seed
@@ -116,6 +121,16 @@ compose_service() {
   local service="$1"
   shift
   local compose_file="${LAB_DIR}/services/${service}/docker-compose.yml"
+  if [ "${service}" = "registry-harbor" ]; then
+    compose_file="${OUT_DIR}/stands/harbor/docker-compose.yml"
+    if [ ! -f "${compose_file}" ]; then
+      mkdir -p "${OUT_DIR}/stands"
+      "${PYTHON_BIN}" "${LAB_DIR}/services/registry-harbor-real/prepare_version.py" \
+        v2.11.1 "${OUT_DIR}/stands/harbor" >>"${OUT_DIR}/logs/harbor-prepare.log" 2>&1 || return 1
+    fi
+    docker compose -p redposture-matrix-harbor -f "${compose_file}" "$@"
+    return
+  fi
   if [ ! -f "${compose_file}" ]; then
     echo "[error] local lab service compose not found: ${compose_file}" >&2
     return 2
@@ -199,6 +214,10 @@ wait_healthy_service() {
     if [ "${readiness_rc}" -eq 0 ]; then
       return 0
     fi
+    if [ "${readiness_rc}" -eq 2 ]; then
+      printf "%s\n" "${readiness_output}" >&2
+      return 1
+    fi
     # A transiently unhealthy dependency can make the first ``compose up
     # --wait`` return before Compose ever starts a dependent container. Once
     # the dependency recovers, re-issuing detached up starts only that deferred
@@ -217,26 +236,46 @@ wait_healthy_service() {
 
 start_service() {
   local service="$1"
-  local timeout=180
-  if [ "${service}" = "registry" ]; then
-    timeout=900
+  local timeout
+  timeout="$("${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_service_policy.py" "${service}")"
+  if [ "${service}" = "valkey" ]; then
+    "${PYTHON_BIN}" "${LAB_DIR}/services/valkey/prepare.py"
   fi
   echo
   echo "== service:${service} up =="
   CURRENT_SERVICE="${service}"
   local started_at="${SECONDS}"
   set +e
-  compose_service "${service}" up -d --build --wait --wait-timeout "${timeout}"
+  if [ "${service}" = "registry" ]; then
+    # Nexus can take most of the wait budget to become healthy before Compose
+    # starts nexus-seed. Let the positive health gate own the remaining budget.
+    compose_service "${service}" up -d --build
+  else
+    compose_service "${service}" up -d --build --wait --wait-timeout "${timeout}"
+  fi
   local compose_rc=$?
   set -e
   if [ "${compose_rc}" -ne 0 ]; then
     echo "[warn] compose up for ${service} returned ${compose_rc}; continuing with health gate" >&2
   fi
   local remaining=$((timeout - (SECONDS - started_at)))
-  if [ "${remaining}" -lt 1 ]; then
+  if [ "${service}" = "registry" ] && [ "${remaining}" -lt 120 ]; then
+    # Compose starts the seed only after Nexus becomes healthy. It needs its
+    # own short completion window even when Nexus used the startup budget.
+    remaining=120
+  elif [ "${remaining}" -lt 1 ]; then
     remaining=1
   fi
-  wait_healthy_service "${service}" "${remaining}"
+  if ! wait_healthy_service "${service}" "${remaining}"; then
+    compose_service "${service}" logs --tail 80 >&2 || true
+    return 1
+  fi
+  if [ "${service}" = "gitlab" ]; then
+    "${PYTHON_BIN}" scripts/bootstrap_gitlab_lab.py "${OUT_DIR}/gitlab-seed" \
+      --compose "${LAB_DIR}/services/gitlab/docker-compose.yml"
+  elif [ "${service}" = "registry-harbor" ]; then
+    "${PYTHON_BIN}" scripts/seed_real_vendors.py harbor http://127.0.0.1:18280 "${OUT_DIR}/harbor-seed"
+  fi
 }
 
 stop_service() {
@@ -253,6 +292,10 @@ run_case() {
   local label="$2"
   local expected_exit="$3"
   shift 3
+  if [ "${module}" = "gitlab" ]; then
+    # Rails on a cold emulated image can need longer than lightweight APIs.
+    set -- "$@" --timeout 15
+  fi
 
   local json_path="${OUT_DIR}/json/${label}.json"
   local log_path="${OUT_DIR}/logs/${label}.log"
@@ -458,8 +501,6 @@ run_exporters_cases() {
 run_registry_cases() {
   run_case registry registry_open 0 registry -t 127.0.0.1 --port 15000 --docker --images
   run_case registry registry_auth 0 registry -t 127.0.0.1 --port 15001 -u admin -p admin --docker --images
-  run_case registry registry_harbor 0 registry -t 127.0.0.1 --port 15002 --harbor --images
-  run_case registry registry_gitlab 0 registry -t 127.0.0.1 --port 15003 --token glrt-lab-token --gitlab --images
   run_case registry registry_nexus 0 registry -t 127.0.0.1 --port 15004 --nexus --assets
   run_case registry registry_url_http 0 registry -t "http://127.0.0.1:15000/v2/_catalog?n=1000" --docker --images
   run_case registry registry_url_https_transport_fallback 0 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
@@ -471,6 +512,14 @@ run_registry_cases() {
     run_case registry fuzz_registry_malformed_target 2 registry -t "http://[invalid:url" --docker --images
     run_case registry fuzz_registry_invalid_port 2 registry -t 127.0.0.1 --port -1 --docker --images
   fi
+}
+
+run_registry_harbor_cases() {
+  run_case registry registry_harbor 0 registry -t http://127.0.0.1:18280 --timeout 15 --harbor --images -u admin -p Harbor12345
+}
+
+run_valkey_cases() {
+  "${PYTHON_BIN}" scripts/verify_valkey_lab.py "${OUT_DIR}" --project valkey
 }
 
 run_grafana_cases() {
@@ -517,6 +566,7 @@ run_minio_cases() {
 }
 
 run_gitlab_cases() {
+  run_case registry registry_gitlab 0 registry -t http://127.0.0.1:15003 --timeout 15 --gitlab --images -u root -p glpat-redposture-lab-root-2026
   run_case gitlab gitlab_public 0 gitlab -t 127.0.0.1 --port 18080
   run_case gitlab gitlab_analyst 0 gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-analyst-2026
   run_case gitlab gitlab_url_override_http 0 gitlab -t "http://127.0.0.1:18080/users/sign_in?ref=matrix" --https
@@ -528,6 +578,7 @@ run_gitlab_cases() {
     run_case gitlab fuzz_gitlab_invalid_port 2 gitlab -t 127.0.0.1 --port 99999
     run_case gitlab fuzz_gitlab_zero_timeout 2 gitlab -t 127.0.0.1 --timeout 0
   fi
+  "${PYTHON_BIN}" scripts/verify_gitlab_lab.py "${OUT_DIR}"
 }
 
 run_consul_cases() {
@@ -797,6 +848,7 @@ run_elastic_cases() {
   run_case elastic elastic_multi_instance_urls 0 elastic -t "http://127.0.0.1:19200/,http://127.0.0.1:19202/,http://127.0.0.1:19203/,http://127.0.0.1:19204/,http://127.0.0.1:19205/" --endpoints
   run_text_case elastic elastic_debug_smoke 0 elastic -t 127.0.0.1 --port 19200 --debug
   if is_extended_matrix; then
+    run_case elastic elastic_discover_budget 0 elastic -t 127.0.0.1 --port 19201 -u elastic -p changeme --discover --discover-time 10 --discover-max-bytes 52428800
     run_case elastic elastic_extended_ports_defcreds 0 elastic -t 127.0.0.1 --ports 19201 --defcreds --endpoints
     run_case elastic elastic_extended_all_actions 0 elastic -t 127.0.0.1 --port 19201 -u elastic -p changeme --endpoints --cluster --user --plugins --discover
     run_case elastic elastic_extended_apitoken_invalid 0 elastic -t 127.0.0.1 --port 19201 --apitoken invalid-token --endpoints
@@ -901,6 +953,7 @@ run_proxmox_cases() {
   run_case proxmox proxmox_multi_instance_urls 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket,https://127.0.0.1:18061/api2/json/access/ticket,https://127.0.0.1:18062/api2/json/access/ticket,https://127.0.0.1:18063/api2/json/access/ticket,https://127.0.0.1:18064/api2/json/access/ticket" --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
   run_text_case proxmox proxmox_debug_smoke 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --debug
   if is_extended_matrix; then
+    run_case proxmox proxmox_discover_budget 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover --discover-time 10 --discover-max-bytes 52428800
     run_case proxmox proxmox_extended_ports_flag 0 proxmox -t 127.0.0.1 --ports 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
     run_case proxmox proxmox_extended_defcreds 0 proxmox -t 127.0.0.1 --port 18006 --insecure --defcreds --nodes
     run_case proxmox proxmox_extended_defcreds_empty_password 0 proxmox -t 127.0.0.1 --port 18006 --insecure -u root@pam -p "" --nodes --users
@@ -927,6 +980,10 @@ run_airflow_cases() {
   run_case airflow airflow_default 0 airflow -t 127.0.0.1 --debug --defcreds
   run_case airflow airflow_creds 0 airflow -t http://127.0.0.1:18080 -u airflow -p airflow --show-keys --discover --enum-cve --discover-time 10 --discover-max-bytes 52428800 -ot excluded.invalid
   run_case airflow airflow_anonymous 0 airflow -t http://127.0.0.1:18081 --show-keys --discover --enum-cve --discover-time 10 --discover-max-bytes 52428800 -ot excluded.invalid
+  if is_extended_matrix; then
+    run_case airflow airflow_connections 0 airflow -t 127.0.0.1 --port 18080 -u airflow -p airflow --show-connections
+    run_case airflow airflow_multi_ports 0 airflow -t 127.0.0.1 --ports 18080,18081 --show-keys
+  fi
 }
 
 run_service_block() {
@@ -942,7 +999,7 @@ run_service_block() {
 if [ -n "${REDPOSTURE_LOCAL_QA_SERVICE:-}" ]; then
   qa_service="${REDPOSTURE_LOCAL_QA_SERVICE}"
   case "${qa_service}" in
-    exporters|registry|grafana|minio|rabbitmq|airflow|gitlab|consul|kubeapi|postgres|mongodb|oracle|docker|clickhouse|redis|etcd|qdrant|elastic|opensearch|grpc|kafka|zookeeper|zookeeper-auth|keeper|proxmox|proxy-isolated)
+    exporters|registry|registry-harbor|grafana|minio|rabbitmq|airflow|gitlab|consul|kubeapi|postgres|mongodb|oracle|docker|clickhouse|redis|valkey|etcd|qdrant|elastic|opensearch|grpc|kafka|zookeeper|zookeeper-auth|keeper|proxmox|proxy-isolated)
       qa_function="run_${qa_service//-/_}_cases"
       ;;
     *) echo "[error] unsupported local QA service: ${qa_service}" >&2; exit 2 ;;
@@ -968,6 +1025,7 @@ fi
 
 run_service_block exporters run_exporters_cases
 run_service_block registry run_registry_cases
+run_service_block registry-harbor run_registry_harbor_cases
 run_service_block grafana run_grafana_cases
 run_service_block minio run_minio_cases
 run_service_block rabbitmq run_rabbitmq_cases
@@ -981,6 +1039,7 @@ run_service_block oracle run_oracle_cases
 run_service_block docker run_docker_cases
 run_service_block clickhouse run_clickhouse_cases
 run_service_block redis run_redis_cases
+run_service_block valkey run_valkey_cases
 run_service_block etcd run_etcd_cases
 run_service_block qdrant run_qdrant_cases
 run_service_block elastic run_elastic_cases

@@ -898,11 +898,11 @@ def test_vendor_helper_fetchers_cover_harbor_gitlab_and_nexus(monkeypatch: pytes
         _ = (headers, body)
         if path == "/api/v2.0/systeminfo":
             return 200, json.dumps({"harbor_version": "2.12.0"}).encode(), {}, None
-        if path == "/api/v2.0/projects?page=1&page_size=200":
+        if path == "/api/v2.0/projects?page=1&page_size=100":
             return 200, json.dumps([{"name": "library"}, {"name": "infra"}, {"other": "skip"}]).encode(), {}, None
-        if path == "/api/v2.0/projects/library/repositories?page=1&page_size=200":
+        if path == "/api/v2.0/projects/library/repositories?page=1&page_size=100":
             return 200, json.dumps([{"name": "library/app"}, {"name": "library/app"}]).encode(), {}, None
-        if path == "/api/v2.0/projects/library/repositories/library%2Fapp/artifacts?page=1&page_size=20&with_tag=true":
+        if path == "/api/v2.0/projects/library/repositories/app/artifacts?page=1&page_size=20&with_tag=true":
             return (
                 200,
                 json.dumps(
@@ -914,7 +914,7 @@ def test_vendor_helper_fetchers_cover_harbor_gitlab_and_nexus(monkeypatch: pytes
         if path == "/jwt/auth?service=container_registry&scope=registry:catalog:*":
             return 200, json.dumps({"token": "jwt-token", "scope": "registry:catalog:*"}).encode(), {}, None
         if path == "/service/rest/v1/status":
-            return 200, b"", {}, None
+            return 200, b"", {"server": "Nexus"}, None
         if path == "/service/rest/v1/repositories":
             return (
                 200,
@@ -1508,8 +1508,8 @@ def test_registry_manifest_blob_and_download_failure_branches(monkeypatch: pytes
 def test_registry_vendor_invalid_payload_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     responses: dict[str, tuple[int, bytes, dict[str, str], str | None]] = {
         "/api/v2.0/systeminfo": (200, b"[]", {}, None),
-        "/api/v2.0/projects?page=1&page_size=200": (200, b"{}", {}, None),
-        "/api/v2.0/projects/proj/repositories?page=1&page_size=200": (200, b"{}", {}, None),
+        "/api/v2.0/projects?page=1&page_size=100": (200, b"{}", {}, None),
+        "/api/v2.0/projects/proj/repositories?page=1&page_size=100": (200, b"{}", {}, None),
         "/api/v2.0/projects/proj/repositories/repo/artifacts?page=1&page_size=20&with_tag=true": (
             200,
             b"{}",
@@ -1546,7 +1546,7 @@ def test_registry_vendor_invalid_payload_branches(monkeypatch: pytest.MonkeyPatc
     )
     assert registry._fetch_harbor_repositories("h", 5000, "proj", 1.0, headers={}) == (
         None,
-        "/api/v2.0/projects/proj/repositories?page=1&page_size=200 payload is invalid",
+        "/api/v2.0/projects/proj/repositories?page=1&page_size=100 payload is invalid",
     )
     assert registry._fetch_harbor_artifacts("h", 5000, "proj", "repo", 1.0, headers={}) == (
         None,
@@ -1554,22 +1554,17 @@ def test_registry_vendor_invalid_payload_branches(monkeypatch: pytest.MonkeyPatc
     )
 
     info, error = registry._fetch_gitlab_info("h", 5000, "", 1.0, headers={}, deep=True)
-    assert error is None
-    assert info is not None
-    assert info["token_probe_status"] == "failed"
-    assert info["token_probe_error"] == "realm JSON payload is invalid"
+    assert info is None
+    assert error == "not gitlab"
 
-    assert (
-        registry._fetch_gitlab_info(
-            "h",
-            5000,
-            'Bearer realm="ftp://auth.local/token",service="container_registry"',
-            1.0,
-            headers={},
-            deep=True,
-        )[0]["token_probe_status"]
-        == "skipped"
-    )
+    assert registry._fetch_gitlab_info(
+        "h",
+        5000,
+        'Bearer realm="ftp://auth.local/token",service="container_registry"',
+        1.0,
+        headers={},
+        deep=True,
+    ) == (None, "not gitlab")
 
     assert registry._fetch_nexus_info("h", 5000, 1.0, headers={}) == (
         None,
@@ -1733,9 +1728,7 @@ def test_fetch_gitlab_info_error_branches(monkeypatch: pytest.MonkeyPatch) -> No
         headers={},
         deep=True,
     )
-    assert fallback_error is None
-    assert fallback_info is not None
-    assert fallback_info["token_probe_status"] == "failed"
+    assert (fallback_info, fallback_error) == (None, "not gitlab")
 
     deep_info, deep_error = registry._fetch_gitlab_info(
         "registry.local",
@@ -1745,9 +1738,7 @@ def test_fetch_gitlab_info_error_branches(monkeypatch: pytest.MonkeyPatch) -> No
         headers={},
         deep=True,
     )
-    assert deep_error is None
-    assert deep_info is not None
-    assert deep_info["token_probe_status"] == "skipped"
+    assert (deep_info, deep_error) == (None, "not gitlab")
 
     monkeypatch.setattr(registry, "_http_request_url", lambda *_a, **_k: (500, b"", {}, None))
     deep_info2, deep_error2 = registry._fetch_gitlab_info(
@@ -1766,7 +1757,7 @@ def test_fetch_gitlab_info_error_branches(monkeypatch: pytest.MonkeyPatch) -> No
 @pytest.mark.parametrize(
     ("status", "body", "expected"),
     [
-        (401, b"", "authentication required"),
+        (401, b"", "not nexus"),
         (404, b"", "not nexus"),
         (500, b"", "/service/rest/v1/status returned status 500"),
         (200, b"not-json", "nexus status payload is invalid JSON"),
@@ -2157,7 +2148,7 @@ def test_fetch_harbor_info_error_paths(
     [
         ("_fetch_harbor_projects", "/api/v2.0/projects"),
         ("_fetch_harbor_repositories", "/api/v2.0/projects/library/repositories"),
-        ("_fetch_harbor_artifacts", "/api/v2.0/projects/library/repositories/library%2Fapp/artifacts"),
+        ("_fetch_harbor_artifacts", "/api/v2.0/projects/library/repositories/app/artifacts"),
     ],
 )
 def test_fetch_harbor_collection_helpers_error_paths(
@@ -2587,6 +2578,109 @@ def test_registry_anonymous_open_lifecycle_emits_all_canonical_stages(
         "access_capabilities",
         "data",
     ]
+
+
+@pytest.mark.parametrize(
+    ("challenge", "expected_gitlab"),
+    [
+        ('Bearer realm="http://gitlab.local/jwt/auth",service="container_registry"', True),
+        ('Bearer realm="http://registry.local/token",service="container_registry"', None),
+        ('Bearer realm="http://gitlab.local/jwt/auth",service="registry"', None),
+    ],
+)
+def test_registry_auth_required_detects_gitlab_vendor_from_real_challenge(
+    monkeypatch: pytest.MonkeyPatch, challenge: str, expected_gitlab: bool | None
+) -> None:
+    requests: list[str] = []
+
+    def fake_request(_host, _port, _method, path, _timeout, *, headers=None, body=None):
+        _ = (headers, body)
+        requests.append(path)
+        return (
+            401,
+            b'{"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}',
+            {"docker-distribution-api-version": "registry/2.0", "www-authenticate": challenge},
+            None,
+        )
+
+    monkeypatch.setattr(registry, "_http_request", fake_request)
+    args = parse_args(["registry", "-t", "127.0.0.1", "--port", "5000", "--gitlab", "--enum-cve", "--format", "json"])
+    args._registry_console = Console()
+    runner = AuditCommandRunner(args=args, spec=registry.build_registry_spec(args), emit_line=lambda _line: None)
+    record = runner.run_plan(registry.build_registry_plan(args)).records[0]
+
+    assert requests == ["/v2/"]
+    assert record["is_registry"] is True
+    assert record["status"] == "auth_required"
+    assert record["is_gitlab"] is expected_gitlab
+    if expected_gitlab:
+        assert record["gitlab_info"]["detected_by"] == "www_authenticate"
+        assert record["cve_enumeration"]["status"] == "version_unknown"
+    else:
+        assert record["gitlab_info"] is None
+        assert record["cve_enumeration"]["status"] == "unsupported"
+
+
+@pytest.mark.parametrize(
+    ("challenge", "systeminfo", "expected_harbor"),
+    [
+        (
+            'Bearer realm="http://harbor.local/service/token",service="harbor-registry"',
+            {"harbor_version": "v2.11.1-6b7ecba1", "auth_mode": "db_auth"},
+            True,
+        ),
+        (
+            'Bearer realm="http://registry.local/token",service="harbor-registry"',
+            {"harbor_version": "v2.11.1-6b7ecba1"},
+            None,
+        ),
+        (
+            'Bearer realm="http://harbor.local/service/token",service="harbor-registry"',
+            {"version": "2.11.1"},
+            None,
+        ),
+    ],
+)
+def test_registry_auth_required_detects_harbor_only_with_challenge_and_systeminfo(
+    monkeypatch: pytest.MonkeyPatch,
+    challenge: str,
+    systeminfo: dict[str, str],
+    expected_harbor: bool | None,
+) -> None:
+    requests: list[str] = []
+
+    def fake_request(_host, _port, _method, path, _timeout, *, headers=None, body=None):
+        _ = (headers, body)
+        requests.append(path)
+        if path == "/v2/":
+            return (
+                401,
+                b'{"errors":[{"code":"UNAUTHORIZED"}]}',
+                {"docker-distribution-api-version": "registry/2.0", "www-authenticate": challenge},
+                None,
+            )
+        assert path == "/api/v2.0/systeminfo"
+        return 200, json.dumps(systeminfo).encode(), {}, None
+
+    monkeypatch.setattr(registry, "_http_request", fake_request)
+    args = parse_args(["registry", "-t", "127.0.0.1", "--port", "5000", "--harbor", "--enum-cve", "--format", "json"])
+    args._registry_console = Console()
+    runner = AuditCommandRunner(args=args, spec=registry.build_registry_spec(args), emit_line=lambda _line: None)
+    record = runner.run_plan(registry.build_registry_plan(args)).records[0]
+
+    assert record["is_registry"] is True
+    assert record["status"] == "auth_required"
+    assert record["is_harbor"] is expected_harbor
+    assert requests == (
+        ["/v2/", "/api/v2.0/systeminfo"]
+        if challenge.endswith('service="harbor-registry"') and "/service/token" in challenge
+        else ["/v2/"]
+    )
+    if expected_harbor:
+        assert record["harbor_info"]["harbor_version"] == "v2.11.1-6b7ecba1"
+        assert record["cve_enumeration"]["status"] in {"matched", "no_matches"}
+    else:
+        assert record["cve_enumeration"]["status"] == "unsupported"
 
 
 def test_registry_auth_retries_transient_failure_without_repeating_anonymous_probe(

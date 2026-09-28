@@ -28,6 +28,45 @@ class MongoNotMongoError(MongoClientError):
     """Raised when the endpoint does not look like MongoDB."""
 
 
+def is_mongodb_hello_response(result: Any) -> bool:
+    """Return whether *result* has a MongoDB-specific hello/isMaster shape.
+
+    ``{"ok": 1}`` is a generic command acknowledgement and is insufficient.
+    A real hello response advertises a coherent wire-version range and at
+    least one topology/role field defined by MongoDB's handshake protocol.
+    """
+
+    if not isinstance(result, dict):
+        return False
+    ok = result.get("ok")
+    if isinstance(ok, bool) or not isinstance(ok, (int, float)) or ok != 1:
+        return False
+    minimum = result.get("minWireVersion")
+    maximum = result.get("maxWireVersion")
+    if (
+        not isinstance(minimum, int)
+        or isinstance(minimum, bool)
+        or not isinstance(maximum, int)
+        or isinstance(maximum, bool)
+        or minimum < 0
+        or maximum < minimum
+        or maximum > 10_000
+    ):
+        return False
+    return any(
+        key in result
+        for key in (
+            "isWritablePrimary",
+            "ismaster",
+            "secondary",
+            "arbiterOnly",
+            "setName",
+            "msg",
+            "topologyVersion",
+        )
+    )
+
+
 def _load_pymongo() -> Any:
     try:
         import pymongo
@@ -216,9 +255,7 @@ class MongoAuditClient:
             result = _command(self.client, "admin", "isMaster")
         if not isinstance(result, dict):
             raise MongoNotMongoError("hello did not return a document")
-        if not (
-            result.get("ok") == 1 or result.get("isWritablePrimary") is not None or result.get("ismaster") is not None
-        ):
+        if not is_mongodb_hello_response(result):
             raise MongoNotMongoError("hello response is not MongoDB-like")
         safe = json_safe(dict(result))
         return safe if isinstance(safe, dict) else dict(result)
@@ -300,6 +337,7 @@ __all__ = [
     "MongoClientError",
     "MongoDependencyError",
     "MongoNotMongoError",
+    "is_mongodb_hello_response",
     "build_mongodb_uri",
     "close_quietly",
     "is_auth_error",

@@ -17,6 +17,7 @@
     },
     "detection_status": "confirmed",
     "host": "127.0.0.1",
+    "is_rabbitmq": true,
     "module": "rabbitmq",
     "port": 15672,
     "provided_credentials_ok": false,

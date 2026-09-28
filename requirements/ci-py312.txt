@@ -21,6 +21,7 @@ h2==4.4.1
 hatchling==1.32.0
 hpack==4.2.0
 hyperframe==6.1.0
+hypothesis==6.168.1
 identify==2.6.19
 iniconfig==2.3.0
 librt==0.15.0
@@ -48,6 +49,7 @@ pytz==2026.3.post1
 PyYAML==6.0.3
 ruff==0.16.4
 setuptools==84.0.0
+sortedcontainers==2.4.0
 tomli_w==1.2.0
 tomlkit==0.15.1
 tox==4.60.0

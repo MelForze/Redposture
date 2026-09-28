@@ -202,6 +202,7 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
         credential_attempt_detail_fields=("provided_credential_type",),
         render_module=_CompactOpenApiRender if compact_openapi_output else render,
         colorize=render._render_colored_grpc_line,
+        is_detected=lambda record: record.extra.get("is_grpc") is True,
     )
 
 

@@ -26,13 +26,25 @@ class MatrixCase:
     version: str
     cve: str
     affected: bool
+    username: str | None = None
+    password: str | None = None
 
 
 CASES = (
     MatrixCase("redis", "127.0.0.1", 16370, "server_version", "7.0.3", "CVE-2022-31144", True),
     MatrixCase("redis", "127.0.0.1", 16371, "server_version", "7.0.4", "CVE-2022-31144", False),
+    MatrixCase("redis", "127.0.0.1", 16371, "server_version", "7.0.4", "CVE-2022-35951", True),
+    MatrixCase("redis", "127.0.0.1", 16374, "server_version", "7.0.5", "CVE-2022-35951", False),
     MatrixCase("grafana", "http://127.0.0.1:13000", 13000, "server_version", "11.0.0", "CVE-2024-9264", True),
     MatrixCase("grafana", "http://127.0.0.1:13005", 13005, "server_version", "11.0.5", "CVE-2024-9264", False),
+    MatrixCase("grafana", "http://127.0.0.1:13115", 13115, "server_version", "11.1.5", "CVE-2024-9264", True),
+    MatrixCase("grafana", "http://127.0.0.1:13116", 13116, "server_version", "11.1.6", "CVE-2024-9264", False),
+    MatrixCase(
+        "postgres", "127.0.0.1", 16372, "server_version", "16.4", "CVE-2024-10979", True, "postgres", "matrixpass"
+    ),
+    MatrixCase(
+        "postgres", "127.0.0.1", 16373, "server_version", "16.5", "CVE-2024-10979", False, "postgres", "matrixpass"
+    ),
 )
 
 
@@ -77,6 +89,8 @@ def _scan(case: MatrixCase) -> dict[str, Any]:
         "--format",
         "json",
     ]
+    if case.username is not None and case.password is not None:
+        command.extend(["-u", case.username, "-p", case.password])
     completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=45, check=False)
     if completed.returncode != 0:
         raise RuntimeError(

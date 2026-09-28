@@ -104,7 +104,11 @@
       }
     ],
     "nexus_error": null,
-    "nexus_info": {},
+    "nexus_info": {
+      "raw_version": "3.72.0-04",
+      "version": "3.72.0",
+      "version_source": "server_header"
+    },
     "nexus_repositories": [
       "maven-central (format=maven2, type=proxy, url=http://127.0.0.1:15004/repository/maven-central)",
       "maven-public (format=maven2, type=group, url=http://127.0.0.1:15004/repository/maven-public)",

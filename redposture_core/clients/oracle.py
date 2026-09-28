@@ -279,7 +279,17 @@ def tns_listener_command(
         )
         restricted = any(
             token in text.upper()
-            for token in ("TNS-12526", "TNS-12527", "TNS-12528", "ERR=12526", "ERR=12527", "ERR=12528")
+            for token in (
+                "TNS-01194",
+                "(ERR=1194)",
+                "(CODE=1194)",
+                "TNS-12526",
+                "TNS-12527",
+                "TNS-12528",
+                "ERR=12526",
+                "ERR=12527",
+                "ERR=12528",
+            )
         )
         return {
             "command": cmd,
@@ -350,7 +360,10 @@ def parse_listener_dump(status: dict[str, Any] | None, services: dict[str, Any] 
     restricted = bool(
         status.get("listener_restricted")
         or services.get("listener_restricted")
-        or any(token in text.upper() for token in ("TNS-12526", "TNS-12527", "TNS-12528"))
+        or any(
+            token in text.upper()
+            for token in ("TNS-01194", "(ERR=1194)", "(CODE=1194)", "TNS-12526", "TNS-12527", "TNS-12528")
+        )
     )
     return {
         "ok": bool(status.get("ok") or services.get("ok")),
@@ -539,12 +552,32 @@ class OracleAuditClient:
                 close()
 
     def server_banner(self) -> dict[str, Any]:
-        rows = self.query("select banner_full from v$version", limit=5)
-        if not rows:
-            rows = self.query("select banner from v$version", limit=5)
+        # The authenticated driver handshake exposes the exact Database
+        # release even when v$version is unavailable to a read-only account.
+        # Marketing names (23ai / 26ai) and the listener's 23.0 are not patch
+        # versions and cannot decide a CVE boundary.
+        driver_version = getattr(self.connection, "version", None)
+        version = (
+            driver_version
+            if isinstance(driver_version, str) and re.fullmatch(r"[0-9]+(?:\.[0-9]+){2,4}", driver_version)
+            else None
+        )
+        rows: list[dict[str, Any]] = []
+        for query in ("select banner_full from v$version", "select banner from v$version"):
+            try:
+                rows = self.query(query, limit=5)
+            except Exception:
+                continue
+            if rows:
+                break
         banner = " | ".join(str(row.get("banner_full") or row.get("banner") or "") for row in rows if row)
-        version_match = re.search(r"Oracle Database\s+([0-9]+[A-Za-z0-9_.]*)", banner)
-        return {"banner": banner or None, "version": version_match.group(1) if version_match else None}
+        if version is None:
+            numeric = re.search(r"(?:^|[\n|])\s*Version\s+([0-9]+(?:\.[0-9]+){2,4})\b", banner, re.I)
+            release = re.search(r"\bRelease\s+([0-9]+(?:\.[0-9]+){2,4})\b", banner, re.I)
+            marketing = re.search(r"Oracle Database\s+([0-9]+[A-Za-z0-9_.]*)", banner)
+            match = numeric or release or marketing
+            version = match.group(1) if match else None
+        return {"banner": banner or None, "version": version}
 
     def current_context(self) -> dict[str, Any]:
         rows = self.query(

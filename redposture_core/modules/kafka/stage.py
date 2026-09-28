@@ -176,6 +176,7 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         fallback_to_anonymous_detect_record=full_credential_sweep,
         render_module=render,
         colorize=render._render_colored_kafka_line,
+        is_detected=lambda record: record.extra.get("is_kafka") is True,
     )
 
 

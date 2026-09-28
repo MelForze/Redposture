@@ -3291,12 +3291,13 @@ class AuditCommandRunner:
         marker_value = record.extra.get(marker)
         if marker_value is True:
             return True
-        if marker_value is False:
-            return False
-        status = str(record.status or "").strip().lower()
-        if not status or status == "fail" or status.startswith(("not_", "unknown")):
-            return False
-        return True
+        # A status word describes the outcome only after product identity has
+        # been established; it is not a fingerprint.  Treating arbitrary
+        # non-failure statuses as detection let generic HTTP responses enter
+        # authentication, discovery, and CVE phases.  Real module specs must
+        # either expose their strict ``is_<module>`` marker or provide an
+        # explicit ``is_detected`` predicate.
+        return False
 
     def _not_detected_reason(self, record: AuditRecord) -> str:
         status = str(record.status or "")

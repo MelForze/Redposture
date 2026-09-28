@@ -10,8 +10,25 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import pytest
+from hypothesis import HealthCheck, settings
 
 from redposture_core.clients.tls_cache import clear_tls_context_cache
+
+settings.register_profile(
+    "redposture-ci",
+    max_examples=250,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=(HealthCheck.too_slow,),
+)
+settings.register_profile(
+    "redposture-local",
+    max_examples=10_000,
+    deadline=None,
+    print_blob=True,
+    suppress_health_check=(HealthCheck.too_slow,),
+)
+settings.load_profile(os.environ.get("REDPOSTURE_HYPOTHESIS_PROFILE", "redposture-ci"))
 
 
 class ExternalDnsBlockedError(RuntimeError):

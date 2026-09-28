@@ -87,6 +87,7 @@ def build_registry_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_registry_line,
+        is_detected=lambda record: record.extra.get("is_registry") is True,
         # E3 opt-in: Docker Registry anon-open (public registries, no auth
         # required) is confirmed by the /v2/ probe returning 200.
         keep_anonymous_open_no_auth=True,

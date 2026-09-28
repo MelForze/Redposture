@@ -38,6 +38,7 @@ def _http_service(kind: str, version: str) -> Iterator[int]:
                     status = 200
                     body = b"[]"
             elif kind == "nexus":
+                headers["Server"] = f"Nexus/{version} (OSS)"
                 if self.path == "/service/rest/v1/status":
                     status = 200
                     body = json.dumps({"version": version, "edition": "OSS"}).encode()

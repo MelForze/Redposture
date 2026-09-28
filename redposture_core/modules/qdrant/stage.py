@@ -109,6 +109,7 @@ def build_qdrant_spec(args: Any) -> ModuleAuditSpec:
         else None,
         render_module=render,
         colorize=render._render_colored_qdrant_line,
+        is_detected=lambda record: record.extra.get("is_qdrant") is True,
         # E3 opt-in: Qdrant anon-open (no --api-key-set config) is confirmed
         # by the detect probe.
         keep_anonymous_open_no_auth=True,

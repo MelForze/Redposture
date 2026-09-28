@@ -35,6 +35,7 @@ def build_oracle_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_oracle_line,
+        is_detected=lambda record: record.extra.get("is_oracle") is True,
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
     )

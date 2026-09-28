@@ -9,7 +9,7 @@
         "dest": "<OUT_DIR>/gitlab_clones/127.0.0.1_18080/redposture-lab/public-api",
         "error": null,
         "project": "redposture-lab/public-api",
-        "project_id": 101,
+        "project_id": 1,
         "status": "cloned"
       }
     ],
@@ -27,24 +27,29 @@
     ],
     "public_projects": [
       {
-        "archived": false,
+        "avatar_url": null,
+        "default_branch": "main",
+        "description": null,
+        "forks_count": 0,
         "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/public-api.git",
-        "id": 101,
-        "issues_enabled": true,
-        "merge_requests_enabled": true,
-        "path_with_namespace": "redposture-lab/public-api",
-        "permissions": {
-          "group_access": {
-            "access_level": 40
-          },
-          "project_access": {
-            "access_level": 40
-          }
+        "id": 1,
+        "last_activity_at": "<ISO>",
+        "name_with_namespace": "redposture-lab / public-api",
+        "namespace": {
+          "avatar_url": null,
+          "full_path": "redposture-lab",
+          "id": 3,
+          "kind": "group",
+          "parent_id": null,
+          "web_url": "http://127.0.0.1:18080/groups/redposture-lab"
         },
-        "snippets_enabled": true,
-        "visibility": "public",
-        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api",
-        "wiki_enabled": true
+        "path_with_namespace": "redposture-lab/public-api",
+        "readme_url": "http://127.0.0.1:18080/redposture-lab/public-api/-/blob/main/README.md",
+        "ssh_url_to_repo": "ssh://git@127.0.0.1:12222/redposture-lab/public-api.git",
+        "star_count": 0,
+        "tag_list": [],
+        "topics": [],
+        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api"
       }
     ],
     "public_projects_error": null,
@@ -81,55 +86,87 @@
     "status": "valid_credentials",
     "token_access": [
       {
-        "access_level": 40,
+        "access_level": null,
         "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/public-api.git",
-        "id": 101,
-        "issues_enabled": true,
+        "id": 1,
+        "issues_enabled": false,
         "issues_error": null,
         "issues_read": true,
         "members_error": null,
-        "members_read": false,
-        "merge_requests_enabled": true,
+        "members_read": true,
+        "merge_requests_enabled": false,
         "path_with_namespace": "redposture-lab/public-api",
         "repo_error": null,
         "repo_read": true,
-        "snippets_enabled": true,
-        "visibility": "public",
+        "snippets_enabled": false,
+        "visibility": null,
         "web_url": "http://127.0.0.1:18080/redposture-lab/public-api",
-        "wiki_enabled": true
+        "wiki_enabled": false
       }
     ],
     "token_capability": "identity",
     "token_projects": [
       {
-        "archived": false,
+        "avatar_url": null,
+        "default_branch": "main",
+        "description": null,
+        "forks_count": 0,
         "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/public-api.git",
-        "id": 101,
-        "issues_enabled": true,
-        "merge_requests_enabled": true,
-        "path_with_namespace": "redposture-lab/public-api",
-        "permissions": {
-          "group_access": {
-            "access_level": 40
-          },
-          "project_access": {
-            "access_level": 40
-          }
+        "id": 1,
+        "last_activity_at": "<ISO>",
+        "name_with_namespace": "redposture-lab / public-api",
+        "namespace": {
+          "avatar_url": null,
+          "full_path": "redposture-lab",
+          "id": 3,
+          "kind": "group",
+          "parent_id": null,
+          "web_url": "http://127.0.0.1:18080/groups/redposture-lab"
         },
-        "snippets_enabled": true,
-        "visibility": "public",
-        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api",
-        "wiki_enabled": true
+        "path_with_namespace": "redposture-lab/public-api",
+        "readme_url": "http://127.0.0.1:18080/redposture-lab/public-api/-/blob/main/README.md",
+        "ssh_url_to_repo": "ssh://git@127.0.0.1:12222/redposture-lab/public-api.git",
+        "star_count": 0,
+        "tag_list": [],
+        "topics": [],
+        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api"
       }
     ],
     "token_projects_error": null,
     "token_provided": true,
     "token_user": {
+      "avatar_url": "https://www.gravatar.com/avatar/<DOCKER_ID>?s=80&d=identicon",
+      "bio": "",
+      "bot": false,
+      "can_create_group": true,
+      "can_create_project": true,
+      "color_scheme_id": 1,
+      "commit_email": "analyst@example.invalid",
+      "discord": "",
+      "email": "analyst@example.invalid",
+      "external": false,
       "id": 2,
+      "identities": [],
+      "job_title": "",
+      "linkedin": "",
+      "location": "",
+      "locked": false,
+      "organization": "",
+      "private_profile": false,
+      "projects_limit": 100000,
+      "pronouns": null,
+      "public_email": null,
+      "skype": "",
       "state": "active",
-      "username": "analyst"
+      "theme_id": 3,
+      "twitter": "",
+      "two_factor_enabled": false,
+      "username": "analyst",
+      "web_url": "http://127.0.0.1:18080/analyst",
+      "website_url": "",
+      "work_information": null
     },
     "token_valid": true,
-    "version": "17.8.1"
+    "version": null
   }
 ]

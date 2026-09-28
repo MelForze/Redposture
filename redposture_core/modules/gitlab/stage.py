@@ -99,6 +99,7 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
         else None,
         render_module=render,
         colorize=render._render_colored_gitlab_line,
+        is_detected=lambda record: record.extra.get("is_gitlab") is True,
         suppress_undetected_records_in_text=True,
     )
 

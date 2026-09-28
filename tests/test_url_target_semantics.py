@@ -41,6 +41,7 @@ class _HostStageCapture:
             module=self.module,
             service=self.module,
             status=self.status,
+            extra={f"is_{self.module}": True},
         )
 
 

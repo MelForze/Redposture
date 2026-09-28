@@ -11,7 +11,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from functools import lru_cache
 from importlib.resources import files
 from typing import Any
@@ -62,7 +62,7 @@ _ALLOWED_IMPACTS = {
 }
 _VERSION_TOKEN_RE = re.compile(r"^(?:v)?(\d+(?:[._]\d+){1,5})(.*)$", re.IGNORECASE)
 _MINIO_RELEASE_RE = re.compile(
-    r"(?:RELEASE[.-])?(\d{4})[-_.](\d{2})[-_.](\d{2})(?:T(\d{2})[-_.](\d{2})[-_.](\d{2})Z?)?", re.I
+    r"(?:RELEASE[.-])?(\d{4})[-_.](\d{2})[-_.](\d{2})T(\d{2})[-_.:](\d{2})[-_.:](\d{2})Z", re.I
 )
 _PRERELEASE_RE = re.compile(r"^[-_.]?(dev|alpha|a|beta|b|rc|pre|preview)(?:[-_.]?(\d+))?", re.IGNORECASE)
 _ORACLE_RELEASE_RE = re.compile(r"^(?:v)?(\d{2})c$", re.IGNORECASE)
@@ -282,10 +282,15 @@ def _parse_numeric_version(value: str) -> _ParsedVersion | None:
 
 
 def _minio_version(value: str) -> tuple[int, ...] | None:
-    match = _MINIO_RELEASE_RE.search(value.strip())
+    match = _MINIO_RELEASE_RE.fullmatch(value.strip())
     if not match:
         return None
-    return tuple(int(part or 0) for part in match.groups())
+    parts = tuple(int(part) for part in match.groups())
+    try:
+        datetime(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5])
+    except ValueError:
+        return None
+    return parts
 
 
 def normalize_version(value: str, scheme: str = "numeric") -> tuple[int, ...] | None:
@@ -431,9 +436,12 @@ def resolve_products(module: str, payload: Mapping[str, Any]) -> list[DetectedPr
     if module == "registry":
         products: list[DetectedProduct] = []
         if payload.get("is_harbor") is True:
-            products.append(
-                _product("harbor", "Harbor", _nested_version(payload, "harbor_info", "harbor_version", "version"))
-            )
+            harbor_version = _nested_version(payload, "harbor_info", "harbor_version", "version")
+            if harbor_version:
+                release = re.fullmatch(r"(v?\d+\.\d+\.\d+)-[0-9a-f]{8}", harbor_version, re.IGNORECASE)
+                if release:
+                    harbor_version = release.group(1)
+            products.append(_product("harbor", "Harbor", harbor_version))
         if payload.get("is_nexus") is True:
             products.append(
                 _product(
@@ -595,8 +603,8 @@ def render_finding_lines(payload: Mapping[str, Any], *, label: str, host: str, p
     if not isinstance(enumeration, Mapping):
         return []
     findings = enumeration.get("findings")
-    if not isinstance(findings, list):
-        findings = []
+    if not isinstance(findings, list) or not any(isinstance(finding, Mapping) for finding in findings):
+        return []
     # Use the same tab-separated prefix as module renderers. Fixed-width fields
     # combined with tabs shifted CVE rows farther right than their service row.
     prefix = f"{label}\t{host}\t{int(port)}\t "

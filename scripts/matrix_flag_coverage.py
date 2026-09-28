@@ -26,6 +26,7 @@ class MatrixCase:
 
 
 _COMMON_EXCLUDED_DESTS: dict[str, str] = {
+    "enum_cve": "all audit modules are covered by the CVE resolver/property tests; representative real products run in run_real_cve_matrix.sh.",
     "help": "argparse built-in help is covered by CLI smoke tests, not by live lab cases.",
     "hosts": "target string aliases are unit-tested; live matrix uses -t/--targets target values.",
     "hosts_file": "target file ingestion is unit-tested; live matrix keeps targets inline for reproducibility.",
@@ -39,6 +40,12 @@ _COMMON_EXCLUDED_DESTS: dict[str, str] = {
 }
 
 _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
+    "exporters scan": {
+        "tls_ca": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",
+        "tls_cert": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",
+        "tls_key": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",
+        "insecure": "this matrix has no untrusted-certificate exporter; shared transport tests cover verification policy.",
+    },
     "exporters trigger": {
         "bind": "listener bind address is covered by listener unit tests; live matrix avoids host bind variability.",
         "cert_file": "TLS listener certificate wiring is unit-tested; live trigger coverage uses no-listen mode.",
@@ -46,6 +53,10 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "key_file": "TLS listener key wiring is unit-tested with certificate handling.",
         "listen_seconds": "listener wait timing is covered by baseline trigger smoke and unit tests.",
         "with_listen": "baseline trigger case covers listener mode; extended cases focus no-listen flag combinations.",
+        "tls_ca": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",
+        "tls_cert": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",
+        "tls_key": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",
+        "insecure": "this matrix has no untrusted-certificate exporter; shared transport tests cover verification policy.",
     },
     "postgres": {
         "os_shell": "interactive shell is intentionally excluded from non-interactive matrix.",
@@ -91,6 +102,7 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
     "kubeapi": {
         "ca_file": "CA bundle loading is unit-tested; live lab uses --insecure/self-signed shortcuts.",
         "exec_command": "pod exec is excluded from sequential matrix to avoid pod-name drift; resource visibility is covered.",
+        "pod": "pod selector is only used by exec; selection is covered by the Kubernetes action tests.",
     },
     "keeper": {
         "ca_file": "Keeper and ZooKeeper share TLS validation; custom-CA handling is covered by the shared protocol tests.",

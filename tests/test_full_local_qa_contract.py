@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -30,9 +32,81 @@ def test_full_docker_matrix_is_reproducible_and_local_only() -> None:
     assert "run_auth_service_matrix.sh" in script
     assert "run_real_cve_matrix.sh" in script
     assert "REDPOSTURE_CLI_PARAM_FUZZ=1" in script
+    assert "--hypothesis-seed=20260928" in script
+    assert "REDPOSTURE_HYPOTHESIS_PROFILE=redposture-local" in script
+    for profile in (
+        "test_local_output_audit.py",
+        "test_concurrency_stress.py",
+        "test_sigint_runtime.py",
+        "test_soak_qa.py",
+    ):
+        assert profile in script
+    assert "--junitxml=" in script
 
     workflows = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / ".github" / "workflows").glob("*.yml"))
     assert "run_full_local_qa.sh" not in workflows
+
+
+def test_real_heavy_vendors_are_seeded_in_separate_matrix_blocks() -> None:
+    script = (ROOT / "scripts/run_lab_matrix_sequential.sh").read_text()
+    assert "qa_service_policy.py" in script
+    assert "prepare_version.py" in script
+    assert "run_service_block registry-harbor run_registry_harbor_cases" in script
+    assert "run_service_block valkey run_valkey_cases" in script
+    assert "scripts/bootstrap_gitlab_lab.py" in script
+    assert "scripts/seed_real_vendors.py harbor" in script
+    bootstrap = (ROOT / "scripts/bootstrap_gitlab_lab.py").read_text()
+    assert '"gitlab-rails", "runner", "/qa/seed.rb"' in bootstrap
+    assert "timeout=600" in bootstrap
+    assert "glrt-lab-token" not in script
+    registry_block = script.split("run_registry_cases() {", 1)[1].split("\n}", 1)[0]
+    assert "registry_harbor" not in registry_block
+    assert "registry_gitlab" not in registry_block
+
+
+def test_real_gitlab_golden_ignores_activity_clock_but_preserves_role() -> None:
+    verifier = _load_postrun_verifier()
+    left = {
+        "module": "gitlab",
+        "token_user": {
+            "username": "analyst",
+            "is_admin": False,
+            "last_activity_on": "2026-09-28",
+            "local_time": "15:00",
+        },
+    }
+    right = {
+        "module": "gitlab",
+        "token_user": {
+            "username": "analyst",
+            "is_admin": False,
+            "last_activity_on": "2026-10-01",
+            "local_time": "18:00",
+        },
+    }
+    assert verifier._normalize_for_golden(left) == verifier._normalize_for_golden(right)
+    right["token_user"]["is_admin"] = True
+    assert verifier._normalize_for_golden(left) != verifier._normalize_for_golden(right)
+
+
+def test_sequential_matrix_rejects_reused_artifact_directory(tmp_path: Path) -> None:
+    (tmp_path / "stale-checkpoint").write_text("old run", encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "run_lab_matrix_sequential.sh"), str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "matrix output directory is not empty" in result.stderr
+    assert (tmp_path / "stale-checkpoint").read_text(encoding="utf-8") == "old run"
+
+
+def test_extended_matrix_accounts_for_every_cli_option() -> None:
+    from scripts.matrix_flag_coverage import build_coverage_report
+
+    report = build_coverage_report(ROOT / "scripts" / "run_lab_matrix_sequential.sh")
+    assert report["missing_actions"] == {}
 
 
 def test_split_lab_compose_files_only_reference_paths_inside_current_checkout() -> None:
@@ -189,3 +263,74 @@ def test_runtime_partial_and_inconclusive_cases_have_current_json_expectations(
             }
         ]
     )
+
+
+def test_golden_normalization_preserves_fingerprints_and_ignores_lab_entropy() -> None:
+    verifier = _load_postrun_verifier()
+    rabbit_a = {"module": "rabbitmq", "cluster_id": "cluster-one", "is_rabbitmq": True}
+    rabbit_b = {"module": "rabbitmq", "cluster_id": "cluster-two", "is_rabbitmq": True}
+    assert verifier._normalize_for_golden(rabbit_a) == verifier._normalize_for_golden(rabbit_b)
+    rabbit_b["is_rabbitmq"] = False
+    assert verifier._normalize_for_golden(rabbit_a) != verifier._normalize_for_golden(rabbit_b)
+
+    for module, field in (
+        ("mongodb", "operation_results"),
+        ("clickhouse", "rows"),
+        ("elastic", "discover_findings"),
+    ):
+        left = {"module": module, field: [{"value": "alpha"}, {"value": "beta"}]}
+        right = {"module": module, field: list(reversed(left[field]))}
+        assert verifier._normalize_for_golden(left) == verifier._normalize_for_golden(right)
+
+
+def test_golden_comparison_re_normalizes_older_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    verifier = _load_postrun_verifier()
+    old = [{"module": "rabbitmq", "cluster_id": "old-cluster", "is_rabbitmq": True}]
+    (tmp_path / "rabbitmq_case.json").write_text(json.dumps(old), encoding="utf-8")
+    current = [{"module": "rabbitmq", "cluster_id": "new-cluster", "is_rabbitmq": True}]
+    normalized = verifier._normalize_for_golden(current, module="rabbitmq", label="rabbitmq_case")
+    monkeypatch.setattr(verifier, "_GOLDEN_DIR", tmp_path)
+    monkeypatch.setattr(verifier, "_golden_text_for_row", lambda _row: json.dumps(normalized, indent=2, sort_keys=True))
+
+    verifier._validate_golden_snapshots([{"module": "rabbitmq", "label": "rabbitmq_case", "exit_code": "0"}])
+
+
+def test_rabbitmq_golden_ignores_queue_depth_but_preserves_queue_metadata() -> None:
+    verifier = _load_postrun_verifier()
+    left = {
+        "module": "rabbitmq",
+        "enumeration": {
+            "queues": {
+                "items": [
+                    {
+                        "name": "work",
+                        "messages": 14,
+                        "messages_ready": 13,
+                        "messages_unacknowledged": 1,
+                        "consumers": 1,
+                        "durable": True,
+                    }
+                ]
+            }
+        },
+    }
+    right = {
+        "module": "rabbitmq",
+        "enumeration": {
+            "queues": {
+                "items": [
+                    {
+                        "name": "work",
+                        "messages": 13,
+                        "messages_ready": 0,
+                        "messages_unacknowledged": 13,
+                        "consumers": 0,
+                        "durable": True,
+                    }
+                ]
+            }
+        },
+    }
+    assert verifier._normalize_for_golden(left) == verifier._normalize_for_golden(right)
+    right["enumeration"]["queues"]["items"][0]["durable"] = False
+    assert verifier._normalize_for_golden(left) != verifier._normalize_for_golden(right)

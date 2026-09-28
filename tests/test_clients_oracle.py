@@ -106,6 +106,47 @@ def test_tns_packet_and_listener_dump_helpers() -> None:
         parse_tns_packet(b"\x00\x09\x00\x00\x06\x00\x00\x00")
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "(DESCRIPTION=(ERR=1194)(ERROR_STACK=(ERROR=(CODE=1194)(EMFI=4))))",
+        "TNS-01194: The listener command did not arrive in a secure transport",
+        "(ERROR_STACK=(ERROR=(CODE=1194)(EMFI=4)))",
+    ],
+)
+def test_real_ipc_only_listener_is_restricted_without_claiming_a_password(text: str) -> None:
+    result = parse_listener_dump({"ok": True, "text": text})
+    assert result["listener_restricted"] is True
+    assert result["listener_password_protected"] is False
+    assert result["summary"] == {"password_protected": False, "restricted": True}
+
+
+def test_similar_error_code_does_not_imply_secure_control_restriction() -> None:
+    assert parse_listener_dump({"ok": True, "text": "(ERR=11940)(CODE=11940)"})["listener_restricted"] is False
+
+
+def test_secure_control_wire_reply_is_classified_and_socket_closed(monkeypatch) -> None:
+    class Socket:
+        closed = False
+
+        def sendall(self, packet):
+            assert b"COMMAND=status" in packet
+
+        def close(self):
+            self.closed = True
+
+    sock = Socket()
+    monkeypatch.setattr("redposture_core.clients.oracle.socket.create_connection", lambda *a, **k: sock)
+    monkeypatch.setattr(
+        "redposture_core.clients.oracle._recv_tns_packets",
+        lambda *a, **k: [{"type": 4, "text": "(DESCRIPTION=(ERR=1194)(ERROR_STACK=(ERROR=(CODE=1194)(EMFI=4))))"}],
+    )
+    result = tns_listener_command("127.0.0.1", 31525, "status")
+    assert result["listener_restricted"] is True
+    assert result["listener_password_protected"] is False
+    assert sock.closed is True
+
+
 def test_tns_recv_and_listener_command_success_and_error(monkeypatch) -> None:
     class FakeSocket:
         def __init__(self, chunks: list[bytes]) -> None:
@@ -672,3 +713,33 @@ def test_close_quietly_suppresses_close_errors() -> None:
             raise RuntimeError("ignore")
 
     close_quietly(BadClose())
+
+
+@pytest.mark.parametrize("version", ["23.6.0.24.10", "23.26.3.0.0", "19.24.0.0.0"])
+def test_database_version_uses_authenticated_handshake_even_without_banner_permission(version: str) -> None:
+    class Connection:
+        def cursor(self):
+            raise RuntimeError("ORA-00942: table or view does not exist")
+
+    connection = Connection()
+    connection.version = version
+    assert OracleAuditClient(connection).server_banner() == {"banner": None, "version": version}
+
+
+@pytest.mark.parametrize("version", [None, "23ai", "23", "23.6", "23.6.0 junk", "TNSLSNR 23.0.0.0.0"])
+def test_database_version_does_not_infer_patch_from_incomplete_driver_metadata(version) -> None:
+    class Connection:
+        def cursor(self):
+            raise RuntimeError("view unavailable")
+
+    connection = Connection()
+    connection.version = version
+    assert OracleAuditClient(connection).server_banner()["version"] is None
+
+
+def test_database_banner_prefers_exact_patch_over_marketing_and_base_release() -> None:
+    class Connection:
+        def cursor(self):
+            return _Cursor([("Oracle Database 23ai Free Release 23.0.0.0.0\nVersion 23.6.0.24.10",)], ["BANNER_FULL"])
+
+    assert OracleAuditClient(Connection()).server_banner()["version"] == "23.6.0.24.10"

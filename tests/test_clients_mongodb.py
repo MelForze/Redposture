@@ -52,7 +52,7 @@ class _Db:
         if isinstance(command, dict):
             return {"ok": 1, "stats": command}
         assert command in {"hello", "isMaster"}
-        return {"ok": 1, "isWritablePrimary": True}
+        return {"ok": 1, "isWritablePrimary": True, "minWireVersion": 0, "maxWireVersion": 21}
 
     def list_collection_names(self):
         return ["demo_accounts"]
@@ -128,7 +128,13 @@ def test_mongo_audit_client_hello_normalizes_non_json_values() -> None:
         def __getitem__(self, name: str):
             class Db:
                 def command(self, command: str):
-                    return {"ok": 1, "isWritablePrimary": True, "topologyVersion": {"processId": ProcessId()}}
+                    return {
+                        "ok": 1,
+                        "isWritablePrimary": True,
+                        "minWireVersion": 0,
+                        "maxWireVersion": 21,
+                        "topologyVersion": {"processId": ProcessId()},
+                    }
 
             return Db()
 
@@ -260,7 +266,7 @@ def test_mongo_audit_client_fallbacks_and_close_quietly() -> None:
         def command(self, command):
             if command == "hello":
                 raise RuntimeError("no hello")
-            return {"ok": 1, "ismaster": True}
+            return {"ok": 1, "ismaster": True, "minWireVersion": 0, "maxWireVersion": 21}
 
         def __getitem__(self, name: str):
             return self.collection_cls()

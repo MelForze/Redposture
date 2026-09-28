@@ -74,6 +74,7 @@ def build_minio_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_close=lambda state: state.close(),
         render_module=render,
         colorize=render._render_colored_minio_line,
+        is_detected=lambda record: record.extra.get("is_minio") is True,
         credential_gate=_minio_credential_gate,
         skip_credentials_without_verifier=True,
         structured_output_redact_fields=("attempted_credentials", "credential_secret"),

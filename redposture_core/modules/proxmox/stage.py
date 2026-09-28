@@ -662,6 +662,7 @@ def build_proxmox_spec(args: Any) -> ModuleAuditSpec:
         credential_attempt_detail_fields=("auth_method",),
         render_module=render,
         colorize=render._render_colored_proxmox_line,
+        is_detected=lambda record: record.extra.get("is_proxmox") is True,
         keep_anonymous_open_no_auth=False,
     )
 

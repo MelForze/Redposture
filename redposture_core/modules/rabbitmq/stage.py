@@ -73,6 +73,7 @@ def build_rabbitmq_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_close=lambda state: state.close(),
         render=render.RabbitMQTextRenderer(debug=bool(getattr(args, "debug", False))),
         colorize=render._render_colored_rabbitmq_line,
+        is_detected=lambda record: record.extra.get("is_rabbitmq") is True,
         credential_gate=_credential_gate,
         deep_gate=_deep_gate,
         skip_credentials_without_verifier=True,

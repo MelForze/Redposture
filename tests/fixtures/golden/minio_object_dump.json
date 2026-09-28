@@ -33,6 +33,7 @@
     "detection_status": "confirmed",
     "host": "127.0.0.1",
     "identity_kind": "delegated_admin",
+    "is_minio": true,
     "module": "minio",
     "object_dumps": [
       {

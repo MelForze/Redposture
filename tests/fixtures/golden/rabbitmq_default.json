@@ -26,6 +26,7 @@
     "detection_status": "confirmed",
     "effective_username": "admin",
     "host": "localhost",
+    "is_rabbitmq": true,
     "module": "rabbitmq",
     "permissions": [],
     "permissions_status": "denied",

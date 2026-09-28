@@ -294,6 +294,7 @@ def test_default_runtime_does_not_add_attempt_history_after_late_success() -> No
         auth=auth,
         data=lambda _ctx, record: record,
         render=lambda record: [record.status],
+        is_detected=lambda record: record.extra.get("is_elastic") is True,
     )
     plan = AuditCommandPlan(
         targets_by_port={1234: ("127.0.0.1",)},

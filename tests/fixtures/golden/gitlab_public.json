@@ -21,102 +21,110 @@
       },
       {
         "status": 200
-      },
-      {
-        "status": 200
-      },
-      {
-        "status": 200
-      },
-      {
-        "status": 200
-      },
-      {
-        "status": 200
       }
     ],
     "port": 18080,
     "project_filters": [],
     "public_projects": [
       {
-        "archived": false,
+        "avatar_url": null,
+        "default_branch": "main",
+        "description": null,
+        "forks_count": 0,
         "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/public-api.git",
-        "id": 101,
-        "issues_enabled": true,
-        "merge_requests_enabled": true,
+        "id": 1,
+        "last_activity_at": "<ISO>",
+        "name_with_namespace": "redposture-lab / public-api",
+        "namespace": {
+          "avatar_url": null,
+          "full_path": "redposture-lab",
+          "id": 3,
+          "kind": "group",
+          "parent_id": null,
+          "web_url": "http://127.0.0.1:18080/groups/redposture-lab"
+        },
         "path_with_namespace": "redposture-lab/public-api",
-        "permissions": {
-          "group_access": {
-            "access_level": 40
-          },
-          "project_access": {
-            "access_level": 40
-          }
-        },
-        "snippets_enabled": true,
-        "visibility": "public",
-        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api",
-        "wiki_enabled": true
+        "readme_url": "http://127.0.0.1:18080/redposture-lab/public-api/-/blob/main/README.md",
+        "ssh_url_to_repo": "ssh://git@127.0.0.1:12222/redposture-lab/public-api.git",
+        "star_count": 0,
+        "tag_list": [],
+        "topics": [],
+        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api"
       },
       {
-        "archived": false,
-        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/ops-runbooks.git",
-        "id": 102,
-        "issues_enabled": false,
-        "merge_requests_enabled": false,
-        "path_with_namespace": "redposture-lab/ops-runbooks",
-        "permissions": {
-          "group_access": {
-            "access_level": 30
-          },
-          "project_access": {
-            "access_level": 30
-          }
-        },
-        "snippets_enabled": false,
-        "visibility": "public",
-        "web_url": "http://127.0.0.1:18080/redposture-lab/ops-runbooks",
-        "wiki_enabled": true
-      },
-      {
-        "archived": false,
-        "http_url_to_repo": "http://127.0.0.1:18080/team-observability/public-statuspage.git",
-        "id": 301,
-        "issues_enabled": false,
-        "merge_requests_enabled": true,
-        "path_with_namespace": "team-observability/public-statuspage",
-        "permissions": {
-          "group_access": {
-            "access_level": 20
-          },
-          "project_access": {
-            "access_level": 20
-          }
-        },
-        "snippets_enabled": false,
-        "visibility": "public",
-        "web_url": "http://127.0.0.1:18080/team-observability/public-statuspage",
-        "wiki_enabled": false
-      },
-      {
-        "archived": false,
+        "avatar_url": null,
+        "default_branch": "main",
+        "description": null,
+        "forks_count": 0,
         "http_url_to_repo": "http://127.0.0.1:18080/team-platform/ops-scripts.git",
-        "id": 302,
-        "issues_enabled": true,
-        "merge_requests_enabled": false,
-        "path_with_namespace": "team-platform/ops-scripts",
-        "permissions": {
-          "group_access": {
-            "access_level": 30
-          },
-          "project_access": {
-            "access_level": 30
-          }
+        "id": 2,
+        "last_activity_at": "<ISO>",
+        "name_with_namespace": "team-platform / ops-scripts",
+        "namespace": {
+          "avatar_url": null,
+          "full_path": "team-platform",
+          "id": 5,
+          "kind": "group",
+          "parent_id": null,
+          "web_url": "http://127.0.0.1:18080/groups/team-platform"
         },
-        "snippets_enabled": true,
-        "visibility": "public",
-        "web_url": "http://127.0.0.1:18080/team-platform/ops-scripts",
-        "wiki_enabled": false
+        "path_with_namespace": "team-platform/ops-scripts",
+        "readme_url": "http://127.0.0.1:18080/team-platform/ops-scripts/-/blob/main/README.md",
+        "ssh_url_to_repo": "ssh://git@127.0.0.1:12222/team-platform/ops-scripts.git",
+        "star_count": 0,
+        "tag_list": [],
+        "topics": [],
+        "web_url": "http://127.0.0.1:18080/team-platform/ops-scripts"
+      },
+      {
+        "avatar_url": null,
+        "default_branch": "main",
+        "description": null,
+        "forks_count": 0,
+        "http_url_to_repo": "http://127.0.0.1:18080/gitlab/project-api.git",
+        "id": 5,
+        "last_activity_at": "<ISO>",
+        "name_with_namespace": "gitlab / project-api",
+        "namespace": {
+          "avatar_url": null,
+          "full_path": "gitlab",
+          "id": 9,
+          "kind": "group",
+          "parent_id": null,
+          "web_url": "http://127.0.0.1:18080/groups/gitlab"
+        },
+        "path_with_namespace": "gitlab/project-api",
+        "readme_url": "http://127.0.0.1:18080/gitlab/project-api/-/blob/main/README.md",
+        "ssh_url_to_repo": "ssh://git@127.0.0.1:12222/gitlab/project-api.git",
+        "star_count": 0,
+        "tag_list": [],
+        "topics": [],
+        "web_url": "http://127.0.0.1:18080/gitlab/project-api"
+      },
+      {
+        "avatar_url": null,
+        "default_branch": "main",
+        "description": null,
+        "forks_count": 0,
+        "http_url_to_repo": "http://127.0.0.1:18080/team/ops-sidecar.git",
+        "id": 6,
+        "last_activity_at": "<ISO>",
+        "name_with_namespace": "team / ops-sidecar",
+        "namespace": {
+          "avatar_url": null,
+          "full_path": "team",
+          "id": 11,
+          "kind": "group",
+          "parent_id": null,
+          "web_url": "http://127.0.0.1:18080/groups/team"
+        },
+        "path_with_namespace": "team/ops-sidecar",
+        "readme_url": "http://127.0.0.1:18080/team/ops-sidecar/-/blob/main/README.md",
+        "ssh_url_to_repo": "ssh://git@127.0.0.1:12222/team/ops-sidecar.git",
+        "star_count": 0,
+        "tag_list": [],
+        "topics": [],
+        "web_url": "http://127.0.0.1:18080/team/ops-sidecar"
       }
     ],
     "public_projects_error": null,
@@ -157,6 +165,6 @@
     "token_provided": false,
     "token_user": null,
     "token_valid": null,
-    "version": "17.8.1"
+    "version": null
   }
 ]

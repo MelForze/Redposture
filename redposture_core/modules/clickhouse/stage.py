@@ -181,6 +181,7 @@ def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
         deep_gate=_deep_gate,
         render_module=render,
         colorize=render._render_colored_clickhouse_line,
+        is_detected=lambda record: record.extra.get("is_clickhouse") is True,
         # E3 opt-in: ClickHouse anon-open (default_user w/ empty password) is
         # already confirmed by the detect probe.
         keep_anonymous_open_no_auth=True,

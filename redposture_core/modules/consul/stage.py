@@ -145,6 +145,7 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_consul_line,
+        is_detected=lambda record: record.extra.get("is_consul") is True,
     )
 
 

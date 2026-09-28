@@ -71,6 +71,7 @@ def build_redis_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_close=actions.close_redis_lifecycle_state if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_redis_line,
+        is_detected=lambda record: record.extra.get("is_redis") is True,
         # E3 opt-in: Redis anon-open (no AUTH required) makes the defcreds
         # loop redundant — the audit already succeeded without credentials.
         keep_anonymous_open_no_auth=True,

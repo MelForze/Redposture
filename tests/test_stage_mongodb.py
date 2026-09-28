@@ -79,7 +79,13 @@ class _FakeDb:
         if isinstance(command, dict):
             return {"ok": 1, "database": self.name, "command": command}
         assert command in {"hello", "isMaster"}
-        return {"ok": 1, "isWritablePrimary": True, "version": "7.0.5"}
+        return {
+            "ok": 1,
+            "isWritablePrimary": True,
+            "minWireVersion": 0,
+            "maxWireVersion": 21,
+            "version": "7.0.5",
+        }
 
     def list_collection_names(self):
         self.raw._check_auth()

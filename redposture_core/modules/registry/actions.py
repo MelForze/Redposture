@@ -939,6 +939,11 @@ def _fetch_harbor_info(
     status, body, _resp_headers, error = _http_request(
         host, port, "GET", "/api/v2.0/systeminfo", timeout, headers=headers
     )
+    legacy = status == 404 and not error
+    if legacy:
+        status, body, _resp_headers, error = _http_request(
+            host, port, "GET", "/api/systeminfo", timeout, headers=headers
+        )
     if error:
         return None, error
     if status in (401, 403):
@@ -953,6 +958,17 @@ def _fetch_harbor_info(
         return None, "harbor systeminfo payload is invalid JSON"
     if not isinstance(payload, dict):
         return None, "harbor systeminfo payload is invalid"
+    version = str(payload.get("harbor_version") or "")
+    if not re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", version):
+        return None, "harbor systeminfo payload is invalid"
+    if legacy and (
+        not re.match(r"v?1\.", version)
+        or not isinstance(payload.get("auth_mode"), str)
+        or payload.get("auth_mode") not in {"db_auth", "ldap_auth", "oidc_auth"}
+        or not isinstance(payload.get("registry_url"), str)
+        or not payload["registry_url"].strip()
+    ):
+        return None, "not harbor"
     return payload, None
 
 
@@ -1009,14 +1025,15 @@ def _fetch_harbor_projects(
     timeout: float,
     *,
     headers: dict[str, str],
+    legacy: bool = False,
 ) -> tuple[list[str] | None, str | None]:
     payload, page_error = _fetch_harbor_pages(
         host,
         port,
-        "/api/v2.0/projects",
+        "/api/projects" if legacy else "/api/v2.0/projects",
         timeout,
         headers=headers,
-        page_size=200,
+        page_size=100,
     )
     if payload is None:
         if page_error and "payload is invalid" in page_error:
@@ -1039,10 +1056,33 @@ def _fetch_harbor_repositories(
     timeout: float,
     *,
     headers: dict[str, str],
+    legacy: bool = False,
 ) -> tuple[list[str] | None, str | None]:
     quoted_project = urllib.parse.quote(project, safe="")
     path = f"/api/v2.0/projects/{quoted_project}/repositories"
-    payload, page_error = _fetch_harbor_pages(host, port, path, timeout, headers=headers, page_size=200)
+    if legacy:
+        projects, error = _fetch_harbor_pages(
+            host,
+            port,
+            "/api/projects?" + urllib.parse.urlencode({"name": project}),
+            timeout,
+            headers=headers,
+            page_size=100,
+        )
+        if projects is None:
+            return None, error
+        identifiers = [
+            item.get("project_id")
+            for item in projects
+            if isinstance(item, dict)
+            and item.get("name") == project
+            and type(item.get("project_id")) is int
+            and item["project_id"] > 0
+        ]
+        if len(identifiers) != 1:
+            return None, "harbor project identifier is unavailable"
+        path = "/api/repositories?" + urllib.parse.urlencode({"project_id": identifiers[0]})
+    payload, page_error = _fetch_harbor_pages(host, port, path, timeout, headers=headers, page_size=100)
     if payload is None:
         return None, page_error
     repositories: list[str] = []
@@ -1063,10 +1103,14 @@ def _fetch_harbor_artifacts(
     timeout: float,
     *,
     headers: dict[str, str],
+    legacy: bool = False,
 ) -> tuple[list[str] | None, str | None]:
     quoted_project = urllib.parse.quote(project, safe="")
-    quoted_repo = urllib.parse.quote(repository, safe="")
+    relative = repository.removeprefix(project + "/")
+    quoted_repo = urllib.parse.quote(urllib.parse.quote(relative, safe=""), safe="")
     path = f"/api/v2.0/projects/{quoted_project}/repositories/{quoted_repo}/artifacts?with_tag=true"
+    if legacy:
+        path = f"/api/repositories/{urllib.parse.quote(repository, safe='')}/tags"
     payload, page_error = _fetch_harbor_pages(host, port, path, timeout, headers=headers, page_size=20)
     if payload is None:
         return None, page_error
@@ -1076,7 +1120,7 @@ def _fetch_harbor_artifacts(
         if not isinstance(item, dict):
             continue
         digest = str(item.get("digest") or "").strip()
-        tags_raw = item.get("tags")
+        tags_raw = [{"name": item.get("name")}] if legacy else item.get("tags")
         tags: list[str] = []
         if isinstance(tags_raw, list):
             for tag_item in tags_raw:
@@ -1119,24 +1163,24 @@ def _fetch_gitlab_info(
     headers: dict[str, str],
     deep: bool,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    scheme, params = _parse_www_authenticate(www_authenticate)
-    realm = str(params.get("realm") or "").strip()
-    service = str(params.get("service") or "").strip()
-    scope = str(params.get("scope") or "").strip()
-
-    marker_raw = " ".join([scheme, realm, service, scope]).lower()
-    header_is_gitlab = service == "container_registry" or "/jwt/auth" in realm.lower() or "gitlab" in marker_raw
-    if not header_is_gitlab:
+    info = _gitlab_registry_challenge_info({"www-authenticate": www_authenticate})
+    if info is None:
         # Fallback for flows where /v2/ returns 200 and omits WWW-Authenticate.
         probe_path = "/jwt/auth?service=container_registry&scope=registry:catalog:*"
         status, body, _probe_headers, error = _http_request(host, port, "GET", probe_path, timeout, headers=headers)
         if error:
             return None, error
-        if status == 404:
+        if status != 200:
             return None, "not gitlab"
-        if status not in {200, 401, 403}:
+        try:
+            payload = _json_loads_bytes(body)
+        except json.JSONDecodeError:
             return None, "not gitlab"
-
+        if not isinstance(payload, dict):
+            return None, "not gitlab"
+        token = str(payload.get("token") or payload.get("access_token") or "").strip()
+        if not token:
+            return None, "not gitlab"
         fallback_info: dict[str, Any] = {
             "scheme": "bearer",
             "realm": f"http://{host}:{port}/jwt/auth",
@@ -1144,44 +1188,21 @@ def _fetch_gitlab_info(
             "scope": "registry:catalog:*",
             "detected_by": "jwt_auth_probe",
         }
-        if not deep:
-            return fallback_info, None
-
-        fallback_info["token_probe_http_status"] = status
-        if status in {401, 403}:
-            fallback_info["token_probe_status"] = "authentication required"
-            return fallback_info, None
-
-        try:
-            payload = _json_loads_bytes(body)
-        except json.JSONDecodeError:
-            fallback_info["token_probe_status"] = "failed"
-            fallback_info["token_probe_error"] = "realm returned invalid JSON"
-            return fallback_info, None
-
-        if isinstance(payload, dict):
-            fallback_info["token_probe_status"] = "ok"
-            token = str(payload.get("token") or payload.get("access_token") or "").strip()
-            fallback_info["token_received"] = bool(token)
+        if deep:
+            fallback_info.update(
+                {"token_probe_http_status": status, "token_probe_status": "ok", "token_received": True}
+            )
             if "expires_in" in payload:
                 fallback_info["token_expires_in"] = payload.get("expires_in")
             if "issued_at" in payload:
                 fallback_info["token_issued_at"] = payload.get("issued_at")
             if "scope" in payload and payload.get("scope"):
                 fallback_info["token_scope"] = payload.get("scope")
-            return fallback_info, None
-
-        fallback_info["token_probe_status"] = "failed"
-        fallback_info["token_probe_error"] = "realm JSON payload is invalid"
         return fallback_info, None
 
-    info: dict[str, Any] = {
-        "scheme": scheme,
-        "realm": realm or None,
-        "service": service or None,
-        "scope": scope or None,
-        "detected_by": "www_authenticate",
-    }
+    realm = str(info.get("realm") or "")
+    service = str(info.get("service") or "")
+    scope = str(info.get("scope") or "")
 
     if not deep or not realm:
         return info, None
@@ -1241,6 +1262,78 @@ def _fetch_gitlab_info(
     return info, None
 
 
+def _enrich_registry_gitlab_version(info: dict[str, Any], timeout: float, api_token: str | None) -> None:
+    """Read the actual GitLab API release at its confirmed JWT issuer origin."""
+    if not api_token:
+        return
+    parsed = urllib.parse.urlsplit(str(info.get("realm") or ""))
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.path.endswith("/jwt/auth"):
+        return
+    path = parsed.path.removesuffix("/jwt/auth") + "/api/v4/version"
+    url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+    status, body, _headers, error = _http_request_url(url, "GET", timeout, headers={"PRIVATE-TOKEN": api_token})
+    if error or status != 200:
+        return
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return
+    from ..gitlab.actions import _detect_version_payload
+
+    version = _detect_version_payload(payload)
+    if version is not None:
+        info["version"] = version
+
+
+def _nexus_release_version(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"(\d{1,6}\.\d{1,6}\.\d{1,6})(?:-\d{1,6})?", value.strip(), re.ASCII)
+    return match.group(1) if match else None
+
+
+def _nexus_status_info(response_headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    normalized_headers = {str(key).lower(): value for key, value in response_headers.items()}
+    server = str(normalized_headers.get("server") or "").strip()
+    server_match = re.fullmatch(
+        r"(?:Sonatype\s+)?Nexus(?:\s+Repository(?:\s+Manager)?)?"
+        r"(?:/(?P<version>[\w.+-]+))?(?:\s+\((?:OSS|PRO|Professional|Community)\))?",
+        server,
+        re.IGNORECASE | re.ASCII,
+    )
+    scheme, challenge = _parse_www_authenticate(str(normalized_headers.get("www-authenticate") or ""))
+    realm = str(challenge.get("realm") or "").strip().lower()
+    product_names = {
+        "nexus repository",
+        "nexus repository manager",
+        "sonatype nexus repository",
+        "sonatype nexus repository manager",
+    }
+    challenge_matches = scheme == "basic" and realm in product_names
+    body_versions = [value for key in ("version", "release") if _nexus_release_version(value := payload.get(key))]
+    body_matches = bool(body_versions) and any(
+        isinstance(payload.get(key), str) and payload[key].strip().lower() in product_names
+        for key in ("product", "productName", "applicationName")
+    )
+    if server_match is None and not challenge_matches and not body_matches:
+        return None
+    info = dict(payload)
+    header_version = server_match.group("version") if server_match else None
+    candidates = [value for value in (header_version, *body_versions) if _nexus_release_version(value)]
+    releases = {_nexus_release_version(value) for value in candidates}
+    if len(releases) == 1:
+        info["version"] = releases.pop()
+        info["raw_version"] = candidates[0]
+        info["version_source"] = "server_header" if header_version in candidates else "status_body"
+    else:
+        # A missing, malformed or conflicting release is never guessed from a banner.
+        info.pop("version", None)
+        info.pop("release", None)
+        if len(releases) > 1:
+            info["version_error"] = "conflicting Nexus version evidence"
+    return info
+
+
 def _fetch_nexus_info(
     host: str,
     port: int,
@@ -1248,27 +1341,28 @@ def _fetch_nexus_info(
     *,
     headers: dict[str, str],
 ) -> tuple[dict[str, Any] | None, str | None]:
-    status, body, _resp_headers, error = _http_request(
+    status, body, resp_headers, error = _http_request(
         host, port, "GET", "/service/rest/v1/status", timeout, headers=headers
     )
     if error:
         return None, error
-    if status in (401, 403):
-        return None, "authentication required"
     if status == 404:
         return None, "not nexus"
-    if status != 200:
+    if status not in (200, 401, 403):
         return None, f"/service/rest/v1/status returned status {status}"
-    if not body.strip():
-        # Newer Nexus versions can return 200 with an empty body on this endpoint.
-        return {}, None
-    try:
-        payload = _json_loads_bytes(body)
-    except json.JSONDecodeError:
-        return None, "nexus status payload is invalid JSON"
-    if not isinstance(payload, dict):
-        return None, "nexus status payload is invalid"
-    return payload, None
+    payload: dict[str, Any] = {}
+    if body.strip() and status == 200:
+        try:
+            decoded = _json_loads_bytes(body)
+        except json.JSONDecodeError:
+            return None, "nexus status payload is invalid JSON"
+        if not isinstance(decoded, dict):
+            return None, "nexus status payload is invalid"
+        payload = decoded
+    info = _nexus_status_info(resp_headers, payload)
+    if info is None:
+        return None, "not nexus"
+    return info, "authentication required" if status in (401, 403) else None
 
 
 def _fetch_nexus_repositories(
@@ -1647,6 +1741,39 @@ def _registry_probe_state(probe: _RegistryProbe) -> tuple[bool, str, bool | None
     return True, "unknown_auth", None
 
 
+def _gitlab_registry_challenge_info(headers: Mapping[str, str]) -> dict[str, Any] | None:
+    """Recognize GitLab's auth challenge without requiring registry access."""
+    scheme, params = _parse_www_authenticate(str(headers.get("www-authenticate") or ""))
+    realm = str(params.get("realm") or "").strip()
+    service = str(params.get("service") or "").strip()
+    parsed = urllib.parse.urlsplit(realm)
+    if (
+        scheme != "bearer"
+        or service.lower() != "container_registry"
+        or parsed.scheme not in {"http", "https"}
+        or parsed.path.rstrip("/") != "/jwt/auth"
+    ):
+        return None
+    return {
+        "scheme": scheme,
+        "realm": realm,
+        "service": service,
+        "scope": str(params.get("scope") or "").strip() or None,
+        "detected_by": "www_authenticate",
+    }
+
+
+def _has_harbor_registry_challenge(headers: Mapping[str, str]) -> bool:
+    scheme, params = _parse_www_authenticate(str(headers.get("www-authenticate") or ""))
+    realm = urllib.parse.urlsplit(str(params.get("realm") or ""))
+    return (
+        scheme == "bearer"
+        and str(params.get("service") or "").strip().lower() == "harbor-registry"
+        and realm.scheme in {"http", "https"}
+        and realm.path.rstrip("/") == "/service/token"
+    )
+
+
 def _registry_error_is_retryable(value: Any) -> bool:
     text = str(value or "").strip().lower()
     return bool(text) and any(
@@ -1710,16 +1837,16 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
             headers={},
         )
         state.anonymous_nexus = (nexus_info, nexus_error)
-        if nexus_info is not None:
-            is_registry = True
-            is_nexus = True
-            status = "open_no_auth"
-            auth_required = False
-        elif nexus_error == "authentication required":
+        if nexus_error == "authentication required":
             is_registry = True
             is_nexus = True
             status = "auth_required"
             auth_required = True
+        elif nexus_info is not None:
+            is_registry = True
+            is_nexus = True
+            status = "open_no_auth"
+            auth_required = False
     payload = _registry_lifecycle_payload(
         ctx,
         options,
@@ -1730,6 +1857,21 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
         probe_status=probe[0] or None,
         error=probe[3] if status == "fail" else nexus_error if status == "not_registry" else None,
     )
+    if is_registry:
+        gitlab_info = _gitlab_registry_challenge_info(probe[2])
+        if gitlab_info is not None:
+            payload["is_gitlab"] = True
+            payload["gitlab_info"] = gitlab_info
+        if _has_harbor_registry_challenge(probe[2]):
+            harbor_info, harbor_error = _fetch_harbor_info(
+                str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), headers={}
+            )
+            version = str((harbor_info or {}).get("harbor_version") or "").strip()
+            if re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", version):
+                payload["is_harbor"] = True
+                payload["harbor_info"] = harbor_info
+            elif harbor_error:
+                payload["harbor_error"] = harbor_error
     payload["nexus_info"] = nexus_info
     stage_result = status if status in {"fail", "not_registry"} else "ok"
     return _registry_append_lifecycle_stage(
@@ -1781,15 +1923,19 @@ def authenticate_registry(ctx: Any, detect_record: Any, options: Mapping[str, An
                 float(getattr(ctx.args, "timeout", 5.0)),
                 headers=headers,
             )
-            if nexus_result[0] is not None:
+            if nexus_result[0] is not None and nexus_result[1] is None:
                 break
             if not _registry_error_is_retryable(nexus_result[1]) or attempt >= attempts - 1:
                 transient_exhausted = _registry_error_is_retryable(nexus_result[1])
                 break
             time.sleep(_retry_delay(attempt))
         state.credential_nexus[key] = nexus_result
-        ok = nexus_result[0] is not None
-        anonymous_ok = state.anonymous_nexus is not None and state.anonymous_nexus[0] is not None
+        ok = nexus_result[0] is not None and nexus_result[1] is None
+        anonymous_ok = (
+            state.anonymous_nexus is not None
+            and state.anonymous_nexus[0] is not None
+            and (state.anonymous_nexus[1] is None)
+        )
         error = nexus_result[1]
         definitive_rejection = error == "authentication required"
         probe_status = payload.get("probe_status")
@@ -1929,6 +2075,7 @@ def collect_registry_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> 
             initial_probe=probe,
             initial_nexus=nexus_result,
             anonymous_probe_status=state.anonymous_probe[0] if state.anonymous_probe is not None else None,
+            anonymous_probe_headers=state.anonymous_probe[2] if state.anonymous_probe is not None else None,
         )
         retry_errors = (
             result.get("error"),
@@ -1944,6 +2091,15 @@ def collect_registry_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> 
         time.sleep(_retry_delay(attempt))
     deep_status = str(result.get("status") or "fail")
     deep_error = str(result.get("error") or "").strip() or None
+    if (
+        bool(getattr(ctx.args, "enum_cve", False))
+        and result.get("is_gitlab") is True
+        and prior.get("provided_credentials_ok") is True
+        and isinstance(result.get("gitlab_info"), dict)
+    ):
+        _enrich_registry_gitlab_version(
+            result["gitlab_info"], float(getattr(ctx.args, "timeout", 5.0)), password or token
+        )
     result["data_transport_attempts"] = data_attempts
     if deep_status == "fail" and bool(prior.get("is_registry")):
         result["is_registry"] = True
@@ -2014,6 +2170,7 @@ def _audit_registry_host_core(
     initial_probe: _RegistryProbe | None = None,
     initial_nexus: tuple[dict[str, Any] | None, str | None] | None = None,
     anonymous_probe_status: int | None = None,
+    anonymous_probe_headers: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -2045,6 +2202,11 @@ def _audit_registry_host_core(
             unauthorized_body = "unauthorized" in body_text or "authentication required" in body_text
             is_registry = _registry_probe_has_fingerprint(status, body, resp_headers)
             www_authenticate = str(resp_headers.get("www-authenticate") or "")
+            if not www_authenticate and anonymous_probe_headers:
+                # Successful Registry authentication removes the challenge. Its
+                # confirmed vendor evidence still belongs to this lifecycle.
+                if _gitlab_registry_challenge_info(anonymous_probe_headers) is not None:
+                    www_authenticate = str(anonymous_probe_headers.get("www-authenticate") or "")
 
             gitlab_info, gitlab_error = _fetch_gitlab_info(
                 host,
@@ -2090,7 +2252,7 @@ def _audit_registry_host_core(
             nexus_repositories: list[str] | None = None
             nexus_repository_details: list[dict[str, Any]] | None = None
             nexus_assets_list: list[dict[str, Any]] | None = None
-            if nexus and is_nexus is True:
+            if nexus and is_nexus is True and nexus_error != "authentication required":
                 nexus_repository_details, nexus_error_repositories = _fetch_nexus_repository_records(
                     host,
                     port,
@@ -2208,11 +2370,16 @@ def _audit_registry_host_core(
 
             if nexus_detected_service and not is_registry:
                 auth_required = False
-                nexus_anonymous = not (provided_credentials or token_provided)
+                nexus_anonymous = not (provided_credentials or token_provided) and nexus_error is None
                 if not nexus_anonymous:
-                    anonymous_info, _anonymous_error = _fetch_nexus_info(host, port, timeout, headers={})
-                    nexus_anonymous = anonymous_info is not None
-                state = "open_no_auth" if nexus_anonymous else "valid_credentials"
+                    anonymous_info, anonymous_error = _fetch_nexus_info(host, port, timeout, headers={})
+                    nexus_anonymous = anonymous_info is not None and anonymous_error is None
+                auth_required = not nexus_anonymous
+                state = (
+                    "auth_required"
+                    if nexus_error == "authentication required"
+                    else ("open_no_auth" if nexus_anonymous else "valid_credentials")
+                )
             else:
                 auth_required = status == 401 or (status == 403 and unauthorized_body)
                 anon_probe_status: int | None = None
@@ -2327,8 +2494,11 @@ def _audit_registry_host_core(
 
             # Deep Harbor parsing is enabled only with --harbor.
             if harbor and is_harbor is True:
+                legacy_options = (
+                    {"legacy": True} if re.match(r"v?1\.", str((harbor_info or {}).get("harbor_version") or "")) else {}
+                )
                 harbor_projects, harbor_error_projects = _fetch_harbor_projects(
-                    host, port, timeout, headers=auth_headers
+                    host, port, timeout, headers=auth_headers, **legacy_options
                 )
                 if harbor_error_projects and harbor_error is None:
                     harbor_error = harbor_error_projects
@@ -2343,6 +2513,7 @@ def _audit_registry_host_core(
                         project_name,
                         timeout,
                         headers=auth_headers,
+                        **legacy_options,
                     )
                     if project_error and harbor_error is None:
                         harbor_error = project_error
@@ -2355,6 +2526,7 @@ def _audit_registry_host_core(
                             repo_name,
                             timeout,
                             headers=auth_headers,
+                            **legacy_options,
                         )
                         if artifacts_error and harbor_error is None:
                             harbor_error = artifacts_error
@@ -3068,7 +3240,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     elif record.get("is_harbor") is True:
         service_label = "Harbor Registry (Docker Registry v2)"
     elif record.get("is_nexus") is True:
-        service_label = "Nexus Docker Registry (Docker Registry v2)"
+        service_label = "Nexus Repository"
     return f"{_nxc_prefix(record)} [*] {service_label} (auth required:{auth_required_text})"
 
 

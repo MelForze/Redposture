@@ -111,6 +111,7 @@ def build_grafana_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_grafana_line,
+        is_detected=lambda record: record.extra.get("is_grafana") is True,
         credential_gate=_grafana_credential_gate,
         skip_credentials_without_verifier=True,
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),

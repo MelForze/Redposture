@@ -172,6 +172,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         "host": ctx.host,
         "port": ctx.port,
         "service": "rabbitmq",
+        "is_rabbitmq": confirmed,
         "status": "detected" if confirmed else "probable" if ui else "fail" if response.error else "not_service",
         "detection_status": detection,
         "detection": evidence,

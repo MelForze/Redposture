@@ -158,6 +158,7 @@
     },
     "discover_requested": true,
     "host": "127.0.0.1",
+    "is_airflow": true,
     "module": "airflow",
     "port": 18080,
     "provided_credentials_ok": true,

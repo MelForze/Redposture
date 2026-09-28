@@ -599,6 +599,7 @@ def build_postgres_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_factory=_postgres_lifecycle_state_factory,
         render_module=render,
         colorize=render._render_colored_postgres_line,
+        is_detected=lambda record: record.extra.get("is_postgres") is True,
         keep_anonymous_open_no_auth=True,
         credential_gate=_postgres_credential_gate,
         fallback_to_anonymous_detect_record=True,

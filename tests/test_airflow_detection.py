@@ -34,7 +34,16 @@ def test_detect_confirmed_v2_captures_version_and_generation():
 
 
 def test_detect_confirmed_v1_when_v2_absent():
-    c = _FakeClient({"/api/v2/version": (404, b""), "/api/v1/version": (200, b'{"version":"2.9.3"}')})
+    c = _FakeClient(
+        {
+            "/api/v2/version": (404, b""),
+            "/api/v1/version": (200, b'{"version":"2.9.3"}'),
+            "/api/v1/health": (
+                200,
+                b'{"metadatabase":{"status":"healthy"},"scheduler":{"status":"healthy"}}',
+            ),
+        }
+    )
     d = actions.detect_airflow(c)
     assert d.status == "confirmed"
     assert d.api_generation == "v1"
@@ -46,7 +55,10 @@ def test_detect_probable_from_health_when_version_gated():
         {
             "/api/v2/version": (403, b""),
             "/api/v1/version": (403, b""),
-            "/api/v2/monitor/health": (200, b'{"metadatabase":{"status":"healthy"},"scheduler":{}}'),
+            "/api/v2/monitor/health": (
+                200,
+                b'{"metadatabase":{"status":"healthy"},"scheduler":{"status":"healthy"}}',
+            ),
         }
     )
     d = actions.detect_airflow(c)

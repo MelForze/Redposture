@@ -15,10 +15,23 @@ mkdir -p "${ARTIFACT_DIR}"
 command -v docker >/dev/null
 docker compose version >/dev/null
 
+echo "== service fixture fidelity =="
+"${PYTHON_BIN}" lab/services/coverage.py "${ARTIFACT_DIR}/service-coverage"
+
 echo "== deterministic suite =="
-"${PYTHON_BIN}" -m pytest -q
+"${PYTHON_BIN}" -m pytest -q --junitxml="${ARTIFACT_DIR}/deterministic.xml"
 "${PYTHON_BIN}" scripts/run_mutation_smoke.py
 REDPOSTURE_CLI_PARAM_FUZZ=1 "${PYTHON_BIN}" -m pytest tests/test_cli_param_fuzz.py -q
+
+echo "== 10000-example deterministic property fuzzing =="
+REDPOSTURE_HYPOTHESIS_PROFILE=redposture-local "${PYTHON_BIN}" -m pytest \
+  tests/test_detection_cve_hypothesis.py tests/test_registry_nexus_detection.py \
+  --hypothesis-seed=20260928 -q --junitxml="${ARTIFACT_DIR}/hypothesis.xml"
+echo "== local output, load, SIGINT and FD/thread soak =="
+"${PYTHON_BIN}" -m pytest -q -m local_output_audit \
+  tests/test_local_output_audit.py tests/test_concurrency_stress.py \
+  tests/test_sigint_runtime.py tests/test_soak_qa.py \
+  --junitxml="${ARTIFACT_DIR}/local-output-load.xml"
 
 echo "== focused real-service matrices =="
 PYTHON="${PYTHON_BIN}" ./scripts/run_minio_kubeapi_lab.sh
@@ -32,4 +45,8 @@ echo "== complete Docker service matrix =="
 REDPOSTURE_MATRIX_PROFILE=extended PYTHON_BIN="${PYTHON_BIN}" \
   ./scripts/run_lab_matrix_sequential.sh "${ARTIFACT_DIR}/service-matrix"
 
-echo "full local QA passed; artifacts: ${ARTIFACT_DIR}"
+echo "== optional real-product fixtures =="
+"${PYTHON_BIN}" lab/services/run_optional_real_qa.py "${ARTIFACT_DIR}/optional-real" proxmox-real
+
+echo "full local QA matrix passed; inspect optional-real/report.json for unavailable vendor fixtures"
+echo "artifacts: ${ARTIFACT_DIR}"

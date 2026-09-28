@@ -460,7 +460,7 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "oracle_privesc_check": ("privesc_findings", "DBA/SYSDBA"),
     "oracle_nne_check": ("nne_check", "tcp_available"),
     "oracle_listener_dump": ("listener_dump", "services_ok"),
-    "oracle_listener_protected": ("Listener Dump", "password_protected=True"),
+    "oracle_listener_protected": ("Listener Dump", "restricted=True"),
     "oracle_external_table_rce": ("exec_result", "external-table", "ext-rce-ok"),
     "oracle_dbms_cloud_capability": ("DBMS_CLOUD",),
     "oracle_privesc_chain_execute": ("privesc_chain_executed", "scheduler_rce"),
@@ -2012,6 +2012,12 @@ _ACTION_NONEMPTY_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 _ACTION_LIST_CONTAINS: dict[str, dict[str, tuple[object, ...]]] = {
+    "registry_gitlab": {
+        "images": ("gitlab/project-api:latest", "team/ops-sidecar:latest"),
+    },
+    "registry_harbor": {
+        "harbor_repositories": ("core/control-plane", "security/scanner-adapter"),
+    },
     "grafana_ssrf_edge": {
         "check_urls": ("http://grafana-2:3000/api/health",),
     },
@@ -2150,6 +2156,11 @@ def _validate_action_contracts(rows: list[dict[str, str]]) -> None:
         if row["exit_code"] != "0":
             continue
         label = row["label"]
+        if label in {"registry_gitlab", "registry_harbor"}:
+            vendor = "is_gitlab" if label == "registry_gitlab" else "is_harbor"
+            for record in _iter_audit_records_for_row(row):
+                if record.get(vendor) is not True or record.get("provided_credentials_ok") is not True:
+                    raise SystemExit(f"real vendor contract for '{label}' failed: identity or credentials not verified")
         expected_values = _ACTION_EXPECTED_VALUES.get(label)
         nonempty_fields = _ACTION_NONEMPTY_FIELDS.get(label, ())
         list_contains = _ACTION_LIST_CONTAINS.get(label, {})
@@ -2735,6 +2746,8 @@ _GOLDEN_VOLATILE_FIELDS = frozenset(
         "token_expires_at",
         "expires_at",
         "created_at",
+        "first_seen",  # discovery observation time in the seeded lab
+        "last_seen",
         "last_login",
         "last_rotated",
         "started_at",
@@ -2756,6 +2769,11 @@ _GOLDEN_VOLATILE_FIELDS = frozenset(
 # the audit contract. Keep this narrow: typed/status assertions above still validate
 # these records before golden comparison.
 _GOLDEN_MODULE_VOLATILE_FIELDS: dict[str, frozenset[str]] = {
+    "rabbitmq": frozenset(
+        {
+            "cluster_id",  # generated afresh when the lab cluster is recreated
+        }
+    ),
     "keeper": frozenset(
         {
             "connections",
@@ -2824,6 +2842,26 @@ _GOLDEN_LABEL_VOLATILE_FIELDS: dict[str, frozenset[str]] = {
 }
 # Volatile fields limited to a specific nested result collection.
 _GOLDEN_CONTEXT_VOLATILE_FIELDS: dict[tuple[str, str], frozenset[str]] = {
+    ("gitlab", "token_user"): frozenset(
+        {"last_activity_on", "local_time", "current_sign_in_at", "last_sign_in_at", "confirmed_at"}
+    ),
+    ("rabbitmq", "items"): frozenset(
+        {
+            # Queue depth changes as earlier matrix cases publish/consume messages.
+            # Keep the other queue metadata in the golden.
+            "messages",
+            "messages_ready",
+            "messages_unacknowledged",
+            "consumers",  # live consumer connections can close between cases
+        }
+    ),
+    ("clickhouse", "inventory"): frozenset(
+        {
+            "partitions",  # relative-date seed changes partition IDs and part sizes
+            "total_bytes",  # compressed physical size of those parts
+            "total_rows",  # changing seed partition sizes across lab boots
+        }
+    ),
     ("elastic", "cluster_nodes"): frozenset(
         {
             "host",  # Docker network address
@@ -2851,6 +2889,11 @@ _GOLDEN_PATH_NOISE = re.compile(r"/tmp/[a-z_]+_matrix[_a-z0-9-]*")
 # ISO 8601 timestamps embedded in string values (e.g. "issued 2026-06-17T15:55:40Z").
 _GOLDEN_ISO_NOISE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?")
 _MONGODB_UNORDERED_LIST_FIELDS = frozenset({"database_names", "collections", "documents", "indexes"})
+_GOLDEN_UNORDERED_LIST_FIELDS_BY_MODULE: dict[str, frozenset[str]] = {
+    "clickhouse": frozenset({"rows"}),  # table dumps without ORDER BY
+    "elastic": frozenset({"discover_findings"}),  # discovery concurrency changes arrival order
+    "mongodb": _MONGODB_UNORDERED_LIST_FIELDS | {"operation_results"},
+}
 
 
 def _normalize_string_value(value: str, *, out_dir: Path | None = None) -> str:
@@ -2939,7 +2982,7 @@ def _normalize_for_golden(
             )
             for item in payload
         ]
-        if module == "mongodb" and parent_key in _MONGODB_UNORDERED_LIST_FIELDS:
+        if parent_key in _GOLDEN_UNORDERED_LIST_FIELDS_BY_MODULE.get(module or "", frozenset()):
             return sorted(
                 normalized,
                 key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
@@ -3017,6 +3060,11 @@ def _validate_golden_snapshots(rows: list[dict[str, str]], *, update: bool = Fal
         except json.JSONDecodeError:
             previous_payload = None
         if isinstance(previous_payload, list) and all(isinstance(item, dict) for item in previous_payload):
+            previous_payload = _normalize_for_golden(
+                previous_payload,
+                module=row["module"],
+                label=row["label"],
+            )
             previous = json.dumps(
                 _canonicalize_golden_records(previous_payload),
                 ensure_ascii=False,

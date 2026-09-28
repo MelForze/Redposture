@@ -18,7 +18,10 @@ def test_real_cve_matrix_has_vulnerable_and_fixed_vendor_versions() -> None:
     for case in cases:
         by_module.setdefault(case.module, []).append(case)
         assert f":{case.version}" in compose
-    assert set(by_module) == {"redis", "grafana"}
+    assert set(by_module) == {"redis", "grafana", "postgres"}
     for module_cases in by_module.values():
-        assert {case.affected for case in module_cases} == {False, True}
-        assert len({case.cve for case in module_cases}) == 1
+        for cve in {case.cve for case in module_cases}:
+            boundary_cases = [case for case in module_cases if case.cve == cve]
+            assert {case.affected for case in boundary_cases} == {False, True}, cve
+            assert len({case.version for case in boundary_cases}) >= 2, cve
+    assert all(case.username and case.password for case in by_module["postgres"])

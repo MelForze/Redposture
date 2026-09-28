@@ -400,6 +400,10 @@ def test_product_resolvers_distinguish_compatible_products() -> None:
         "registry",
         {"is_harbor": True, "harbor_info": {"harbor_version": "v2.10.0"}},
     )[0] == DetectedProduct("harbor", "Harbor", "v2.10.0")
+    assert resolve_products(
+        "registry",
+        {"is_harbor": True, "harbor_info": {"harbor_version": "v2.11.1-6b7ecba1"}},
+    )[0] == DetectedProduct("harbor", "Harbor", "v2.11.1")
 
 
 @pytest.mark.parametrize(
@@ -745,7 +749,7 @@ def test_debug_reports_unknown_version_without_normal_txt_noise() -> None:
     AuditCommandRunner(args=args, spec=spec, emit_line=emitted.append).run_plan(
         AuditCommandPlan(targets_by_port={3000: ("host",)}, output_format="txt")
     )
-    assert emitted == ["service", "GRAFANA\thost\t3000\t [*] CVE's Enumeration"]
+    assert emitted == ["service"]
     assert any("status=version_unknown" in line for line in debug)
 
 
@@ -844,3 +848,26 @@ def test_catalog_rejects_high_privilege_entries(monkeypatch: pytest.MonkeyPatch,
     with pytest.raises(CveCatalogError, match="exactly one of PR:N or PR:L"):
         cve.load_catalog()
     cve.load_catalog.cache_clear()
+
+
+@pytest.mark.parametrize("version", ["2023-03-20T20:16:18Z", "RELEASE.2023-03-20T20-16-18Z", "2023-03-20t20-16-18z"])
+def test_minio_admin_iso_timestamp_keeps_time_and_excludes_fixed_release(version: str) -> None:
+    assert normalize_version(version, "minio_release") == (2023, 3, 20, 20, 16, 18)
+    assert version_in_range(version, {"fixed": "RELEASE.2023-03-20T20-16-18Z", "scheme": "minio_release"}) is False
+    assert version_in_range("2023-03-20T20:16:17Z", {"fixed": version, "scheme": "minio_release"}) is True
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "2023-03-20",
+        "2023-03-20T20:16",
+        "2023-02-29T20:16:18Z",
+        "2023-03-20T24:16:18Z",
+        "2023-03-20T20:60:18Z",
+        "junk RELEASE.2023-03-20T20-16-18Z",
+        "RELEASE.2023-03-20T20-16-18Z junk",
+    ],
+)
+def test_minio_cve_version_requires_complete_valid_release_timestamp(version: str) -> None:
+    assert normalize_version(version, "minio_release") is None

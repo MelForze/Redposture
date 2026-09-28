@@ -240,6 +240,7 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_close=actions.close_elastic_lifecycle_state if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_elastic_line,
+        is_detected=lambda record: record.extra.get("is_elastic") is True,
         suppress_undetected_records_in_text=True,
         credential_gate=_elastic_credential_gate,
         record_all_credential_attempts=True,

@@ -118,6 +118,45 @@ MUTATIONS = (
             "tests/test_discovery_rendering.py::test_discovery_section_keeps_title_white_and_colors_status_and_findings",
         ),
     ),
+    Mutation(
+        name="MinIO accepts an embedded release inside an arbitrary banner",
+        source="redposture_core/cve.py",
+        original="match = _MINIO_RELEASE_RE.fullmatch(value.strip())",
+        replacement="match = _MINIO_RELEASE_RE.search(value.strip())",
+        tests=("tests/test_cve.py::test_minio_cve_version_requires_complete_valid_release_timestamp",),
+    ),
+    Mutation(
+        name="MinIO discards release seconds when comparing CVE boundaries",
+        source="redposture_core/cve.py",
+        original="    return parts\n",
+        replacement="    return (*parts[:3], 0, 0, 0)\n",
+        tests=("tests/test_cve.py::test_minio_admin_iso_timestamp_keeps_time_and_excludes_fixed_release",),
+    ),
+    Mutation(
+        name="Oracle loses the authenticated exact Database version",
+        source="redposture_core/clients/oracle.py",
+        original='driver_version = getattr(self.connection, "version", None)',
+        replacement="driver_version = None",
+        tests=(
+            "tests/test_clients_oracle.py::test_database_version_uses_authenticated_handshake_even_without_banner_permission",
+        ),
+    ),
+    Mutation(
+        name="GitLab tries private version retrieval only after token rejection",
+        source="redposture_core/modules/gitlab/actions.py",
+        original='if state.token_valid is True and bool(getattr(ctx.args, "enum_cve", False)) and not record.get("version"):',
+        replacement='if state.token_valid is False and bool(getattr(ctx.args, "enum_cve", False)) and not record.get("version"):',
+        tests=("tests/test_gitlab_version_cve.py",),
+    ),
+    Mutation(
+        name="Airflow treats a foreign service as confirmed",
+        source="redposture_core/modules/airflow/stage.py",
+        original='is_detected=lambda record: record.extra.get("is_airflow") is True,',
+        replacement="is_detected=lambda record: True,",
+        tests=(
+            "tests/test_network_fingerprint_matrix.py::test_actual_detector_rejects_other_products_over_the_network[airflow-grafana]",
+        ),
+    ),
 )
 
 
@@ -157,7 +196,9 @@ def run_mutation(mutation: Mutation) -> tuple[bool, str]:
             check=False,
         )
         output = (completed.stdout + completed.stderr).strip()
-        return completed.returncode != 0, output
+        # Collection/import/configuration failures are broken QA, not a killed
+        # mutation. A kill requires an actual failed assertion/test (pytest 1).
+        return completed.returncode == 1 and "FAILED " in output and "FAILURES" in output, output
 
 
 def main() -> int:

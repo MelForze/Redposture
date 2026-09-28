@@ -627,6 +627,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
     record: dict[str, Any] = {
         "host": str(ctx.host),
         "port": int(ctx.port),
+        "is_minio": detection.status in {"confirmed", "console"},
         "status": status_word,
         "detection_status": detection.status,
         "api_endpoint": detection.api_endpoint,

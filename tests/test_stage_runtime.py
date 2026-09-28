@@ -1045,6 +1045,7 @@ def test_audit_command_runner_requires_typed_hook_records() -> None:
             extra={"legacy": "kept"},
         ),
         render=lambda record: [f"{record.host}:{record.port} {record.status}"],
+        is_detected=lambda record: record.status == "open_no_auth",
     )
 
     plan = AuditCommandPlan(targets_by_port={6379: ("127.0.0.1",)}, output_format="txt")
@@ -1711,6 +1712,7 @@ def test_audit_command_runner_run_plan_uses_one_typed_path_for_multi_port_target
         default_port=6379,
         detect=detect,
         render=lambda record: [f"{record.host}:{record.port}"],
+        is_detected=lambda record: record.status == "open_no_auth",
     )
     plan = AuditCommandPlan(targets_by_port={6379: ("a",), 6380: ("b",)}, output_format="txt")
 

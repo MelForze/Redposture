@@ -18,5 +18,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker compose --project-name "$PROJECT" --file "$COMPOSE_FILE" up --detach
+for image in $(docker compose --project-name "$PROJECT" --file "$COMPOSE_FILE" config --images | sort -u); do
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    continue
+  fi
+  pulled=0
+  for attempt in 1 2 3; do
+    echo "[pull] ${image} (attempt ${attempt}/3)"
+    if docker pull --quiet "$image"; then
+      pulled=1
+      break
+    fi
+    sleep $((attempt * 5))
+  done
+  if [ "$pulled" -ne 1 ]; then
+    echo "[error] could not pull ${image} after three attempts" >&2
+    exit 1
+  fi
+done
+
+docker compose --project-name "$PROJECT" --file "$COMPOSE_FILE" up --detach --wait --wait-timeout 240
 "$PYTHON_BIN" "$ROOT_DIR/scripts/verify_real_cve_matrix.py"

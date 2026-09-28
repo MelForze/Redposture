@@ -1560,6 +1560,17 @@ def authenticate_gitlab(ctx: Any, detect_record: Any, options: dict[str, Any]) -
             "token_projects_error": state.token_error if not state.token_valid else None,
         }
     )
+    if state.token_valid is True and bool(getattr(ctx.args, "enum_cve", False)) and not record.get("version"):
+        version_status, version_payload, _headers, version_error = _api_get_json(
+            str(ctx.host),
+            int(ctx.port),
+            "/api/v4/version",
+            float(getattr(ctx.args, "timeout", 5.0)),
+            use_https=bool(record.get("https")),
+            token=token,
+        )
+        if version_error is None and version_status == 200:
+            record["version"] = _detect_version_payload(version_payload)
     return record
 
 
