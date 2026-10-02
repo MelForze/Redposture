@@ -127,6 +127,7 @@ def build_registry_spec(args: Any, *, product: str = "registry") -> ModuleAuditS
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render if product == "registry" else product_render,
+        defer_detect_output_until_auth=product == "nexus",
         structured_output_redact_fields=("provided_password",),
         colorize=(render if product == "registry" else product_render)._render_colored_registry_line,
         is_detected=lambda record: (

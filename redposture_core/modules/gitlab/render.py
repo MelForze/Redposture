@@ -35,8 +35,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     line = f"{_nxc_prefix(record)} [*] GitLab (auth required:{auth})"
     if auth == "sso" and record.get("sso_provider"):
         line += f" (provider:{record['sso_provider']})"
-    if record.get("version"):
-        line += f" (version:{record['version']})"
+    line += f" (version:{record.get('version') or 'unknown'})"
     return line
 
 
@@ -111,7 +110,10 @@ def _render_colored_gitlab_line(console: Console, line: str) -> bool:
             CountColorRule(name, "true_red", unknown_color="orange", zero_color="bright_green")
             for name in ("images", "projects", "endpoints", "repositories", "tags")
         ),
-        extra_spans=lambda marker, payload: [(0, len(payload), "orange")] if marker == "[!]" else [],
+        extra_spans=lambda marker, payload: (
+            ([(0, len(payload), "orange")] if marker == "[!]" else [])
+            + oci_render._registry_marker_value_spans(marker, payload)
+        ),
     ):
         return True
     if "\t" in line:
@@ -119,7 +121,7 @@ def _render_colored_gitlab_line(console: Console, line: str) -> bool:
             console,
             line,
             tag="GITLAB",
-            default_color="white",
+            default_color="orange",
             resource_counts=("images", "projects", "endpoints", "repositories", "tags"),
         )
     return False

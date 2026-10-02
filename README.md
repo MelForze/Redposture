@@ -188,6 +188,10 @@ GitLab, Harbor, Nexus and Docker Registry share the Airflow-style TXT layout:
 one product line, then verified credentials and requested inventory sections
 with item counts. Terminal colors distinguish access and nonzero counts; `-o`
 keeps four tab-separated fields without ANSI escapes. JSON fields are unchanged.
+Inventory values are orange in the terminal. The product version stays on the
+service line; `version:unknown` means the endpoint did not disclose a server
+version. In particular, the OCI `registry/2.0` header identifies the API
+protocol, not the Docker Registry server release.
 
 ### Grafana
 

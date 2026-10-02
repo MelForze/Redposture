@@ -2109,6 +2109,9 @@ def authenticate_registry(ctx: Any, detect_record: Any, options: Mapping[str, An
                     float(getattr(ctx.args, "timeout", 5.0)),
                     headers=headers,
                 )
+                authenticated_info, _authenticated_error = state.credential_nexus[key]
+                if authenticated_info is not None:
+                    payload["nexus_info"] = authenticated_info
         status = "valid_credentials" if verified is True else "auth_required" if verified is False else "unknown_auth"
         payload.update(
             {

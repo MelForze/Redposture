@@ -110,6 +110,7 @@ def _status_service(
     headers: dict[str, str],
     *,
     accept_credentials: bool = False,
+    authenticated_headers: dict[str, str] | None = None,
 ) -> Iterator[tuple[int, list[tuple[str, str, str | None]]]]:
     requests: list[tuple[str, str, str | None]] = []
     valid_auth = "Basic " + base64.b64encode(b"observer:correct").decode()
@@ -123,6 +124,7 @@ def _status_service(
                 code, response, extra = status, body, headers
                 if accept_credentials and auth == valid_auth:
                     code, response = 200, b""
+                    extra = authenticated_headers if authenticated_headers is not None else headers
             elif self.path == "/service/rest/v1/repositories":
                 code, response = 200, b"[]"
             elif self.path == "/service/rest/v1/security/users":
@@ -238,3 +240,18 @@ def test_nexus_basic_realm_confirms_product_but_does_not_invent_version() -> Non
     assert record["is_nexus"] is True and record["auth_required"] is True
     assert record["cve_enumeration"]["status"] == "version_unknown"
     assert not any("CVE's Enumeration" in line for line in lines)
+
+
+def test_nexus_version_revealed_after_auth_stays_on_single_service_line() -> None:
+    with _status_service(
+        401,
+        b"Unauthorized",
+        {"WWW-Authenticate": 'Basic realm="Sonatype Nexus Repository Manager"'},
+        accept_credentials=True,
+        authenticated_headers={"Server": "Nexus/3.72.0-04 (OSS)"},
+    ) as (port, _requests):
+        lines = _audit(port, "-u", "observer", "-p", "correct")
+    service_lines = [line for line in lines if "[*] Nexus Repository (auth required:" in line]
+    assert len(service_lines) == 1
+    assert service_lines[0].endswith("(version:3.72.0)")
+    assert lines.index(service_lines[0]) < next(i for i, line in enumerate(lines) if "[+] observer:correct" in line)

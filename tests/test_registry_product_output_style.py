@@ -13,7 +13,7 @@ from redposture_core.stage_runtime import render_record_with_module
 @pytest.mark.parametrize(
     ("product", "flag", "name", "version_info", "version"),
     [
-        ("docker-registry", None, "Docker Registry", {}, None),
+        ("docker-registry", None, "Docker Registry", {}, "unknown"),
         ("harbor", "is_harbor", "Harbor", {"harbor_info": {"harbor_version": "v2.11.1"}}, "v2.11.1"),
         ("nexus", "is_nexus", "Nexus Repository", {"nexus_info": {"version": "3.72.0"}}, "3.72.0"),
     ],
@@ -35,8 +35,7 @@ def test_product_service_line_has_airflow_style_and_no_duplicate_presence(
         payload[flag] = True
     lines = render_record_with_module(spec.render_module, AuditRecord.from_mapping(payload, module=product), "txt")
     expected = f"{product.upper()}\thost\t5000\t [*] {name} (auth required:True)"
-    if version:
-        expected += f" (version:{version})"
+    expected += f" (version:{version})"
     assert lines[0] == expected
     assert len([line for line in lines if "detected" in line.lower()]) == 0
     assert all(len(line.split("\t", 3)) == 4 for line in lines)
@@ -62,7 +61,7 @@ def test_product_inventory_is_counted_and_auth_block_does_not_show_empty_section
         "harbor_repositories": ["core/control-plane"],
     }
     lines = render_record_with_module(spec.render_module, AuditRecord.from_mapping(payload, module="harbor"), "txt")
-    assert lines[0].endswith("[*] Harbor (auth required:True)")
+    assert lines[0].endswith("[*] Harbor (auth required:True) (version:unknown)")
     assert lines[1].endswith("[+] admin:Harbor12345")
     assert any("[*] Images Enumeration (images:1)" in line for line in lines)
     assert any("[*] Harbor Projects Enumeration (projects:1)" in line for line in lines)
@@ -75,7 +74,7 @@ def test_product_inventory_is_counted_and_auth_block_does_not_show_empty_section
     blocked_lines = render_record_with_module(
         spec.render_module, AuditRecord.from_mapping(blocked, module="harbor"), "txt"
     )
-    assert blocked_lines == ["HARBOR\thost\t5000\t [*] Harbor (auth required:True)"]
+    assert blocked_lines == ["HARBOR\thost\t5000\t [*] Harbor (auth required:True) (version:unknown)"]
 
 
 def test_registry_detection_and_credential_stages_do_not_claim_empty_inventory() -> None:
@@ -101,7 +100,7 @@ def test_registry_detection_and_credential_stages_do_not_claim_empty_inventory()
         AuditRecord.from_mapping({**base, "status": "auth_required"}, module="docker-registry"),
         "txt",
     )
-    assert detected == ["DOCKER-REGISTRY\thost\t5000\t [*] Docker Registry (auth required:True)"]
+    assert detected == ["DOCKER-REGISTRY\thost\t5000\t [*] Docker Registry (auth required:True) (version:unknown)"]
     authenticated = render_record_with_module(
         spec.render_module,
         AuditRecord.from_mapping(
@@ -111,7 +110,7 @@ def test_registry_detection_and_credential_stages_do_not_claim_empty_inventory()
         "txt",
     )
     assert authenticated == [
-        "DOCKER-REGISTRY\thost\t5000\t [*] Docker Registry (auth required:True)",
+        "DOCKER-REGISTRY\thost\t5000\t [*] Docker Registry (auth required:True) (version:unknown)",
         "DOCKER-REGISTRY\thost\t5000\t [+] registry:registry",
     ]
 
@@ -195,7 +194,7 @@ def test_gitlab_registry_only_has_one_service_line() -> None:
         },
     }
     lines = render_record_with_module(gitlab_render, AuditRecord.from_mapping(payload, module="gitlab"), "txt")
-    assert lines == ["GITLAB\thost\t5050\t [*] GitLab Container Registry (auth required:True)"]
+    assert lines == ["GITLAB\thost\t5050\t [*] GitLab Container Registry (auth required:True) (version:unknown)"]
 
 
 def test_gitlab_credential_stage_does_not_emit_empty_web_or_oci_inventory() -> None:
@@ -249,7 +248,7 @@ def test_gitlab_credential_stage_does_not_emit_empty_web_or_oci_inventory() -> N
     )
     registry_lines = render_record_with_module(spec.render_module, registry_record, "txt")
     assert registry_lines == [
-        "GITLAB\thost\t5050\t [*] GitLab Container Registry (auth required:True)",
+        "GITLAB\thost\t5050\t [*] GitLab Container Registry (auth required:True) (version:unknown)",
         "GITLAB\thost\t5050\t [+] root:secret",
     ]
 
@@ -268,7 +267,7 @@ def test_gitlab_definitively_rejected_pair_has_one_negative_line() -> None:
     }
     lines = render_record_with_module(gitlab_render, AuditRecord.from_mapping(payload, module="gitlab"), "txt")
     assert lines == [
-        "GITLAB\thost\t8080\t [*] GitLab (auth required:True)",
+        "GITLAB\thost\t8080\t [*] GitLab (auth required:True) (version:unknown)",
         "GITLAB\thost\t8080\t [-] root:wrong",
     ]
 
@@ -305,6 +304,82 @@ def test_product_output_color_follows_airflow_rules(product: str) -> None:
     console.paint_calls.clear()
     assert spec.colorize(console, f"{tag}\thost\t5000\t [*] Images Enumeration (images:0)")
     assert ("images:0", "bright_green") in console.paint_calls
+
+
+@pytest.mark.parametrize("product", ("docker-registry", "harbor", "nexus", "gitlab"))
+@pytest.mark.parametrize("value", ("redposture/demo-api:latest", "DB_PASSWORD=postgres"))
+def test_product_inventory_values_are_orange_in_terminal(product: str, value: str) -> None:
+    args = parse_args([product, "-t", "http://host:5000"])
+    spec = (
+        gitlab_stage.build_gitlab_spec(args)
+        if product == "gitlab"
+        else registry_stage.build_registry_spec(args, product=product)
+    )
+    console = _RecordingConsole()
+    assert spec.colorize is not None
+    assert spec.colorize(console, f"{product.upper()}\thost\t5000\t {value}")
+    assert (f" {value}", "orange") in console.paint_calls
+    assert ("\thost\t5000", "white") in console.paint_calls
+
+
+@pytest.mark.parametrize("product", ("docker-registry", "harbor", "nexus", "gitlab"))
+@pytest.mark.parametrize(
+    ("payload", "value"),
+    [
+        ("[*] Tags Enumeration redposture/demo-api (tags:3)", "redposture/demo-api"),
+        ("[*] Metadata redposture/demo-api:latest", "redposture/demo-api:latest"),
+        ("[*] Inspect redposture/demo-api:latest (layers:1)", "redposture/demo-api:latest"),
+        ("[+] Download complete path=/tmp/image size=1.5KB", "/tmp/image"),
+    ],
+)
+def test_product_section_references_are_orange_but_headings_remain_white(
+    product: str, payload: str, value: str
+) -> None:
+    args = parse_args([product, "-t", "http://host:5000"])
+    spec = (
+        gitlab_stage.build_gitlab_spec(args)
+        if product == "gitlab"
+        else registry_stage.build_registry_spec(args, product=product)
+    )
+    console = _RecordingConsole()
+    assert spec.colorize is not None
+    assert spec.colorize(console, f"{product.upper()}\thost\t5000\t {payload}")
+    assert (value, "orange") in console.paint_calls
+    assert any(
+        color == "white" and any(name in text for name in ("Enumeration", "Metadata", "Inspect", "Download complete"))
+        for text, color in console.paint_calls
+    )
+
+
+def test_gitlab_web_unknown_version_is_on_service_line_only() -> None:
+    record = AuditRecord.from_mapping(
+        {"host": "host", "port": 8080, "is_gitlab": True, "status": "valid_credentials", "auth_required": True},
+        module="gitlab",
+    )
+    lines = render_record_with_module(gitlab_render, record, "txt")
+    assert lines == ["GITLAB\thost\t8080\t [*] GitLab (auth required:True) (version:unknown)"]
+
+
+def test_registry_protocol_version_is_not_mistaken_for_server_version() -> None:
+    spec = registry_stage.build_registry_spec(
+        parse_args(["docker-registry", "-t", "http://host:5000"]), product="docker-registry"
+    )
+    record = AuditRecord.from_mapping(
+        {
+            "host": "host",
+            "port": 5000,
+            "is_registry": True,
+            "status": "valid_credentials",
+            "auth_required": True,
+            "registry_api_version": "registry/2.0",
+            "provided_username": "registry",
+            "provided_password": "registry",
+        },
+        module="docker-registry",
+    )
+    lines = render_record_with_module(spec.render_module, record, "txt")
+    assert lines[0].endswith("Docker Registry (auth required:True) (version:unknown)")
+    assert not any("(version:2.0)" in line for line in lines)
 
 
 def test_product_renderers_leave_json_payloads_unchanged() -> None:

@@ -6,6 +6,7 @@ the presentation of confirmed products; collection and JSON stay unchanged.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ...auth_detection import auth_required_text
@@ -59,9 +60,10 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     product = _product(record)
     auth = auth_required_text(record.get("auth_required"), record.get("auth_method"))
     line = f"{_prefix(record)} [*] {_NAMES[product]} (auth required:{auth})"
-    version = _version(record, product)
-    if version:
-        line += f" (version:{version})"
+    # The OCI /v2/ response identifies the protocol, not the server build.
+    # Keep the version in this service line, and be explicit when the vendor
+    # does not expose a product version through a read-only endpoint.
+    line += f" (version:{_version(record, product) or 'unknown'})"
     return line
 
 
@@ -91,6 +93,14 @@ _COUNTED_SECTIONS = {
     "Nexus Repositories Enumeration": ("nexus_repositories", "repositories"),
     "Nexus Assets Enumeration": ("nexus_assets", "assets"),
 }
+
+
+def _registry_marker_value_spans(marker: str, payload: str) -> list[tuple[int, int, str]]:
+    if marker not in {"[*]", "[+]"}:
+        return []
+    pattern = r"^(?:Tags Enumeration|Metadata|Inspect) (\S+)" if marker == "[*]" else r"^Download complete path=(\S+)"
+    match = re.match(pattern, payload)
+    return [(match.start(1), match.end(1), "orange")] if match else []
 
 
 def _format_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -172,7 +182,8 @@ def _render_colored_registry_line(console: Console, line: str) -> bool:
             for name in ("images", "projects", "repositories", "artifacts", "assets", "tags", "layers", "components")
         ),
         extra_spans=lambda marker, payload: (
-            [(0, len(payload), "orange")] if marker == "[!]" and not payload.startswith("CVE's Enumeration") else []
+            ([(0, len(payload), "orange")] if marker == "[!]" and not payload.startswith("CVE's Enumeration") else [])
+            + _registry_marker_value_spans(marker, payload)
         ),
     ):
         return True
@@ -181,7 +192,7 @@ def _render_colored_registry_line(console: Console, line: str) -> bool:
             console,
             line,
             tag=tag,
-            default_color="white",
+            default_color="orange",
             resource_counts=(
                 "images",
                 "projects",
