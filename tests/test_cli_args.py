@@ -23,12 +23,36 @@ from redposture_core.cli_args import (
     build_parser,
     parse_args,
 )
+from redposture_core.module_registry import COMMAND_SPECS
 
 
 def test_parse_args_without_args_shows_help_and_exits_cleanly() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args([])
     assert exc.value.code == 0
+
+
+def test_root_help_groups_every_command_by_function_with_one_module_per_line() -> None:
+    help_text = build_parser().format_help()
+    assert "MODULE ..." in help_text.splitlines()[0]
+    assert "{" not in help_text.splitlines()[0]
+    assert "Examples:" not in help_text
+    headers = (
+        "  Protocol & callback checks\n",
+        "  Management & permissions\n",
+        "  Data & secrets\n",
+        "  Images & packages\n",
+    )
+    positions = [help_text.index(header) for header in headers]
+    assert positions == sorted(positions)
+    command_lines = [line for line in help_text.splitlines() if line.startswith("    ")]
+    names = [line.split()[0] for line in command_lines]
+    expected = {"exporters", *(spec.name for spec in COMMAND_SPECS)}
+    assert len(names) == len(set(names)) == len(expected)
+    assert set(names) == expected
+    assert names[:5] == ["exporters", "grpc", "kafka", "keeper", "zookeeper"]
+    assert all(len(line.split(maxsplit=1)) == 2 for line in command_lines)
+    assert "--selfcert" in help_text
 
 
 def test_cli_scalar_type_helpers_reject_invalid_values() -> None:

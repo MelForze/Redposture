@@ -53,6 +53,31 @@ class _NoColorArgumentParser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
 
+class _RootArgumentParser(_NoColorArgumentParser):
+    def format_help(self) -> str:
+        lines = [
+            f"usage: {self.prog} [-h] [--version] MODULE ...",
+            "",
+            "Audit services and exporter workflows.",
+            f"Run {self.prog} MODULE -h for module options.",
+            "",
+            "Commands:",
+        ]
+        for title, commands in _ROOT_HELP_GROUPS:
+            lines.append(f"  {title}")
+            lines.extend(f"    {name:<18} {purpose}" for name, purpose in commands)
+            lines.append("")
+        lines.extend(
+            (
+                "Global options:",
+                "  -h, --help           show this help and exit",
+                "  --version            show version and exit",
+                "  --selfcert           create local TLS certificate and key",
+            )
+        )
+        return "\n".join(lines) + "\n"
+
+
 def _package_version() -> str:
     # Prefer version from local source tree when running from repository checkout.
     local_version = _local_package_version()
@@ -523,16 +548,57 @@ def _build_selfcert_option_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = _NoColorArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description=(
-            "Security toolkit for module-focused auditing (exporters, docker-registry, harbor, nexus, grafana, proxmox, gitlab, "
-            "consul, kubeapi, postgres, mongodb, docker, oracle, clickhouse, redis, etcd, qdrant, elastic, kafka, "
-            "zookeeper, keeper, grpc). "
-            "Use '<module> -h' for grouped flags by topic."
+_ROOT_HELP_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Protocol & callback checks",
+        (
+            ("exporters", "scan, collect, trigger"),
+            ("grpc", "auth, reflection, health"),
+            ("kafka", "broker auth and topics"),
+            ("keeper", "quorum and znodes"),
+            ("zookeeper", "auth and znodes"),
         ),
-    )
+    ),
+    (
+        "Management & permissions",
+        (
+            ("airflow", "DAG access, credentials, logs"),
+            ("consul", "KV, services, agent access"),
+            ("docker", "Engine API and containers"),
+            ("etcd", "KV access and auth"),
+            ("gitlab", "projects, tokens, registry"),
+            ("grafana", "login and datasources"),
+            ("kubeapi", "namespaces and workloads"),
+            ("proxmox", "nodes, VMs, storage"),
+            ("rabbitmq", "users, queues, permissions"),
+        ),
+    ),
+    (
+        "Data & secrets",
+        (
+            ("clickhouse", "databases, tables, secrets"),
+            ("elastic", "indices, documents, secrets"),
+            ("minio", "buckets, objects, secrets"),
+            ("mongodb", "databases and documents"),
+            ("oracle", "listener, schemas, roles"),
+            ("postgres", "roles, databases, privileges"),
+            ("qdrant", "collections and snapshots"),
+            ("redis", "ACL and keys"),
+        ),
+    ),
+    (
+        "Images & packages",
+        (
+            ("docker-registry", "images and tags"),
+            ("harbor", "projects and artifacts"),
+            ("nexus", "repositories and components"),
+        ),
+    ),
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _RootArgumentParser(usage="%(prog)s [-h] [--version] MODULE ...")
     parser.add_argument("--version", action="version", version=f"%(prog)s {_package_version()}")
     parser.set_defaults(_port_option_provided=False)
     subparsers = parser.add_subparsers(dest="command", parser_class=_NoColorArgumentParser)
