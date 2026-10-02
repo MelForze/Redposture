@@ -26,7 +26,7 @@ from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, 
 
 def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
     catalog = load_catalog()
-    assert catalog.version == "2026-09-20"
+    assert catalog.version == "2026-10-03"
     assert catalog.entries
     keys: set[tuple[str, str]] = set()
     for entry in catalog.entries:
@@ -37,7 +37,10 @@ def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
         assert entry["score"] >= 7.0
         vector_parts = entry["vector"].split("/")
         assert all(metric in vector_parts for metric in ("AV:N", "UI:N"))
-        assert entry["privileges_required"] in {"N", "L"}
+        assert entry["privileges_required"] in {"N", "L", "H"}
+        if entry["privileges_required"] == "H":
+            assert entry["id"] in {"CVE-2026-77124", "CVE-2026-10748"}
+            assert entry["required_permission"]
         assert f"PR:{entry['privileges_required']}" in vector_parts
         assert entry["impact"] in {
             "rce",
@@ -47,6 +50,7 @@ def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
             "file_read",
             "file_write",
             "ssrf",
+            "data_disclosure",
         }
         assert entry["affected"]
         assert all(str(ref).startswith("https://") for ref in entry["references"])
@@ -57,7 +61,7 @@ def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
 
 def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
     counts = Counter(entry["product"] for entry in load_catalog().entries)
-    assert len(load_catalog().entries) == 186
+    assert len(load_catalog().entries) == 197
     assert counts == {
         "apache_airflow": 11,
         "apache_zookeeper": 2,
@@ -66,24 +70,26 @@ def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
         "elasticsearch": 6,
         "etcd": 1,
         "gitlab": 72,
-        "grafana": 10,
+        "grafana": 11,
+        "grafana_enterprise": 1,
+        "grafana_image_renderer": 1,
         "harbor": 2,
         "hashicorp_consul": 1,
         "kubernetes": 1,
-        "minio": 4,
-        "mongodb": 6,
-        "nexus_repository": 5,
+        "minio": 5,
+        "mongodb": 7,
+        "nexus_repository": 10,
         "opensearch": 1,
         "oracle_database": 2,
-        "postgresql": 22,
+        "postgresql": 23,
         "proxmox_ve": 1,
         "qdrant": 5,
         "rabbitmq": 4,
         "redis": 23,
         "valkey": 3,
     }
-    assert Counter(entry["impact"] for entry in load_catalog().entries)["ssrf"] == 31
-    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 88, "L": 98}
+    assert Counter(entry["impact"] for entry in load_catalog().entries)["ssrf"] == 32
+    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 94, "L": 101, "H": 2}
 
 
 @pytest.mark.parametrize(
@@ -845,7 +851,7 @@ def test_catalog_rejects_high_privilege_entries(monkeypatch: pytest.MonkeyPatch,
     )
     cve.load_catalog.cache_clear()
     monkeypatch.setattr(cve, "_catalog_path", lambda: path)
-    with pytest.raises(CveCatalogError, match="exactly one of PR:N or PR:L"):
+    with pytest.raises(CveCatalogError, match="unsupported privilege requirement"):
         cve.load_catalog()
     cve.load_catalog.cache_clear()
 

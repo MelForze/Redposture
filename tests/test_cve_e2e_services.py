@@ -18,7 +18,7 @@ from redposture_core.stage_runtime import AuditCommandRunner
 
 
 @contextmanager
-def _http_service(kind: str, version: str) -> Iterator[int]:
+def _http_service(kind: str, version: str, *, renderer_version: str | None = None) -> Iterator[int]:
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -37,6 +37,11 @@ def _http_service(kind: str, version: str) -> Iterator[int]:
                 elif self.path == "/api/datasources":
                     status = 200
                     body = b"[]"
+                elif self.path == "/api/plugins" and renderer_version is not None:
+                    status = 200
+                    body = json.dumps(
+                        [{"id": "grafana-image-renderer", "info": {"version": renderer_version}}]
+                    ).encode()
             elif kind == "nexus":
                 headers["Server"] = f"Nexus/{version} (OSS)"
                 if self.path == "/service/rest/v1/status":
@@ -45,6 +50,14 @@ def _http_service(kind: str, version: str) -> Iterator[int]:
                 elif self.path.startswith("/service/rest/v1/repositories"):
                     status = 200
                     body = b"[]"
+            elif kind == "nexus2":
+                if self.path == "/service/local/status":
+                    status = 200
+                    headers = {"Content-Type": "application/xml"}
+                    body = (
+                        "<status><data><appName>Sonatype Nexus Professional</appName>"
+                        f"<version>{version}</version><state>STARTED</state></data></status>"
+                    ).encode()
             elif kind == "airflow":
                 if self.path == "/api/v2/version":
                     status = 404
@@ -226,6 +239,27 @@ def test_nexus_live_fingerprint_and_version_feed_cve_enumeration() -> None:
     assert record["nexus_info"]["version"] == "3.68.0"
     findings = {item["id"]: item for item in record["cve_enumeration"]["findings"]}
     assert findings["CVE-2024-4956"]["product"] == "nexus_repository"
+
+
+def test_nexus_2_live_fingerprint_feeds_legacy_cves() -> None:
+    with _http_service("nexus2", "2.15.2") as port:
+        record = _audit_json("nexus", port)
+
+    assert record["is_nexus"] is True
+    assert record["nexus_info"]["version"] == "2.15.2"
+    findings = {item["id"] for item in record["cve_enumeration"]["findings"]}
+    assert "CVE-2025-9868" in findings
+    assert "CVE-2020-13933" not in findings
+
+
+@pytest.mark.parametrize(("renderer_version", "affected"), [("4.0.16", True), ("4.0.17", False)])
+def test_grafana_renderer_live_plugin_version_controls_cve(renderer_version: str, affected: bool) -> None:
+    with _http_service("grafana", "12.0.0", renderer_version=renderer_version) as port:
+        record = _audit_json("grafana", port)
+
+    assert record["renderer_plugin_version"] == renderer_version
+    findings = {item["id"] for item in record["cve_enumeration"]["findings"]}
+    assert ("CVE-2025-11539" in findings) is affected
 
 
 @pytest.mark.parametrize(

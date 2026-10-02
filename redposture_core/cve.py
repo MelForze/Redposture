@@ -59,6 +59,7 @@ _ALLOWED_IMPACTS = {
     "file_read",
     "file_write",
     "ssrf",
+    "data_disclosure",
 }
 _VERSION_TOKEN_RE = re.compile(r"^(?:v)?(\d+(?:[._]\d+){1,5})(.*)$", re.IGNORECASE)
 _MINIO_RELEASE_RE = re.compile(
@@ -76,6 +77,7 @@ _IGNORED_VERSION_SUFFIX_RE = re.compile(
 class _ParsedVersion:
     numbers: tuple[int, ...]
     prerelease: tuple[int, int] | None = None
+    security_revision: int = 0
 
 
 def _catalog_path() -> Any:
@@ -95,7 +97,7 @@ def _validate_range(item: Any, cve_id: str) -> dict[str, Any]:
     if not any(item.get(key) is not None for key in ("introduced", "fixed", "last_affected")):
         raise CveCatalogError(f"{cve_id}: affected range has no boundary")
     scheme = str(item.get("scheme") or "numeric").strip().lower()
-    if scheme not in {"numeric", "minio_release", "oracle"}:
+    if scheme not in {"numeric", "minio_release", "oracle", "grafana_security"}:
         raise CveCatalogError(f"{cve_id}: unsupported version scheme {scheme!r}")
     if item.get("fixed") is not None and item.get("last_affected") is not None:
         raise CveCatalogError(f"{cve_id}: affected range cannot contain both fixed and last_affected")
@@ -180,8 +182,14 @@ def _validate_entry(raw: Any, seen: set[tuple[str, str]]) -> dict[str, Any]:
     if not all(metric in vector_parts for metric in _VECTOR_REQUIRED):
         raise CveCatalogError(f"{cve_id}: vector must contain AV:N and UI:N")
     privilege_metrics = [part for part in vector_parts if part.startswith("PR:")]
-    if len(privilege_metrics) != 1 or privilege_metrics[0].removeprefix("PR:") not in _ALLOWED_PRIVILEGES_REQUIRED:
-        raise CveCatalogError(f"{cve_id}: vector must contain exactly one of PR:N or PR:L")
+    privilege = privilege_metrics[0].removeprefix("PR:") if len(privilege_metrics) == 1 else ""
+    privileged_exceptions = {"CVE-2026-77124": "nexus:script:*:run", "CVE-2026-10748": "nx-licensing-create"}
+    if privilege not in _ALLOWED_PRIVILEGES_REQUIRED and not (
+        privilege == "H"
+        and product == "nexus_repository"
+        and raw.get("required_permission") == privileged_exceptions.get(cve_id)
+    ):
+        raise CveCatalogError(f"{cve_id}: unsupported privilege requirement")
     impact = _nonempty_text(raw.get("impact"), "impact").lower()
     if impact not in _ALLOWED_IMPACTS:
         raise CveCatalogError(f"{cve_id}: unsupported impact {impact!r}")
@@ -216,7 +224,7 @@ def _validate_entry(raw: Any, seen: set[tuple[str, str]]) -> dict[str, Any]:
             "severity": severity,
             "score": float(score),
             "vector": vector,
-            "privileges_required": privilege_metrics[0].removeprefix("PR:"),
+            "privileges_required": privilege,
             "impact": impact,
             "affected": validated_ranges,
             "title": _nonempty_text(raw.get("title"), "title"),
@@ -299,6 +307,13 @@ def normalize_version(value: str, scheme: str = "numeric") -> tuple[int, ...] | 
 
 
 def _parse_version(value: str, scheme: str) -> _ParsedVersion | None:
+    if scheme == "grafana_security":
+        match = re.fullmatch(r"(\d+(?:\.\d+){1,5})(?:\+security-(\d+))?", value.strip(), re.I)
+        if match is None:
+            return None
+        return _ParsedVersion(
+            tuple(int(part) for part in match.group(1).split(".")), security_revision=int(match.group(2) or 0)
+        )
     if scheme == "minio_release":
         numbers = _minio_version(value)
         return _ParsedVersion(numbers) if numbers is not None else None
@@ -317,7 +332,7 @@ def _compare_versions(left: _ParsedVersion, right: _ParsedVersion) -> int:
     if numeric_result:
         return numeric_result
     if left.prerelease is None and right.prerelease is None:
-        return 0
+        return (left.security_revision > right.security_revision) - (left.security_revision < right.security_revision)
     if left.prerelease is None:
         return 1
     if right.prerelease is None:
@@ -411,7 +426,20 @@ def resolve_products(module: str, payload: Mapping[str, Any]) -> list[DetectedPr
     }
     if module in version_fields:
         key, name, field = version_fields[module]
-        return [_product(key, name, payload.get(field))]
+        version_products = [_product(key, name, payload.get(field))]
+        if module == "grafana":
+            server_version = _clean_version(payload.get(field))
+            parsed_server = normalize_version(server_version) if server_version is not None else None
+            if (
+                parsed_server is not None
+                and parsed_server[0] == 12
+                and str(payload.get("edition") or "").lower() != "oss"
+            ):
+                version_products.append(_product("grafana_enterprise", "Grafana Enterprise", payload.get(field)))
+            renderer_version = _clean_version(payload.get("renderer_plugin_version"))
+            if renderer_version is not None:
+                version_products.append(_product("grafana_image_renderer", "Grafana Image Renderer", renderer_version))
+        return version_products
     if module == "elastic":
         vendor = str(payload.get("vendor") or "").strip().lower()
         if vendor == "opensearch":
@@ -559,7 +587,10 @@ def enumerate_record(
                 matched = version_in_range(product.version, affected)
                 if matched is True:
                     privileges_required = str(entry.get("privileges_required") or "N")
-                    if privileges_required == "L" and low_privilege_basis is None:
+                    version_only_exception = (
+                        entry.get("version_only_exception") is True and entry["id"] == "CVE-2025-11539"
+                    )
+                    if privileges_required == "L" and low_privilege_basis is None and not version_only_exception:
                         break
                     findings.append(
                         {
@@ -571,7 +602,15 @@ def enumerate_record(
                             "score": entry["score"],
                             "vector": entry["vector"],
                             "privileges_required": privileges_required,
-                            "access_basis": "network" if privileges_required == "N" else low_privilege_basis,
+                            "access_basis": (
+                                "network"
+                                if privileges_required == "N"
+                                else "privileged_account_required"
+                                if privileges_required == "H"
+                                else "renderer_token_required"
+                                if version_only_exception and low_privilege_basis is None
+                                else low_privilege_basis
+                            ),
                             "impact": entry["impact"],
                             "affected_range": _range_text(affected),
                             "fixed_version": affected.get("fixed"),

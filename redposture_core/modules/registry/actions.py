@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dc_field
@@ -1363,6 +1364,18 @@ def _fetch_nexus_info(
     if error:
         return None, error
     if status == 404:
+        # Nexus Repository 2 uses a different, read-only status API.  Keep
+        # its fingerprint separate from the Nexus 3 REST response: a lone
+        # version field (or generic 200) must not confirm another service.
+        for legacy_path in ("/service/local/status", "/nexus/service/local/status"):
+            legacy_status, legacy_body, _legacy_headers, legacy_error = _http_request(
+                host, port, "GET", legacy_path, timeout, headers=headers
+            )
+            if legacy_error or legacy_status != 200:
+                continue
+            legacy_info = _nexus_2_status_info(legacy_body)
+            if legacy_info is not None:
+                return legacy_info, None
         return None, "not nexus"
     if status not in (200, 401, 403):
         return None, f"/service/rest/v1/status returned status {status}"
@@ -1379,6 +1392,39 @@ def _fetch_nexus_info(
     if info is None:
         return None, "not nexus"
     return info, "authentication required" if status in (401, 403) else None
+
+
+def _nexus_2_status_info(body: bytes | str) -> dict[str, Any] | None:
+    try:
+        raw = body if isinstance(body, bytes) else body.encode("utf-8")
+        if len(raw) > _DETECT_RESPONSE_CAP:
+            return None
+        if raw.lstrip().startswith(b"{"):
+            decoded = json.loads(raw)
+            data = decoded.get("data") if isinstance(decoded, dict) else None
+            if not isinstance(data, dict):
+                return None
+            app_name = data.get("appName")
+            version = data.get("version")
+        else:
+            root = ET.fromstring(raw)
+            if root.tag != "status":
+                return None
+            data_node = root.find("data")
+            if data_node is None:
+                return None
+            app_name = data_node.findtext("appName")
+            version = data_node.findtext("version")
+    except (UnicodeError, ValueError, ET.ParseError, TypeError):
+        return None
+    if not isinstance(app_name, str) or not re.fullmatch(
+        r"Sonatype Nexus(?: (?:Professional|Open Source))?", app_name.strip()
+    ):
+        return None
+    release = _nexus_release_version(version)
+    if release is None or not release.startswith("2."):
+        return None
+    return {"product": "Sonatype Nexus Repository", "version": release, "major_version": 2}
 
 
 def _fetch_nexus_repositories(

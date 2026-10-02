@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_version": "2026-09-20",
+  "catalog_version": "2026-10-03",
   "entries": [
     {
       "id": "CVE-2017-15720",
@@ -2839,6 +2839,27 @@
       "verified_at": "2026-09-20"
     },
     {
+      "id": "CVE-2025-3260",
+      "product": "grafana",
+      "title": "Grafana dashboard API authorization bypass for viewers",
+      "severity": "HIGH",
+      "score": 8.3,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:L",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "11.6.0",
+          "fixed": "11.6.1+security-01",
+          "scheme": "grafana_security"
+        }
+      ],
+      "references": [
+        "https://grafana.com/security/security-advisories/cve-2025-3260/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-3260"
+      ],
+      "verified_at": "2026-10-03"
+    },
+    {
       "id": "CVE-2026-14199",
       "product": "grafana",
       "title": "Grafana credential or account takeover requiring low privileges",
@@ -2868,6 +2889,55 @@
         "https://nvd.nist.gov/vuln/detail/CVE-2026-14199"
       ],
       "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2025-41115",
+      "product": "grafana_enterprise",
+      "title": "Grafana Enterprise SCIM identity impersonation (requires configured SCIM client)",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "12.0.0",
+          "fixed": "12.0.6"
+        },
+        {
+          "introduced": "12.1.0",
+          "fixed": "12.1.3"
+        },
+        {
+          "introduced": "12.2.0",
+          "fixed": "12.2.1"
+        }
+      ],
+      "references": [
+        "https://grafana.com/security/security-advisories/cve-2025-41115/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-41115"
+      ],
+      "verified_at": "2026-10-03"
+    },
+    {
+      "id": "CVE-2025-11539",
+      "product": "grafana_image_renderer",
+      "title": "Grafana Image Renderer code execution (requires reachable renderer and known/default token)",
+      "severity": "CRITICAL",
+      "score": 9.9,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "1.0.0",
+          "fixed": "4.0.17"
+        }
+      ],
+      "references": [
+        "https://grafana.com/security/security-advisories/cve-2025-11539/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-11539"
+      ],
+      "verified_at": "2026-10-03",
+      "version_only_exception": true
     },
     {
       "id": "CVE-2017-17697",
@@ -3061,6 +3131,27 @@
       "verified_at": "2026-09-20"
     },
     {
+      "id": "CVE-2025-31489",
+      "product": "minio",
+      "title": "Unsigned-trailer signature bypass; requires known write-enabled access key and bucket",
+      "severity": "HIGH",
+      "score": 8.7,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "impact": "file_write",
+      "affected": [
+        {
+          "introduced": "RELEASE.2023-05-18T00-05-36Z",
+          "fixed": "RELEASE.2025-04-03T14-56-28Z",
+          "scheme": "minio_release"
+        }
+      ],
+      "references": [
+        "https://github.com/minio/minio/security/advisories/GHSA-wg47-6jq2-q2hh",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-31489"
+      ],
+      "verified_at": "2026-10-03"
+    },
+    {
       "id": "CVE-2015-7882",
       "product": "mongodb",
       "title": "MongoDB unauthenticated authentication bypass",
@@ -3079,6 +3170,46 @@
         "https://nvd.nist.gov/vuln/detail/CVE-2015-7882"
       ],
       "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2025-14847",
+      "product": "mongodb",
+      "title": "Unauthenticated MongoDB compressed-wire memory disclosure",
+      "severity": "HIGH",
+      "score": 8.7,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "impact": "data_disclosure",
+      "affected": [
+        {
+          "introduced": "3.6.0",
+          "fixed": "4.4.30"
+        },
+        {
+          "introduced": "5.0.0",
+          "fixed": "5.0.32"
+        },
+        {
+          "introduced": "6.0.0",
+          "fixed": "6.0.27"
+        },
+        {
+          "introduced": "7.0.0",
+          "fixed": "7.0.28"
+        },
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.0.17"
+        },
+        {
+          "introduced": "8.2.0",
+          "fixed": "8.2.3"
+        }
+      ],
+      "references": [
+        "https://www.mongodb.com/community/forums/t/important-mongodb-patch-available/332977",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-14847"
+      ],
+      "verified_at": "2026-10-03"
     },
     {
       "id": "CVE-2026-13078",
@@ -3263,6 +3394,30 @@
       "verified_at": "2026-09-20"
     },
     {
+      "id": "CVE-2020-13933",
+      "product": "nexus_repository",
+      "title": "Nexus Shiro authentication bypass",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "2.0.0",
+          "fixed": "2.14.19"
+        },
+        {
+          "introduced": "3.0.0",
+          "fixed": "3.27.0"
+        }
+      ],
+      "references": [
+        "https://support.sonatype.com/hc/en-us/articles/360053556313-CVE-2020-13933-Nexus-Repository-2-3-Shiro-Authentication-Bypass-2020-10-15",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-13933"
+      ],
+      "verified_at": "2026-10-03"
+    },
+    {
       "id": "CVE-2020-15012",
       "product": "nexus_repository",
       "title": "Nexus Repository unauthenticated arbitrary file read",
@@ -3301,6 +3456,67 @@
         "https://nvd.nist.gov/vuln/detail/CVE-2024-4956"
       ],
       "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2025-9868",
+      "product": "nexus_repository",
+      "title": "Nexus 2 Remote Browser SSRF; credential leak if proxy auth is configured",
+      "severity": "HIGH",
+      "score": 8.7,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "2.0.0",
+          "fixed": "3.0.0"
+        }
+      ],
+      "references": [
+        "https://support.sonatype.com/hc/en-us/articles/45363201583635-CVE-2025-9868-Nexus-Repository-2-SSRF-Vulnerability-in-Remote-Browser-Plugin",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-9868"
+      ],
+      "verified_at": "2026-10-03"
+    },
+    {
+      "id": "CVE-2026-10748",
+      "product": "nexus_repository",
+      "title": "Nexus license-upload code execution (requires nx-licensing-create)",
+      "severity": "HIGH",
+      "score": 8.6,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "3.0.0",
+          "fixed": "3.92.0"
+        }
+      ],
+      "references": [
+        "https://support.sonatype.com/hc/en-us/articles/52335766035603-CVE-2026-10748-Nexus-Repository-3-Remote-Code-Execution-2026-06-16",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-10748"
+      ],
+      "verified_at": "2026-10-03",
+      "required_permission": "nx-licensing-create"
+    },
+    {
+      "id": "CVE-2026-14504",
+      "product": "nexus_repository",
+      "title": "Unauthorized upload to Swift, Terraform or Conda hosted repository with read access",
+      "severity": "HIGH",
+      "score": 8.2,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "impact": "file_write",
+      "affected": [
+        {
+          "introduced": "3.88.0",
+          "fixed": "3.94.0"
+        }
+      ],
+      "references": [
+        "https://support.sonatype.com/hc/en-us/articles/53137654741907-CVE-2026-14504-Nexus-Repository-3-Authorization-Bypass-in-Component-Upload-API-2026-07-14",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-14504"
+      ],
+      "verified_at": "2026-10-03"
     },
     {
       "id": "CVE-2026-3199",
@@ -3343,6 +3559,27 @@
         "https://nvd.nist.gov/vuln/detail/CVE-2026-5189"
       ],
       "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-77124",
+      "product": "nexus_repository",
+      "title": "Nexus script execution despite disable setting (requires nexus:script:*:run)",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:H/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "3.21.2",
+          "fixed": "3.96.0"
+        }
+      ],
+      "references": [
+        "https://support.sonatype.com/hc/en-us/articles/54641528273811-CVE-2026-77124-Nexus-Repository-3-Script-Execution-Disable-Setting-Not-Enforced-2026-09-02",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-77124"
+      ],
+      "verified_at": "2026-10-03",
+      "required_permission": "nexus:script:*:run"
     },
     {
       "id": "CVE-2023-23612",
@@ -3620,6 +3857,42 @@
         "https://nvd.nist.gov/vuln/detail/CVE-2026-14664"
       ],
       "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-14668",
+      "product": "postgresql",
+      "title": "PostgreSQL server-memory disclosure requiring object CREATE privilege",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:H",
+      "impact": "data_disclosure",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.6"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-14668/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-14668"
+      ],
+      "verified_at": "2026-10-03"
     },
     {
       "id": "CVE-2026-14669",

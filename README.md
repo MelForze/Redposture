@@ -377,10 +377,16 @@ callbacks confirm SSRF without claiming a captured password.
 No external lookup or exploitation is performed. Matches are **potentially affected**,
 not proof of exploitation; vendor backports and deployment settings may change applicability.
 
-High/Critical CVEs require `AV:N`, `PR:N` or `PR:L`, `UI:N`, a reliable version range,
-and RCE/command execution, auth bypass/account takeover, arbitrary file read/write, or SSRF.
-Pure DoS is excluded. `PR:L` appears only with anonymous access or verified **explicit**
-credentials/token/API key; invalid credentials and `--defcreds` alone do not enable it.
+The catalog primarily covers High/Critical network CVEs with a reliable version range:
+code execution, auth bypass, account takeover, data disclosure, arbitrary file access,
+or SSRF. Pure DoS is excluded. `PR:L` normally appears only with anonymous access or
+verified **explicit** credentials/token/API key; invalid credentials and `--defcreds`
+alone do not enable it. A few selected entries are version-only exceptions: the
+Nexus script/licensing CVEs require the elevated permissions named in their titles;
+Grafana Image Renderer requires the separately detected plugin version and a reachable
+renderer with a known/default token. Other prerequisites in titles, such as Enterprise
+SCIM configuration or a write-enabled MinIO access key, are not verified by version
+matching. These findings remain `potentially affected`, not confirmed exploitation.
 
 Credential checks precede CVEs. Findings sort newest first. The `CVE's Enumeration`
 header appears only with matches. Unknown versions, no matches and unsupported products
@@ -392,22 +398,23 @@ GRAFANA         10.0.0.1        3000  [*] CVE's Enumeration
 GRAFANA         10.0.0.1        3000  [!] CVE-2021-43798 potentially affected (HIGH 7.5) Unauthenticated path traversal and arbitrary file read
 ```
 
-The bundled `2026-09-20` catalog contains 186 reviewed product/CVE records:
+The bundled `2026-10-03` catalog contains 197 reviewed product/CVE records:
 
 | Product | CVEs | Product | CVEs |
 |---|---:|---|---:|
 | GitLab | 72 | Redis | 23 |
-| PostgreSQL | 22 | Airflow | 11 |
-| Grafana | 10 | Elasticsearch | 6 |
-| MongoDB | 6 | MinIO | 4 |
-| Nexus Repository | 5 | Qdrant | 5 |
+| PostgreSQL | 23 | Airflow | 11 |
+| Grafana | 11 | Elasticsearch | 6 |
+| MongoDB | 7 | MinIO | 5 |
+| Nexus Repository | 10 | Qdrant | 5 |
 | RabbitMQ | 4 | ClickHouse | 3 |
 | Valkey | 3 | ZooKeeper | 2 |
 | Harbor | 2 | Oracle Database | 2 |
 | OpenSearch | 1 | Proxmox VE | 1 |
+| Grafana Enterprise SCIM | 1 | Grafana Image Renderer | 1 |
 | Consul | 1 | Docker Engine | 1 |
 | etcd | 1 | Kubernetes | 1 |
-| **Total** | **186** | | |
+| **Total** | **197** | | |
 
 Products are matched separately: Elasticsearch/OpenSearch, Redis/Valkey and
 ZooKeeper/Keeper do not share findings. Harbor, Nexus and GitLab match only their

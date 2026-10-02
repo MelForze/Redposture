@@ -214,6 +214,28 @@ def _load_json_list(body: str) -> list[Any] | None:
     return parsed
 
 
+def _fetch_renderer_plugin_version(host: str, port: int, timeout: float, auth_header: str | None) -> str | None:
+    """Read the installed renderer version; Grafana's own version is not a substitute."""
+    headers = {"Authorization": auth_header} if auth_header else None
+    try:
+        status, body, _headers = _http_request(host, port, "/api/plugins", timeout, headers=headers)
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return None
+    if status != 200:
+        return None
+    plugins = _load_json_list(body)
+    if plugins is None:
+        return None
+    for item in plugins:
+        if not isinstance(item, dict) or item.get("id") != "grafana-image-renderer":
+            continue
+        info = item.get("info")
+        version = info.get("version") if isinstance(info, dict) else None
+        if isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version.strip()):
+            return version.strip()
+    return None
+
+
 def _header_lookup(headers: dict[str, str], name: str) -> str | None:
     target = name.lower()
     for key, value in headers.items():
@@ -1519,6 +1541,13 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                 or getattr(ctx.args, "password", None) is not None
                 or getattr(ctx.args, "username", None) is not None
             )
+            renderer_version = (
+                _fetch_renderer_plugin_version(
+                    str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), None
+                )
+                if bool(getattr(ctx.args, "enum_cve", False))
+                else None
+            )
             return {
                 "timestamp": utc_now_iso(),
                 "host": str(ctx.host),
@@ -1538,6 +1567,7 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                     "unavailable" if sso is not None and not explicit_auth else "available"
                 ),
                 "server_version": version,
+                "renderer_plugin_version": renderer_version,
                 "provided_credentials": False,
                 "provided_username": None,
                 "provided_credentials_ok": None,
@@ -1645,6 +1675,10 @@ def authenticate_grafana(ctx: Any, detect_record: Any, _options: dict[str, Any])
         state.credentials_source = source
         state.effective_username = username
         state.effective_password = password
+    if ok and bool(getattr(ctx.args, "enum_cve", False)) and not record.get("renderer_plugin_version"):
+        record["renderer_plugin_version"] = _fetch_renderer_plugin_version(
+            str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), auth_header
+        )
     anonymous_open = record.get("auth_required") is False
     status = (
         "weak_default_creds"
