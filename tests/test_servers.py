@@ -218,6 +218,78 @@ def test_postgres_listener_handler_logs_http_probe(tmp_path) -> None:
     assert "protocol=http" in attempts
 
 
+def test_mysql_handshake_response_extracts_native_auth_material() -> None:
+    from redposture_core.servers import parse_mysql_handshake_response
+
+    capabilities = 0x00000200 | 0x00008000 | 0x00080000 | 0x00000008
+    scramble = bytes(range(1, 21))
+    payload = (
+        capabilities.to_bytes(4, "little")
+        + (1 << 20).to_bytes(4, "little")
+        + b"\x21"
+        + b"\x00" * 23
+        + b"exporter\x00"
+        + bytes([len(scramble)])
+        + scramble
+        + b"metrics\x00"
+        + b"mysql_native_password\x00"
+    )
+    assert parse_mysql_handshake_response(payload) == {
+        "username": "exporter",
+        "auth_response": scramble.hex(),
+        "database": "metrics",
+        "auth_plugin": "mysql_native_password",
+    }
+    assert parse_mysql_handshake_response(payload[:-1]) is None
+    assert parse_mysql_handshake_response(b"\x00" * 32) is None
+
+
+def test_mysql_callback_logs_challenge_and_native_response() -> None:
+    import hashlib
+
+    logger = AttemptLogger()
+    logger.set_trigger_callback_mode(True, ["127.0.0.1"])
+    server = SimpleNamespace(server_address=("127.0.0.1", 13306), attempt_logger=logger)
+    left, right = socket.socketpair()
+    worker = threading.Thread(
+        target=servers.MySQLCallbackHandler,
+        args=(left, ("127.0.0.1", 54321), server),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        header = servers.recv_exact(right, 4)
+        handshake = servers.recv_exact(right, int.from_bytes(header[:3], "little"))
+        version_end = handshake.index(b"\x00", 1)
+        salt = handshake[version_end + 5 : version_end + 13] + handshake[version_end + 32 : version_end + 44]
+        assert len(salt) == 20
+        stage1 = hashlib.sha1(b"LabMysqlPassword").digest()
+        stage2 = hashlib.sha1(stage1).digest()
+        challenge = hashlib.sha1(salt + stage2).digest()
+        scramble = bytes(a ^ b for a, b in zip(stage1, challenge, strict=True))
+        capabilities = 0x200 | 0x8000 | 0x80000
+        payload = (
+            capabilities.to_bytes(4, "little")
+            + (1 << 20).to_bytes(4, "little")
+            + b"\x21"
+            + b"\x00" * 23
+            + b"exporter\x00"
+            + b"\x14"
+            + scramble
+            + b"mysql_native_password\x00"
+        )
+        right.sendall(len(payload).to_bytes(3, "little") + b"\x01" + payload)
+        worker.join(timeout=2)
+        events = logger.get_trigger_callback_events()
+        assert len(events) == 1
+        assert events[0]["auth_salt"] == salt.hex()
+        assert events[0]["auth_response"] == scramble.hex()
+        assert logger._is_trigger_cred_event(events[0])
+    finally:
+        right.close()
+        left.close()
+
+
 def test_postgres_listener_handler_logs_cleartext_password(tmp_path) -> None:
     logger = AttemptLogger()
     log_path = tmp_path / "postgres-auth.log"
@@ -426,6 +498,14 @@ def test_make_blackbox_handler_logs_probe_metrics_and_parse_error(tmp_path) -> N
         assert 'probe_module_info{module="http_2xx"} 1' in body
         assert 'probe_target_info{target="http://example.local"} 1' in body
 
+        response = roundtrip(
+            b"GET /probe?target=http://example.local&module=http_bearer HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Authorization: Bearer lab-blackbox-token\r\n"
+            b"\r\n"
+        )
+        assert b"200 OK" in response
+
         metric_body = b"ping"
         response = roundtrip(
             (
@@ -473,6 +553,7 @@ def test_make_blackbox_handler_logs_probe_metrics_and_parse_error(tmp_path) -> N
     attempts = log_path.read_text(encoding="utf-8")
     assert "[BLACKBOX]" in attempts
     assert "target=http://example.local" in attempts
+    assert "token=lab-blackbox-token" in attempts
     assert "endpoint_type=exporter_metrics" in attempts
     assert "method=PARSE_ERROR" in attempts
 

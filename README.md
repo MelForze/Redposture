@@ -317,15 +317,18 @@ After detecting an exporter, trigger tries its default probe and a bounded list 
 common named profiles (`auth_module`, `module`, or SNMP `auth`) serially. It keeps
 testing after a callback because another profile may forward credentials. Guessed
 profiles are paced, not retried, and stop after repeated exporter failures. The
-`CRED!` marker requires credentials actually received by the callback; an HTTP
-callback can capture Basic, Bearer, API-key or `X-API-Key` authentication. Custom
-profile names can be provided through `--profiles-file` or each exporter's
+`CRED!` marker requires credential material actually received by the callback;
+an HTTP callback can capture Basic, Bearer, API-key or `X-API-Key` authentication.
+For MySQL `mysql_native_password`, the callback records the username, random
+challenge (`auth_salt`) and 20-byte `auth_response`, **not the plaintext password**.
+The response is bound to that challenge. Custom profile names can be provided
+through `--profiles-file` or each exporter's
 explicit profile flag (for example `--mysql-auth-module`, `--elastic-auth-module`,
 `--postgres-auth-module`, `--blackbox-module` or `--snmp-auth`). These flags use
 the exporter's own query parameter, rather than a shared `auth_mode`; Redis has
 no named probe profile. Use `-check` to verify captured Redis/Postgres credentials.
-SNMPv1/v2c callbacks additionally show the community string; SNMPv3 and MySQL
-challenge-response do not expose a plaintext password to these listeners.
+SNMPv1/v2c callbacks additionally show the community string. SNMPv3 and IPMI
+callbacks confirm SSRF without claiming a captured password.
 
 ## Offline CVE enumeration
 

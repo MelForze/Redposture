@@ -87,6 +87,9 @@ _PRIORITY_KEYS = (
     "api_key",
     "token",
     "community",
+    "auth_plugin",
+    "auth_salt",
+    "auth_response",
     "error",
     "error_message",
 )
@@ -275,6 +278,7 @@ class AttemptLogger:
             str(event.get("api_key") or ""),
             str(event.get("token") or ""),
             str(event.get("community") or ""),
+            str(event.get("auth_response") or ""),
             str(event.get("method") or ""),
             str(event.get("path") or ""),
             str(event.get("command") or ""),
@@ -376,6 +380,13 @@ class AttemptLogger:
         password = event.get("password")
         return (
             (username not in (None, "") and password not in (None, ""))
+            or (
+                event.get("service") == "mysql"
+                and username not in (None, "")
+                and event.get("auth_plugin") == "mysql_native_password"
+                and isinstance(event.get("auth_response"), str)
+                and len(event["auth_response"]) == 40
+            )
             or event.get("api_key") not in (None, "")
             or event.get("token") not in (None, "")
             or event.get("community") not in (None, "")

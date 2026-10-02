@@ -78,6 +78,27 @@ def test_logger_trigger_callback_mode_prints_callback_line_with_creds(capsys: py
     assert "\x1b[1;38;5;208m" in out
 
 
+def test_logger_marks_mysql_native_challenge_response_as_credential_evidence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logger = AttemptLogger()
+    logger.set_trigger_callback_mode(True)
+    logger.log(
+        "mysql",
+        ("10.0.0.5", 50001),
+        username="exporter",
+        auth_plugin="mysql_native_password",
+        auth_salt="12" * 20,
+        auth_response="ab" * 20,
+        listen_port=3306,
+    )
+    output = capsys.readouterr().out
+    assert "(CRED!)" in output
+    assert "[CRED]" in output
+    assert "auth_response=" in output
+    assert "pass=" not in output
+
+
 def test_logger_trigger_callback_mode_prints_callback_line_without_creds(capsys: pytest.CaptureFixture[str]) -> None:
     logger = AttemptLogger()
     logger.set_trigger_callback_mode(True)

@@ -96,7 +96,7 @@ class MySQLCallbackHandler(socketserver.BaseRequestHandler):
         sock = self.request
         assert isinstance(sock, socket.socket)
         sock.settimeout(3)
-        salt = b"redposture-mysql-salt"
+        salt = os.urandom(20)
         handshake = (
             b"\x0a5.7.0-redposture\x00"
             + (1).to_bytes(4, "little")
@@ -112,12 +112,73 @@ class MySQLCallbackHandler(socketserver.BaseRequestHandler):
             packet_length = int.from_bytes(header[:3], "little")
             if header[3] != 1 or not 32 <= packet_length <= 65536:
                 return
-            recv_exact(sock, min(packet_length, 64))
+            response = recv_exact(sock, packet_length)
+            auth_fields = parse_mysql_handshake_response(response) or {}
             self.server.attempt_logger.log(  # type: ignore[attr-defined]
-                "mysql", self.client_address, protocol="mysql", listen_port=server_listen_port(self.server)
+                "mysql",
+                self.client_address,
+                protocol="mysql",
+                listen_port=server_listen_port(self.server),
+                auth_salt=salt.hex() if auth_fields.get("auth_response") else None,
+                **auth_fields,
             )
         except (OSError, ConnectionError):
             return
+
+
+def parse_mysql_handshake_response(payload: bytes) -> dict[str, str] | None:
+    """Extract native-password challenge material from a valid HandshakeResponse41."""
+
+    if len(payload) < 35:
+        return None
+    capabilities = int.from_bytes(payload[:4], "little")
+    if not capabilities & 0x200 or not capabilities & 0x8000:
+        return None
+    offset = 32
+
+    def nul_string(start: int) -> tuple[str, int] | None:
+        end = payload.find(b"\x00", start)
+        if end < 0 or end - start > 255:
+            return None
+        try:
+            value = payload[start:end].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        if not value or any(ord(char) < 0x20 for char in value):
+            return None
+        return value, end + 1
+
+    user_part = nul_string(offset)
+    if user_part is None:
+        return None
+    username, offset = user_part
+    if offset >= len(payload):
+        return None
+    auth_size = payload[offset]
+    offset += 1
+    if auth_size != 20 or offset + auth_size > len(payload):
+        return None
+    auth_response = payload[offset : offset + auth_size]
+    offset += auth_size
+    if not any(auth_response):
+        return None
+
+    result = {"username": username, "auth_response": auth_response.hex()}
+    if capabilities & 0x8:
+        db_part = nul_string(offset)
+        if db_part is None:
+            return None
+        result["database"], offset = db_part
+    if capabilities & 0x80000:
+        plugin_part = nul_string(offset)
+        if plugin_part is None:
+            return None
+        result["auth_plugin"], offset = plugin_part
+        if result["auth_plugin"] != "mysql_native_password":
+            return None
+    else:
+        result["auth_plugin"] = "mysql_native_password"
+    return result
 
 
 def _snmp_community_from_packet(packet: bytes) -> str | None:
@@ -741,7 +802,7 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
             return "{" + ",".join(parts) + "}"
 
         def _log_probe(self, parsed_path: Any, target: str | None, module: str, method: str, body_len: int = 0) -> None:
-            username, password = parse_basic_auth(self.headers.get("Authorization"))
+            auth_fields = _exporter_http_auth_fields(self.headers.get("Authorization"), self.headers.get("X-API-Key"))
 
             logger.log(
                 "blackbox",
@@ -752,14 +813,13 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
                 content_length=body_len if body_len > 0 else None,
                 target=target,
                 module=module,
-                username=username,
-                password=password,
+                **auth_fields,
                 user_agent=self.headers.get("User-Agent"),
                 listen_port=self._listen_port(),
             )
 
         def _log_exporter_metrics(self, parsed_path: Any, method: str, body_len: int = 0) -> None:
-            username, password = parse_basic_auth(self.headers.get("Authorization"))
+            auth_fields = _exporter_http_auth_fields(self.headers.get("Authorization"), self.headers.get("X-API-Key"))
             labels = self._extract_exporter_params(parsed_path)
             logger.log(
                 "blackbox",
@@ -774,14 +834,13 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
                 instance=labels["instance"],
                 exporter=labels["exporter"],
                 module=labels["module"],
-                username=username,
-                password=password,
+                **auth_fields,
                 user_agent=self.headers.get("User-Agent"),
                 listen_port=self._listen_port(),
             )
 
         def _log_non_probe(self, parsed_path: Any, method: str, body_len: int = 0) -> None:
-            username, password = parse_basic_auth(self.headers.get("Authorization"))
+            auth_fields = _exporter_http_auth_fields(self.headers.get("Authorization"), self.headers.get("X-API-Key"))
             logger.log(
                 "blackbox",
                 self._client_addr(),
@@ -789,8 +848,7 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
                 path=parsed_path.path,
                 query=parsed_path.query,
                 content_length=body_len if body_len > 0 else None,
-                username=username,
-                password=password,
+                **auth_fields,
                 user_agent=self.headers.get("User-Agent"),
                 listen_port=self._listen_port(),
             )
