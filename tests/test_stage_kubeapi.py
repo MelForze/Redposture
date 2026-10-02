@@ -119,8 +119,10 @@ def test_kube_scoped_403_requires_self_subject_review_and_exec_flags_are_paired(
         credential=SimpleNamespace(token=None, username="bad", password="bad"),
         lifecycle_state=kube.KubeApiLifecycleState(use_https=True, insecure=True),
     )
+    monkeypatch.setattr(kube, "_verify_self_subject_review", lambda *_args, **_kwargs: (None, None, "review denied"))
     basic_record = kube.authenticate_kubeapi(basic_ctx, detect_record, {})
-    assert basic_record["auth_valid"] is False
+    assert basic_record["auth_valid"] is None
+    assert basic_record["auth_verification_method"] == "self_subject_review"
 
     console = _ConsoleCapture()
     assert kube.validate_args(_kube_args(pod="pod-a"), console) == 2
@@ -727,9 +729,9 @@ def test_audit_kubeapi_host_basic_auth_failure_and_exec_argument_errors(monkeypa
         exec_pod=None,
         exec_command=None,
     )
-    assert record["status"] == "invalid_credentials_anonymous"
+    assert record["status"] == "auth_unverified_anonymous"
     assert record["auth_mode"] == "basic"
-    assert record["auth_valid"] is False
+    assert record["auth_valid"] is None
 
     monkeypatch.setattr(
         kube,

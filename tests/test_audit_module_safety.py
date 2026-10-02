@@ -20,17 +20,17 @@ from redposture_core.module_registry import AUDIT_MODULE_NAMES
 
 
 def _stage(name: str):
-    return importlib.import_module(f"redposture_core.modules.{name}.stage")
+    return importlib.import_module(f"redposture_core.modules.{name.replace('-', '_')}.stage")
 
 
 def _build_spec(name: str):
     args = parse_args([name, "-t", "127.0.0.1"])
-    return getattr(_stage(name), f"build_{name}_spec")(args)
+    return getattr(_stage(name), f"build_{name.replace('-', '_')}_spec")(args)
 
 
 def _build_plan(name: str):
     args = parse_args([name, "-t", "127.0.0.1"])
-    return getattr(_stage(name), f"build_{name}_plan")(args)
+    return getattr(_stage(name), f"build_{name.replace('-', '_')}_plan")(args)
 
 
 def test_registry_lists_every_module_package():

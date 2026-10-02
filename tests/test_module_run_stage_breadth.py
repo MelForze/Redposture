@@ -22,7 +22,9 @@ RUN_CASES = {
     "minio": ["minio", "-t", "127.0.0.1"],
     "rabbitmq": ["rabbitmq", "-t", "127.0.0.1"],
     "airflow": ["airflow", "-t", "127.0.0.1"],
-    "registry": ["registry", "-t", "127.0.0.1"],
+    "docker-registry": ["docker-registry", "-t", "127.0.0.1"],
+    "harbor": ["harbor", "-t", "127.0.0.1"],
+    "nexus": ["nexus", "-t", "127.0.0.1"],
     "proxmox": ["proxmox", "-t", "127.0.0.1", "--insecure", "--defcreds"],
     "etcd": ["etcd", "-t", "127.0.0.1"],
     "mongodb": ["mongodb", "-t", "127.0.0.1"],
@@ -43,8 +45,8 @@ def test_run_cases_cover_every_registered_audit_module() -> None:
     ("module_name", "argv", "expected_error"),
     [
         (
-            "registry",
-            ["registry", "-t", "127.0.0.1", "--token", "token", "-u", "admin", "-p", "admin", "--docker"],
+            "docker_registry",
+            ["docker-registry", "-t", "127.0.0.1", "--token", "token", "-u", "admin", "-p", "admin"],
             "use either --token or --username/--password",
         ),
         ("consul", ["consul", "-t", "127.0.0.1", "--key", "redposture/kafka/sasl_password"], "--key requires --dump"),
@@ -109,7 +111,8 @@ def test_package_stage_policy_negative_cases_do_not_run_plan(
 
 @pytest.mark.parametrize("module_name", sorted(RUN_CASES))
 def test_package_stage_run_functions_cover_runner_plan_path(monkeypatch, module_name: str) -> None:
-    stage = importlib.import_module(f"redposture_core.modules.{module_name}.stage")
+    package = module_name.replace("-", "_")
+    stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
     calls: list[object] = []
 
     def fake_run_plan(self, plan):
@@ -119,7 +122,7 @@ def test_package_stage_run_functions_cover_runner_plan_path(monkeypatch, module_
     monkeypatch.setattr("redposture_core.stage_runtime.AuditCommandRunner.run_plan", fake_run_plan)
     args = parse_args(RUN_CASES[module_name])
     args._progress_owner = None
-    rc = getattr(stage, f"run_{module_name}_stage")(args, SimpleNamespace(log=lambda *_a, **_k: None))
+    rc = getattr(stage, f"run_{package}_stage")(args, SimpleNamespace(log=lambda *_a, **_k: None))
 
     assert rc == 0
     assert calls, module_name

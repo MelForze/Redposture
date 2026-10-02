@@ -11,7 +11,7 @@
   <a href="https://github.com/MelForze/Redposture/releases">
     <img src="https://img.shields.io/github/v/tag/MelForze/Redposture?style=flat-square&label=version" alt="Latest version">
   </a>
-  <img src="https://img.shields.io/badge/modules-22-2b2f36?style=flat-square" alt="Modules">
+  <img src="https://img.shields.io/badge/modules-24-2b2f36?style=flat-square" alt="Modules">
   <img src="https://img.shields.io/badge/Python-3.10%2B-2b2f36?style=flat-square" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/install-pipx-2b2f36?style=flat-square" alt="Install with pipx">
 </p>
@@ -21,7 +21,7 @@
 
 CLI for authorized audits of exposed services: identify the product, verify access,
 enumerate data, find secrets, and match versions against an offline CVE catalog.
-Python 3.10+; 22 audit modules plus exporter scan/collect/trigger workflows.
+Python 3.10+; 24 audit modules plus exporter scan/collect/trigger workflows.
 
 ## Install
 
@@ -98,7 +98,20 @@ secrets.
 | ZooKeeper | `admin:admin`, `admin:changeme`, `admin:kafka`, `admin:password`, `admin:zookeeper`, `broker:broker`, `broker:brokerpass`, `client:client`, `dev:dev`, `guest:guest`, `hadoop:hadoop`, `kafka:changeme`, `kafka:kafka`, `kafka:password`, `kafka:zookeeper`, `root:admin`, `root:password`, `root:root`, `root:rootpass`, `root:zookeeper`, `service:password`, `service:service`, `solr:solr`, `super:super`, `test:test`, `user:password`, `user:user`, `user1:12345`, `zk:password`, `zk:zk`, `zk:zookeeper`, `zookeeper:admin`, `zookeeper:password`, `zookeeper:zookeeper` |
 | Keeper | `admin:admin`, `admin:changeme`, `admin:clickhouse`, `admin:keeper`, `admin:password`, `clickhouse:changeme`, `clickhouse:clickhouse`, `clickhouse:keeper`, `clickhouse:password`, `default:<empty>`, `default:changeme`, `default:clickhouse`, `default:default`, `default:password`, `keeper:changeme`, `keeper:clickhouse`, `keeper:keeper`, `keeper:password`, `root:clickhouse`, `root:keeper`, `root:password`, `root:root`, `service:password`, `service:service`, `user:password`, `user:user` |
 | Airflow | `airflow:airflow`, `admin:admin`, `admin:airflow`, `airflow:admin`, `airflow:password`, `airflow:changeme`, `airflow:airflow123`, `admin:password`, `admin:changeme`, `admin:airflow123`, `root:root`, `root:password`, `user:user`, `user:password`, `test:test`, `dev:dev`, `service:service`, `guest:guest` |
+| GitLab | `root:root`, `root:password`, `root:admin`, `admin:admin`, `admin:password`, `gitlab:gitlab`, `user:user`, `test:test` |
+| Harbor | `admin:Harbor12345`, then `admin:admin`, `admin:password`, `admin:changeme`, `root:root`, `root:password`, `user:user`, `test:test` |
+| Nexus | `admin:admin123`, `nexus:nexus`, then `admin:admin`, `admin:password`, `admin:changeme`, `root:root`, `root:password`, `user:user`, `test:test` |
+| Docker Registry | `registry:registry`, `registry:password`, then `admin:admin`, `admin:password`, `admin:changeme`, `root:root`, `root:password`, `user:user`, `test:test` |
+| KubeAPI | `admin:admin`, `admin:password`, `root:root`, `root:password`, `kubeadmin:kubeadmin`, `kubernetes:kubernetes`, `user:user`, `test:test` |
 | RabbitMQ | `admin:admin`, `admin:changeme`, `admin:password`, `admin:rabbitmq`, `guest:guest`, `guest:password`, `rabbitmq:admin`, `rabbitmq:password`, `rabbitmq:rabbitmq`, `root:password`, `root:root`, `service:password`, `service:service`, `test:test`, `user:password`, `user:user` |
+
+These are weak-password candidates, not claims about factory passwords. [Harbor](https://goharbor.io/docs/edge/install-config/run-installer-script/)
+documents `admin:Harbor12345` for its initial setup; [GitLab](https://docs.gitlab.com/install/next_steps/)
+and [Nexus](https://help.sonatype.com/en/install-nexus-repository.html) generate per-installation
+initial passwords. [Kubernetes](https://kubernetes.io/docs/reference/access-authn-authz/authentication/)
+has no universal Basic pair. KubeAPI checks these pairs
+only when the confirmed API advertises Basic authentication. A public `/v2/` or HTTP 200
+alone does not prove a registry credential; inconclusive checks stay in debug/JSON.
 
 ## Module Examples
 
@@ -163,9 +176,14 @@ redposture etcd -t http://etcd.example:2379 -u root -p 'password' --show-keys 20
 
 ```bash
 redposture gitlab -t https://gitlab.example --enum-cve
-redposture gitlab -t https://gitlab.example --token "$GITLAB_TOKEN" --enum-cve
-redposture gitlab -t https://gitlab.example --token "$GITLAB_TOKEN" --project group/project --clone
+redposture gitlab -t https://gitlab.example --defcreds
+redposture gitlab -t https://gitlab.example --token "$GITLAB_TOKEN" --registry-token "$REGISTRY_TOKEN" --images
 ```
+
+GitLab detects the web/API, Container Registry, or both. `--token` belongs to the
+web/API; `--registry-token` belongs to the Container Registry. OCI inventory appears
+in the nested `container_registry` JSON object. Web login pairs use an isolated
+CSRF session per attempt and stop at SSO, CAPTCHA or rate limiting.
 
 ### Grafana
 
@@ -203,7 +221,7 @@ redposture keeper -t keeper.example -u auditor -p 'password' --show-znodes 20 --
 
 ```bash
 redposture kubeapi -t targets.txt --enum-cve
-redposture kubeapi -t https://cluster.example:6443 --namespaces --pods
+redposture kubeapi -t https://cluster.example:6443 --defcreds
 redposture kubeapi -t https://cluster.example:6443 --token "$KUBE_TOKEN" --secrets
 ```
 
@@ -271,18 +289,33 @@ redposture redis -t targets.txt --defcreds
 redposture redis -t redis.example -u auditor -p 'password' --show-keys 20 --dump 10
 ```
 
-### Registry
-
-`--harbor`, `--gitlab` and `--nexus` select the requested vendor, while
-`--docker` checks the generic Registry v2 API. An unrelated Registry is not
-reported under a vendor selector. Inventory sections use `Enumeration`
-headings; sections skipped because authentication is required are omitted.
+### Harbor
 
 ```bash
-redposture registry -t https://registry.example --enum-cve
-redposture registry -t https://registry.example -u auditor -p 'password' --docker --images
-redposture registry -t https://registry.example -u auditor -p 'password' --docker --repository team/app --show-tags
+redposture harbor -t https://harbor.example --enum-cve
+redposture harbor -t https://harbor.example --defcreds
+redposture harbor -t https://harbor.example -u auditor -p 'password' --images
 ```
+
+### Nexus
+
+```bash
+redposture nexus -t https://nexus.example --enum-cve
+redposture nexus -t https://nexus.example --defcreds
+redposture nexus -t https://nexus.example -u auditor -p 'password' --assets
+```
+
+### Docker Registry
+
+```bash
+redposture docker-registry -t https://registry.example --enum-cve
+redposture docker-registry -t https://registry.example --defcreds
+redposture docker-registry -t https://registry.example -u auditor -p 'password' --images
+```
+
+`docker-registry` accepts only a plain OCI Registry fingerprint. Harbor, Nexus and
+GitLab require their product commands. Image, tag, metadata and download options
+are available on each product command; inaccessible inventory sections are omitted.
 
 ### ZooKeeper
 
@@ -369,8 +402,8 @@ The bundled `2026-09-20` catalog contains 186 reviewed product/CVE records:
 | **Total** | **186** | | |
 
 Products are matched separately: Elasticsearch/OpenSearch, Redis/Valkey and
-ZooKeeper/Keeper do not share findings. Registry matches only confirmed Harbor,
-Nexus or GitLab. Generic Registry and gRPC are unsupported; Kafka cannot determine
+ZooKeeper/Keeper do not share findings. Harbor, Nexus and GitLab match only their
+confirmed product. Plain Docker Registry and gRPC are unsupported; Kafka cannot determine
 an exact broker release. Keeper currently has no catalog matches. Version access may
 require authentication; Oracle needs the exact Database version, not the listener version.
 With `-f json`, `cve_enumeration` includes ranges, fixed versions, CVSS and source references.

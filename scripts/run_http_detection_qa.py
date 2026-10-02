@@ -30,7 +30,9 @@ MODULES = (
     "proxmox",
     "qdrant",
     "rabbitmq",
-    "registry",
+    "docker-registry",
+    "harbor",
+    "nexus",
     "clickhouse",
     "grpc",
 )

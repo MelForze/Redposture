@@ -19,7 +19,9 @@ COMMAND_SCAN = _registry.COMMAND_SCAN
 COMMAND_TRIGGER = _registry.COMMAND_TRIGGER
 COMMAND_COLLECT = _registry.COMMAND_COLLECT
 COMMAND_REDIS = _registry.COMMAND_REDIS
-COMMAND_REGISTRY = _registry.COMMAND_REGISTRY
+COMMAND_DOCKER_REGISTRY = _registry.COMMAND_DOCKER_REGISTRY
+COMMAND_HARBOR = _registry.COMMAND_HARBOR
+COMMAND_NEXUS = _registry.COMMAND_NEXUS
 COMMAND_POSTGRES = _registry.COMMAND_POSTGRES
 COMMAND_CLICKHOUSE = _registry.COMMAND_CLICKHOUSE
 COMMAND_ETCD = _registry.COMMAND_ETCD
@@ -525,7 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _NoColorArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
-            "Security toolkit for module-focused auditing (exporters, registry, grafana, proxmox, gitlab, "
+            "Security toolkit for module-focused auditing (exporters, docker-registry, harbor, nexus, grafana, proxmox, gitlab, "
             "consul, kubeapi, postgres, mongodb, docker, oracle, clickhouse, redis, etcd, qdrant, elastic, kafka, "
             "zookeeper, keeper, grpc). "
             "Use '<module> -h' for grouped flags by topic."

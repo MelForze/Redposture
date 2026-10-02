@@ -193,14 +193,14 @@ run_case exporters exporters_collect_url_https_transport_fail 1 exporters collec
 run_case exporters exporters_trigger_url_http 0 exporters trigger -t "http://127.0.0.1:19121/scrape?target=redis://127.0.0.1:6379" --callback-dns host.docker.internal --no-with-listen
 run_case exporters exporters_trigger_url_https_transport_mismatch 0 exporters trigger -t "https://127.0.0.1:19121/scrape" --callback-dns host.docker.internal --no-with-listen
 
-run_case registry registry_open 0 registry -t 127.0.0.1 --port 15000 --docker --images
-run_case registry registry_auth 0 registry -t 127.0.0.1 --port 15001 -u admin -p admin --docker --images
-run_case registry registry_harbor 0 registry -t 127.0.0.1 --port 15002 --harbor --images
-run_case registry registry_gitlab 0 registry -t 127.0.0.1 --port 15003 --token glrt-lab-token --gitlab --images
-run_case registry registry_nexus 0 registry -t 127.0.0.1 --port 15004 --nexus --assets
-run_case registry registry_url_http 0 registry -t "http://127.0.0.1:15000/v2/_catalog?n=1000" --docker --images
-run_case registry registry_url_https_transport_fail 1 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
-run_case registry registry_multi_instance_urls 0 registry -t "http://127.0.0.1:15000/v2/_catalog,http://127.0.0.1:15010/v2/_catalog,http://127.0.0.1:15011/v2/_catalog,http://127.0.0.1:15012/v2/_catalog,http://127.0.0.1:15013/v2/_catalog" --docker --images
+run_case docker-registry registry_open 0 docker-registry -t 127.0.0.1 --port 15000 --images
+run_case docker-registry registry_auth 0 docker-registry -t 127.0.0.1 --port 15001 -u admin -p admin --images
+run_case harbor registry_harbor 0 harbor -t 127.0.0.1 --port 15002 --images
+run_case gitlab registry_gitlab 0 gitlab -t 127.0.0.1 --port 15003 --registry-token glrt-lab-token --images
+run_case nexus registry_nexus 0 nexus -t 127.0.0.1 --port 15004 --assets
+run_case docker-registry registry_url_http 0 docker-registry -t "http://127.0.0.1:15000/v2/_catalog?n=1000" --images
+run_case docker-registry registry_url_https_transport_fail 1 docker-registry -t "https://127.0.0.1:15000/v2/_catalog" --images
+run_case docker-registry registry_multi_instance_urls 0 docker-registry -t "http://127.0.0.1:15000/v2/_catalog,http://127.0.0.1:15010/v2/_catalog,http://127.0.0.1:15011/v2/_catalog,http://127.0.0.1:15012/v2/_catalog,http://127.0.0.1:15013/v2/_catalog" --images
 
 run_case grafana grafana_default 0 grafana -t 127.0.0.1 --defcreds --show-datasources
 run_case grafana grafana_url_http 0 grafana -t "http://127.0.0.1:3000/login?next=%2F" --defcreds --show-datasources

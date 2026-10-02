@@ -40,7 +40,9 @@ AUDIT_MODULES = (
     "qdrant",
     "rabbitmq",
     "redis",
-    "registry",
+    "docker-registry",
+    "harbor",
+    "nexus",
     "zookeeper",
 )
 

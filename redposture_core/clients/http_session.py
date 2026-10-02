@@ -343,6 +343,29 @@ class HttpSessionPool:
         pin_http_redirect_path(response, method=method)
         return response
 
+    def request_once(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        body: bytes | None = None,
+        timeout: float | None = None,
+        response_size_cap: int = 256 * 1024,
+    ) -> HttpResponse:
+        """Send one request without following redirects (for CSRF/session login flows)."""
+        if self._closed:
+            raise RuntimeError("HTTP session pool is closed")
+        response, _error, _reused = self._request_once(
+            str(method).upper(),
+            str(url),
+            headers=headers or {},
+            body=body,
+            timeout=self.timeout if timeout is None else max(0.1, float(timeout)),
+            response_size_cap=response_size_cap,
+        )
+        return response
+
     def stats(self) -> dict[str, int]:
         with self._lock:
             return dict(self._stats)

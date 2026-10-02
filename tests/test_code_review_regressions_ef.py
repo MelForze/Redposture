@@ -114,13 +114,13 @@ def test_fix_e3_open_no_auth_fast_path_opt_in() -> None:
     'anonymous' probe that guarantees future creds would be redundant."""
     from redposture_core.modules.clickhouse.stage import build_clickhouse_spec
     from redposture_core.modules.docker.stage import build_docker_spec
+    from redposture_core.modules.docker_registry.stage import build_docker_registry_spec
     from redposture_core.modules.etcd.stage import build_etcd_spec
     from redposture_core.modules.kubeapi.stage import build_kubeapi_spec
     from redposture_core.modules.mongodb.stage import build_mongodb_spec
     from redposture_core.modules.postgres.stage import build_postgres_spec
     from redposture_core.modules.qdrant.stage import build_qdrant_spec
     from redposture_core.modules.redis.stage import build_redis_spec
-    from redposture_core.modules.registry.stage import build_registry_spec
     from redposture_core.modules.zookeeper.stage import build_zookeeper_spec
 
     for build in (
@@ -131,7 +131,7 @@ def test_fix_e3_open_no_auth_fast_path_opt_in() -> None:
         build_postgres_spec,
         build_qdrant_spec,
         build_etcd_spec,
-        build_registry_spec,
+        build_docker_registry_spec,
         build_zookeeper_spec,
         build_kubeapi_spec,
     ):

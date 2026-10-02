@@ -377,6 +377,7 @@ def _http_request(
                     return 0, b"", {}, _friendly_error_text(retry_response.error)
                 retry_response_headers = {str(key).lower(): str(value) for key, value in retry_response.headers.items()}
                 retry_response_headers["x-redposture-bearer-exchanged"] = "true"
+                retry_response_headers.setdefault("www-authenticate", challenge)
                 return int(retry_response.status), retry_response.body, retry_response_headers, None
             if bearer_error:
                 response_headers["x-redposture-bearer-error"] = bearer_error
@@ -1844,8 +1845,15 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
     is_nexus: bool | None = None
     nexus_info: dict[str, Any] | None = None
     nexus_error: str | None = None
-    selected_vendors = {vendor for vendor in ("nexus", "harbor", "gitlab") if bool(getattr(ctx.args, vendor, False))}
-    if bool(options["nexus"]) and (not is_registry or "nexus" in selected_vendors):
+    product = str(options.get("product") or "registry")
+    selected_vendors = (
+        {product}
+        if product in {"nexus", "harbor", "gitlab"}
+        else {vendor for vendor in ("nexus", "harbor", "gitlab") if bool(getattr(ctx.args, vendor, False))}
+    )
+    if (bool(options["nexus"]) or product == "docker-registry") and (
+        not is_registry or "nexus" in selected_vendors or product == "docker-registry"
+    ):
         nexus_info, nexus_error = _fetch_nexus_info(
             str(ctx.host),
             int(ctx.port),
@@ -1880,7 +1888,7 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
         if gitlab_info is not None:
             payload["is_gitlab"] = True
             payload["gitlab_info"] = gitlab_info
-        if _has_harbor_registry_challenge(probe[2]):
+        if _has_harbor_registry_challenge(probe[2]) or product in {"harbor", "docker-registry"}:
             harbor_info, harbor_error = _fetch_harbor_info(
                 str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), headers={}
             )
@@ -1890,7 +1898,14 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
                 payload["harbor_info"] = harbor_info
             elif harbor_error:
                 payload["harbor_error"] = harbor_error
-    if selected_vendors and not any(payload.get(f"is_{vendor}") is True for vendor in selected_vendors):
+    if product == "docker-registry" and any(
+        payload.get(f"is_{vendor}") is True for vendor in ("nexus", "harbor", "gitlab")
+    ):
+        payload["is_registry"] = False
+        payload["status"] = "not_registry"
+        payload["auth_required"] = None
+        payload["error"] = "vendor registry endpoint is not a plain Docker Registry"
+    elif selected_vendors and not any(payload.get(f"is_{vendor}") is True for vendor in selected_vendors):
         # An explicit vendor flag is a product selector. --enum-cve also probes
         # vendors, but does not narrow a generic Registry scan.
         payload["is_registry"] = False
@@ -1898,6 +1913,16 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
         payload["auth_required"] = None
         payload["error"] = f"requested {'/'.join(sorted(selected_vendors))} fingerprint not confirmed"
     payload["nexus_info"] = nexus_info
+    if product != "registry":
+        challenge = str(probe[2].get("www-authenticate") or "")
+        scheme, _params = _parse_www_authenticate(challenge)
+        payload["credential_verification_status"] = (
+            "available"
+            if product in {"harbor", "nexus"}
+            or (product == "gitlab" and payload.get("is_gitlab") is True)
+            or (product == "docker-registry" and status == "auth_required" and scheme in {"basic", "bearer"})
+            else "unavailable"
+        )
     stage_result = str(payload["status"]) if payload["status"] in {"fail", "not_registry"} else "ok"
     return _registry_append_lifecycle_stage(
         payload,
@@ -1908,6 +1933,130 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
         error=str(payload.get("error") or "").strip() or None,
         max_attempts=attempts,
     )
+
+
+def _registry_jwt_subject(token: str) -> str | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
+        payload = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    subject = str(payload.get("sub") or "").strip()
+    return subject or None
+
+
+def _verify_registry_credential(
+    product: str,
+    host: str,
+    port: int,
+    timeout: float,
+    username: str | None,
+    password: str | None,
+    token: str | None,
+    *,
+    anonymous_probe: _RegistryProbe | None,
+) -> tuple[bool | None, str | None]:
+    """Check identity, never treating an anonymously available endpoint as proof."""
+    headers = _auth_headers(username, password, token)
+    if product == "harbor":
+        status, body, _headers, error = _http_request(
+            host, port, "GET", "/api/v2.0/users/current", timeout, headers=headers
+        )
+        if error:
+            return None, error
+        if status == 401:
+            return False, "authentication rejected"
+        if status != 200:
+            return None, f"identity verification unavailable status={status}"
+        try:
+            payload = _json_loads_bytes(body)
+        except json.JSONDecodeError:
+            return None, "invalid Harbor identity response"
+        actual = str(payload.get("username") or "") if isinstance(payload, dict) else ""
+        if not actual or not isinstance(payload.get("user_id"), int):
+            return None, "invalid Harbor identity response"
+        return (True, None) if username is None or actual == username else (None, "Harbor identity mismatch")
+    if product == "nexus":
+        status, body, _headers, error = _http_request(
+            host, port, "GET", "/service/rest/v1/security/users", timeout, headers=headers
+        )
+        if error:
+            return None, error
+        if status == 401:
+            return False, "authentication rejected"
+        if status != 200:
+            return None, f"identity verification unavailable status={status}"
+        try:
+            payload = _json_loads_bytes(body)
+        except json.JSONDecodeError:
+            return None, "invalid Nexus identity response"
+        if not isinstance(payload, list) or not any(
+            isinstance(item, dict) and item.get("userId") == username for item in payload
+        ):
+            return None, "Nexus identity not confirmed"
+        anonymous_status, _anonymous_body, _anonymous_headers, anonymous_error = _http_request(
+            host, port, "GET", "/service/rest/v1/security/users", timeout
+        )
+        if anonymous_error:
+            return None, f"anonymous Nexus identity comparison unavailable: {anonymous_error}"
+        if anonymous_status == 200:
+            return None, "Nexus user listing is anonymously accessible"
+        if anonymous_status not in {401, 403}:
+            return None, f"anonymous Nexus identity comparison unavailable status={anonymous_status}"
+        return True, None
+    if product == "gitlab":
+        info = _gitlab_registry_challenge_info(anonymous_probe[2]) if anonymous_probe is not None else None
+        if info is None:
+            return None, "GitLab registry token realm unavailable"
+        if token is not None:
+            if anonymous_probe is None or anonymous_probe[0] != 401:
+                return None, "protected GitLab Registry access was not established"
+            status, body, response_headers, error = _http_request(host, port, "GET", "/v2/", timeout, headers=headers)
+            if error:
+                return None, error
+            if status == 200 and _registry_probe_has_fingerprint(status, body, response_headers):
+                return True, None
+            if status in {401, 403} and _registry_probe_has_fingerprint(status, body, response_headers):
+                return False, "GitLab Registry token rejected"
+            return None, f"GitLab Registry token verification unavailable status={status}"
+        realm = str(info["realm"])
+        parsed = urllib.parse.urlsplit(realm)
+        query = urllib.parse.parse_qs(parsed.query)
+        query["service"] = ["container_registry"]
+        url = urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query, doseq=True), "")
+        )
+        status, body, _headers, error = _http_request_url(url, "GET", timeout, headers=headers)
+        if error:
+            return None, error
+        if status in {401, 403}:
+            return False, "authentication rejected"
+        if status != 200:
+            return None, f"GitLab registry identity unavailable status={status}"
+        try:
+            payload = _json_loads_bytes(body)
+        except json.JSONDecodeError:
+            return None, "invalid GitLab token response"
+        issued = str(payload.get("token") or payload.get("access_token") or "") if isinstance(payload, dict) else ""
+        subject = _registry_jwt_subject(issued)
+        if not subject:
+            return None, "GitLab registry token does not identify a user"
+        return True, None
+    if anonymous_probe is None or _registry_probe_state(anonymous_probe)[1] == "open_no_auth":
+        return None, "anonymous registry access cannot verify a Basic pair"
+    status, body, response_headers, error = _http_request(host, port, "GET", "/v2/", timeout, headers=headers)
+    if error:
+        return None, error
+    if status == 200 and _registry_probe_has_fingerprint(status, body, response_headers):
+        return True, None
+    if status in {401, 403} and _registry_probe_has_fingerprint(status, body, response_headers):
+        return False, "authentication rejected"
+    return None, f"registry identity unavailable status={status}"
 
 
 def authenticate_registry(ctx: Any, detect_record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
@@ -1927,6 +2076,63 @@ def authenticate_registry(ctx: Any, detect_record: Any, options: Mapping[str, An
             duration_ms=int((time.monotonic() - started_at) * 1000),
             result=str(payload.get("status") or "unknown_auth"),
             error=str(payload.get("error") or "").strip() or None,
+            max_attempts=attempts,
+        )
+
+    product = str(options.get("product") or "registry")
+    if product != "registry":
+        verified, reason = _verify_registry_credential(
+            product,
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            credential.username,
+            credential.password,
+            credential.token,
+            anonymous_probe=state.anonymous_probe,
+        )
+        key = (credential.username, credential.password, credential.token, str(credential.source))
+        headers = _auth_headers(credential.username, credential.password, credential.token)
+        if verified is True:
+            state.credential_probes[key] = _http_request(
+                str(ctx.host),
+                int(ctx.port),
+                "GET",
+                "/v2/",
+                float(getattr(ctx.args, "timeout", 5.0)),
+                headers=headers,
+            )
+            if product == "nexus":
+                state.credential_nexus[key] = _fetch_nexus_info(
+                    str(ctx.host),
+                    int(ctx.port),
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    headers=headers,
+                )
+        status = "valid_credentials" if verified is True else "auth_required" if verified is False else "unknown_auth"
+        payload.update(
+            {
+                "timestamp": utc_now_iso(),
+                "status": status,
+                "provided_credentials": credential.username is not None and credential.password is not None,
+                "provided_username": credential.username,
+                "provided_password": credential.password,
+                "token_provided": bool(credential.token),
+                "credentials_source": str(credential.source),
+                "provided_credentials_ok": verified,
+                "credential_verification_status": "available" if verified is not None else "unavailable",
+                "credential_verification_reason": reason,
+                "auth_transport_attempts": 1,
+                "error": reason,
+            }
+        )
+        return _registry_append_lifecycle_stage(
+            payload,
+            stage_name=_STAGE_AUTH_INFERENCE,
+            attempt=1,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+            result=status,
+            error=reason,
             max_attempts=attempts,
         )
 
@@ -3233,7 +3439,8 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 def _nxc_prefix(record: dict[str, Any]) -> str:
     host = _clip(str(record.get("host") or "-"), 64)
     port = str(record.get("port") or "-")
-    return f"{'REGISTRY':<12}\t{host}\t{port}\t"
+    tag = str(record.get("module") or record.get("service") or "registry").upper()
+    return f"{tag:<16}\t{host}\t{port}\t"
 
 
 def _with_optional_images(record: dict[str, Any], message: str) -> str:
@@ -3253,7 +3460,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "type": "detect",
                 "host": record.get("host"),
                 "port": record.get("port"),
-                "service": "registry",
+                "service": record.get("service") or "registry",
                 "detected": bool(record.get("is_registry")),
                 "auth_required": auth_required_value,
             },
@@ -3308,6 +3515,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return line
 
     if status == "unknown_auth":
+        if record.get("provided_credentials") or record.get("token_provided"):
+            return ""  # Inconclusive attempts stay in debug and JSON, not in ordinary TXT.
         line = f"{prefix} [!] auth status unknown"
         if err != "-":
             return f"{line} err={err}"
@@ -3766,10 +3975,13 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
 
 
 def _render_colored_registry_line(console: Console, line: str) -> bool:
+    tag = line.split(None, 1)[0].strip() if line.strip() else ""
+    if tag not in {"REGISTRY", "DOCKER-REGISTRY", "HARBOR", "NEXUS"}:
+        return False
     if render_colored_marker_line(
         console,
         line,
-        tag="REGISTRY",
+        tag=tag,
         counts=(
             CountColorRule("images", "red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("layers", "red", unknown_color="orange", zero_color="bright_green"),
@@ -3778,9 +3990,9 @@ def _render_colored_registry_line(console: Console, line: str) -> bool:
         ),
     ):
         return True
-    if line.startswith("REGISTRY") and "\t" in line:
+    if line.startswith(tag) and "\t" in line:
         return render_tagged_detail_line(
-            console, line, tag="REGISTRY", default_color="orange", resource_counts=("components", "tags", "layers")
+            console, line, tag=tag, default_color="orange", resource_counts=("components", "tags", "layers")
         )
     return False
 

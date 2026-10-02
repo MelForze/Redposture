@@ -125,6 +125,8 @@ def _status_service(
                     code, response = 200, b""
             elif self.path == "/service/rest/v1/repositories":
                 code, response = 200, b"[]"
+            elif self.path == "/service/rest/v1/security/users":
+                code, response = (200, b'[{"userId":"observer"}]') if auth == valid_auth else (401, b"")
             self.send_response_only(code)
             for key, value in extra.items():
                 self.send_header(key, value)
@@ -149,11 +151,11 @@ def _status_service(
 
 
 def _audit(port: int, *extra: str) -> list[str]:
-    args = parse_args(["registry", "-t", f"http://127.0.0.1:{port}", "--enum-cve", "--no-color", *extra])
+    args = parse_args(["nexus", "-t", f"http://127.0.0.1:{port}", "--enum-cve", "--no-color", *extra])
     lines: list[str] = []
-    AuditCommandRunner(args=args, spec=stage.build_registry_spec(args), emit_line=lines.append).run_plan(
-        stage.build_registry_plan(args)
-    )
+    AuditCommandRunner(
+        args=args, spec=stage.build_registry_spec(args, product="nexus"), emit_line=lines.append
+    ).run_plan(stage.build_registry_plan(args, product="nexus"))
     return lines
 
 
@@ -180,14 +182,12 @@ def test_foreign_status_never_starts_credentials_data_or_cves(
     with _status_service(status, body, headers) as (port, requests):
         record = _record(port, "-u", "observer", "-p", "wrong", "--assets")
         lines = _audit(port, "-u", "observer", "-p", "wrong", "--assets")
-        debug = _audit(port, "--debug")
     assert record["is_registry"] is False
     assert record.get("is_nexus") is not True
     assert record["cve_enumeration"]["findings"] == []
     assert not any("CVE's Enumeration" in line or "potentially affected" in line for line in lines)
     assert not any("Nexus Repository" in line or "observer:wrong" in line for line in lines)
-    assert record["error"] in {"not nexus", "nexus status payload is invalid JSON"}
-    assert any("not a Docker Registry v2 endpoint" in line for line in debug)
+    assert record["error"] == "requested nexus fingerprint not confirmed"
     assert all(method == "GET" and auth is None for method, _path, auth in requests)
     assert not any(path.startswith("/service/rest/v1/repositories") for _method, path, _auth in requests)
 

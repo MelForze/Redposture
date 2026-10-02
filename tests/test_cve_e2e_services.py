@@ -166,7 +166,7 @@ def _redis_service(version: str) -> Iterator[int]:
 
 def _audit_json(module: str, port: int, *extra: str) -> dict[str, Any]:
     target = (
-        f"http://127.0.0.1:{port}" if module in {"airflow", "docker", "grafana", "qdrant", "registry"} else "127.0.0.1"
+        f"http://127.0.0.1:{port}" if module in {"airflow", "docker", "grafana", "qdrant", "nexus"} else "127.0.0.1"
     )
     args = parse_args([module, "-t", target, "--port", str(port), "--enum-cve", "--format", "json", *extra])
     stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
@@ -218,9 +218,9 @@ def test_redis_live_resp_version_controls_cve_boundary(version: str, affected: b
     assert ("CVE-2022-31144" in findings) is affected
 
 
-def test_registry_live_nexus_fingerprint_and_version_feed_cve_enumeration() -> None:
+def test_nexus_live_fingerprint_and_version_feed_cve_enumeration() -> None:
     with _http_service("nexus", "3.68.0") as port:
-        record = _audit_json("registry", port)
+        record = _audit_json("nexus", port)
 
     assert record["is_nexus"] is True
     assert record["nexus_info"]["version"] == "3.68.0"

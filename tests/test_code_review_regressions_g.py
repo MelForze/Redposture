@@ -52,7 +52,7 @@ def test_fix_g1_exporter_port_collisions_all_have_negative_markers() -> None:
         "postgres",
         "qdrant",
         "etcd",
-        "registry",
+        "docker-registry",
         "zookeeper",
         "kubeapi",
     ],
@@ -60,8 +60,9 @@ def test_fix_g1_exporter_port_collisions_all_have_negative_markers() -> None:
 def test_fix_g2_module_opts_into_keep_anonymous_open_no_auth(module: str) -> None:
     """These modules opt into the anon-open fast-path so `--defcreds` with a
     confirmed anonymous access doesn't run the credential loop redundantly."""
-    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-    build_spec = getattr(stage, f"build_{module}_spec")
+    package = module.replace("-", "_")
+    stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
+    build_spec = getattr(stage, f"build_{package}_spec")
     spec = build_spec(SimpleNamespace())
     assert getattr(spec, "keep_anonymous_open_no_auth", False) is True, (
         f"{module} spec did not opt in to keep_anonymous_open_no_auth"
@@ -99,7 +100,10 @@ _AUTH_MODULES = [
     "oracle",
     "postgres",
     "redis",
-    "registry",
+    "docker-registry",
+    "harbor",
+    "nexus",
+    "gitlab",
     "zookeeper",
     "kafka",
     "etcd",
@@ -131,7 +135,10 @@ _SAVE_MODULES = [
     "oracle",
     "postgres",
     "redis",
-    "registry",
+    "docker-registry",
+    "harbor",
+    "nexus",
+    "gitlab",
     "zookeeper",
     "consul",
     "grafana",

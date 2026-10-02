@@ -10,10 +10,23 @@ import pytest
 
 from redposture_core import stage_registry as registry
 from redposture_core.audit_models import AuditRecord
-from redposture_core.cli_args import parse_args
+from redposture_core.cli_args import parse_args as parse_cli_args
 from redposture_core.console import Console
 from redposture_core.stage_runtime import AuditCommandRunner
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Keep internal OCI-engine regressions while the public registry command is removed."""
+    if not argv or argv[0] != "registry":
+        return parse_cli_args(argv)
+    vendor_flags = {flag: flag in argv for flag in ("--docker", "--harbor", "--gitlab", "--nexus", "--assets")}
+    public_argv = ["docker-registry", *(part for part in argv[1:] if part not in vendor_flags)]
+    args = parse_cli_args(public_argv)
+    args.command = "registry"
+    for flag, enabled in vendor_flags.items():
+        setattr(args, flag.removeprefix("--"), enabled)
+    return args
 
 
 def test_human_bytes_and_path_helpers() -> None:

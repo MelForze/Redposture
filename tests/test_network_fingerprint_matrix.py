@@ -41,7 +41,9 @@ HTTP_PRODUCTS = (
     "proxmox",
     "qdrant",
     "rabbitmq",
-    "registry",
+    "docker-registry",
+    "harbor",
+    "nexus",
 )
 HTTP_API_SUFFIXES = {
     "airflow": "/api/v1/version",
@@ -56,7 +58,9 @@ HTTP_API_SUFFIXES = {
     "proxmox": "/api2/json/version",
     "qdrant": "/collections",
     "rabbitmq": "/api/overview",
-    "registry": "/service/rest/v1/status",
+    "docker-registry": "/v2/_catalog",
+    "harbor": "/api/v2.0/systeminfo",
+    "nexus": "/service/rest/v1/status",
 }
 NATIVE_PRODUCTS = ("clickhouse", "grpc", "kafka", "keeper", "mongodb", "oracle", "postgres", "redis", "zookeeper")
 PRODUCTS = HTTP_PRODUCTS + NATIVE_PRODUCTS
@@ -137,7 +141,13 @@ def _http_response(product: str, path: str, *, proxy_headers: bool = False) -> b
             "cluster_name": "rabbit@lab",
             "node": "rabbit@lab",
         }
-    elif product == "registry":
+    elif product == "docker-registry":
+        headers["Docker-Distribution-Api-Version"] = "registry/2.0"
+        payload = {}
+    elif product == "harbor":
+        headers["Docker-Distribution-Api-Version"] = "registry/2.0"
+        payload = {"harbor_version": "v2.11.1"} if path == "/api/v2.0/systeminfo" else {}
+    elif product == "nexus":
         headers["Server"] = "Nexus/3.72.0-04 (OSS)"
         payload = {"productName": "Nexus Repository", "version": "3.72.0-04", "edition": "OSS"}
     else:
@@ -436,8 +446,6 @@ def _detect(
     with_cve: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     extra = ["--protocol", "native"] if module == "clickhouse" else ["--plaintext"] if module == "grpc" else []
-    if module == "registry":
-        extra += ["--nexus"]
     if module == "oracle":
         extra += ["--service", "FREEPDB1", "--protocol", "tcp"]
     if verify_foreign or with_cve:
@@ -465,8 +473,9 @@ def _detect(
             *extra,
         ]
     )
-    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-    spec = getattr(stage, f"build_{module}_spec")(args)
+    package = module.replace("-", "_")
+    stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
+    spec = getattr(stage, f"build_{package}_spec")(args)
     # Preserve production detection/auth/state/cleanup. On lifecycle modules,
     # replace inventory hooks with no-ops rather than setting them to None:
     # None would accidentally fall back to the legacy monolithic host_stage.
@@ -474,7 +483,7 @@ def _detect(
         spec = replace(spec, data=lambda _ctx, record: record, capabilities=lambda _ctx, record: record)
     lines: list[str] = []
     result = AuditCommandRunner(args=args, spec=spec, emit_line=lines.append).run_plan(
-        getattr(stage, f"build_{module}_plan")(args)
+        getattr(stage, f"build_{package}_plan")(args)
     )
     records = [json.loads(line) for line in lines if json.loads(line).get("type") != "summary"]
     assert len(records) == 1, (module, lines)
@@ -482,7 +491,7 @@ def _detect(
 
 
 def test_wire_corpus_covers_exactly_all_audit_modules() -> None:
-    assert len(PRODUCTS) == len(set(PRODUCTS)) == 22
+    assert len(PRODUCTS) == len(set(PRODUCTS)) == 24
     assert set(PRODUCTS) == set(AUDIT_MODULE_NAMES)
 
 

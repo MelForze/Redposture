@@ -48,7 +48,7 @@ jobs:
           expected_version="$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
           test "$(redposture --version)" = "redposture ${expected_version}"
           redposture --help > /dev/null
-          for command in airflow clickhouse consul docker elastic etcd gitlab grafana grpc kafka keeper kubeapi minio mongodb oracle postgres proxmox qdrant rabbitmq redis registry zookeeper; do
+          for command in airflow clickhouse consul docker docker-registry elastic etcd gitlab grafana grpc harbor kafka keeper kubeapi minio mongodb nexus oracle postgres proxmox qdrant rabbitmq redis zookeeper; do
             redposture "$command" -h > /dev/null
           done
           redposture exporters scan -h > /dev/null

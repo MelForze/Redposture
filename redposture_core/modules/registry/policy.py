@@ -7,8 +7,8 @@ from typing import Any
 from ...stage_runtime import validate_basic_module_args
 
 
-def validate_args(args: Any, console: Any) -> int | None:
-    common_rc = validate_basic_module_args(args, console, module="registry")
+def validate_args(args: Any, console: Any, *, product: str = "registry") -> int | None:
+    common_rc = validate_basic_module_args(args, console, module=product)
     if common_rc is not None:
         return common_rc
     if getattr(args, "token", None) and (
@@ -27,8 +27,10 @@ def validate_args(args: Any, console: Any) -> int | None:
     ):
         console.error("--metadata requires --repository and --tag")
         return 2
-    if bool(getattr(args, "assets", False)) and not bool(getattr(args, "nexus", False)):
-        console.error("--assets requires --nexus")
+    if bool(getattr(args, "assets", False)) and (
+        product not in {"nexus", "registry"} or (product == "registry" and not bool(getattr(args, "nexus", False)))
+    ):
+        console.error("--assets requires --nexus" if product == "registry" else "--assets is only available in nexus")
         return 2
     if bool(getattr(args, "download", False)) and not getattr(args, "image", None):
         console.error("--download requires --image")

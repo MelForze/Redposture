@@ -14,6 +14,8 @@ import urllib.parse
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from html.parser import HTMLParser
+from http.cookies import SimpleCookie
 from typing import Any
 
 from ...auth_detection import auth_required_text, detect_browser_sso
@@ -70,6 +72,7 @@ class GitLabLifecycleState:
     host: str | None = None
     port: int | None = None
     origin_resolved: bool = False
+    web_auth_blocked: bool = False
 
     def close(self) -> None:
         if self.http is not None:
@@ -308,6 +311,128 @@ def _detect_login_page(body: str) -> bool:
         re.search(r"<form\b[^>]*\baction\s*=\s*['\"][^'\"]*/users/sign_in(?:[?#][^'\"]*)?['\"]", text)
     )
     return has_gitlab_title and has_sign_in_form
+
+
+class _GitLabLoginForm(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_form = False
+        self.token: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "form" and str(values.get("action") or "").split("?", 1)[0].endswith("/users/sign_in"):
+            self.in_form = True
+        elif tag == "input" and self.in_form and values.get("name") == "authenticity_token":
+            self.token = values.get("value")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "form":
+            self.in_form = False
+
+
+def _gitlab_session_cookie(headers: dict[str, str]) -> str | None:
+    raw = str(headers.get("set-cookie") or "")
+    if not raw:
+        return None
+    cookie = SimpleCookie()
+    try:
+        cookie.load(raw)
+    except Exception:  # noqa: BLE001 — malformed Set-Cookie must not abort a scan
+        return None
+    morsel = cookie.get("_gitlab_session")
+    return f"_gitlab_session={morsel.value}" if morsel is not None else None
+
+
+def _gitlab_active_captcha(body: str) -> bool:
+    """Ignore GitLab's inert recaptcha configuration embedded on normal login pages."""
+    return bool(
+        re.search(r"gon\.recaptcha_sitekey\s*=\s*['\"][^'\"]+['\"]", body, re.IGNORECASE)
+        or re.search(
+            r"(?:class|name)\s*=\s*['\"][^'\"]*(?:g-recaptcha|h-captcha|captcha-response)", body, re.IGNORECASE
+        )
+    )
+
+
+def verify_gitlab_web_credentials(ctx: Any, username: str, password: str) -> tuple[bool | None, str | None]:
+    """Use one isolated CSRF login session and require GitLab's user identity."""
+    state = ctx.lifecycle_state
+    if not isinstance(state, GitLabLifecycleState) or state.http is None:
+        return None, "GitLab login transport unavailable"
+    if state.web_auth_blocked:
+        return None, "GitLab login attempts stopped after SSO, CAPTCHA or rate limit"
+    host, port = str(state.host or ctx.host), int(state.port or ctx.port)
+    scheme = str(state.scheme or "http")
+    timeout = float(getattr(ctx.args, "timeout", 5.0))
+
+    def _url(path: str) -> str:
+        return build_http_target_url(host, port, path, default_scheme=scheme, override_bound_scheme=True)
+
+    login = state.http.request_once("GET", _url("/users/sign_in"), timeout=timeout)
+    if login.error:
+        return None, str(login.error)
+    if login.status == 429:
+        state.web_auth_blocked = True
+        return None, "GitLab login rate limited"
+    login_location = str(login.headers.get("location") or login.headers.get("Location") or "")
+    if login.status in {301, 302, 303, 307, 308} and login_location:
+        destination = urllib.parse.urlsplit(urllib.parse.urljoin(_url("/users/sign_in"), login_location))
+        if destination.hostname and destination.hostname != host:
+            state.web_auth_blocked = True
+            return None, "GitLab login redirected to an identity provider"
+    body = login.body.decode("utf-8", errors="replace")
+    form = _GitLabLoginForm()
+    form.feed(body)
+    if _gitlab_active_captcha(body) or (
+        not form.token and detect_browser_sso(headers=login.headers, body=body) is not None
+    ):
+        state.web_auth_blocked = True
+        return None, "GitLab SSO or CAPTCHA login is not checked"
+    cookie = _gitlab_session_cookie({str(k).lower(): str(v) for k, v in login.headers.items()})
+    if login.status != 200 or not form.token or not cookie:
+        return None, "GitLab CSRF login form unavailable"
+    fields = urllib.parse.urlencode(
+        {
+            "authenticity_token": form.token,
+            "user[login]": username,
+            "user[password]": password,
+        }
+    ).encode("utf-8")
+    posted = state.http.request_once(
+        "POST",
+        _url("/users/sign_in"),
+        timeout=timeout,
+        body=fields,
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Cookie": cookie},
+    )
+    if posted.error:
+        return None, str(posted.error)
+    if posted.status == 429:
+        state.web_auth_blocked = True
+        return None, "GitLab login rate limited"
+    posted_text = posted.body.decode("utf-8", errors="replace")
+    if _gitlab_active_captcha(posted_text) or detect_browser_sso(headers=posted.headers, body=posted_text) is not None:
+        state.web_auth_blocked = True
+        return None, "GitLab SSO or CAPTCHA login is not checked"
+    if posted.status in {401, 422} or (posted.status == 200 and _detect_login_page(posted_text)):
+        return False, "GitLab login rejected"
+    if posted.status not in {200, 302, 303}:
+        return None, f"GitLab login inconclusive status={posted.status}"
+    location = str(posted.headers.get("location") or "")
+    if location and urllib.parse.urlsplit(urllib.parse.urljoin(_url("/users/sign_in"), location)).hostname != host:
+        state.web_auth_blocked = True
+        return None, "GitLab login redirected to an identity provider"
+    session_cookie = _gitlab_session_cookie({str(k).lower(): str(v) for k, v in posted.headers.items()}) or cookie
+    identity = state.http.request_once("GET", _url("/api/v4/user"), timeout=timeout, headers={"Cookie": session_cookie})
+    if identity.error:
+        return None, str(identity.error)
+    try:
+        user = _json_loads_bytes(identity.body)
+    except json.JSONDecodeError:
+        user = None
+    if identity.status == 200 and _looks_like_gitlab_user(user) and user.get("username") == username:
+        return True, None
+    return None, "GitLab identity was not confirmed after login"
 
 
 def _detect_version_payload(payload: Any) -> str | None:

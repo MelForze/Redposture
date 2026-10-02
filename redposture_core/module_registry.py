@@ -22,12 +22,16 @@ from .cli_modules.keeper import configure_keeper_parser
 from .cli_modules.kubeapi import configure_kubeapi_parser
 from .cli_modules.minio import configure_minio_parser
 from .cli_modules.mongodb import MongoDBHelpFormatter, configure_mongodb_parser
+from .cli_modules.oci_registry import (
+    configure_docker_registry_parser,
+    configure_harbor_parser,
+    configure_nexus_parser,
+)
 from .cli_modules.oracle import configure_oracle_parser
 from .cli_modules.postgres import PostgresHelpFormatter, configure_postgres_parser
 from .cli_modules.proxmox import configure_proxmox_parser
 from .cli_modules.qdrant import configure_qdrant_parser
 from .cli_modules.rabbitmq import configure_rabbitmq_parser
-from .cli_modules.registry import configure_registry_parser
 from .cli_modules.zookeeper import configure_zookeeper_parser
 
 COMMAND_LISTEN = "listen"
@@ -35,7 +39,9 @@ COMMAND_SCAN = "scan"
 COMMAND_TRIGGER = "trigger"
 COMMAND_COLLECT = "collect"
 COMMAND_REDIS = "redis"
-COMMAND_REGISTRY = "registry"
+COMMAND_DOCKER_REGISTRY = "docker-registry"
+COMMAND_HARBOR = "harbor"
+COMMAND_NEXUS = "nexus"
 COMMAND_POSTGRES = "postgres"
 COMMAND_CLICKHOUSE = "clickhouse"
 COMMAND_ETCD = "etcd"
@@ -106,7 +112,9 @@ _STAGE_RUNNER_MODULES: dict[str, str] = {
     COMMAND_TRIGGER: "redposture_core.stage_trigger",
     COMMAND_COLLECT: "redposture_core.stage_collect",
     COMMAND_REDIS: "redposture_core.modules.redis.stage",
-    COMMAND_REGISTRY: "redposture_core.modules.registry.stage",
+    COMMAND_DOCKER_REGISTRY: "redposture_core.modules.docker_registry.stage",
+    COMMAND_HARBOR: "redposture_core.modules.harbor.stage",
+    COMMAND_NEXUS: "redposture_core.modules.nexus.stage",
     COMMAND_POSTGRES: "redposture_core.modules.postgres.stage",
     COMMAND_CLICKHOUSE: "redposture_core.modules.clickhouse.stage",
     COMMAND_ETCD: "redposture_core.modules.etcd.stage",
@@ -233,18 +241,25 @@ EXPORTERS_ACTION_SPECS: tuple[ExportersActionSpec, ...] = (
 
 COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
-        name=COMMAND_REGISTRY,
-        help="Audit Docker Registry v2 / Harbor / GitLab / Nexus exposure and image metadata.",
-        description=(
-            "Registry audit supports four modes: generic Docker Registry v2/OCI, Harbor, "
-            "GitLab Container Registry, and Nexus Repository. By default it performs minimal "
-            "detection and prints only the detected type + basic access status. "
-            "Use --harbor/--gitlab/--nexus for vendor API parsing, and use shared Docker/OCI "
-            "flags (--repository/--show-tags/--tag/--metadata/--inspect/--download) to inspect "
-            "image tags and config metadata on any compatible v2 registry endpoint."
-        ),
-        runner_attr="run_registry_stage",
-        configure_parser=_make_configurator(configure_registry_parser, _HTTP_MODULE_HELPERS_WITH_MIRROR),
+        name=COMMAND_DOCKER_REGISTRY,
+        help="Audit plain Docker Registry v2 / OCI exposure and image metadata.",
+        runner_attr="run_docker_registry_stage",
+        runner_module="redposture_core.modules.docker_registry.stage",
+        configure_parser=_make_configurator(configure_docker_registry_parser, _HTTP_MODULE_HELPERS),
+    ),
+    CommandSpec(
+        name=COMMAND_HARBOR,
+        help="Audit Harbor registry exposure and image metadata.",
+        runner_attr="run_harbor_stage",
+        runner_module="redposture_core.modules.harbor.stage",
+        configure_parser=_make_configurator(configure_harbor_parser, _HTTP_MODULE_HELPERS),
+    ),
+    CommandSpec(
+        name=COMMAND_NEXUS,
+        help="Audit Nexus Repository exposure and image metadata.",
+        runner_attr="run_nexus_stage",
+        runner_module="redposture_core.modules.nexus.stage",
+        configure_parser=_make_configurator(configure_nexus_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_GRAFANA,
@@ -505,7 +520,9 @@ __all__ = [
     "COMMAND_PROXMOX",
     "COMMAND_QDRANT",
     "COMMAND_REDIS",
-    "COMMAND_REGISTRY",
+    "COMMAND_DOCKER_REGISTRY",
+    "COMMAND_HARBOR",
+    "COMMAND_NEXUS",
     "COMMAND_SCAN",
     "COMMAND_SELFCERT",
     "COMMAND_TRIGGER",

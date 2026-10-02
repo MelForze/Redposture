@@ -64,12 +64,11 @@ def test_registry_nexus_mode_detects_non_docker_nexus_before_deep_actions(
     output_path = tmp_path / "registry-nexus.jsonl"
     args = parse_args(
         [
-            "registry",
+            "nexus",
             "-t",
             "127.0.0.1",
             "--port",
             "15004",
-            "--nexus",
             "--assets",
             "--format",
             "json",
@@ -78,7 +77,7 @@ def test_registry_nexus_mode_detects_non_docker_nexus_before_deep_actions(
         ]
     )
 
-    rc = stage.run_registry_stage(args, logger=SimpleNamespace(log=lambda *_args, **_kwargs: None))
+    rc = stage.run_nexus_stage(args, logger=SimpleNamespace(log=lambda *_args, **_kwargs: None))
 
     assert rc == 0
     assert repository_calls == ["repositories"]

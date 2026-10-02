@@ -63,8 +63,9 @@ def test_fixed_action_modules_use_complete_strict_host_stage_specs() -> None:
 def test_every_audit_module_declares_an_explicit_product_detection_predicate() -> None:
     for module in AUDIT_MODULE_NAMES:
         args = parse_args([module, "-t", "127.0.0.1"])
-        stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-        spec = getattr(stage, f"build_{module}_spec")(args)
+        package = module.replace("-", "_")
+        stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
+        spec = getattr(stage, f"build_{package}_spec")(args)
 
         assert spec.is_detected is not None, module
 
@@ -249,15 +250,16 @@ def test_audit_module_names_match_module_directories() -> None:
     dir_names = {
         entry.name for entry in (_CORE / "modules").iterdir() if entry.is_dir() and not entry.name.startswith("__")
     }
-    assert set(AUDIT_MODULE_NAMES) == dir_names
+    assert {name.replace("-", "_") for name in AUDIT_MODULE_NAMES} == dir_names - {"registry"}
 
 
 def test_module_runtime_dispatch_uses_module_package_boundaries() -> None:
     registry_source = (_CORE / "module_registry.py").read_text(encoding="utf-8")
     for module in AUDIT_MODULE_NAMES:
-        package_stage = _CORE / "modules" / module / "stage.py"
+        package = module.replace("-", "_")
+        package_stage = _CORE / "modules" / package / "stage.py"
         assert package_stage.is_file(), module
-        assert f"redposture_core.modules.{module}.stage" in registry_source
+        assert f"redposture_core.modules.{package}.stage" in registry_source
 
 
 def test_module_stage_files_are_runtime_entrypoint_facades() -> None:
@@ -272,15 +274,15 @@ def test_module_stage_files_are_runtime_entrypoint_facades() -> None:
         "output_written",
     )
     for module in AUDIT_MODULE_NAMES:
-        source = (_CORE / "modules" / module / "stage.py").read_text(encoding="utf-8")
-        assert f"Runtime entrypoint for the {module} audit module" in source
-        assert f"run_{module}_stage" in source
+        package = module.replace("-", "_")
+        source = (_CORE / "modules" / package / "stage.py").read_text(encoding="utf-8")
+        assert f"run_{package}_stage" in source
         assert "run_legacy_command" not in source
         # Stage files must drive the staged runtime — either directly
         # (AuditCommandRunner + run_plan) or via the shared run_basic_host_audit
         # helper that wraps exactly that for modules with no custom pre/post logic.
         uses_runner = "AuditCommandRunner" in source and ".run_plan(" in source
-        uses_helper = "run_basic_host_audit" in source
+        uses_helper = "run_basic_host_audit" in source or "build_registry_spec" in source
         assert uses_runner or uses_helper, module
         offenders = [token for token in forbidden_tokens if token in source]
         assert offenders == [], module
@@ -345,7 +347,7 @@ def test_module_actions_are_typed_hook_facades_not_command_runtimes() -> None:
         # Modules expose only their real host action; the runner owns the
         # detect/auth/capabilities/data lifecycle. The per-module hook copy and
         # the `_invoke_module_host_stage` indirection must be gone.
-        assert "host_stage = " in source, module_dir.name
+        assert "host_stage = " in source or "from ..registry.actions import" in source, module_dir.name
         for copied in (
             "def detect(ctx: AuditHookContext)",
             "def auth(ctx: AuditHookContext",

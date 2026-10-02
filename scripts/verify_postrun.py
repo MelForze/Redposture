@@ -13,7 +13,9 @@ from typing import Any
 
 _EXPECTED_MODULES = (
     "exporters",
-    "registry",
+    "docker-registry",
+    "harbor",
+    "nexus",
     "grafana",
     "gitlab",
     "consul",
@@ -46,9 +48,12 @@ _EXPECTED_LABELS = (
     "exporters_trigger_url_https_transport_mismatch",
     "registry_open",
     "registry_auth",
+    "registry_weak_pairs",
     "registry_harbor",
+    "registry_harbor_weak_pairs",
     "registry_gitlab",
     "registry_nexus",
+    "registry_nexus_weak_pairs",
     "registry_url_http",
     "registry_url_https_transport_fallback",
     "registry_multi_instance_urls",
@@ -74,6 +79,8 @@ _EXPECTED_LABELS = (
     "airflow_default",
     "airflow_creds",
     "gitlab_public",
+    "gitlab_registry_token_rejected",
+    "gitlab_weak_pairs",
     "gitlab_analyst",
     "gitlab_url_override_http",
     "gitlab_multi_instance_urls",
@@ -83,6 +90,7 @@ _EXPECTED_LABELS = (
     "consul_url_hint_http",
     "consul_multi_instance_urls",
     "kubeapi_open",
+    "kubeapi_default_pairs_without_basic",
     "kubeapi_auditor",
     "kubeapi_admin",
     "kubeapi_url_override_https",
@@ -317,7 +325,11 @@ _EXTENDED_EXPECTED_LABELS = (
     "fuzz_registry_token_basic_conflict",
     "fuzz_registry_show_tags_without_repository",
     "fuzz_registry_metadata_without_tag",
-    "fuzz_registry_assets_without_nexus",
+    "fuzz_harbor_missing_targets",
+    "fuzz_nexus_missing_targets",
+    "fuzz_harbor_option_surface",
+    "fuzz_nexus_option_surface",
+    "fuzz_gitlab_oci_option_surface",
     "fuzz_registry_download_without_image",
     "fuzz_grafana_username_without_password",
     "fuzz_kubeapi_username_without_password",
@@ -1610,9 +1622,26 @@ _CAPABILITY_FIELDS_BY_MODULE: dict[str, tuple[str, ...]] = {
     "oracle": ("connect_service", "capabilities", "credential_attempts"),
     "docker": ("server_version", "api_version", "containers"),
     "kubeapi": ("version", "auth_mode", "can_list_namespaces", "namespaces", "pods", "secrets"),
-    "registry": (
+    "docker-registry": (
         "image_count",
         "images",
+        "selected_repository_tags",
+        "metadata_result",
+        "inspections",
+        "download_result",
+    ),
+    "harbor": (
+        "harbor_projects",
+        "harbor_repositories",
+        "harbor_artifacts",
+    ),
+    "nexus": (
+        "nexus_info",
+        "nexus_repositories",
+        "nexus_assets",
+    ),
+    "registry": (
+        # Internal shared OCI records can still occur in archived QA artifacts.
         "selected_repository_tags",
         "metadata_result",
         "inspections",
@@ -1623,7 +1652,7 @@ _CAPABILITY_FIELDS_BY_MODULE: dict[str, tuple[str, ...]] = {
         "nexus_repositories",
         "nexus_assets",
     ),
-    "gitlab": ("version", "open_endpoints", "public_projects", "token_projects", "clone_results"),
+    "gitlab": ("version", "open_endpoints", "public_projects", "token_projects", "clone_results", "container_registry"),
     "grpc": ("services", "methods", "reflection_enabled", "invoke_result", "grpc_web_detected"),
     "proxmox": ("auth_method", "successful_endpoints", "nodes", "users", "added_user"),
     "grafana": ("server_version", "datasource_count", "datasources", "check_results"),
@@ -2013,7 +2042,7 @@ _ACTION_NONEMPTY_FIELDS: dict[str, tuple[str, ...]] = {
 
 _ACTION_LIST_CONTAINS: dict[str, dict[str, tuple[object, ...]]] = {
     "registry_gitlab": {
-        "images": ("gitlab/project-api:latest", "team/ops-sidecar:latest"),
+        "container_registry.images": ("gitlab/project-api:latest", "team/ops-sidecar:latest"),
     },
     "registry_harbor": {
         "harbor_repositories": ("core/control-plane", "security/scanner-adapter"),
@@ -2330,7 +2359,9 @@ _MODULE_SCHEMA_REQUIRED: dict[str, tuple[str, ...]] = {
     "oracle": ("is_oracle", "transport", "transport_mode", "defcreds_enabled"),
     "docker": ("is_docker", "transport", "transport_mode", "tls_required"),
     "kubeapi": ("is_kubeapi", "https", "auth_mode", "insecure_effective"),
-    "registry": ("is_registry", "show_images", "show_tags", "docker"),
+    "docker-registry": ("is_registry", "show_images", "show_tags", "docker"),
+    "harbor": ("is_registry", "is_harbor", "show_images", "show_tags"),
+    "nexus": ("is_registry", "is_nexus", "show_images", "show_tags"),
     "gitlab": ("is_gitlab", "https", "token_provided"),
     "grpc": ("is_grpc", "transport", "transport_mode", "reflection_enabled"),
     "grafana": ("is_grafana", "show_datasources", "defcreds_enabled"),
@@ -2383,7 +2414,9 @@ def _validate_idempotency(rows: list[dict[str, str]]) -> None:
 # detection trivial without enumerating every variant.
 
 _MISSING_TARGET_MODULES = (
-    "registry",
+    "docker-registry",
+    "harbor",
+    "nexus",
     "grafana",
     "gitlab",
     "consul",
@@ -2432,7 +2465,6 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_registry_token_basic_conflict": ("use either --token or --username/--password, not both",),
     "fuzz_registry_show_tags_without_repository": ("--show-tags requires --repository",),
     "fuzz_registry_metadata_without_tag": ("--metadata requires --repository and --tag",),
-    "fuzz_registry_assets_without_nexus": ("--assets requires --nexus",),
     "fuzz_registry_download_without_image": ("--download requires --image",),
     "fuzz_grafana_username_without_password": ("--password is required when --username is set",),
     "fuzz_kubeapi_username_without_password": ("--username and --password must be set together",),
@@ -3320,7 +3352,9 @@ def _run_cli_check(*args: str) -> subprocess.CompletedProcess[str]:
 def _cli_smoke_checks() -> None:
     checks = [
         ("--help",),
-        ("registry", "-h"),
+        ("docker-registry", "-h"),
+        ("harbor", "-h"),
+        ("nexus", "-h"),
         ("exporters", "scan", "-h"),
         ("postgres", "-h"),
         ("elastic", "-h"),

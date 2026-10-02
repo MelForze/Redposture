@@ -11,7 +11,9 @@ from redposture_core.cli_args import parse_args
 from redposture_core.stage_runtime import AuditCommandPlan
 
 _AUDIT_MODULES = (
-    "registry",
+    "docker-registry",
+    "harbor",
+    "nexus",
     "grafana",
     "proxmox",
     "gitlab",
@@ -34,8 +36,9 @@ _AUDIT_MODULES = (
 
 
 def _plan_builder(module_name: str) -> Callable[[Any], AuditCommandPlan]:
-    stage_module = importlib.import_module(f"redposture_core.stage_{module_name}")
-    return getattr(stage_module, f"build_{module_name}_plan")
+    package = module_name.replace("-", "_")
+    stage_module = importlib.import_module(f"redposture_core.modules.{package}.stage")
+    return getattr(stage_module, f"build_{package}_plan")
 
 
 def _target_pairs(plan: AuditCommandPlan) -> set[tuple[str, int]]:

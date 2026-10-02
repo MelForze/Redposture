@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from .oci_registry import add_oci_content_flags
+
 
 def configure_gitlab_parser(
     parser: argparse.ArgumentParser,
@@ -48,6 +50,12 @@ def configure_gitlab_parser(
         metavar="value",
         help="Optional GitLab Personal/Group Access Token for API auth and permission checks.",
     )
+    auth.add_argument("-u", "--username", metavar="name", help="Web login or Container Registry Basic username.")
+    auth.add_argument("-p", "--password", metavar="value", help="Web login or Container Registry Basic password.")
+    auth.add_argument(
+        "--registry-token", metavar="value", help="Container Registry Bearer token; separate from --token PAT."
+    )
+    auth.add_argument("--defcreds", action="store_true", help="Check a small catalog of weak login pairs.")
     actions.add_argument(
         "--project",
         dest="project",
@@ -68,6 +76,7 @@ def configure_gitlab_parser(
         metavar="dir",
         help="Output directory root for --clone repositories.",
     )
+    add_oci_content_flags(parser.add_argument_group("Container Registry"))
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(
         "-f",

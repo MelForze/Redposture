@@ -433,22 +433,24 @@ def resolve_products(module: str, payload: Mapping[str, Any]) -> list[DetectedPr
                 payload.get("version"),
             )
         ]
-    if module == "registry":
+    if module in {"registry", "harbor", "nexus", "docker-registry"}:
+        if module == "docker-registry":
+            return []
         products: list[DetectedProduct] = []
-        if payload.get("is_harbor") is True:
+        if payload.get("is_harbor") is True and module in {"registry", "harbor"}:
             harbor_version = _nested_version(payload, "harbor_info", "harbor_version", "version")
             if harbor_version:
                 release = re.fullmatch(r"(v?\d+\.\d+\.\d+)-[0-9a-f]{8}", harbor_version, re.IGNORECASE)
                 if release:
                     harbor_version = release.group(1)
             products.append(_product("harbor", "Harbor", harbor_version))
-        if payload.get("is_nexus") is True:
+        if payload.get("is_nexus") is True and module in {"registry", "nexus"}:
             products.append(
                 _product(
                     "nexus_repository", "Nexus Repository", _nested_version(payload, "nexus_info", "version", "release")
                 )
             )
-        if payload.get("is_gitlab") is True:
+        if payload.get("is_gitlab") is True and module == "registry":
             products.append(_product("gitlab", "GitLab", _nested_version(payload, "gitlab_info", "version")))
         return products
     return []

@@ -39,10 +39,9 @@ def test_authenticated_registry_keeps_original_gitlab_identity_and_gates_version
     monkeypatch.setattr(registry, "_http_request_url", absolute)
     args = parse_args(
         [
-            "registry",
+            "gitlab",
             "-t",
             "127.0.0.1:15003",
-            "--gitlab",
             "-u",
             "root",
             "-p",

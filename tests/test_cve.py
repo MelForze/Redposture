@@ -509,8 +509,8 @@ def test_registry_enum_cve_enables_vendor_fingerprints(monkeypatch: pytest.Monke
         return {"host": ctx.host, "port": ctx.port, "status": "not_registry"}
 
     monkeypatch.setattr(actions, "detect_registry", detect)
-    args = parse_args(["registry", "-t", "127.0.0.1", "--enum-cve"])
-    spec = stage.build_registry_spec(args)
+    args = parse_args(["harbor", "-t", "127.0.0.1", "--enum-cve"])
+    spec = stage.build_registry_spec(args, product="harbor")
     assert spec.detect is not None
     spec.detect(SimpleNamespace(host="127.0.0.1", port=5000, target=None))
     assert seen["harbor"] is True

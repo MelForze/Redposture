@@ -12,9 +12,11 @@ from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
+    AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
     command_result_exit_code,
+    merge_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -22,6 +24,16 @@ _DEFAULT_PORT = 6443
 _DEFAULT_PORTS: tuple[int, ...] | None = (6443, 16443, 26443)
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_kubeapi_host
+_KUBE_BASIC_PAIRS = (
+    ("admin", "admin"),
+    ("admin", "password"),
+    ("root", "root"),
+    ("root", "password"),
+    ("kubeadmin", "kubeadmin"),
+    ("kubernetes", "kubernetes"),
+    ("user", "user"),
+    ("test", "test"),
+)
 
 
 def build_kubeapi_plan(args: Any) -> AuditCommandPlan:
@@ -29,6 +41,12 @@ def build_kubeapi_plan(args: Any) -> AuditCommandPlan:
     explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
     if not explicit_port and plan.target_plan is not None:
         plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
+    if bool(getattr(args, "defcreds", False)):
+        defaults = tuple(
+            AuditCredentialRun(username=username, password=password, source="default")
+            for username, password in _KUBE_BASIC_PAIRS
+        )
+        plan = replace(plan, credential_runs=merge_audit_credential_runs(plan.credential_runs, defaults))
     return plan
 
 
@@ -105,6 +123,7 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_factory=(lambda _ctx: actions.KubeApiLifecycleState()) if use_lifecycle_hooks else None,
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render,
+        structured_output_redact_fields=("provided_password",),
         colorize=render._render_colored_kubeapi_line,
         is_detected=lambda record: record.extra.get("is_kubeapi") is True,
         deep_gate=_deep_gate,
@@ -112,6 +131,8 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
         # E3 opt-in: kubeapi anon-open (system:anonymous binding, common on
         # dev/testing clusters) is confirmed by the detect probe.
         keep_anonymous_open_no_auth=True,
+        continue_after_credential_error=bool(getattr(args, "defcreds", False)),
+        continue_after_credential_success=bool(getattr(args, "defcreds", False)),
         progress_refresh_interval_s=0.1,
     )
 

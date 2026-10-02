@@ -56,12 +56,11 @@ def main() -> int:
         command = [
             sys.executable,
             str(ROOT / "redposture.py"),
-            "registry",
+            "harbor",
             "-t",
             args.url,
             "--timeout",
             "15",
-            "--harbor",
             "--images",
             "--enum-cve",
             *extra,

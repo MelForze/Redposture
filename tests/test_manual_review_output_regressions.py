@@ -39,8 +39,9 @@ class RecordingConsole:
 @pytest.mark.parametrize("padding", [0, 8, 15])
 def test_real_module_console_columns_are_independent_of_legacy_padding(module, padding, capsys, tmp_path) -> None:
     args = parse_args([module, "-t", "127.0.0.1", "--no-color"])
-    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-    spec = getattr(stage, f"build_{module}_spec")(args)
+    package = module.replace("-", "_")
+    stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
+    spec = getattr(stage, f"build_{package}_spec")(args)
     prefix = f"{spec.label:<{padding}}\t127.0.0.1\t1234\t"
     lines = [f"{prefix} [*] service", f"{prefix} detail"]
     output = tmp_path / "report.txt"
@@ -139,8 +140,9 @@ def test_colored_console_alignment_matches_plain_console(monkeypatch, capsys) ->
 @pytest.mark.parametrize("module", AUDIT_MODULE_NAMES)
 def test_every_module_keeps_blue_label_on_markerless_details(module) -> None:
     args = parse_args([module, "-t", "127.0.0.1"])
-    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-    spec = getattr(stage, f"build_{module}_spec")(args)
+    package = module.replace("-", "_")
+    stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
+    spec = getattr(stage, f"build_{package}_spec")(args)
     console = RecordingConsole()
     _build_colored_emit(console, spec.colorize)(f"{spec.label}\t127.0.0.1\t1234\t <no data>")
     assert (spec.label, "blue") in console.paint_calls
@@ -166,7 +168,7 @@ RESOURCE_COUNTERS = [
     ("qdrant", "collections"),
     ("grafana", "datasources"),
     ("gitlab", "projects"),
-    ("registry", "images"),
+    ("docker-registry", "images"),
     ("zookeeper", "znodes"),
     ("keeper", "znodes"),
     ("minio", "buckets"),
@@ -190,9 +192,9 @@ RESOURCE_COUNTERS = [
     ("clickhouse", "tables"),
     ("grpc", "descriptors"),
     ("grpc", "checks"),
-    ("registry", "layers"),
-    ("registry", "components"),
-    ("registry", "tags"),
+    ("docker-registry", "layers"),
+    ("nexus", "components"),
+    ("docker-registry", "tags"),
 ]
 
 
@@ -202,8 +204,9 @@ RESOURCE_COUNTERS = [
 )
 def test_resource_counter_colors_are_consistent_across_modules(module, field, value, colors) -> None:
     args = parse_args([module, "-t", "127.0.0.1"])
-    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-    spec = getattr(stage, f"build_{module}_spec")(args)
+    package = module.replace("-", "_")
+    stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
+    spec = getattr(stage, f"build_{package}_spec")(args)
     console = RecordingConsole()
     _build_colored_emit(console, spec.colorize)(f"{spec.label}\t127.0.0.1\t1234\t [*] Inventory ({field}:{value})")
     assert any(text == f"{field}:{value}" and color in colors for text, color in console.paint_calls)
@@ -218,9 +221,9 @@ DETAIL_COUNTERS = [
     ("rabbitmq", "consumers"),
     ("rabbitmq", "messages_ready"),
     ("rabbitmq", "messages_unacknowledged"),
-    ("registry", "components"),
-    ("registry", "tags"),
-    ("registry", "layers"),
+    ("nexus", "components"),
+    ("docker-registry", "tags"),
+    ("docker-registry", "layers"),
 ]
 
 
@@ -230,29 +233,31 @@ DETAIL_COUNTERS = [
 )
 def test_resource_counters_in_details_are_colored(module, field, value, colors) -> None:
     args = parse_args([module, "-t", "127.0.0.1"])
-    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-    spec = getattr(stage, f"build_{module}_spec")(args)
+    package = module.replace("-", "_")
+    stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
+    spec = getattr(stage, f"build_{package}_spec")(args)
     console = RecordingConsole()
     _build_colored_emit(console, spec.colorize)(f"{spec.label}\t127.0.0.1\t1234\t collection ({field}:{value})")
     assert any(text == f"{field}:{value}" and color in colors for text, color in console.paint_calls)
 
 
 @pytest.mark.parametrize(
-    "module", ["redis", "grafana", "registry", "kafka", "etcd", "postgres", "clickhouse", "mongodb", "docker"]
+    "module", ["redis", "grafana", "docker-registry", "kafka", "etcd", "postgres", "clickhouse", "mongodb", "docker"]
 )
 def test_runtime_does_not_repeat_bare_auth_requirement_but_keeps_failed_attempts(module) -> None:
     from redposture_core.audit_models import AuditRecord
     from redposture_core.stage_runtime import AuditCommandRunner, build_render_plan
 
     args = parse_args([module, "-t", "127.0.0.1"])
-    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-    spec = getattr(stage, f"build_{module}_spec")(args)
+    package = module.replace("-", "_")
+    stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
+    spec = getattr(stage, f"build_{package}_spec")(args)
     runner = AuditCommandRunner(args=args, spec=spec)
     plan = build_render_plan(spec.render_module) if spec.render_module is not None else None
     payload = {
         "host": "127.0.0.1",
         "port": spec.default_port,
-        f"is_{module}": True,
+        "is_registry" if module == "docker-registry" else f"is_{module}": True,
         "auth_required": True,
         "status": "auth_required",
     }

@@ -316,6 +316,13 @@ def test_kubeapi_credential_file_reuses_anonymous_classification_and_selected_na
 
     monkeypatch.setattr(kubeapi, "_api_get_json", fake_api)
     monkeypatch.setattr(kubeapi, "_list_namespaces", fake_namespaces)
+    monkeypatch.setattr(
+        kubeapi,
+        "_verify_self_subject_review",
+        lambda _ctx, _state, _token, *, username=None, password=None: (
+            (True, username, None) if (username, password) == ("good", "good") else (False, None, None)
+        ),
+    )
     args = parse_args(
         [
             "kubeapi",

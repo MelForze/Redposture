@@ -448,7 +448,9 @@ def test_grafana_retries_are_linear_not_squared(monkeypatch: pytest.MonkeyPatch)
         ("proxmox", 50),
         ("qdrant", 50),
         ("redis", 50),
-        ("registry", 50),
+        ("docker-registry", 50),
+        ("harbor", 50),
+        ("nexus", 50),
         ("zookeeper", 50),
     ],
 )
@@ -476,7 +478,9 @@ def test_transport_contract_is_exhaustive_and_uses_known_strategies() -> None:
         "proxmox",
         "qdrant",
         "redis",
-        "registry",
+        "docker-registry",
+        "harbor",
+        "nexus",
         "zookeeper",
     }
     assert set(MODULE_TRANSPORT_STRATEGY) == expected

@@ -146,8 +146,9 @@ def _real_specs() -> dict[str, Any]:
     specs: dict[str, Any] = {}
     for module in AUDIT_MODULE_NAMES:
         args = parse_args([module, "-t", "127.0.0.1"])
-        stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-        specs[module] = getattr(stage, f"build_{module}_spec")(args)
+        package = module.replace("-", "_")
+        stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
+        specs[module] = getattr(stage, f"build_{package}_spec")(args)
     return specs
 
 
@@ -163,6 +164,8 @@ def _fingerprint_payload(module: str) -> dict[str, Any]:
         payload.update({"is_zookeeper": True, "is_keeper": True})
     elif module == "zookeeper":
         payload.update({"is_zookeeper": True, "is_keeper": False})
+    elif module in {"harbor", "nexus", "docker-registry"}:
+        payload["is_registry"] = True
     return payload
 
 

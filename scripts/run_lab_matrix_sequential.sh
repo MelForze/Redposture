@@ -396,7 +396,9 @@ run_negative_cli_cases() {
   run_raw_case exporters fuzz_exporters_trigger_json_listen_without_output 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --format json
   run_raw_case exporters fuzz_exporters_trigger_negative_listen_seconds 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --listen-seconds -1
 
-  run_raw_case registry fuzz_registry_missing_targets 2 registry -ot excluded.invalid --docker --images
+  run_raw_case docker-registry fuzz_registry_missing_targets 2 docker-registry -ot excluded.invalid --images
+  run_raw_case harbor fuzz_harbor_missing_targets 2 harbor -ot excluded.invalid --images
+  run_raw_case nexus fuzz_nexus_missing_targets 2 nexus -ot excluded.invalid --assets
   run_raw_case grafana fuzz_grafana_missing_targets 2 grafana -ot excluded.invalid --defcreds
   run_raw_case gitlab fuzz_gitlab_missing_targets 2 gitlab -ot excluded.invalid
   run_raw_case consul fuzz_consul_missing_targets 2 consul -ot excluded.invalid --keys --tls --insecure --tls-cert /nonexistent/consul-client.crt --tls-key /nonexistent/consul-client.key
@@ -415,12 +417,14 @@ run_negative_cli_cases() {
   run_raw_case zookeeper fuzz_zookeeper_missing_targets 2 zookeeper -ot excluded.invalid --show-znodes
   run_raw_case proxmox fuzz_proxmox_missing_targets 2 proxmox -ot excluded.invalid --pveapitoken "monitor@pve!audit=token" --grant-role Auditor --grant-path / --no-grant-propagate
 
-  run_raw_case registry fuzz_registry_username_without_password 2 registry -t 127.0.0.1 -u admin --docker --images
-  run_raw_case registry fuzz_registry_token_basic_conflict 2 registry -t 127.0.0.1 --token token -u admin -p admin --docker --images
-  run_raw_case registry fuzz_registry_show_tags_without_repository 2 registry -t 127.0.0.1 --docker --show-tags
-  run_raw_case registry fuzz_registry_metadata_without_tag 2 registry -t 127.0.0.1 --docker --repository redposture/demo-api --metadata
-  run_raw_case registry fuzz_registry_assets_without_nexus 2 registry -t 127.0.0.1 --assets
-  run_raw_case registry fuzz_registry_download_without_image 2 registry -t 127.0.0.1 --docker --download
+  run_raw_case docker-registry fuzz_registry_username_without_password 2 docker-registry -t 127.0.0.1 -u admin --images
+  run_raw_case docker-registry fuzz_registry_token_basic_conflict 2 docker-registry -t 127.0.0.1 --token token -u admin -p admin --images
+  run_raw_case docker-registry fuzz_registry_show_tags_without_repository 2 docker-registry -t 127.0.0.1 --show-tags
+  run_raw_case docker-registry fuzz_registry_metadata_without_tag 2 docker-registry -t 127.0.0.1 --repository redposture/demo-api --metadata
+  run_raw_case docker-registry fuzz_registry_download_without_image 2 docker-registry -t 127.0.0.1 --download
+  run_raw_case harbor fuzz_harbor_option_surface 2 harbor -t "http://[invalid:url" --debug --port 80 --ports 80 --token invalid --defcreds --repository sample/app --show-tags --tag latest --metadata --inspect --image sample/app:latest --download --download-dir "${OUT_DIR}/harbor_downloads"
+  run_raw_case nexus fuzz_nexus_option_surface 2 nexus -t "http://[invalid:url" --debug --ports 8081 -u admin -p invalid --token invalid --defcreds --images --repository sample/app --show-tags --tag latest --metadata --inspect --image sample/app:latest --download --download-dir "${OUT_DIR}/nexus_downloads"
+  run_raw_case gitlab fuzz_gitlab_oci_option_surface 2 gitlab -t "http://[invalid:url" --defcreds --repository sample/app --show-tags --tag latest --metadata --inspect --image sample/app:latest --download --download-dir "${OUT_DIR}/gitlab_downloads"
 
   run_raw_case grafana fuzz_grafana_username_without_password 2 grafana -t 127.0.0.1 -u admin --show-datasource
   run_raw_case kubeapi fuzz_kubeapi_username_without_password 2 kubeapi -t 127.0.0.1 -u audit --namespaces
@@ -513,23 +517,26 @@ run_exporters_cases() {
 }
 
 run_registry_cases() {
-  run_case registry registry_open 0 registry -t 127.0.0.1 --port 15000 --docker --images
-  run_case registry registry_auth 0 registry -t 127.0.0.1 --port 15001 -u admin -p admin --docker --images
-  run_case registry registry_nexus 0 registry -t 127.0.0.1 --port 15004 --nexus --assets
-  run_case registry registry_url_http 0 registry -t "http://127.0.0.1:15000/v2/_catalog?n=1000" --docker --images
-  run_case registry registry_url_https_transport_fallback 0 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
-  run_case registry registry_multi_instance_urls 0 registry -t "http://127.0.0.1:15000/v2/_catalog,http://127.0.0.1:15010/v2/_catalog,http://127.0.0.1:15011/v2/_catalog,http://127.0.0.1:15012/v2/_catalog,http://127.0.0.1:15013/v2/_catalog" --docker --images
-  run_text_case registry registry_debug_smoke 0 registry -t 127.0.0.1 --port 15000 --docker --images --debug
+  run_case docker-registry registry_open 0 docker-registry -t 127.0.0.1 --port 15000 --images
+  run_case docker-registry registry_auth 0 docker-registry -t 127.0.0.1 --port 15001 -u admin -p admin --images
+  run_case docker-registry registry_weak_pairs 0 docker-registry -t 127.0.0.1 --port 15001 --defcreds
+  run_case nexus registry_nexus 0 nexus -t 127.0.0.1 --port 15004 --assets
+  run_case nexus registry_nexus_weak_pairs 0 nexus -t 127.0.0.1 --port 15004 --defcreds
+  run_case docker-registry registry_url_http 0 docker-registry -t "http://127.0.0.1:15000/v2/_catalog?n=1000" --images
+  run_case docker-registry registry_url_https_transport_fallback 0 docker-registry -t "https://127.0.0.1:15000/v2/_catalog" --images
+  run_case docker-registry registry_multi_instance_urls 0 docker-registry -t "http://127.0.0.1:15000/v2/_catalog,http://127.0.0.1:15010/v2/_catalog,http://127.0.0.1:15011/v2/_catalog,http://127.0.0.1:15012/v2/_catalog,http://127.0.0.1:15013/v2/_catalog" --images
+  run_text_case docker-registry registry_debug_smoke 0 docker-registry -t 127.0.0.1 --port 15000 --images --debug
   if is_extended_matrix; then
-    run_case registry registry_extended_tags_metadata 0 registry -t 127.0.0.1 --port 15000 --docker --repository redposture/demo-api --show-tags --tag latest --metadata --inspect --image redposture/demo-api:latest --download --download-dir "${OUT_DIR}/registry_downloads"
-    run_case registry registry_extended_ports_flag 0 registry -t 127.0.0.1 --ports 15000 --docker --images
-    run_case registry fuzz_registry_malformed_target 2 registry -t "http://[invalid:url" --docker --images
-    run_case registry fuzz_registry_invalid_port 2 registry -t 127.0.0.1 --port -1 --docker --images
+    run_case docker-registry registry_extended_tags_metadata 0 docker-registry -t 127.0.0.1 --port 15000 --repository redposture/demo-api --show-tags --tag latest --metadata --inspect --image redposture/demo-api:latest --download --download-dir "${OUT_DIR}/registry_downloads"
+    run_case docker-registry registry_extended_ports_flag 0 docker-registry -t 127.0.0.1 --ports 15000 --images
+    run_case docker-registry fuzz_registry_malformed_target 2 docker-registry -t "http://[invalid:url" --images
+    run_case docker-registry fuzz_registry_invalid_port 2 docker-registry -t 127.0.0.1 --port -1 --images
   fi
 }
 
 run_registry_harbor_cases() {
-  run_case registry registry_harbor 0 registry -t http://127.0.0.1:18280 --timeout 15 --harbor --images -u admin -p Harbor12345
+  run_case harbor registry_harbor 0 harbor -t http://127.0.0.1:18280 --timeout 15 --images -u admin -p Harbor12345
+  run_case harbor registry_harbor_weak_pairs 0 harbor -t http://127.0.0.1:18280 --timeout 15 --defcreds
 }
 
 run_valkey_cases() {
@@ -580,7 +587,9 @@ run_minio_cases() {
 }
 
 run_gitlab_cases() {
-  run_case registry registry_gitlab 0 registry -t http://127.0.0.1:15003 --timeout 15 --gitlab --images -u root -p glpat-redposture-lab-root-2026
+  run_case gitlab registry_gitlab 0 gitlab -t http://127.0.0.1:15003 --timeout 15 --images -u root -p glpat-redposture-lab-root-2026
+  run_case gitlab gitlab_registry_token_rejected 0 gitlab -t http://127.0.0.1:15003 --timeout 15 --registry-token invalid-qa-token
+  run_case gitlab gitlab_weak_pairs 0 gitlab -t http://127.0.0.1:18080 --timeout 15 --defcreds
   run_case gitlab gitlab_public 0 gitlab -t 127.0.0.1 --port 18080
   run_case gitlab gitlab_analyst 0 gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-analyst-2026
   run_case gitlab gitlab_url_override_http 0 gitlab -t "http://127.0.0.1:18080/users/sign_in?ref=matrix" --https
@@ -631,6 +640,7 @@ run_kubeapi_cases() {
     return 1
   fi
   run_case kubeapi kubeapi_open 0 kubeapi -t 127.0.0.1 --port 26443 --namespaces --pods
+  run_case kubeapi kubeapi_default_pairs_without_basic 0 kubeapi -t 127.0.0.1 --port 26443 --defcreds
   run_case kubeapi kubeapi_auditor 0 kubeapi -t 127.0.0.1 --port 16443 --insecure --token "${kube_auditor_token}" --namespaces --pods
   run_case kubeapi kubeapi_admin 0 kubeapi -t 127.0.0.1 --port 16443 --insecure --token "${kube_admin_token}" --secrets
   run_case kubeapi kubeapi_url_override_https 0 kubeapi -t "https://127.0.0.1:26443/api?from=matrix" --no-https --namespaces

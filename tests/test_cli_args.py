@@ -308,7 +308,7 @@ def test_kafka_help_lists_every_runtime_default_port() -> None:
 
 
 def test_help_documents_implicit_target_file_precedence() -> None:
-    help_text = _command_help("registry")
+    help_text = _command_help("docker-registry")
     assert "treated as" in help_text
     assert "target files" in help_text
 
@@ -316,13 +316,12 @@ def test_help_documents_implicit_target_file_precedence() -> None:
 @pytest.mark.parametrize(
     ("command", "sections"),
     [
-        (
-            "registry",
-            ["Common", "Auth", "Docker / OCI (Registry v2)", "Harbor", "GitLab Container Registry", "Nexus Repository"],
-        ),
+        ("docker-registry", ["Common", "Auth", "OCI images"]),
+        ("harbor", ["Common", "Auth", "OCI images"]),
+        ("nexus", ["Common", "Auth", "OCI images"]),
         ("grafana", ["Common", "Auth", "Actions", "SSRF / Probes"]),
         ("proxmox", ["Common", "Auth", "Actions"]),
-        ("gitlab", ["Common", "Auth", "Actions"]),
+        ("gitlab", ["Common", "Auth", "Actions", "Container Registry"]),
         ("consul", ["Common", "Auth", "Actions", "SSRF / Probes", "Revshell"]),
         ("kubeapi", ["Common", "Auth", "Actions"]),
         ("postgres", ["Common", "Database / Auth", "Discovery / Dump", "Execute / Shell"]),
@@ -1101,7 +1100,9 @@ def test_ports_file_is_accepted_across_all_modules(tmp_path) -> None:
         ["qdrant", "-t", "10.0.0.1", "--ports", file_value],
         ["kubeapi", "-t", "10.0.0.1", "--ports", file_value],
         ["gitlab", "-t", "10.0.0.1", "--ports", file_value],
-        ["registry", "-t", "10.0.0.1", "--ports", file_value],
+        ["docker-registry", "-t", "10.0.0.1", "--ports", file_value],
+        ["harbor", "-t", "10.0.0.1", "--ports", file_value],
+        ["nexus", "-t", "10.0.0.1", "--ports", file_value],
         ["proxmox", "-t", "10.0.0.1", "--pveapitoken", "monitor@pve!audit=token", "--ports", file_value],
     ]
 
@@ -1120,7 +1121,9 @@ def test_port_file_is_normalized_to_ports_across_port_modules(tmp_path) -> None:
         ["kubeapi", "-t", "10.0.0.1", "--port", file_value],
         ["consul", "-t", "10.0.0.1", "--port", file_value],
         ["qdrant", "-t", "10.0.0.1", "--port", file_value],
-        ["registry", "-t", "10.0.0.1", "--port", file_value],
+        ["docker-registry", "-t", "10.0.0.1", "--port", file_value],
+        ["harbor", "-t", "10.0.0.1", "--port", file_value],
+        ["nexus", "-t", "10.0.0.1", "--port", file_value],
         ["grafana", "-t", "10.0.0.1", "--port", file_value],
         ["proxmox", "-t", "10.0.0.1", "--pveapitoken", "monitor@pve!audit=token", "--port", file_value],
         ["postgres", "-t", "10.0.0.1", "--port", file_value],
@@ -1830,10 +1833,10 @@ def test_proxmox_rejects_profiles_file_flag() -> None:
     assert exc.value.code == 2
 
 
-def test_registry_flags_are_parsed() -> None:
+def test_docker_registry_flags_are_parsed() -> None:
     args = parse_args(
         [
-            "registry",
+            "docker-registry",
             "-t",
             "10.0.0.41,10.0.0.42",
             "--timeout",
@@ -1857,10 +1860,6 @@ def test_registry_flags_are_parsed() -> None:
             "--tag",
             "latest",
             "--metadata",
-            "--harbor",
-            "--gitlab",
-            "--nexus",
-            "--assets",
             "--inspect",
             "--image",
             "library/nginx:latest",
@@ -1873,7 +1872,7 @@ def test_registry_flags_are_parsed() -> None:
             "registry_audit.jsonl",
         ]
     )
-    assert args.command == "registry"
+    assert args.command == "docker-registry"
     assert args.targets == "10.0.0.41,10.0.0.42"
     assert args.timeout == 0.9
     assert args.workers == 6
@@ -1887,10 +1886,6 @@ def test_registry_flags_are_parsed() -> None:
     assert args.show_tags is True
     assert args.tag == "latest"
     assert args.metadata is True
-    assert args.harbor is True
-    assert args.gitlab is True
-    assert args.nexus is True
-    assert args.assets is True
     assert args.inspect is True
     assert args.image == "library/nginx:latest"
     assert args.download is True
@@ -1902,24 +1897,21 @@ def test_registry_flags_are_parsed() -> None:
 
 def test_registry_rejects_profiles_file_flag() -> None:
     with pytest.raises(SystemExit) as exc:
-        parse_args(["registry", "-t", "10.0.0.9", "--profiles-file", "profiles.json"])
+        parse_args(["docker-registry", "-t", "10.0.0.9", "--profiles-file", "profiles.json"])
     assert exc.value.code == 2
 
 
 def test_registry_token_flag_is_parsed() -> None:
-    args = parse_args(["registry", "-t", "10.0.0.9", "--token", "token-value"])
-    assert args.command == "registry"
+    args = parse_args(["docker-registry", "-t", "10.0.0.9", "--token", "token-value"])
+    assert args.command == "docker-registry"
     assert args.token == "token-value"
-    assert args.gitlab is False
-    assert args.nexus is False
     assert args.show_tags is False
     assert args.metadata is False
-    assert args.assets is False
 
 
 def test_registry_port_list_in_port_flag_is_normalized() -> None:
-    args = parse_args(["registry", "-t", "10.0.0.9", "--port", "15000,15002"])
-    assert args.command == "registry"
+    args = parse_args(["docker-registry", "-t", "10.0.0.9", "--port", "15000,15002"])
+    assert args.command == "docker-registry"
     assert args.port == 15000
     assert args.ports == "15000,15002"
 
@@ -1927,8 +1919,8 @@ def test_registry_port_list_in_port_flag_is_normalized() -> None:
 def test_registry_port_file_in_port_flag_is_normalized(tmp_path) -> None:
     ports_file = tmp_path / "ports.txt"
     ports_file.write_text("15000\n15002\n", encoding="utf-8")
-    args = parse_args(["registry", "-t", "10.0.0.9", "--port", str(ports_file)])
-    assert args.command == "registry"
+    args = parse_args(["docker-registry", "-t", "10.0.0.9", "--port", str(ports_file)])
+    assert args.command == "docker-registry"
     assert args.port is None
     assert args.ports == str(ports_file)
 

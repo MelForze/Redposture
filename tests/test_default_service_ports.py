@@ -10,7 +10,9 @@ from redposture_core.cli_args import parse_args
 @pytest.mark.parametrize(
     ("module", "expected_ports"),
     [
-        ("registry", (5000, 15000, 25000)),
+        ("docker-registry", (5000, 15000, 25000)),
+        ("harbor", (80, 443)),
+        ("nexus", (8081,)),
         ("postgres", (5432, 6432, 15432, 16432, 25432, 26432)),
         ("clickhouse", (9000, 19000, 29000)),
         ("etcd", (2379, 12379, 22379)),
@@ -28,8 +30,9 @@ def test_bare_target_uses_complete_module_default_port_set(
     expected_ports: tuple[int, ...],
 ) -> None:
     args = parse_args([module, "-t", "127.0.0.1"])
-    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-    plan = getattr(stage, f"build_{module}_plan")(args)
+    package = module.replace("-", "_")
+    stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
+    plan = getattr(stage, f"build_{package}_plan")(args)
 
     assert args.port is None
     assert plan.ports == expected_ports

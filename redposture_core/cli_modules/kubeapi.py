@@ -19,6 +19,9 @@ def configure_kubeapi_parser(
     common = parser.add_argument_group("Common")
     auth = parser.add_argument_group("Auth")
     actions = parser.add_argument_group("Actions")
+    auth.add_argument(
+        "--defcreds", action="store_true", help="Check weak Basic pairs only when Basic auth is advertised."
+    )
 
     add_output_flags(common)
     add_log_flag(common)

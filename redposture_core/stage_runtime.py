@@ -1830,7 +1830,9 @@ _HTTP_DETECTION_MODULES = frozenset(
         "proxmox",
         "qdrant",
         "rabbitmq",
-        "registry",
+        "docker-registry",
+        "harbor",
+        "nexus",
         "clickhouse",
         "grpc",
     }
@@ -2144,6 +2146,15 @@ class AuditCommandRunner:
                     payload = record.to_dict()
                     for field_name in self.spec.structured_output_redact_fields:
                         payload.pop(field_name, None)
+                    if "provided_password" in self.spec.structured_output_redact_fields:
+                        attempts = payload.get("attempted_credentials")
+                        if isinstance(attempts, list):
+                            payload["attempted_credentials"] = [
+                                {**item, "password": "<redacted>"}
+                                if isinstance(item, dict) and item.get("password") is not None
+                                else item
+                                for item in attempts
+                            ]
                     payload.pop("_stream_lines_file", None)
                     emitted_lines += 1
                     sink.emit_many((json.dumps(payload, ensure_ascii=False),))

@@ -48,8 +48,8 @@ class _RecordingConsole:
 
 def _build_real_spec(module: str, *extra: str) -> ModuleAuditSpec:
     args = parse_args([module, "-t", "127.0.0.1", *extra])
-    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-    return getattr(stage, f"build_{module}_spec")(args)
+    stage = importlib.import_module(f"redposture_core.modules.{module.replace('-', '_')}.stage")
+    return getattr(stage, f"build_{module.replace('-', '_')}_spec")(args)
 
 
 def _detected_payload(module: str, spec: ModuleAuditSpec) -> dict[str, Any]:
@@ -65,7 +65,9 @@ def _detected_payload(module: str, spec: ModuleAuditSpec) -> dict[str, Any]:
     payload.update(
         {
             "redis": {"is_redis": True},
-            "registry": {"is_registry": True},
+            "docker-registry": {"is_registry": True, "registry_type": "docker"},
+            "harbor": {"is_registry": True, "registry_type": "harbor"},
+            "nexus": {"is_registry": True, "registry_type": "nexus"},
             "postgres": {"is_postgres": True},
             "clickhouse": {"is_clickhouse": True, "protocol": "native"},
             "etcd": {"is_etcd": True, "api_versions": "v3", "server_version": "3.5.0"},

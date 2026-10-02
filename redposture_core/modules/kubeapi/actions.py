@@ -2401,6 +2401,8 @@ def _status_summary_line(record: dict[str, Any]) -> str | None:
         return None
     auth_mode = str(record.get("auth_mode") or "none")
     auth_valid = record.get("auth_valid")
+    if auth_valid is None and record.get("credentials_source") == "default":
+        return None
     auth_error = str(record.get("auth_error") or "").strip()
     username = None
     password = None
@@ -2834,7 +2836,7 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
         auth_required = None
         record_status = "detected"
     state.anonymous_access = anonymous_access
-    return {
+    result = {
         "timestamp": utc_now_iso(),
         "host": str(ctx.host),
         "port": int(ctx.port),
@@ -2874,12 +2876,27 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
         "elapsed_ms": _elapsed_ms(state),
         "error": None,
     }
+    if bool(getattr(ctx.args, "defcreds", False)):
+        basic_status, _basic_payload, basic_headers, _basic_error = _lifecycle_get_json_with_retries(
+            ctx,
+            state,
+            "/api/v1/namespaces",
+            response_size_cap=_KUBE_AUTH_RESPONSE_CAP,
+        )
+        challenge = str(basic_headers.get("www-authenticate") or "")
+        result["credential_verification_status"] = (
+            "available" if basic_status == 401 and re.search(r"(?:^|,)\s*Basic\b", challenge, re.I) else "unavailable"
+        )
+    return result
 
 
 def _verify_self_subject_review(
     ctx: Any,
     state: KubeApiLifecycleState,
-    token: str,
+    token: str | None,
+    *,
+    username: str | None = None,
+    password: str | None = None,
 ) -> tuple[bool | None, str | None, str | None]:
     status, payload, _headers, error = _lifecycle_request_json_with_retries(
         ctx,
@@ -2888,6 +2905,8 @@ def _verify_self_subject_review(
         "/apis/authentication.k8s.io/v1/selfsubjectreviews",
         response_size_cap=_KUBE_AUTH_RESPONSE_CAP,
         token=token,
+        username=username,
+        password=password,
         json_body={"apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview"},
     )
     if status == 401:
@@ -2920,6 +2939,18 @@ def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any])
     credential = ctx.credential
     if credential.token is None and credential.username is None and credential.password is None:
         return record
+    if getattr(credential, "source", "") == "default" and record.get("credential_verification_status") != "available":
+        record.update(
+            {
+                "status": "auth_unverified",
+                "auth_valid": None,
+                "auth_mode": "basic",
+                "credentials_source": "default",
+                "auth_error": "Basic authentication is not advertised",
+                "auth_verification_method": "unsupported_basic",
+            }
+        )
+        return record
     namespace_access, status, error = _probe_namespace_access(
         str(state.host or ctx.host),
         int(state.port or ctx.port),
@@ -2936,18 +2967,22 @@ def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any])
     anonymous_usable = state.anonymous_access in {"open", "limited"} or state.anonymous_namespaces is not None
     method = "namespace_list"
     identity: str | None = None
-    if namespace_access is True:
-        auth_valid: bool | None = True
-        auth_error = None
-    elif status == 401:
+    auth_valid: bool | None
+    if status == 401:
         auth_valid = False
         auth_error = error or "authentication rejected"
-    elif status == 403 and credential.token is not None:
+    elif namespace_access is True and credential.token is not None:
+        auth_valid = True
+        auth_error = None
+    elif status in {200, 403} and (credential.token is not None or credential.username is not None):
         method = "self_subject_review"
-        auth_valid, identity, auth_error = _verify_self_subject_review(ctx, state, credential.token)
-    elif status == 403:
-        auth_valid = False
-        auth_error = error or "Basic authentication rejected"
+        auth_valid, identity, auth_error = _verify_self_subject_review(
+            ctx,
+            state,
+            credential.token,
+            username=credential.username,
+            password=credential.password,
+        )
     else:
         auth_valid = None
         auth_error = error or (
@@ -2977,6 +3012,7 @@ def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any])
             "timestamp": utc_now_iso(),
             "status": record_status,
             "auth_mode": "token" if credential.token else "basic",
+            "credentials_source": str(getattr(credential, "source", "provided")),
             "auth_valid": auth_valid,
             "auth_error": auth_error,
             "auth_verification_method": method,
