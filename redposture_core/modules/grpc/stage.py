@@ -10,6 +10,7 @@ from typing import Any
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...clients.grpc import GrpcTlsConfig
+from ...clients.http_api import infer_http_base_path
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -188,7 +189,13 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_factory=(
             lambda _ctx: actions.GrpcLifecycleState(
                 requested_use_tls=requested_use_tls,
-                tls_config=tls_config,
+                tls_config=replace(
+                    tls_config,
+                    proxy_path=infer_http_base_path(
+                        str(getattr(getattr(_ctx, "target", None), "path", "") or ""),
+                        ("/grpc.health.v1.Health", "/grpc.reflection.v1.ServerReflection"),
+                    ),
+                ),
             )
         )
         if use_lifecycle_hooks

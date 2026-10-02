@@ -98,6 +98,11 @@
       "root_tagline",
       "root_version_shape"
     ],
+    "detection_signals": [
+      "elastic.probe",
+      "elastic.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover": false,
     "discover_error": null,
     "discover_error_detail": null,
@@ -454,6 +459,11 @@
       "root_tagline",
       "root_version_shape"
     ],
+    "detection_signals": [
+      "elastic.probe",
+      "elastic.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover": false,
     "discover_error": null,
     "discover_error_detail": null,
@@ -810,6 +820,11 @@
       "root_tagline",
       "root_version_shape"
     ],
+    "detection_signals": [
+      "elastic.probe",
+      "elastic.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover": false,
     "discover_error": null,
     "discover_error_detail": null,
@@ -1166,6 +1181,11 @@
       "root_tagline",
       "root_version_shape"
     ],
+    "detection_signals": [
+      "elastic.probe",
+      "elastic.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover": false,
     "discover_error": null,
     "discover_error_detail": null,
@@ -1522,6 +1542,11 @@
       "root_tagline",
       "root_version_shape"
     ],
+    "detection_signals": [
+      "elastic.probe",
+      "elastic.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover": false,
     "discover_error": null,
     "discover_error_detail": null,

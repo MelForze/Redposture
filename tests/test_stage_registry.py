@@ -327,7 +327,7 @@ def test_format_detail_records_vendor_inventory_and_targeted_views() -> None:
     }
     lines = registry._format_detail_records(targeted_record, "txt")
     joined = "\n".join(lines)
-    assert "[*] Show Tags group/app" in joined
+    assert "[*] Tags Enumeration group/app" in joined
     assert "[*] Metadata group/app:latest" in joined
     assert "[*] ENV" in joined
     assert "[*] Inspect group/app:latest (layers:2) (size:1.0KB)" in joined
@@ -1979,7 +1979,7 @@ def test_format_detail_records_presence_unknown_and_download_variants() -> None:
     }
     lines = registry._format_detail_records(record, "txt")
     text = "\n".join(lines)
-    assert "[*] Show Images" in text
+    assert "[*] Images Enumeration" in text
     assert "catalog unavailable" in text
     assert "Harbor presence unknown: probe failed" in text
     assert "GitLab Container Registry not detected" in text
@@ -2388,13 +2388,13 @@ def test_format_detail_records_branch_matrix_errors_and_download_variants() -> N
     }
     lines = registry._format_detail_records(record, "txt")
     joined = "\n".join(lines)
-    assert "[*] Show Images" in joined
-    assert "authentication required" in joined
+    assert "[*] Images Enumeration" not in joined
+    assert "[-] authentication required" not in joined
     assert "[!] Harbor presence unknown: probe failed" in joined
     assert "GitLab Container Registry detected" in joined
     assert "GitLab token probe status=failed" in joined
     assert "realm returned status 500" in joined
-    assert "[*] Show Tags repo/app" in joined
+    assert "[*] Tags Enumeration repo/app" in joined
     assert "repo/app: authentication required" in joined
     assert "Metadata repo/app:latest err=manifest unavailable" in joined
     assert "Nexus Repository detected" in joined
@@ -2610,15 +2610,15 @@ def test_registry_auth_required_detects_gitlab_vendor_from_real_challenge(
     record = runner.run_plan(registry.build_registry_plan(args)).records[0]
 
     assert requests == ["/v2/"]
-    assert record["is_registry"] is True
-    assert record["status"] == "auth_required"
+    assert record["is_registry"] is (expected_gitlab is True)
+    assert record["status"] == ("auth_required" if expected_gitlab else "not_registry")
     assert record["is_gitlab"] is expected_gitlab
     if expected_gitlab:
         assert record["gitlab_info"]["detected_by"] == "www_authenticate"
         assert record["cve_enumeration"]["status"] == "version_unknown"
     else:
         assert record["gitlab_info"] is None
-        assert record["cve_enumeration"]["status"] == "unsupported"
+        assert record["cve_enumeration"]["findings"] == []
 
 
 @pytest.mark.parametrize(
@@ -2668,8 +2668,8 @@ def test_registry_auth_required_detects_harbor_only_with_challenge_and_systeminf
     runner = AuditCommandRunner(args=args, spec=registry.build_registry_spec(args), emit_line=lambda _line: None)
     record = runner.run_plan(registry.build_registry_plan(args)).records[0]
 
-    assert record["is_registry"] is True
-    assert record["status"] == "auth_required"
+    assert record["is_registry"] is (expected_harbor is True)
+    assert record["status"] == ("auth_required" if expected_harbor else "not_registry")
     assert record["is_harbor"] is expected_harbor
     assert requests == (
         ["/v2/", "/api/v2.0/systeminfo"]
@@ -2680,7 +2680,7 @@ def test_registry_auth_required_detects_harbor_only_with_challenge_and_systeminf
         assert record["harbor_info"]["harbor_version"] == "v2.11.1-6b7ecba1"
         assert record["cve_enumeration"]["status"] in {"matched", "no_matches"}
     else:
-        assert record["cve_enumeration"]["status"] == "unsupported"
+        assert record["cve_enumeration"]["findings"] == []
 
 
 def test_registry_auth_retries_transient_failure_without_repeating_anonymous_probe(

@@ -8,6 +8,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
+from contextvars import Context, copy_context
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar, cast
 
@@ -244,6 +245,7 @@ class _SharedTask:
     completion: queue.Queue[_Outcome[Any, Any]]
     limiter: threading.Semaphore | None
     cancelled: threading.Event
+    context: Context
 
 
 class SharedNestedScheduler:
@@ -302,12 +304,12 @@ class SharedNestedScheduler:
                         if task.cancelled.is_set():
                             continue
                         if task.limiter is None:
-                            value = task.worker(task.item)
+                            value = task.context.run(task.worker, task.item)
                         else:
                             with task.limiter:
                                 if task.cancelled.is_set():
                                     continue
-                                value = task.worker(task.item)
+                                value = task.context.run(task.worker, task.item)
                 except BaseException as exc:  # noqa: BLE001
                     if not task.cancelled.is_set():
                         task.completion.put(_Outcome(index=task.index, item=task.item, error=exc))
@@ -363,6 +365,7 @@ class SharedNestedScheduler:
                         completion=cast(queue.Queue[_Outcome[Any, Any]], completion),
                         limiter=limiter,
                         cancelled=cancelled,
+                        context=copy_context(),
                     )
                 )
                 in_flight += 1
@@ -455,6 +458,7 @@ class SharedNestedScheduler:
                         completion=cast(queue.Queue[_Outcome[Any, Any]], completion),
                         limiter=limiter,
                         cancelled=cancelled,
+                        context=copy_context(),
                     )
                 )
                 in_flight += 1

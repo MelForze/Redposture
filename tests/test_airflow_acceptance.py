@@ -127,10 +127,34 @@ def test_detect_rejects_scheduler_only_health():
 
 
 def test_anonymous_valid_dag_collection_proves_access_without_role_inference():
-    client = FakeClient({"/api/v1/dags": (200, b'{"dags":[],"total_entries":0}')})
+    client = FakeClient(
+        {
+            "/api/v1/dags": (200, b'{"dags":[],"total_entries":0}'),
+            "/api/v1/variables?limit=1&offset=0": (403, b""),
+            "/api/v1/connections?limit=1&offset=0": (200, b'{"connections":[],"total_entries":0}'),
+        }
+    )
     result = actions.classify_anonymous(client, "v1")
     assert result.auth_required is False and result.dags_allowed is True
-    assert client.calls == [("GET", "/api/v1/dags", False)]
+    assert result.keys_allowed is False and result.connections_allowed is True
+    assert client.calls == [
+        ("GET", "/api/v1/dags", False),
+        ("GET", "/api/v1/variables?limit=1&offset=0", False),
+        ("GET", "/api/v1/connections?limit=1&offset=0", False),
+    ]
+
+
+def test_anonymous_collection_http_200_requires_shape_for_keys_and_connections():
+    client = FakeClient(
+        {
+            "/api/v1/dags": (403, b""),
+            "/api/v1/variables?limit=1&offset=0": (200, b'{"variables":"login"}'),
+            "/api/v1/connections?limit=1&offset=0": (200, b"<html>proxy login</html>"),
+        }
+    )
+    result = actions.classify_anonymous(client, "v1")
+    assert result.dags_allowed is False
+    assert result.keys_allowed is None and result.connections_allowed is None
 
 
 def test_anonymous_malformed_http_200_does_not_prove_dag_access():
@@ -310,7 +334,85 @@ def test_detect_record_confirmed_includes_anon_and_version(monkeypatch):
     assert record["api_generation"] == "v2"
     assert record["auth_required"] is True and "anonymous_role" not in record
     assert record["dags_allowed"] is False
+    assert record["keys_allowed"] is None
+    assert record["connections_allowed"] is None
     assert record["credential_verification_status"] == "available"
+
+
+def test_discovery_streams_keys_and_connections_before_findings(monkeypatch):
+    events = []
+    monkeypatch.setattr(actions, "_client_for", lambda *_a, **_kw: FakeClient())
+    monkeypatch.setattr(
+        actions,
+        "list_variable_keys",
+        lambda *_a, **_kw: (
+            events.append("keys") or {"keys": ["warehouse"], "count": 1, "total": 1, "truncated": False, "error": None}
+        ),
+    )
+    monkeypatch.setattr(
+        actions,
+        "list_connections",
+        lambda *_a, **_kw: (
+            events.append("connections")
+            or {
+                "connections": [{"connection_id": "warehouse"}],
+                "count": 1,
+                "total": 1,
+                "truncated": False,
+                "error": None,
+            }
+        ),
+    )
+
+    def discover(_client, _generation, _config, *, on_finding=None):
+        events.append("discover")
+        assert on_finding is not None
+        on_finding({"type": "password", "value": "abc123", "place": "dag_source:test$"})
+        return {"status": "complete", "findings": [], "partial_reasons": []}
+
+    monkeypatch.setattr(actions, "discover_task_logs", discover)
+    lines = []
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(discover=True, show_keys=True, show_connections=True, discover_max_bytes=1024),
+        credential=_cred("airflow", "airflow"),
+        lifecycle_state=None,
+        host="h",
+        port=8080,
+        live_emit=lambda batch: lines.extend(batch),
+    )
+    result = actions.discover_record(
+        ctx,
+        {
+            "detection_status": "confirmed",
+            "api_generation": "v1",
+            "auth_required": True,
+            "provided_credentials_ok": True,
+        },
+    )
+    assert events == ["keys", "connections", "discover"]
+    assert [line.split(" [", 1)[-1].split("] ", 1)[-1] for line in lines[:5]][:3] == [
+        "Airflow Variable Keys (keys:1)",
+        'Variable Name="warehouse"',
+        "Airflow Connections (connections:1)",
+    ]
+    assert lines[4].endswith("Discover Secrets")
+    assert lines[5].endswith('Pass Value="abc123" Place="dag_source:test$"')
+    assert result["_show_keys_streamed"] and result["_show_connections_streamed"]
+
+
+def test_show_keys_without_credentials_skips_closed_api(monkeypatch):
+    monkeypatch.setattr(actions, "_client_for", lambda *_a, **_kw: FakeClient())
+    monkeypatch.setattr(actions, "list_variable_keys", lambda *_a, **_kw: pytest.fail("unexpected keys request"))
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(discover=False, show_keys=True, show_connections=False),
+        credential=_cred(None, None),
+        lifecycle_state=None,
+    )
+    result = actions.discover_record(
+        ctx,
+        {"detection_status": "confirmed", "api_generation": "v1", "auth_required": True},
+    )
+    assert result["variable_keys_error"] == "authentication_required"
 
 
 # --- auth_record shaping ---------------------------------------------------
@@ -339,7 +441,7 @@ def test_auth_record_empty_password_is_still_attempted(monkeypatch):
     ctx = SimpleNamespace(credential=_cred("airflow", ""), lifecycle_state=None)
     out = actions.auth_record(ctx, {"api_generation": "v1"})
     assert seen["args"] == ("v1", "airflow", "")
-    assert out["provided_credentials_ok"] is False and "credential_password" not in out
+    assert out["provided_credentials_ok"] is False and out["credential_password"] == ""
 
 
 def test_auth_record_valid_sets_password_and_flags(monkeypatch):
@@ -356,7 +458,7 @@ def test_auth_record_valid_sets_password_and_flags(monkeypatch):
     assert out["credential_results"][0]["username"] == "airflow"
 
 
-def test_auth_record_invalid_omits_password(monkeypatch):
+def test_auth_record_invalid_keeps_password_for_txt_attempt_line(monkeypatch):
     monkeypatch.setattr(
         actions,
         "verify_credential",
@@ -366,7 +468,7 @@ def test_auth_record_invalid_omits_password(monkeypatch):
     ctx = SimpleNamespace(credential=_cred("admin", "wrong"), lifecycle_state=None)
     out = actions.auth_record(ctx, {"api_generation": "v1"})
     assert out["provided_credentials_ok"] is False
-    assert "credential_password" not in out
+    assert out["credential_password"] == "wrong"
     assert out["default_credentials"] is False
 
 

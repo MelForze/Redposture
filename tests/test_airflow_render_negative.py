@@ -213,10 +213,9 @@ def test_attempts_empty_for_json():
     assert render._format_credential_attempts_records(record, "json") == []
 
 
-def test_attempts_empty_for_single_attempt():
-    # A lone attempt is already covered by the detect/accepted lines.
+def test_single_rejected_attempt_is_not_lost():
     record = _record(attempted_credentials=[{"username": "a", "password": "a", "credential_state": "invalid"}])
-    assert render._format_credential_attempts_records(record, "txt") == []
+    assert render._format_credential_attempts_records(record, "txt") == [f"{_PFX} [-] a:a"]
 
 
 @pytest.mark.parametrize("attempts", [None, "not-a-list", {"username": "a"}, 5])

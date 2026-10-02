@@ -15,6 +15,10 @@
       "overview_status": 401,
       "rabbitmq_realm": true
     },
+    "detection_signals": [
+      "rabbitmq.probe",
+      "rabbitmq.product_fingerprint"
+    ],
     "detection_status": "confirmed",
     "host": "localhost",
     "is_rabbitmq": true,

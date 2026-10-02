@@ -7,6 +7,7 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.http_api import infer_http_base_path
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...show_limits import dump_flag_enabled, dump_flag_limit
@@ -122,6 +123,10 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
             strict_scheme=strict_scheme,
             host=str(ctx.host),
             port=int(ctx.port),
+            base_path=infer_http_base_path(
+                str(getattr(getattr(ctx, "target", None), "path", "") or ""),
+                ("/v1/status", "/v1/agent", "/v1/kv", "/v1/catalog", "/v1/acl"),
+            ),
             http=HttpSessionPool(
                 timeout=float(getattr(args, "timeout", 1.0)),
                 insecure=bool(getattr(args, "insecure", False)),

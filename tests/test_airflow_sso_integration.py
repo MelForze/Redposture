@@ -94,7 +94,8 @@ def test_airflow_keycloak_redirect_is_reported_as_sso_and_skips_defcreds(output_
         if output_format == "txt":
             output = "\n".join(lines)
             assert (
-                "Airflow (auth required:sso) (Dags allowed anonymously:False) "
+                "Airflow (auth required:sso) (Dags allowed:False) "
+                "(Keys allowed:unknown) (Connections allowed:unknown) "
                 "(provider:keycloak) (version:2.11.1)" in output
             )
             assert "airflow:airflow" not in output

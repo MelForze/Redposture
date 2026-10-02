@@ -20,6 +20,8 @@ class AnonymousResult:
     reachable: bool
     auth_required: bool | None = None
     dags_allowed: bool | None = None
+    keys_allowed: bool | None = None
+    connections_allowed: bool | None = None
     auth_method: str | None = None  # native | sso
     sso_provider: str | None = None
     sso_protocol: str | None = None

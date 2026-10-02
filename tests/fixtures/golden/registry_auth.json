@@ -5,6 +5,11 @@
     "auth_transport_attempts": 1,
     "credentials_source": "anonymous",
     "debug": false,
+    "detection_signals": [
+      "registry.probe",
+      "registry.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "docker": true,
     "download": false,
     "download_result": null,

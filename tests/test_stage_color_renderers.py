@@ -177,7 +177,7 @@ def test_render_colored_postgres_colors_caps_and_dbs() -> None:
     assert _contains_paint(console.paint_calls, "(superuser:False)", "bright_green")
     assert _contains_paint(console.paint_calls, "(execute:unknown)", "orange")
     assert _contains_paint(console.paint_calls, "(read:True)", "red")
-    assert _contains_paint(console.paint_calls, "(DBs:2)", "orange")
+    assert _contains_paint(console.paint_calls, "(DBs:2)", "red")
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
 
 
@@ -191,7 +191,7 @@ def test_render_colored_clickhouse_colors_caps_and_dbs() -> None:
     assert _contains_paint(console.paint_calls, "(read:false)", "bright_green")
     assert _contains_paint(console.paint_calls, "(execute:unknown)", "orange")
     assert _contains_paint(console.paint_calls, "(admin:true)", "red")
-    assert _contains_paint(console.paint_calls, "(DBs:2)", "orange")
+    assert _contains_paint(console.paint_calls, "(DBs:2)", "red")
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
 
 

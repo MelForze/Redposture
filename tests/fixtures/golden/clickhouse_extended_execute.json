@@ -32,6 +32,11 @@
     "default_credentials": false,
     "defcreds_enabled": false,
     "detection_error_kind": "auth",
+    "detection_signals": [
+      "clickhouse.probe",
+      "clickhouse.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover_report": null,
     "discover_requested": false,
     "effective_database": "default",

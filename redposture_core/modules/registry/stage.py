@@ -61,17 +61,29 @@ def build_registry_spec(args: Any) -> ModuleAuditSpec:
         return actions.registry_lifecycle_state_factory(ctx)
 
     def _detect(ctx: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth")):
+        with http_target_context(
+            ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
+            api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth"),
+        ):
             result = actions.detect_registry(ctx, options)
         return AuditRecord.from_mapping(result, module="registry", service="registry")
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth")):
+        with http_target_context(
+            ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
+            api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth"),
+        ):
             result = actions.authenticate_registry(ctx, record, options)
         return AuditRecord.from_mapping(result, module="registry", service="registry")
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth")):
+        with http_target_context(
+            ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
+            api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth"),
+        ):
             result = actions.collect_registry_data(ctx, record, options)
         return AuditRecord.from_mapping(result, module="registry", service="registry")
 

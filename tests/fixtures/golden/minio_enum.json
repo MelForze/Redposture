@@ -53,6 +53,10 @@
       "s3_shape": true,
       "server_minio": true
     },
+    "detection_signals": [
+      "minio.probe",
+      "minio.product_fingerprint"
+    ],
     "detection_status": "confirmed",
     "discover_bytes_read": 20972050,
     "discover_candidates_count": 8,

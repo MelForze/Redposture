@@ -11,6 +11,11 @@
     "api_versions": "v2,v3",
     "auth_required": false,
     "defcreds_enabled": false,
+    "detection_signals": [
+      "etcd.probe",
+      "etcd.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "dump_keys": false,
     "effective_password": null,
     "effective_username": null,

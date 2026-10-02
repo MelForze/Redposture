@@ -875,6 +875,93 @@ def test_grpc_web_call_success_and_helpers(monkeypatch, tmp_path) -> None:
     assert written >= 1
 
 
+@pytest.mark.parametrize(
+    "body, extra_headers",
+    [
+        (b"<html>login</html>", b""),
+        (b"\x00\x00\x00\x00\x08partial", b""),
+        (b"", b"Grpc-Status: bad\r\n"),
+    ],
+)
+def test_grpc_web_content_type_without_valid_response_is_not_detection(monkeypatch, body, extra_headers) -> None:
+    response = (
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/grpc-web+proto\r\n"
+        + extra_headers
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.done = False
+
+        def sendall(self, _data: bytes) -> None:
+            pass
+
+        def recv(self, _size: int) -> bytes:
+            if self.done:
+                return b""
+            self.done = True
+            return response
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(grpc_client, "_open_http_socket", lambda *_a, **_k: FakeSocket())
+    result = grpc_client._grpc_web_call(
+        "127.0.0.1",
+        8080,
+        path="/grpc.health.v1.Health/Check",
+        payload=b"",
+        timeout=1.0,
+        use_tls=False,
+        authorization=None,
+    )
+    assert result["is_grpc_web"] is False
+    assert result["is_grpc"] is False
+
+
+def test_grpc_web_uses_explicit_reverse_proxy_prefix(monkeypatch) -> None:
+    trailer = b"grpc-status: 12\r\n"
+    body = b"\x80" + len(trailer).to_bytes(4, "big") + trailer
+    response = (
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/grpc-web+proto\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+
+    class FakeSocket:
+        sent = b""
+        done = False
+
+        def sendall(self, data: bytes) -> None:
+            self.sent += data
+
+        def recv(self, _size: int) -> bytes:
+            if self.done:
+                return b""
+            self.done = True
+            return response
+
+        def close(self) -> None:
+            pass
+
+    sock = FakeSocket()
+    monkeypatch.setattr(grpc_client, "_open_http_socket", lambda *_a, **_k: sock)
+    result = grpc_client._grpc_web_call(
+        "127.0.0.1",
+        8080,
+        path="/grpc.health.v1.Health/Check",
+        payload=b"",
+        timeout=1.0,
+        use_tls=False,
+        authorization=None,
+        tls_config=grpc_client.GrpcTlsConfig(proxy_path="/edge/grpc"),
+    )
+    assert result["is_grpc_web"] is True
+    assert sock.sent.startswith(b"POST /edge/grpc/grpc.health.v1.Health/Check HTTP/1.1\r\n")
+
+
 def test_grpc_call_revalidates_metadata_before_opening_socket(monkeypatch) -> None:
     def unexpected_open(*_args, **_kwargs):
         raise AssertionError("invalid metadata must be rejected before network I/O")
@@ -1057,7 +1144,7 @@ def test_grpc_web_error_and_invoke_branches(monkeypatch) -> None:
         authorization="Bearer token",
     )
     assert bad_status["grpc_status"] is None
-    assert bad_status["is_grpc_web"] is True
+    assert bad_status["is_grpc_web"] is False
 
     response = grpc_health_pb2.HealthCheckResponse(status=grpc_health_pb2.HealthCheckResponse.SERVING)
     monkeypatch.setattr(

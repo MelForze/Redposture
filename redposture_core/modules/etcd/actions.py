@@ -781,7 +781,7 @@ def _audit_etcd_host(
                 key_count_v2 = _count_v2_keys(v2_body)
                 if key_count_v2 is None:
                     key_count_v2_error = "v2 key count response returned invalid JSON"
-            elif v2_status in {401, 403} and _body_indicates_auth_required(v2_body):
+            elif is_etcd and v2_status in {401, 403} and _body_indicates_auth_required(v2_body):
                 v2_supported = True
                 v2_auth_required = True
             elif v2_status not in (404,):
@@ -1259,7 +1259,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         attempts = record.get("credential_attempts")
         if isinstance(attempts, list) and attempts:
             return ""
-        return f"{prefix} [-] authentication required"
+        return ""
 
     if status == "unknown_auth":
         line = f"{prefix} [!] auth status unknown"
@@ -1407,9 +1407,9 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
     if show_keys and key_names:
         total = record.get("key_count")
         if show_keys_limit is not None and isinstance(total, int) and total > len(displayed_key_names):
-            lines.append(f"{prefix} [*] Show Keys (showing:{len(displayed_key_names)} of {total})")
+            lines.append(f"{prefix} [*] Keys Enumeration (showing:{len(displayed_key_names)} of {total})")
         else:
-            lines.append(f"{prefix} [*] Show Keys")
+            lines.append(f"{prefix} [*] Keys Enumeration")
         for item in displayed_key_names:
             lines.append(f"{prefix} {_format_etcd_text(item)}")
     if query_key and isinstance(query_key_value, str):
@@ -1423,7 +1423,12 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
 
 
 def _render_colored_etcd_line(console: Console, line: str) -> bool:
-    if render_colored_marker_line(console, line, tag="ETCD", counts=(CountColorRule("keys", "red"),)):
+    if render_colored_marker_line(
+        console,
+        line,
+        tag="ETCD",
+        counts=(CountColorRule("keys", "red", unknown_color="orange", zero_color="bright_green"),),
+    ):
         return True
     if line.startswith("ETCD") and "\t" in line:
         return render_tagged_detail_line(console, line, tag="ETCD", default_color="orange")

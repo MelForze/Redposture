@@ -23,7 +23,7 @@ from ...rendering import (
     render_tagged_detail_line,
 )
 
-_UNDETECTED = {"probable", "not_airflow", "transport_failure", ""}
+_UNDETECTED = {"probable", "not_airflow", "not_service", "transport_failure", ""}
 _AUTHENTICATED_RESOURCES = ("Dags", "Keys", "Connections")
 
 
@@ -40,16 +40,20 @@ def _password_text(password: Any) -> str:
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
-    """`[*] Airflow (auth required:X) (Dags allowed anonymously:Y) [(version:Z)]`."""
+    """Show validated anonymous collection access before credential checks."""
     if output_format != "txt":
         return ""
     if str(record.get("detection_status") or "") in _UNDETECTED:
         return ""
     auth_text = auth_required_text(record.get("auth_required"), record.get("auth_method"))
     line = f"{_prefix(record)} [*] Airflow (auth required:{auth_text})"
-    dags_allowed = record.get("dags_allowed")
-    dags_text = str(dags_allowed) if isinstance(dags_allowed, bool) else "unknown"
-    line += f" (Dags allowed anonymously:{dags_text})"
+    for label, key in (
+        ("Dags allowed", "dags_allowed"),
+        ("Keys allowed", "keys_allowed"),
+        ("Connections allowed", "connections_allowed"),
+    ):
+        allowed = record.get(key)
+        line += f" ({label}:{allowed if isinstance(allowed, bool) else 'unknown'})"
     if auth_text == "sso" and record.get("sso_provider"):
         line += f" (provider:{record['sso_provider']})"
     if record.get("version"):
@@ -90,13 +94,24 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
 
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
-    """Per-credential lines for `--defcreds`: rejected `[-] user:pass`, other-accepted
-    `[+] user`; the winner is rendered by `_format_record` and skipped here."""
+    """Show each attempted pair once, distinguishing rejection from uncertainty."""
     if output_format != "txt":
         return []
     attempts = record.get("attempted_credentials")
-    if not isinstance(attempts, list) or len(attempts) < 2:
-        return []
+    if not isinstance(attempts, list) or not attempts:
+        state = str(record.get("credential_state") or "")
+        results = record.get("credential_results") or []
+        if state in {"valid", "valid_but_restricted", ""} or not results or not isinstance(results[0], dict):
+            return []
+        if "credential_password" not in record:
+            return []
+        attempts = [
+            {
+                "username": results[0].get("username"),
+                "password": record["credential_password"],
+                "credential_state": state,
+            }
+        ]
     prefix = _prefix(record)
     results = record.get("credential_results") or []
     selected = results[0].get("username") if results and isinstance(results[0], dict) else None
@@ -113,10 +128,13 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         # Show the password on both outcomes: several defaults can share a
         # username, so the operator needs the exact working pair, not just that
         # some default worked. Mirrors _format_record and the other cred modules.
+        pair = f"{username}:{_password_text(attempt.get('password'))}"
         if accepted:
-            lines.append(f"{prefix} [+] {username}:{_password_text(attempt.get('password'))}")
-        else:
-            lines.append(f"{prefix} [-] {username}:{_password_text(attempt.get('password'))}")
+            lines.append(f"{prefix} [+] {pair}")
+        elif str(attempt.get("credential_state") or "") == "invalid":
+            lines.append(f"{prefix} [-] {pair}")
+        # A proxy or SSO page that did not verify the pair is diagnostic
+        # evidence, not a credential result in the normal TXT report.
     return lines
 
 
@@ -164,7 +182,7 @@ def _legacy_log_place(finding: dict[str, Any]) -> str:
 
 
 def _format_show_keys_records(record: dict[str, Any], output_format: str) -> list[str]:
-    if output_format != "txt" or not record.get("show_keys_requested"):
+    if output_format != "txt" or not record.get("show_keys_requested") or record.get("_show_keys_streamed"):
         return []
     prefix = _prefix(record)
     raw_keys = record.get("variable_keys")
@@ -173,6 +191,8 @@ def _format_show_keys_records(record: dict[str, Any], output_format: str) -> lis
     if not isinstance(raw_keys, list) and not error:
         return []
     if error:
+        if str(error) in {"http_401", "http_403", "authentication_required"} and record.get("auth_required") is True:
+            return []
         return [f"{prefix} [-] Airflow Variable Keys unavailable: {error}"]
     lines = [f"{prefix} [*] Airflow Variable Keys (keys:{len(keys)})"]
     lines.extend(f"{prefix} [+] Variable Name={json.dumps(key, ensure_ascii=False)}" for key in keys)
@@ -180,7 +200,11 @@ def _format_show_keys_records(record: dict[str, Any], output_format: str) -> lis
 
 
 def _format_show_connections_records(record: dict[str, Any], output_format: str) -> list[str]:
-    if output_format != "txt" or not record.get("show_connections_requested"):
+    if (
+        output_format != "txt"
+        or not record.get("show_connections_requested")
+        or record.get("_show_connections_streamed")
+    ):
         return []
     prefix = _prefix(record)
     raw_connections = record.get("airflow_connections")
@@ -191,6 +215,8 @@ def _format_show_connections_records(record: dict[str, Any], output_format: str)
     if not isinstance(raw_connections, list) and not error:
         return []
     if error:
+        if str(error) in {"http_401", "http_403", "authentication_required"} and record.get("auth_required") is True:
+            return []
         return [f"{prefix} [-] Airflow Connections unavailable: {error}"]
     lines = [f"{prefix} [*] Airflow Connections (connections:{len(connections)})"]
     for connection in connections:
@@ -222,7 +248,9 @@ def _render_colored_airflow_line(console: Console, line: str) -> bool:
             # auth required:True == server enforces auth (good) -> green;
             # False == open/anonymous (exposure) -> red.
             BooleanColorRule("auth required", true_color="bright_green", false_color="true_red"),
-            BooleanColorRule("Dags allowed anonymously", true_color="true_red", false_color="bright_green"),
+            BooleanColorRule("Dags allowed", true_color="true_red", false_color="bright_green"),
+            BooleanColorRule("Keys allowed", true_color="true_red", false_color="bright_green"),
+            BooleanColorRule("Connections allowed", true_color="true_red", false_color="bright_green"),
         ),
         literals=(
             LiteralColorRule("auth required:sso", "bright_green"),
@@ -262,8 +290,8 @@ __all__ = [
     "_format_detect_record",
     "_format_record",
     "_format_credential_attempts_records",
-    "_format_discover_records",
-    "_format_show_connections_records",
     "_format_show_keys_records",
+    "_format_show_connections_records",
+    "_format_discover_records",
     "_render_colored_airflow_line",
 ]

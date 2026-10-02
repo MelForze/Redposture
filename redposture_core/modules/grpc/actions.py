@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import re
 import threading
 import time
 from collections.abc import Callable
@@ -688,7 +687,13 @@ def _public_auth_attempts(last_attempt: dict[str, Any] | None) -> list[dict[str,
             "username": candidate.get("username") if auth_type == "basic" else None,
             "password": candidate.get("password") if auth_type == "basic" else None,
             "source": str(candidate.get("source") or "provided"),
-            "status": "valid_credentials" if bool(item.get("ok")) else "invalid_credentials",
+            "status": (
+                "valid_credentials"
+                if bool(item.get("ok"))
+                else "invalid_credentials"
+                if item.get("verdict") == "rejected"
+                else "unverified"
+            ),
             "provided_credential_type": auth_type or None,
         }
         attempts.append(attempt)
@@ -836,7 +841,33 @@ def _try_credentials(
             candidate_ok = reflection_ok
         else:
             candidate_ok = health_ok or reflection_ok
-        attempt_history.append({"candidate": dict(candidate), "ok": bool(candidate_ok)})
+        health_rejected = (
+            health_access == _ACCESS_AUTH_REQUIRED
+            and health.get("grpc_status") == 16
+            and bool(health.get("call", {}).get("is_grpc"))
+        )
+        reflection_rejected = (
+            reflection_access == _ACCESS_AUTH_REQUIRED
+            and isinstance(reflection, dict)
+            and _effective_grpc_status(reflection) == 16
+            and bool(reflection.get("call", {}).get("is_grpc"))
+        )
+        if required_capability == "health":
+            rejected = health_rejected
+        elif required_capability == "reflection":
+            rejected = reflection_rejected
+        else:
+            protected = [
+                rejected_signal
+                for required, rejected_signal in (
+                    (health_access == _ACCESS_AUTH_REQUIRED, health_rejected),
+                    (reflection_access == _ACCESS_AUTH_REQUIRED, reflection_rejected),
+                )
+                if required
+            ]
+            rejected = bool(protected) and all(protected)
+        verdict = "valid" if candidate_ok else "rejected" if rejected else "unverified"
+        attempt_history.append({"candidate": dict(candidate), "ok": bool(candidate_ok), "verdict": verdict})
         last_attempt["attempts"] = [dict(item) for item in attempt_history]
         if candidate_ok:
             if first_matched_candidate is None:
@@ -1128,7 +1159,14 @@ def _audit_grpc_host(
             provided_credentials_ok = True
             auth_used = matched_candidate
         else:
-            provided_credentials_ok = False if bool(auth_candidates) else None
+            attempt_verdicts = [
+                str(item.get("verdict") or "unverified")
+                for item in (last_attempt or {}).get("attempts", [])
+                if isinstance(item, dict)
+            ]
+            provided_credentials_ok = (
+                False if attempt_verdicts and all(value == "rejected" for value in attempt_verdicts) else None
+            )
             if isinstance(last_attempt, dict):
                 health = last_attempt.get("health")
                 reflection = last_attempt.get("reflection")
@@ -1629,7 +1667,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
                 password_text = "<empty>" if provided_password == "" else str(provided_password or "")
                 base = f"{prefix} [-] {username}:{password_text}"
         else:
-            base = f"{prefix} [-] authentication required"
+            return ""
         if err != "-":
             return f"{base} err={err}"
         return base
@@ -1670,7 +1708,10 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             else:
                 password_text = str(password)
             label = f"{username_text}:{password_text}"
-        marker = "[+]" if str(attempt.get("status") or "") in success_statuses else "[-]"
+        status = str(attempt.get("status") or "")
+        if status not in success_statuses | {"invalid_credentials"}:
+            continue
+        marker = "[+]" if status in success_statuses else "[-]"
         lines.append(f"{prefix} {marker} {label}")
     return lines
 
@@ -1873,7 +1914,9 @@ def _grpc_marker_color_spans(payload: str) -> list[tuple[int, int, str]]:
             for access, color in _ACCESS_COLORS.items()
         ),
         regexes=(
-            RegexColorRule(r"\((services|methods|descriptors|checks):(\d+)\)", "orange", skip_zero_group=2),
+            RegexColorRule(r"\((services|methods|descriptors|checks):[1-9]\d*\)", "red"),
+            RegexColorRule(r"\((services|methods|descriptors|checks):0\)", "bright_green"),
+            RegexColorRule(r"\((services|methods|descriptors|checks):unknown\)", "orange"),
             RegexColorRule(r"\bservice=[^\s]+", "orange"),
             RegexColorRule(r"\bfile=[^\s]+", "orange"),
             RegexColorRule(r"\bmethod=/[^\s]+", "orange"),
@@ -1932,8 +1975,7 @@ def _render_colored_grpc_line(console: Console, line: str) -> bool:
 
     if "\t" in line:
         _left, right = line.rsplit("\t", 1)
-        if re.search(r"^\s*(service=|file=|/|method=|response=|err=)|\b(status=SERVING|grpc=OK)\b", right):
-            return render_tagged_detail_line(console, line, tag=_GRPC_TAG, spans=_grpc_detail_color_spans(right))
+        return render_tagged_detail_line(console, line, tag=_GRPC_TAG, spans=_grpc_detail_color_spans(right))
 
     return False
 

@@ -4,6 +4,11 @@
     "auth_required": false,
     "data_transport_attempts": 1,
     "debug": false,
+    "detection_signals": [
+      "registry.probe",
+      "registry.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "docker": true,
     "download": false,
     "download_result": null,
@@ -102,6 +107,11 @@
     "auth_required": false,
     "data_transport_attempts": 1,
     "debug": false,
+    "detection_signals": [
+      "registry.probe",
+      "registry.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "docker": true,
     "download": false,
     "download_result": null,
@@ -200,6 +210,11 @@
     "auth_required": false,
     "data_transport_attempts": 1,
     "debug": false,
+    "detection_signals": [
+      "registry.probe",
+      "registry.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "docker": true,
     "download": false,
     "download_result": null,
@@ -298,6 +313,11 @@
     "auth_required": false,
     "data_transport_attempts": 1,
     "debug": false,
+    "detection_signals": [
+      "registry.probe",
+      "registry.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "docker": true,
     "download": false,
     "download_result": null,
@@ -396,6 +416,11 @@
     "auth_required": false,
     "data_transport_attempts": 1,
     "debug": false,
+    "detection_signals": [
+      "registry.probe",
+      "registry.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "docker": true,
     "download": false,
     "download_result": null,

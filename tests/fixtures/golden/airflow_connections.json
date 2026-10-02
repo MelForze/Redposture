@@ -1,0 +1,88 @@
+[
+  {
+    "airflow_connections": [
+      {
+        "conn_type": "postgres",
+        "connection_id": "warehouse",
+        "description": null,
+        "host": "db.internal",
+        "login": "report",
+        "port": null,
+        "schema": "warehouse"
+      }
+    ],
+    "airflow_connections_count": 1,
+    "airflow_connections_total": 1,
+    "airflow_connections_truncated": false,
+    "anonymous_dags_allowed": false,
+    "api_endpoint": "http://127.0.0.1:18080",
+    "api_generation": "v1",
+    "auth_method": "native",
+    "auth_required": true,
+    "authenticated_connections_access": "allowed",
+    "authenticated_connections_count": 1,
+    "authenticated_connections_http_status": 200,
+    "authenticated_dags_access": "allowed",
+    "authenticated_dags_count": 1,
+    "authenticated_dags_http_status": 200,
+    "authenticated_keys_access": "allowed",
+    "authenticated_keys_count": 1,
+    "authenticated_keys_http_status": 200,
+    "credential_results": [
+      {
+        "error_code": null,
+        "state": "valid",
+        "username": "airflow"
+      }
+    ],
+    "credential_state": "valid",
+    "credential_verification_status": "available",
+    "dags_allowed": false,
+    "default_credentials": false,
+    "detection": {
+      "git_version": ".release:f56f13442613912725d307aafc537cc76277c2d1",
+      "v1_version_status": 200,
+      "v2_version_status": 404
+    },
+    "detection_signals": [
+      "airflow.probe",
+      "airflow.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
+    "host": "127.0.0.1",
+    "is_airflow": true,
+    "module": "airflow",
+    "port": 18080,
+    "provided_credentials_ok": true,
+    "service": "airflow",
+    "show_connections_requested": true,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "version": "2.9.2"
+  }
+]

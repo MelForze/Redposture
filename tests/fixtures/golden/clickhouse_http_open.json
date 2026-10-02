@@ -31,6 +31,11 @@
     "default_credentials": false,
     "defcreds_enabled": false,
     "detection_error_kind": null,
+    "detection_signals": [
+      "clickhouse.probe",
+      "clickhouse.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover_report": null,
     "discover_requested": false,
     "effective_database": "default",
@@ -187,8 +192,6 @@
         "rows": [
           "[\"2026-08-31\", 1, \"{\\\"service\\\":{\\\"client_secret\\\":\\\"client-secret-lab-8f99b731\\\"},\\\"cookie\\\":{\\\"sessionid\\\":\\\"session-lab-001-abcdefghijkl\\\"}}\", \"postgresql://reporter:lab-password@db.internal:5432/warehouse\", {\"Authorization\": \"Bearer eyJhbGciOiJIUzI1NiJ9.lab.payloadsignature\", \"owner\": \"platform\"}, [\"AKIAIOSFODNN7EXAMPLE\", \"https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX\"], \"neutral-one\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
           "[\"2026-08-31\", 2, \"user=backup password=backup-lab-password\", \"-----BEGIN PRIVATE KEY-----\\nTEFCUFJJVkFURUtFWURBVEE=\\n-----END PRIVATE KEY-----\", {\"api_key\": \"sk_live_1234567890abcdefghijkl\", \"format\": \"log\"}, [\"Basic YWRtaW46bGFiLXBhc3N3b3Jk\", \"ordinary\"], \"fixed-secret-value\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
-          "[\"2026-09-01\", 3, \"duplicate sk_live_1234567890abcdefghijkl\", \"{\\\"nested\\\":{\\\"neutral\\\":\\\"glpat-abcdefghijklmnopqrstuv\\\"}}\", {\"duplicate\": \"sk_live_1234567890abcdefghijkl\"}, [\"mongodb://sync:sync-password@mongo.internal/app\"], \"neutral-three\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
-          "[\"2026-09-01\", 4, \"malformed-json {\\\"client_secret\\\":\\\"still-detected-secret-778899\\\"\", null, {\"note\": \"no secret here\"}, [\"ordinary-array-value\"], \"neutral-four\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
           "[\"2026-09-01\", 1000, \"ordinary-event-0\", null, {\"kind\": \"synthetic\", \"sequence\": \"0\"}, [\"fragment-0\"], \"fixed-0\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
           "[\"2026-09-01\", 1002, \"ordinary-event-2\", null, {\"kind\": \"synthetic\", \"sequence\": \"2\"}, [\"fragment-2\"], \"fixed-2\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
           "[\"2026-09-01\", 1004, \"ordinary-event-4\", null, {\"kind\": \"synthetic\", \"sequence\": \"4\"}, [\"fragment-4\"], \"fixed-4\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
@@ -284,7 +287,9 @@
           "[\"2026-09-01\", 1184, \"ordinary-event-184\", null, {\"kind\": \"synthetic\", \"sequence\": \"184\"}, [\"fragment-184\"], \"fixed-184\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
           "[\"2026-09-01\", 1186, \"ordinary-event-186\", null, {\"kind\": \"synthetic\", \"sequence\": \"186\"}, [\"fragment-186\"], \"fixed-186\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
           "[\"2026-09-01\", 1188, \"ordinary-event-188\", null, {\"kind\": \"synthetic\", \"sequence\": \"188\"}, [\"fragment-188\"], \"fixed-188\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
-          "[\"2026-09-01\", 1190, \"ordinary-event-190\", null, {\"kind\": \"synthetic\", \"sequence\": \"190\"}, [\"fragment-190\"], \"fixed-190\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]"
+          "[\"2026-09-01\", 1190, \"ordinary-event-190\", null, {\"kind\": \"synthetic\", \"sequence\": \"190\"}, [\"fragment-190\"], \"fixed-190\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
+          "[\"2026-09-01\", 3, \"duplicate sk_live_1234567890abcdefghijkl\", \"{\\\"nested\\\":{\\\"neutral\\\":\\\"glpat-abcdefghijklmnopqrstuv\\\"}}\", {\"duplicate\": \"sk_live_1234567890abcdefghijkl\"}, [\"mongodb://sync:sync-password@mongo.internal/app\"], \"neutral-three\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]",
+          "[\"2026-09-01\", 4, \"malformed-json {\\\"client_secret\\\":\\\"still-detected-secret-778899\\\"\", null, {\"note\": \"no secret here\"}, [\"ordinary-array-value\"], \"neutral-four\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\\u0000\"]"
         ],
         "table": "discovery.secret_corpus"
       },
@@ -328,12 +333,12 @@
         "rows": [
           "[\"<ISO>\", \"eu-1\", \"prod\", \"api-gateway\", \"INFO\", \"11111111-1111-1111-1111-<DOCKER_HEX>\", \"req-7f1a4c\", \"GET\", \"/v1/profile\", 200, 31, \"10.20.4.15\", \"curl/8.7.1\", \"user-service:8080\", \"profile loaded\", {\"tenant\": \"acme\", \"role\": \"user\"}]",
           "[\"<ISO>\", \"eu-1\", \"prod\", \"api-gateway\", \"WARN\", \"22222222-2222-2222-2222-<DOCKER_HEX>\", \"req-a9ff11\", \"POST\", \"/v1/payments\", 429, 184, \"10.20.8.94\", \"okhttp/4.12\", \"billing-service:8080\", \"rate limited request\", {\"tenant\": \"globex\", \"limit\": \"100rps\"}]",
-          "[\"<ISO>\", \"us-1\", \"stage\", \"api-gateway\", \"INFO\", \"88888888-8888-8888-8888-<DOCKER_HEX>\", \"req-webhook-77\", \"POST\", \"/v1/webhooks\", 202, 42, \"172.18.33.4\", \"Go-http-client/1.1\", \"webhook-service:8080\", \"webhook accepted\", {\"provider\": \"stripe\", \"event\": \"invoice.paid\"}]",
           "[\"<ISO>\", \"eu-1\", \"prod\", \"auth-service\", \"INFO\", \"44444444-4444-4444-4444-<DOCKER_HEX>\", \"req-03d9cd\", \"POST\", \"/v1/login\", 200, 94, \"10.20.4.99\", \"Mozilla/5.0\", \"iam-core:8080\", \"login successful\", {\"auth_provider\": \"oidc\", \"mfa\": \"true\"}]",
           "[\"<ISO>\", \"eu-1\", \"prod\", \"auth-service\", \"WARN\", \"55555555-5555-5555-5555-<DOCKER_HEX>\", \"req-bad-cred\", \"POST\", \"/v1/login\", 401, 77, \"10.20.4.77\", \"Mozilla/5.0\", \"iam-core:8080\", \"invalid credentials\", {\"auth_provider\": \"local\", \"username\": \"admin\"}]",
+          "[\"<ISO>\", \"eu-1\", \"prod\", \"scheduler\", \"ERROR\", \"33333333-3333-3333-3333-<DOCKER_HEX>\", \"job-rotate-22\", \"EXEC\", \"/jobs/rotate-keys\", 500, 1542, \"10.30.1.11\", \"worker/1.9\", \"vault-sync:9001\", \"key rotation failed\", {\"vault_path\": \"kv/prod/reporting\", \"retry\": \"true\"}]",
+          "[\"<ISO>\", \"us-1\", \"stage\", \"api-gateway\", \"INFO\", \"88888888-8888-8888-8888-<DOCKER_HEX>\", \"req-webhook-77\", \"POST\", \"/v1/webhooks\", 202, 42, \"172.18.33.4\", \"Go-http-client/1.1\", \"webhook-service:8080\", \"webhook accepted\", {\"provider\": \"stripe\", \"event\": \"invoice.paid\"}]",
           "[\"<ISO>\", \"us-1\", \"stage\", \"edge-proxy\", \"INFO\", \"66666666-6666-6666-6666-<DOCKER_HEX>\", \"req-cache-hit\", \"GET\", \"/assets/app.js\", 304, 6, \"172.18.10.5\", \"Chrome/121\", \"cdn-node-03\", \"cache hit\", {\"cache\": \"hit\", \"node\": \"edge-03\"}]",
-          "[\"<ISO>\", \"us-1\", \"stage\", \"etl-worker\", \"INFO\", \"77777777-7777-7777-7777-<DOCKER_HEX>\", \"etl-20260311-01\", \"COPY\", \"/etl/load/orders\", 202, 3810, \"172.18.20.9\", \"etl/2.1\", \"clickhouse-auth:9000\", \"batch accepted\", {\"batch_id\": \"orders-20260311-01\", \"rows\": \"12034\"}]",
-          "[\"<ISO>\", \"eu-1\", \"prod\", \"scheduler\", \"ERROR\", \"33333333-3333-3333-3333-<DOCKER_HEX>\", \"job-rotate-22\", \"EXEC\", \"/jobs/rotate-keys\", 500, 1542, \"10.30.1.11\", \"worker/1.9\", \"vault-sync:9001\", \"key rotation failed\", {\"vault_path\": \"kv/prod/reporting\", \"retry\": \"true\"}]"
+          "[\"<ISO>\", \"us-1\", \"stage\", \"etl-worker\", \"INFO\", \"77777777-7777-7777-7777-<DOCKER_HEX>\", \"etl-20260311-01\", \"COPY\", \"/etl/load/orders\", 202, 3810, \"172.18.20.9\", \"etl/2.1\", \"clickhouse-auth:9000\", \"batch accepted\", {\"batch_id\": \"orders-20260311-01\", \"rows\": \"12034\"}]"
         ],
         "table": "observability.events"
       },
@@ -351,8 +356,8 @@
           "[\"<ISO>\", \"cpu_usage_percent\", {\"service\": \"etl-worker\", \"instance\": \"etl-03\"}, 64.8]",
           "[\"<ISO>\", \"http_requests_total\", {\"service\": \"api-gateway\", \"code\": \"200\", \"method\": \"GET\"}, 154920.0]",
           "[\"<ISO>\", \"http_requests_total\", {\"service\": \"api-gateway\", \"code\": \"500\", \"method\": \"POST\"}, 44.0]",
-          "[\"<ISO>\", \"http_requests_total\", {\"service\": \"auth-service\", \"code\": \"401\", \"method\": \"POST\"}, 312.0]",
           "[\"<ISO>\", \"http_requests_total\", {\"service\": \"auth-service\", \"code\": \"200\", \"method\": \"POST\"}, 8840.0]",
+          "[\"<ISO>\", \"http_requests_total\", {\"service\": \"auth-service\", \"code\": \"401\", \"method\": \"POST\"}, 312.0]",
           "[\"<ISO>\", \"login_failures_total\", {\"service\": \"auth-service\", \"realm\": \"internal\"}, 27.0]",
           "[\"<ISO>\", \"queue_depth\", {\"service\": \"scheduler\", \"queue\": \"billing-sync\"}, 17.0]",
           "[\"<ISO>\", \"queue_depth\", {\"service\": \"scheduler\", \"queue\": \"mailer\"}, 3.0]"

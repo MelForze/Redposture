@@ -47,6 +47,7 @@ class AirflowClient:
         scheme: str,
         host: str,
         port: int,
+        base_path: str = "",
         basic_user: str | None = None,
         basic_password: str | None = None,
         bearer_token: str | None = None,
@@ -55,6 +56,7 @@ class AirflowClient:
         self.scheme = scheme
         self.host = host
         self.port = int(port)
+        self.base_path = "/" + base_path.strip("/") if base_path.strip("/") else ""
         self.basic_user = basic_user
         self.basic_password = basic_password
         self.bearer_token = bearer_token
@@ -86,7 +88,11 @@ class AirflowClient:
             headers.update(self._auth_header())
         try:
             resp = self._pool.request(
-                method, f"{self.base_url}{path}", headers=headers, body=body, response_size_cap=response_size_cap
+                method,
+                f"{self.base_url}{self.base_path}{path}",
+                headers=headers,
+                body=body,
+                response_size_cap=response_size_cap,
             )
         except Exception as exc:  # noqa: BLE001 - transport errors normalized for callers
             return AirflowResponse(http_status=0, headers={}, body=b"", transport_error=str(exc))

@@ -64,17 +64,29 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
     )
 
     def _detect(ctx: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/api/v4", "/users/sign_in", "/-")):
+        with http_target_context(
+            ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
+            api_prefixes=("/api/v4", "/users/sign_in", "/-"),
+        ):
             result = actions.detect_gitlab(ctx, options)
         return AuditRecord.from_mapping(result, module="gitlab", service="gitlab")
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/api/v4", "/users/sign_in", "/-")):
+        with http_target_context(
+            ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
+            api_prefixes=("/api/v4", "/users/sign_in", "/-"),
+        ):
             result = actions.authenticate_gitlab(ctx, record, options)
         return AuditRecord.from_mapping(result, module="gitlab", service="gitlab")
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/api/v4", "/users/sign_in", "/-")):
+        with http_target_context(
+            ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
+            api_prefixes=("/api/v4", "/users/sign_in", "/-"),
+        ):
             result = actions.collect_gitlab_data(ctx, record, options)
         return AuditRecord.from_mapping(result, module="gitlab", service="gitlab")
 

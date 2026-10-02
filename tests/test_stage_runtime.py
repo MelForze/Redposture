@@ -1087,9 +1087,7 @@ def test_audit_command_runner_suppresses_pre_detect_noise_in_non_debug_txt() -> 
 
     result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
 
-    assert emitted == [
-        "[!] REDIS audit inconclusive: no service confirmed; 1/1 target unreachable or failed before detection"
-    ]
+    assert emitted == ["[!] No REDIS service detected on target; 1/1 target unreachable or failed before detection"]
     assert all("protocol closed" not in line and "unexpected EOF" not in line for line in emitted)
     assert result.emitted_lines == 1
     assert result.suppressed_records == 1
@@ -1099,6 +1097,54 @@ def test_audit_command_runner_suppresses_pre_detect_noise_in_non_debug_txt() -> 
     assert result.records[0]["protocol_error"] == "unexpected EOF"
     assert is_pre_detect_network_noise(result.typed_records[0]) is True
     assert is_pre_detect_operational_failure(result.typed_records[0]) is True
+
+
+@pytest.mark.parametrize(
+    ("failures", "expected"),
+    [
+        (0, "[*] No REDIS service detected on 2 target(s)"),
+        (1, "[!] No REDIS service detected on 2 target(s); 1/2 targets unreachable or failed before detection"),
+        (2, "[!] No REDIS service detected on 2 target(s); 2/2 targets unreachable or failed before detection"),
+    ],
+)
+def test_no_service_summary_uses_one_format_with_optional_incomplete_count(failures: int, expected: str) -> None:
+    emitted: list[str] = []
+
+    def detect(ctx) -> AuditRecord:
+        failed = int(ctx.host.rsplit(".", 1)[-1]) <= failures
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="redis",
+            service="redis",
+            status="fail" if failed else "not_redis",
+            extra={"is_redis": False, "error": "connection refused" if failed else "service is not redis"},
+        )
+
+    spec = ModuleAuditSpec(module="redis", label="REDIS", default_port=6379, detect=detect, render=lambda _record: [])
+    plan = AuditCommandPlan(targets_by_port={6379: ("127.0.0.1", "127.0.0.2")}, output_format="txt")
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
+
+    assert emitted == [expected]
+    assert result.operational_failure_count == failures
+    assert command_result_exit_code(result) == (1 if failures else 0)
+
+
+def test_http_transport_failure_counts_as_incomplete_even_when_error_is_nested() -> None:
+    record = AuditRecord(
+        host="127.0.0.1",
+        port=8080,
+        module="airflow",
+        service="airflow",
+        status="fail",
+        extra={
+            "is_airflow": False,
+            "detection_status": "transport_failure",
+            "detection": {"v1_transport_error": "[Errno 61] Connection refused"},
+            "stages": [{"stage_name": "detect_protocol", "result": "error", "error": "phase failed"}],
+        },
+    )
+    assert is_pre_detect_operational_failure(record) is True
 
 
 def test_default_text_output_suppresses_all_undetected_records_and_keeps_one_summary(tmp_path) -> None:
@@ -1142,7 +1188,7 @@ def test_default_text_output_suppresses_all_undetected_records_and_keeps_one_sum
     result = AuditCommandRunner(args=SimpleNamespace(debug=False), spec=spec, emit_line=emitted.append).run_plan(plan)
 
     assert emitted == [
-        "[!] GRAFANA audit inconclusive: no service confirmed; 2/4 targets unreachable or failed before detection"
+        "[!] No GRAFANA service detected on 4 target(s); 2/4 targets unreachable or failed before detection"
     ]
     assert output.read_text(encoding="utf-8").splitlines() == emitted
     assert result.suppressed_records == 4
@@ -1218,7 +1264,7 @@ def test_module_can_opt_out_of_default_undetected_text_suppression() -> None:
 
     assert emitted == [
         error,
-        "[!] DEMO audit inconclusive: no service confirmed; 1/1 target unreachable or failed before detection",
+        "[!] No DEMO service detected on target; 1/1 target unreachable or failed before detection",
     ]
     assert result.suppressed_records == 0
 
@@ -1522,7 +1568,7 @@ def test_audit_command_runner_keeps_pre_detect_noise_in_debug_txt() -> None:
 
     assert emitted == [
         "127.0.0.1:9092 connection reset by peer",
-        "[!] KAFKA audit inconclusive: no service confirmed; 1/1 target unreachable or failed before detection",
+        "[!] No KAFKA service detected on target; 1/1 target unreachable or failed before detection",
     ]
     assert result.suppressed_records == 0
 
@@ -3232,7 +3278,7 @@ def test_run_basic_host_audit_returns_nonzero_for_inconclusive_result() -> None:
 
     assert rc == 1
     assert console.lines == [
-        "[!] DEMO audit inconclusive: no service confirmed; 1/1 target unreachable or failed before detection"
+        "[!] No DEMO service detected on target; 1/1 target unreachable or failed before detection"
     ]
 
 

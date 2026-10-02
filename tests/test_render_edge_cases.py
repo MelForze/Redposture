@@ -88,8 +88,7 @@ def test_clickhouse_format_record_auth_required_with_attempts_marks_invalid() ->
 
 def test_clickhouse_format_record_auth_required_no_attempts_is_plain() -> None:
     out = clickhouse_stage._format_record(_ch_record(status="auth_required"), "txt")
-    assert "credentials invalid" not in out
-    assert "authentication required" in out
+    assert out == ""
 
 
 def test_clickhouse_format_record_fail_with_error_shows_err_suffix() -> None:

@@ -2466,7 +2466,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
     if bool(record.get("show_namespaces")):
         namespaces = record.get("namespaces")
         err = str(record.get("namespaces_error") or "").strip()
-        lines.append(f"{prefix} [*] Namespaces")
+        lines.append(f"{prefix} [*] Namespaces Enumeration")
         if isinstance(namespaces, list) and namespaces:
             for item in namespaces:
                 lines.append(f"{prefix} {str(item)}")
@@ -2483,7 +2483,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
         err = str(record.get("pods_error") or "").strip()
         filters = record.get("namespace_filters")
         ns_scope = ",".join(str(item) for item in filters) if isinstance(filters, list) and filters else "all"
-        lines.append(f"{prefix} [*] Pods (namespace:{ns_scope})")
+        lines.append(f"{prefix} [*] Pods Enumeration (namespace:{ns_scope})")
         if isinstance(pods, list) and pods:
             for item in pods:
                 if not isinstance(item, dict):
@@ -2491,8 +2491,13 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
                 ns = str(item.get("namespace") or "-")
                 name = str(item.get("name") or "-")
                 phase = str(item.get("phase") or "-")
-                containers = int(item.get("containers") or 0)
-                lines.append(f"{prefix} {ns}/{name} (phase:{phase}) (containers:{containers})")
+                containers = item.get("containers")
+                containers_text = (
+                    str(containers)
+                    if isinstance(containers, int) and not isinstance(containers, bool) and containers >= 0
+                    else "unknown"
+                )
+                lines.append(f"{prefix} {ns}/{name} (phase:{phase}) (containers:{containers_text})")
         elif err:
             lines.append(
                 f"{prefix} [-] pods unavailable: "
@@ -2506,7 +2511,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
         err = str(record.get("secrets_error") or "").strip()
         filters = record.get("namespace_filters")
         ns_scope = ",".join(str(item) for item in filters) if isinstance(filters, list) and filters else "all"
-        lines.append(f"{prefix} [*] Secrets (namespace:{ns_scope})")
+        lines.append(f"{prefix} [*] Secrets Enumeration (namespace:{ns_scope})")
         if isinstance(secrets, list) and secrets:
             for item in secrets:
                 if not isinstance(item, dict):
@@ -2584,7 +2589,9 @@ def _render_colored_kubeapi_line(console: Console, line: str) -> bool:
     ):
         return True
     if line.startswith(_KUBE_TAG) and "\t" in line:
-        return render_tagged_detail_line(console, line, tag=_KUBE_TAG, default_color="orange")
+        return render_tagged_detail_line(
+            console, line, tag=_KUBE_TAG, default_color="orange", resource_counts=("containers", "keys")
+        )
     return False
 
 

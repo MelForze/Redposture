@@ -29,7 +29,7 @@ from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
-from ...rendering import BooleanColorRule, render_colored_marker_line
+from ...rendering import BooleanColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...stage_runtime import (
     StageTelemetryBuilder,
     format_retry_decision,
@@ -394,6 +394,20 @@ def _looks_like_proxmox_response(
     if status == 200 and isinstance(data, dict):
         pve_fields = {"clustername", "ticket", "CSRFPreventionToken", "cap"}
         if pve_fields.intersection(data):
+            return True
+        # /api2/json/version has a product-specific three-field response. A
+        # reverse proxy may replace Server: pve-api-daemon with Server: nginx.
+        version = data.get("version")
+        release = data.get("release")
+        repoid = data.get("repoid")
+        if (
+            isinstance(version, str)
+            and re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", version, re.ASCII)
+            and isinstance(release, str)
+            and re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", release, re.ASCII)
+            and isinstance(repoid, str)
+            and re.fullmatch(r"[0-9A-Za-z]{6,64}", repoid, re.ASCII)
+        ):
             return True
     if status not in {401, 403}:
         return False
@@ -2106,7 +2120,7 @@ def _render_colored_proxmox_line(console: Console, line: str) -> bool:
     def _extra_spans(marker: str, payload: str) -> list[tuple[int, int, str]]:
         return discovery_color_spans(marker, payload)
 
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag="PROXMOX",
@@ -2118,7 +2132,9 @@ def _render_colored_proxmox_line(console: Console, line: str) -> bool:
             BooleanColorRule("read"),
         ),
         extra_spans=_extra_spans,
-    )
+    ):
+        return True
+    return render_tagged_detail_line(console, line, tag="PROXMOX")
 
 
 def _attach_proxmox_stage_telemetry(

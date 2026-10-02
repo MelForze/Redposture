@@ -6,6 +6,11 @@
     "clone_requested": false,
     "clone_results": [],
     "clone_scope": null,
+    "detection_signals": [
+      "gitlab.probe",
+      "gitlab.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "error": null,
     "host": "127.0.0.1",
     "https": false,

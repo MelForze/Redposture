@@ -20,6 +20,11 @@
       }
     ],
     "defcreds_enabled": false,
+    "detection_signals": [
+      "etcd.probe",
+      "etcd.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "dump_keys": false,
     "effective_password": null,
     "effective_username": null,

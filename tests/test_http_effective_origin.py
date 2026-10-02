@@ -3,7 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from redposture_core.clients.http_api import HttpResponse, http_target_context
+from redposture_core.clients.http_api import (
+    HttpResponse,
+    current_http_target_binding,
+    http_target_context,
+    pin_http_redirect_path,
+)
 from redposture_core.modules.airflow import actions as airflow
 from redposture_core.modules.consul import actions as consul
 from redposture_core.modules.elastic import actions as elastic
@@ -40,6 +45,28 @@ def _redirect(source: str, destination: str, body: bytes = b"{}", status: int = 
         final_url=destination,
         redirect_history=(source,),
     )
+
+
+def test_safe_redirect_pins_new_mount_across_lifecycle_hooks() -> None:
+    target = SimpleNamespace(path="/old", scheme="http")
+    state = SimpleNamespace()
+    source = "http://source.local/old/api/health"
+    with http_target_context(target, route_state=state):
+        pin_http_redirect_path(_redirect(source, "https://service.local/new/api/health"), method="GET")
+        assert current_http_target_binding().base_path == "/new"
+    with http_target_context(target, route_state=state):
+        assert current_http_target_binding().base_path == "/new"
+
+
+def test_idp_redirect_and_post_cannot_pin_api_mount() -> None:
+    target = SimpleNamespace(path="/old", scheme="http")
+    state = SimpleNamespace()
+    source = "http://source.local/old/api/health"
+    with http_target_context(target, route_state=state):
+        pin_http_redirect_path(_redirect(source, "https://idp.local/login"), method="GET")
+        pin_http_redirect_path(_redirect(source, "https://service.local/new/api/health"), method="POST")
+        assert current_http_target_binding().base_path == "/old"
+    assert not hasattr(state, "_http_effective_base_path")
 
 
 def test_airflow_and_rabbitmq_reuse_redirected_origin(monkeypatch) -> None:

@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from ...auth_detection import detect_browser_sso
 from ...clients.airflow_api import AirflowClient, AirflowResponse
-from ...clients.http_api import http_response_origin, http_response_requires_https, http_scheme_candidates
+from ...clients.http_api import (
+    http_response_origin,
+    http_response_requires_https,
+    http_scheme_candidates,
+    infer_http_base_path,
+)
 from ...clients.http_session import HttpSessionPool
 from ...discovery_rendering import format_discovery_finding_line
 from .discover import DiscoverConfig, discover_task_logs, list_connections, list_variable_keys
@@ -36,6 +42,7 @@ _ENDPOINTS = {
     },
 }
 _AUTH_TOKEN_PATH = "/auth/token"  # Airflow 3.x JWT exchange
+_TARGET_API_PREFIXES = ("/api/v1/", "/api/v2/", "/auth/token", "/login", "/home")
 _AIRFLOW_VERSION_RE = re.compile(
     r"^[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:[._+-]?(?:a|b|rc|dev|post)?[0-9A-Za-z][0-9A-Za-z._+-]*)?$",
     re.IGNORECASE,
@@ -72,6 +79,7 @@ def detect_airflow(client: AirflowClient) -> AirflowDetection:
     """Probe the public version endpoint (v2 then v1) to confirm Airflow, capture the
     version, and pin the API generation used for later auth."""
     evidence: dict[str, Any] = {}
+    api_endpoint = f"{client.base_url}{getattr(client, 'base_path', '')}"
     transport_failures = 0
     version_candidates: list[tuple[str, str, dict[str, Any]]] = []
     for generation in ("v2", "v1"):
@@ -91,12 +99,12 @@ def detect_airflow(client: AirflowClient) -> AirflowDetection:
                     status="confirmed",
                     api_generation=generation,
                     version=version,
-                    api_endpoint=client.base_url,
+                    api_endpoint=api_endpoint,
                     evidence=candidate_evidence,
                 )
             version_candidates.append((generation, version, candidate_evidence))
     if transport_failures == 2:
-        return AirflowDetection(status="transport_failure", api_endpoint=client.base_url, evidence=evidence)
+        return AirflowDetection(status="transport_failure", api_endpoint=api_endpoint, evidence=evidence)
     # A version-only JSON document is easy for an unrelated API to imitate.  It
     # becomes conclusive only when the same API generation supplies a second,
     # independently validated Airflow response.
@@ -108,7 +116,7 @@ def detect_airflow(client: AirflowClient) -> AirflowDetection:
                 status="confirmed",
                 api_generation=generation,
                 version=version,
-                api_endpoint=client.base_url,
+                api_endpoint=api_endpoint,
                 evidence={**candidate_evidence, **detail},
             )
 
@@ -121,10 +129,10 @@ def detect_airflow(client: AirflowClient) -> AirflowDetection:
             return AirflowDetection(
                 status="probable",
                 api_generation=generation,
-                api_endpoint=client.base_url,
+                api_endpoint=api_endpoint,
                 evidence=evidence,
             )
-    return AirflowDetection(status="not_airflow", api_endpoint=client.base_url, evidence=evidence)
+    return AirflowDetection(status="not_airflow", api_endpoint=api_endpoint, evidence=evidence)
 
 
 def _looks_like_health(resp: AirflowResponse) -> bool:
@@ -166,7 +174,7 @@ def _corroborate_airflow(client: AirflowClient, generation: str) -> tuple[bool, 
     problem_valid = (
         not dags.transport_error
         and dags.http_status in {401, 403}
-        and _looks_like_airflow_problem(dags, int(dags.http_status))
+        and _looks_like_airflow_problem(dags, int(dags.http_status), require_product_type=True)
     )
     detail[f"{generation}_dags"] = dags_valid
     detail[f"{generation}_problem"] = problem_valid
@@ -187,17 +195,32 @@ def _looks_like_dag_collection(resp: AirflowResponse) -> bool:
     )
 
 
-def _looks_like_airflow_problem(resp: AirflowResponse, status: int) -> bool:
+def _looks_like_airflow_problem(resp: AirflowResponse, status: int, *, require_product_type: bool = False) -> bool:
     data = resp.json()
     if not isinstance(data, dict):
         return False
     response_status = data.get("status")
+    problem_type = data.get("type")
+    airflow_problem_type = False
+    if isinstance(problem_type, str):
+        try:
+            parsed_type = urlsplit(problem_type)
+            airflow_problem_type = (
+                parsed_type.scheme == "https"
+                and parsed_type.hostname == "airflow.apache.org"
+                and parsed_type.path.startswith("/docs/apache-airflow/")
+                and "rest-api-ref" in parsed_type.path
+                and parsed_type.fragment.startswith("section/Errors/")
+            )
+        except ValueError:
+            pass
+    detail = data.get("detail")
     return (
         isinstance(response_status, int)
         and not isinstance(response_status, bool)
         and response_status == status
-        and isinstance(data.get("detail"), str)
-        and bool(str(data.get("detail") or "").strip())
+        and (airflow_problem_type or (isinstance(detail, str) and bool(detail.strip())))
+        and (not require_product_type or airflow_problem_type)
         and isinstance(data.get("title"), str)
         and bool(str(data.get("title") or "").strip())
     )
@@ -207,7 +230,7 @@ def _looks_like_airflow_problem(resp: AirflowResponse, status: int) -> bool:
 
 
 def classify_anonymous(client: AirflowClient, generation: str) -> AnonymousResult:
-    """Confirm anonymous DAG access only from a valid Airflow collection response."""
+    """Probe three collections without credentials, validating successful bodies."""
     endpoints = _ENDPOINTS.get(generation, _ENDPOINTS["v1"])
     viewer = client.get(endpoints["dags"], authed=False)
     sso = detect_browser_sso(
@@ -228,15 +251,43 @@ def classify_anonymous(client: AirflowClient, generation: str) -> AnonymousResul
         )
     if viewer.transport_error:
         return AnonymousResult(reachable=False)
+    keys_access = _resource_access(client, endpoints["keys"], "variables", authed=False)
+    connections_access = _resource_access(client, endpoints["connections"], "connections", authed=False)
+    keys_allowed = True if keys_access.status == "allowed" else False if keys_access.status == "denied" else None
+    connections_allowed = (
+        True if connections_access.status == "allowed" else False if connections_access.status == "denied" else None
+    )
     if viewer.http_status in {401, 403}:
-        return AnonymousResult(reachable=True, auth_required=True, dags_allowed=False, auth_method="native")
+        return AnonymousResult(
+            reachable=True,
+            auth_required=True,
+            dags_allowed=False,
+            keys_allowed=keys_allowed,
+            connections_allowed=connections_allowed,
+            auth_method="native",
+        )
     if viewer.http_status != 200:
-        return AnonymousResult(reachable=True, auth_required=None, dags_allowed=None)
+        return AnonymousResult(
+            reachable=True,
+            keys_allowed=keys_allowed,
+            connections_allowed=connections_allowed,
+        )
     if not _looks_like_dag_collection(viewer):
         # A reverse proxy or an unrecognized login page may answer 200. Only an
         # Airflow DAG collection proves anonymous DAG access.
-        return AnonymousResult(reachable=True, auth_required=None, dags_allowed=None)
-    return AnonymousResult(reachable=True, auth_required=False, dags_allowed=True, auth_method="anonymous")
+        return AnonymousResult(
+            reachable=True,
+            keys_allowed=keys_allowed,
+            connections_allowed=connections_allowed,
+        )
+    return AnonymousResult(
+        reachable=True,
+        auth_required=False,
+        dags_allowed=True,
+        keys_allowed=keys_allowed,
+        connections_allowed=connections_allowed,
+        auth_method="anonymous",
+    )
 
 
 # --- credentials -----------------------------------------------------------
@@ -278,10 +329,10 @@ def verify_credential(pool_client_factory: Any, generation: str, username: str, 
 # --- authenticated resource access ----------------------------------------
 
 
-def _resource_access(client: AirflowClient, path: str, collection_key: str) -> ResourceAccess:
+def _resource_access(client: AirflowClient, path: str, collection_key: str, *, authed: bool = True) -> ResourceAccess:
     """Return an exact collection count only for a validated Airflow response."""
 
-    resp = client.get(f"{path}?limit=1&offset=0", authed=True)
+    resp = client.get(f"{path}?limit=1&offset=0", authed=authed)
     if resp.transport_error:
         return ResourceAccess(status="unknown", error="transport_error")
     if resp.http_status in {401, 403}:
@@ -327,9 +378,10 @@ class AirflowLifecycleState:
     for the target and the JWT held for a 3.x credential. Certificates are always
     accepted: this audits exposure, not trust."""
 
-    def __init__(self, args: Any, host: str, port: int, *, scheme: str | None = None) -> None:
+    def __init__(self, args: Any, host: str, port: int, *, scheme: str | None = None, base_path: str = "") -> None:
         self.host = str(host)
         self.port = int(port)
+        self.base_path = infer_http_base_path(base_path, _TARGET_API_PREFIXES)
         if scheme not in {None, "http", "https"}:
             raise ValueError("airflow supports HTTP/HTTPS targets only")
         self.preferred_scheme: str | None = scheme
@@ -343,7 +395,7 @@ class AirflowLifecycleState:
         )
 
     def _probe_scheme(self, scheme: str) -> AirflowResponse:
-        client = AirflowClient(self.pool, scheme=scheme, host=self.host, port=self.port)
+        client = AirflowClient(self.pool, scheme=scheme, host=self.host, port=self.port, base_path=self.base_path)
         return client.get(_ENDPOINTS["v2"]["version"], authed=False)
 
     def resolve_scheme(self) -> str:
@@ -354,6 +406,13 @@ class AirflowLifecycleState:
         selected = candidates[0]
         for index, candidate in enumerate(candidates):
             resp = self._probe_scheme(candidate)
+            # A reverse proxy may move the API to a different mount. Keep the
+            # candidate path only when the redirect still ends at the exact
+            # endpoint we requested; an IdP/login redirect cannot pin it.
+            endpoint = _ENDPOINTS["v2"]["version"]
+            final_path = urlsplit(str(resp.final_url or "")).path
+            if resp.redirect_history and final_path.endswith(endpoint):
+                self.base_path = final_path[: -len(endpoint)].rstrip("/")
             mismatch = bool(resp.transport_error and _transport_mismatch(candidate, resp.transport_error))
             tls_required = candidate == "http" and http_response_requires_https(resp.http_status, resp.body)
             selected = candidate
@@ -388,7 +447,9 @@ def _transport_mismatch(scheme: str, transport_error: str) -> bool:
 def airflow_lifecycle_state_factory(ctx: Any) -> AirflowLifecycleState:
     target = getattr(ctx, "target", None)
     scheme = getattr(target, "scheme", None)
-    return AirflowLifecycleState(ctx.args, ctx.host, ctx.port, scheme=scheme)
+    return AirflowLifecycleState(
+        ctx.args, ctx.host, ctx.port, scheme=scheme, base_path=str(getattr(target, "path", "") or "")
+    )
 
 
 def _client_for(
@@ -404,16 +465,21 @@ def _client_for(
         pool = state.pool
         host = state.host
         port = state.port
+        base_path = state.base_path
     else:
         scheme = "https" if int(ctx.port) in {443, 8443} else "http"
         pool = HttpSessionPool(timeout=float(getattr(ctx.args, "timeout", 5.0) or 5.0), insecure=True)
         host = str(ctx.host)
         port = int(ctx.port)
+        base_path = infer_http_base_path(
+            str(getattr(getattr(ctx, "target", None), "path", "") or ""), _TARGET_API_PREFIXES
+        )
     return AirflowClient(
         pool,
         scheme=scheme,
         host=host,
         port=port,
+        base_path=base_path,
         basic_user=basic_user,
         basic_password=basic_password,
         bearer_token=bearer_token,
@@ -450,6 +516,8 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         record["auth_required"] = anon.auth_required
         record["dags_allowed"] = anon.dags_allowed
         record["anonymous_dags_allowed"] = anon.dags_allowed
+        record["keys_allowed"] = anon.keys_allowed
+        record["connections_allowed"] = anon.connections_allowed
         record["auth_method"] = anon.auth_method
         if anon.auth_required is False:
             # A public DAG endpoint returns the same successful response with
@@ -516,9 +584,8 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     merged["credential_state"] = credential_state
     merged["credential_results"] = [{"username": result.username, "state": credential_state, "error_code": error_code}]
     merged["_credential_capabilities_pending"] = credential_state in {"valid", "valid_but_restricted"}
-    # Echoed on the TXT accepted line as user:pass; redacted from JSON output.
-    if credential_state in {"valid", "valid_but_restricted"}:
-        merged["credential_password"] = str(password)
+    # Used only by TXT renderers; the stage spec redacts it from JSON output.
+    merged["credential_password"] = str(password)
     merged["provided_credentials_ok"] = (
         True
         if credential_state in {"valid", "valid_but_restricted"}
@@ -615,8 +682,12 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         if isinstance(show_connections_value, int) and not isinstance(show_connections_value, bool)
         else None
     )
-    if not discover_requested:
-        if show_keys_requested:
+    # These read-only sections precede discovery in both the final renderer and
+    # the live output. Do not issue their requests when an authenticated API is
+    # known to be closed and no credential has been verified.
+    can_read = credential_ok or prior.get("auth_required") is not True
+    if show_keys_requested:
+        if can_read:
             keys = list_variable_keys(client, generation, limit=show_keys_limit)
             merged["variable_keys"] = keys["keys"]
             merged["variable_keys_count"] = keys["count"]
@@ -624,7 +695,10 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             merged["variable_keys_truncated"] = keys["truncated"]
             if keys.get("error"):
                 merged["variable_keys_error"] = keys["error"]
-        if show_connections_requested:
+        elif prior.get("auth_required") is True:
+            merged["variable_keys_error"] = "authentication_required"
+    if show_connections_requested:
+        if can_read:
             connections = list_connections(client, generation, limit=show_connections_limit)
             merged["airflow_connections"] = connections["connections"]
             merged["airflow_connections_count"] = connections["count"]
@@ -632,6 +706,9 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             merged["airflow_connections_truncated"] = connections["truncated"]
             if connections.get("error"):
                 merged["connections_error"] = connections["error"]
+        elif prior.get("auth_required") is True:
+            merged["connections_error"] = "authentication_required"
+    if not discover_requested:
         return merged
 
     config = DiscoverConfig(
@@ -644,6 +721,16 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     live_emit = getattr(ctx, "live_emit", None)
 
     if discover_requested and callable(live_emit):
+        from . import render
+
+        keys_lines = render._format_show_keys_records(merged, "txt")
+        connections_lines = render._format_show_connections_records(merged, "txt")
+        if keys_lines:
+            live_emit(keys_lines)
+            merged["_show_keys_streamed"] = True
+        if connections_lines:
+            live_emit(connections_lines)
+            merged["_show_connections_streamed"] = True
         live_emit([f"AIRFLOW\t{ctx.host}\t{int(ctx.port)}\t [*] Discover Secrets"])
 
     def _on_finding(finding: dict[str, Any]) -> None:
@@ -670,24 +757,6 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         else discover_task_logs(client, generation, config)
     )
     merged["discover_report"] = report
-    if show_keys_requested:
-        raw_variable_keys = report.get("variable_keys")
-        all_keys: list[Any] = raw_variable_keys if isinstance(raw_variable_keys, list) else []
-        shown_keys = all_keys if show_keys_limit is None else all_keys[:show_keys_limit]
-        merged["variable_keys"] = shown_keys
-        merged["variable_keys_count"] = len(shown_keys)
-        merged["variable_keys_total"] = len(all_keys)
-        merged["variable_keys_truncated"] = show_keys_limit is not None and len(all_keys) > show_keys_limit
-        if report.get("variables_error"):
-            merged["variable_keys_error"] = report["variables_error"]
-    if show_connections_requested:
-        connections = list_connections(client, generation, limit=show_connections_limit)
-        merged["airflow_connections"] = connections["connections"]
-        merged["airflow_connections_count"] = connections["count"]
-        merged["airflow_connections_total"] = connections["total"]
-        merged["airflow_connections_truncated"] = connections["truncated"]
-        if connections.get("error"):
-            merged["connections_error"] = connections["error"]
     if callable(live_emit):
         merged["_discover_findings_streamed"] = True
     return merged

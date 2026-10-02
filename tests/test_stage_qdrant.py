@@ -227,8 +227,7 @@ def test_format_detect_and_summary_records() -> None:
         },
         "txt",
     )
-    assert "[-] authentication required for collections" in auth_line
-    assert "err=forbidden" in auth_line
+    assert auth_line == ""
 
     fail_line = qdrant._format_record(
         {"host": "127.0.0.1", "port": 6333, "status": "fail", "error": "connection timeout"},
@@ -997,7 +996,7 @@ def test_audit_qdrant_targets_and_run_stage_paths(
     assert totals == (2, 1, 0, 0, 1)
     assert any("Qdrant API" in line for line in emitted)
     assert not any("connection failed" in line for line in emitted)
-    assert not any("audit partial" in line or "audit inconclusive" in line for line in emitted)
+    assert not any("No QDRANT service detected" in line for line in emitted)
     assert output_path.read_text(encoding="utf-8")
     assert len(logged) == 2
 

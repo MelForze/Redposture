@@ -240,7 +240,7 @@ def test_format_record_auth_required_variants() -> None:
         },
         "txt",
     )
-    assert "[-] authentication required" in line_plain
+    assert line_plain == ""
 
 
 def test_format_detect_record_txt() -> None:
@@ -271,7 +271,7 @@ def test_format_keys_detail_records_contains_sections() -> None:
         "key_count": 2,
     }
     lines = redis_stage._format_keys_detail_records(record, "txt")
-    assert any("[*] Show Keys" in line for line in lines)
+    assert any("[*] Keys Enumeration" in line for line in lines)
     assert any("[*] Dump Key k1" in line for line in lines)
     assert any("[*] Dump Keys" in line for line in lines)
 
@@ -288,7 +288,7 @@ def test_format_keys_detail_records_honors_show_limit() -> None:
         "key_count": 2,
     }
     lines = redis_stage._format_keys_detail_records(record, "txt")
-    assert any("Show Keys (showing:1 of 2)" in line for line in lines)
+    assert any("Keys Enumeration (showing:1 of 2)" in line for line in lines)
     assert any(line.strip().endswith("k1") for line in lines)
     assert not any(line.strip().endswith("k2") for line in lines)
 
@@ -811,7 +811,7 @@ def test_audit_redis_targets_suppresses_pre_detect_connection_noise(
 
     assert totals == (2, 0, 0, 0, 0, 2)
     assert len(emitted) == 1
-    assert "REDIS audit inconclusive" in emitted[0]
+    assert "[!] No REDIS service detected" in emitted[0]
     assert all("Connection refused" not in line for line in emitted)
 
 
@@ -1026,9 +1026,9 @@ def test_run_redis_stage_debug_shows_unreachable_summary(
     assert rc == 1
     captured = capsys.readouterr()
     # A pre-detection connection failure is reported by run_plan's precise
-    # "audit inconclusive" summary; the coarser "all redis targets are
+    # incomplete no-service summary; the coarser "all redis targets are
     # unreachable" line is suppressed as a redundant duplicate.
-    assert "audit inconclusive" in captured.out.lower()
+    assert "[!] No REDIS service detected" in captured.out
     assert "all redis targets are unreachable" not in captured.out
 
 

@@ -260,7 +260,11 @@ def test_audit_grpc_host_auth_required(monkeypatch: pytest.MonkeyPatch) -> None:
         "_detect_grpc_target",
         lambda *_a, **_k: _detect(health_access="auth_required"),
     )
-    monkeypatch.setattr(grpc, "_try_credentials", lambda *_a, **_k: (False, None, {"call": {"is_grpc": True}}))
+    monkeypatch.setattr(
+        grpc,
+        "_try_credentials",
+        lambda *_a, **_k: (False, None, {"attempts": [{"verdict": "rejected"}], "call": {"is_grpc": True}}),
+    )
     rec = grpc._audit_grpc_host(
         "h",
         50051,

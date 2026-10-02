@@ -1470,9 +1470,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         marker = "[+]"
         return f"{prefix} {marker} {user}:{secret_text}{_caps_suffix(record)}"
     if status == "auth_required":
-        if has_attempt_details:
-            return ""
-        return f"{prefix} [-] authentication required"
+        return ""
     if status in {"account_locked", "account_expired", "invalid_credentials"}:
         if has_attempt_details:
             return ""
@@ -1851,8 +1849,14 @@ def _render_colored_oracle_line(console: Console, line: str) -> bool:
         console,
         line,
         tag=_ORACLE_TAG,
-        counts=(CountColorRule("PDBs", "red"), CountColorRule("Users", "red"), CountColorRule("Tables", "red")),
+        counts=(
+            CountColorRule("PDBs", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("Users", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("Tables", "red", unknown_color="orange", zero_color="bright_green"),
+        ),
         regexes=(
+            RegexColorRule(r"\b(?:available|total):0\b", "bright_green"),
+            RegexColorRule(r"\b(?:available|total):[1-9]\d*\b", "red"),
             RegexColorRule(r"\b(CRITICAL|HIGH|MEDIUM|LOW) - [^\n]+", "orange"),
             RegexColorRule(
                 r"\b(service|sid|schema|user|role|name|open_mode|restricted|transport|version|status|weak|tcp|tcps|path|method|result|password_protected)=[^\s]+",

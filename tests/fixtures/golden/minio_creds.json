@@ -24,6 +24,10 @@
       "s3_shape": true,
       "server_minio": true
     },
+    "detection_signals": [
+      "minio.probe",
+      "minio.product_fingerprint"
+    ],
     "detection_status": "confirmed",
     "host": "127.0.0.1",
     "is_minio": true,
@@ -73,7 +77,12 @@
       "s3_shape": false,
       "server_minio": true
     },
-    "detection_status": "console",
+    "detection_detail_status": "console",
+    "detection_signals": [
+      "minio.probe",
+      "minio.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "host": "127.0.0.1",
     "is_minio": true,
     "module": "minio",

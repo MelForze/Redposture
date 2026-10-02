@@ -81,6 +81,11 @@
         "scheme": "http"
       }
     ],
+    "detection_signals": [
+      "grpc.probe",
+      "grpc.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "error": null,
     "grpc_web_detected": false,
     "health_access": "anonymous",
@@ -276,6 +281,11 @@
         "scheme": "http"
       }
     ],
+    "detection_signals": [
+      "grpc.probe",
+      "grpc.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "error": null,
     "grpc_web_detected": false,
     "health_access": "anonymous",
@@ -471,6 +481,11 @@
         "scheme": "http"
       }
     ],
+    "detection_signals": [
+      "grpc.probe",
+      "grpc.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "error": null,
     "grpc_web_detected": false,
     "health_access": "anonymous",
@@ -666,6 +681,11 @@
         "scheme": "http"
       }
     ],
+    "detection_signals": [
+      "grpc.probe",
+      "grpc.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "error": null,
     "grpc_web_detected": false,
     "health_access": "anonymous",
@@ -861,6 +881,11 @@
         "scheme": "http"
       }
     ],
+    "detection_signals": [
+      "grpc.probe",
+      "grpc.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "error": null,
     "grpc_web_detected": false,
     "health_access": "anonymous",

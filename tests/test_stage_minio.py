@@ -105,7 +105,7 @@ def test_resolve_scheme_flips_on_mismatch_and_caches(monkeypatch: pytest.MonkeyP
 
 
 def test_resolve_scheme_upgrades_on_https_required_http_response(monkeypatch: pytest.MonkeyPatch):
-    state = actions.MinioLifecycleState(_fake_args(), "10.0.0.9", 8083, scheme="http")
+    state = actions.MinioLifecycleState(_fake_args(), "10.0.0.9", 8083, scheme="http", base_path="/edge/app")
     calls: list[str] = []
 
     def fake_probe(scheme: str) -> MinioResponse:
@@ -200,6 +200,23 @@ def test_console_api_fallback_accepts_verified_https_origin(monkeypatch: pytest.
     assert result.console_endpoint == "http://10.0.0.9:8083"
     assert tried == [("http", 9000), ("https", 9000)]
     assert (state.resolved_scheme, state.resolved_host, state.resolved_port) == ("https", "10.0.0.9", 9000)
+    assert state.base_path == ""
+    state.close()
+
+
+def test_s3_redirect_records_confirmed_public_base_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = actions.MinioLifecycleState(_fake_args(), "source.local", 9000, scheme="http")
+    response = MinioResponse(
+        http_status=403,
+        headers={"Server": "MinIO", "Content-Type": "application/xml"},
+        body=b"<Error><Code>AccessDenied</Code></Error>",
+        request_url="http://source.local:9000/",
+        final_url="https://minio.local:9443/edge/storage/",
+        redirect_history=("http://source.local:9000/",),
+    )
+    monkeypatch.setattr(state, "_probe", lambda _scheme: response)
+    assert state.resolve_scheme() == "https"
+    assert (state.resolved_host, state.resolved_port, state.base_path) == ("minio.local", 9443, "/edge/storage")
     state.close()
 
 

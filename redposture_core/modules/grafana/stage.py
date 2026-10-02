@@ -84,17 +84,23 @@ def build_grafana_spec(args: Any) -> ModuleAuditSpec:
     )
 
     def _detect(ctx: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/api", "/login")):
+        with http_target_context(
+            ctx.target, route_state=getattr(ctx, "lifecycle_state", None), api_prefixes=("/api", "/login")
+        ):
             result = actions.detect_grafana(ctx, options)
         return AuditRecord.from_mapping(result, module="grafana", service="grafana")
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/api", "/login")):
+        with http_target_context(
+            ctx.target, route_state=getattr(ctx, "lifecycle_state", None), api_prefixes=("/api", "/login")
+        ):
             result = actions.authenticate_grafana(ctx, record, options)
         return AuditRecord.from_mapping(result, module="grafana", service="grafana")
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/api", "/login")):
+        with http_target_context(
+            ctx.target, route_state=getattr(ctx, "lifecycle_state", None), api_prefixes=("/api", "/login")
+        ):
             result = actions.collect_grafana_data(ctx, record, options)
         return AuditRecord.from_mapping(result, module="grafana", service="grafana")
 

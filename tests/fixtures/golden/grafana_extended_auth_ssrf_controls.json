@@ -109,6 +109,11 @@
     ],
     "default_credentials": false,
     "defcreds_enabled": false,
+    "detection_signals": [
+      "grafana.probe",
+      "grafana.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "effective_password": "admin",
     "effective_username": "admin",
     "error": null,

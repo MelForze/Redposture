@@ -43,12 +43,35 @@ HTTP_PRODUCTS = (
     "rabbitmq",
     "registry",
 )
+HTTP_API_SUFFIXES = {
+    "airflow": "/api/v1/version",
+    "consul": "/v1/status/leader",
+    "docker": "/version",
+    "elastic": "/_cluster/health",
+    "etcd": "/version",
+    "gitlab": "/api/v4/version",
+    "grafana": "/api/health",
+    "kubeapi": "/version",
+    "minio": "/minio/health/live",
+    "proxmox": "/api2/json/version",
+    "qdrant": "/collections",
+    "rabbitmq": "/api/overview",
+    "registry": "/service/rest/v1/status",
+}
 NATIVE_PRODUCTS = ("clickhouse", "grpc", "kafka", "keeper", "mongodb", "oracle", "postgres", "redis", "zookeeper")
 PRODUCTS = HTTP_PRODUCTS + NATIVE_PRODUCTS
 
 
-def _http_response(product: str, path: str) -> bytes:
+def _http_response(product: str, path: str, *, proxy_headers: bool = False) -> bytes:
     path = urlsplit(path).path
+    if product == "grpc_web":
+        trailer = b"grpc-status: 12\r\n"
+        body = b"\x80" + len(trailer).to_bytes(4, "big") + trailer
+        return (
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/grpc-web+proto\r\n"
+            + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+            + body
+        )
     status = 200
     headers = {"Content-Type": "application/json", "Connection": "close"}
     payload: Any
@@ -116,9 +139,12 @@ def _http_response(product: str, path: str) -> bytes:
         }
     elif product == "registry":
         headers["Server"] = "Nexus/3.72.0-04 (OSS)"
-        payload = {"version": "3.72.0-04", "edition": "OSS"}
+        payload = {"productName": "Nexus Repository", "version": "3.72.0-04", "edition": "OSS"}
     else:
         raise AssertionError(product)
+    if proxy_headers:
+        headers.pop("X-Elastic-Product", None)
+        headers["Server"] = "nginx"
     body = payload.encode() if isinstance(payload, str) else json.dumps(payload).encode()
     headers["Content-Length"] = str(len(body))
     reason = {200: "OK", 403: "Forbidden", 404: "Not Found"}[status]
@@ -281,7 +307,9 @@ class _Server(socketserver.ThreadingTCPServer):
 
 
 @contextmanager
-def _product_server(product: str) -> Iterator[tuple[int, list[bytes]]]:
+def _product_server(
+    product: str, *, proxy_headers: bool = False, prefix: str = ""
+) -> Iterator[tuple[int, list[bytes]]]:
     requests: list[bytes] = []
 
     class Handler(socketserver.BaseRequestHandler):
@@ -289,16 +317,27 @@ def _product_server(product: str) -> Iterator[tuple[int, list[bytes]]]:
             self.request.settimeout(0.4)
             try:
                 initial = _read_exact(self.request, 4)
-                requests.append(initial)
-                if product in HTTP_PRODUCTS:
+                if product in HTTP_PRODUCTS or product == "grpc_web":
                     path = "/"
                     if initial in {b"GET ", b"HEAD", b"POST"}:
                         data = initial
                         while b"\r\n\r\n" not in data and len(data) < 65536:
                             data += _read_exact(self.request, 1)
                         path = data.split(b" ")[1].decode("ascii", "replace")
-                    self.request.sendall(_http_response(product, path))
+                        requests.append(data)
+                    else:
+                        requests.append(initial)
+                    if prefix and not (path == prefix or path.startswith(prefix + "/")):
+                        self.request.sendall(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n"
+                            b"Connection: close\r\n\r\nnot found"
+                        )
+                    else:
+                        self.request.sendall(
+                            _http_response(product, path[len(prefix) :] or "/", proxy_headers=proxy_headers)
+                        )
                 else:
+                    requests.append(initial)
                     _native_response(product, self.request, initial)
             except (OSError, EOFError, ValueError, struct.error, H2ProtocolError, InvalidBSON):
                 # Foreign protocols, bounded timeouts and client disconnects.
@@ -318,14 +357,92 @@ def _product_server(product: str) -> Iterator[tuple[int, list[bytes]]]:
         assert server.errors == [], server.errors
 
 
-def _detect(module: str, port: int, *, verify_foreign: bool = False) -> tuple[bool, dict[str, Any]]:
+@contextmanager
+def _redirect_server(
+    destination_port: int, captured_requests: list[bytes] | None = None, destination_prefix: str = ""
+) -> Iterator[tuple[int, list[str]]]:
+    paths: list[str] = []
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            self.request.settimeout(0.5)
+            try:
+                request = bytearray()
+                while b"\r\n\r\n" not in request and len(request) < 65536:
+                    request.extend(self.request.recv(4096))
+                path = request.split(b" ", 2)[1].decode("ascii", "replace")
+                paths.append(path)
+                if captured_requests is not None:
+                    captured_requests.append(bytes(request))
+                location = f"http://127.0.0.1:{destination_port}{destination_prefix}{path}"
+                self.request.sendall(
+                    f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode()
+                )
+            except (OSError, IndexError):
+                return
+
+    server = _Server(("127.0.0.1", 0), Handler)
+    server.errors = []
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield int(server.server_address[1]), paths
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert server.errors == [], server.errors
+
+
+@contextmanager
+def _fixed_http_server(status: int, body: bytes, content_type: str) -> Iterator[int]:
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            self.request.settimeout(0.5)
+            try:
+                request = bytearray()
+                while b"\r\n\r\n" not in request and len(request) < 65536:
+                    request.extend(self.request.recv(4096))
+                self.request.sendall(
+                    f"HTTP/1.1 {status} QA\r\nServer: nginx\r\nContent-Type: {content_type}\r\n"
+                    f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                    + body
+                )
+            except OSError:
+                return
+
+    server = _Server(("127.0.0.1", 0), Handler)
+    server.errors = []
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield int(server.server_address[1])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert server.errors == [], server.errors
+
+
+def _detect(
+    module: str,
+    port: int,
+    *,
+    verify_foreign: bool = False,
+    target_path: str = "",
+    with_credentials: bool = False,
+    with_cve: bool = False,
+) -> tuple[bool, dict[str, Any]]:
     extra = ["--protocol", "native"] if module == "clickhouse" else ["--plaintext"] if module == "grpc" else []
     if module == "registry":
         extra += ["--nexus"]
     if module == "oracle":
         extra += ["--service", "FREEPDB1", "--protocol", "tcp"]
-    if verify_foreign:
+    if verify_foreign or with_cve:
         extra += ["--enum-cve"]
+    if verify_foreign or with_credentials:
         if module == "gitlab":
             extra += ["--token", "qa-token"]
         elif module == "qdrant":
@@ -336,7 +453,7 @@ def _detect(module: str, port: int, *, verify_foreign: bool = False) -> tuple[bo
         [
             module,
             "-t",
-            f"http://127.0.0.1:{port}",
+            f"http://127.0.0.1:{port}{target_path}",
             "--port",
             str(port),
             "--timeout",
@@ -350,9 +467,11 @@ def _detect(module: str, port: int, *, verify_foreign: bool = False) -> tuple[bo
     )
     stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
     spec = getattr(stage, f"build_{module}_spec")(args)
-    # Discovery is tested here; preserve production detection/state/cleanup,
-    # bypass only the independent post-detection inventory on lifecycle modules.
-    spec = replace(spec, data=None, capabilities=None)
+    # Preserve production detection/auth/state/cleanup. On lifecycle modules,
+    # replace inventory hooks with no-ops rather than setting them to None:
+    # None would accidentally fall back to the legacy monolithic host_stage.
+    if spec.detect is not None:
+        spec = replace(spec, data=lambda _ctx, record: record, capabilities=lambda _ctx, record: record)
     lines: list[str] = []
     result = AuditCommandRunner(args=args, spec=spec, emit_line=lines.append).run_plan(
         getattr(stage, f"build_{module}_plan")(args)
@@ -373,6 +492,180 @@ def test_each_wire_fixture_has_a_real_positive_control(product: str) -> None:
         detected, record = _detect(product, port)
     assert requests
     assert detected, record
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+def test_http_product_survives_nginx_header_rewrite_on_ephemeral_port(product: str) -> None:
+    with _product_server(product, proxy_headers=True) as (port, requests):
+        detected, record = _detect(product, port)
+    assert requests
+    assert detected, record
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+def test_http_product_detects_explicit_reverse_proxy_prefix(product: str) -> None:
+    with _product_server(product, proxy_headers=True, prefix="/edge/app") as (port, requests):
+        detected, record = _detect(product, port, target_path="/edge/app")
+    assert requests
+    assert detected, record
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+def test_auth_and_cve_probes_keep_confirmed_reverse_proxy_prefix(product: str) -> None:
+    with _product_server(product, proxy_headers=True, prefix="/edge/app") as (port, requests):
+        detected, record = _detect(product, port, verify_foreign=True, target_path="/edge/app")
+    assert detected, record
+    paths = [
+        request.split(b" ", 2)[1].decode("ascii", "replace")
+        for request in requests
+        if request.startswith((b"GET ", b"HEAD ", b"POST "))
+    ]
+    assert paths, requests
+    assert all(path.startswith("/edge/app") for path in paths), (product, paths)
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+def test_auth_probes_keep_confirmed_reverse_proxy_prefix(product: str) -> None:
+    with _product_server(product, proxy_headers=True, prefix="/edge/app") as (port, requests):
+        detected, record = _detect(product, port, with_credentials=True, target_path="/edge/app")
+    assert detected, record
+    paths = [
+        request.split(b" ", 2)[1].decode("ascii", "replace")
+        for request in requests
+        if request.startswith((b"GET ", b"HEAD ", b"POST "))
+    ]
+    assert paths and all(path.startswith("/edge/app") for path in paths), (product, paths)
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+def test_known_api_suffix_is_removed_from_target_base_path(product: str) -> None:
+    with _product_server(product, proxy_headers=True, prefix="/edge/app") as (port, requests):
+        detected, record = _detect(product, port, target_path="/edge/app" + HTTP_API_SUFFIXES[product])
+    assert requests
+    assert detected, record
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+def test_http_detection_json_has_comparable_product_evidence(product: str) -> None:
+    with _product_server(product, proxy_headers=True) as (port, _requests):
+        detected, record = _detect(product, port)
+    assert detected, record
+    assert record["detection_status"] == "confirmed"
+    assert isinstance(record["detection_signals"], list)
+    assert record["detection_signals"]
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+def test_http_product_detects_read_only_redirect_to_confirmed_origin(product: str) -> None:
+    with _product_server(product, proxy_headers=True) as (destination_port, destination_requests):
+        with _redirect_server(destination_port) as (source_port, source_paths):
+            detected, record = _detect(product, source_port)
+    assert source_paths and destination_requests
+    assert detected, record
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+def test_http_product_detects_redirect_with_explicit_prefix(product: str) -> None:
+    with _product_server(product, proxy_headers=True, prefix="/edge/app") as (destination_port, destination_requests):
+        with _redirect_server(destination_port) as (source_port, source_paths):
+            detected, record = _detect(product, source_port, target_path="/edge/app")
+    assert source_paths and destination_requests
+    assert detected, record
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+def test_credentials_use_confirmed_redirect_origin_without_revisiting_source(product: str) -> None:
+    source_requests: list[bytes] = []
+    with _product_server(product, proxy_headers=True, prefix="/edge/app") as (destination_port, _requests):
+        with _redirect_server(destination_port, source_requests) as (source_port, source_paths):
+            detected, record = _detect(product, source_port, with_credentials=True, target_path="/edge/app")
+    assert detected, record
+    # A module may need several anonymous discovery probes, but credentials
+    # must not cause another request to the initial redirecting listener.
+    assert source_paths
+    assert all(path.startswith("/edge/app") for path in source_paths)
+    assert not any(
+        marker in request.lower()
+        for request in source_requests
+        for marker in (b"authorization:", b"private-token:", b"x-api-key:", b"x-consul-token:")
+    ), (product, source_requests)
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+def test_redirect_to_new_mount_keeps_product_and_credentials(product: str) -> None:
+    source_requests: list[bytes] = []
+    with _product_server(product, proxy_headers=True, prefix="/edge/app") as (destination_port, destination_requests):
+        with _redirect_server(destination_port, source_requests, destination_prefix="/edge/app") as (
+            source_port,
+            _paths,
+        ):
+            detected, record = _detect(product, source_port, with_credentials=True)
+    assert detected, record
+    assert all(
+        request.split(b" ", 2)[1].startswith(b"/edge/app/")
+        for request in destination_requests
+        if request.startswith((b"GET ", b"HEAD ", b"POST "))
+    ), (product, destination_requests)
+    assert not any(
+        marker in request.lower()
+        for request in source_requests
+        for marker in (b"authorization:", b"private-token:", b"x-api-key:", b"x-consul-token:")
+    ), (product, source_requests)
+
+
+def test_grpc_web_real_detector_requires_valid_trailer_frame() -> None:
+    with _product_server("grpc_web", proxy_headers=True) as (port, requests):
+        detected, record = _detect("grpc", port)
+    assert requests
+    assert detected, record
+    assert record["detection_status"] == "confirmed"
+    assert record["protocol_flavor"] == "grpc-web"
+
+
+def test_grpc_web_content_type_only_does_not_start_auth_or_cve() -> None:
+    with _fixed_http_server(200, b"<html>SSO login</html>", "application/grpc-web+proto") as port:
+        detected, record = _detect("grpc", port, verify_foreign=True)
+    assert not detected, record
+    assert record["detection_status"] in {"not_service", "probable", "transport_failure"}
+    assert not record.get("attempted_credentials")
+    assert record["cve_enumeration"]["findings"] == []
+
+
+@pytest.mark.parametrize("module", HTTP_PRODUCTS)
+@pytest.mark.parametrize(
+    "status, body, content_type",
+    [
+        (200, b'{"version":"2.11.2"}', "application/json"),
+        (200, b'<html><form action="/auth/realms/qa">Sign in</form></html>', "text/html"),
+        (401, b'{"error":"authentication required"}', "application/json"),
+    ],
+)
+def test_generic_http_and_sso_are_not_product_evidence(
+    module: str,
+    status: int,
+    body: bytes,
+    content_type: str,
+) -> None:
+    with _fixed_http_server(status, body, content_type) as port:
+        detected, record = _detect(module, port, verify_foreign=True)
+    assert not detected, (module, record)
+    assert record["detection_status"] in {"probable", "not_service", "transport_failure"}
+    assert record["detection_signals"] == [f"{module}.probe"]
+    assert not record.get("attempted_credentials")
+    assert record["cve_enumeration"]["findings"] == []
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+@pytest.mark.parametrize("module", HTTP_PRODUCTS)
+def test_nginx_header_rewrite_does_not_cross_confirm_http_products(module: str, product: str) -> None:
+    with _product_server(product, proxy_headers=True) as (port, _requests):
+        detected, record = _detect(module, port, verify_foreign=module != product)
+    assert detected is (module == product), (module, product, record)
+    if module != product:
+        assert record["detection_status"] in {"not_service", "probable", "transport_failure"}, record
+        assert isinstance(record["detection_signals"], list), record
+        assert not record.get("attempted_credentials"), record
+        assert record["cve_enumeration"]["findings"] == [], record
 
 
 @pytest.mark.parametrize("product", PRODUCTS)

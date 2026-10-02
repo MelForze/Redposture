@@ -331,7 +331,7 @@ def test_all_transport_failures_emit_only_aggregate_inconclusive_warning(
     ).run_plan(clickhouse_stage.build_clickhouse_plan(args))
 
     assert emitted == [
-        "[!] CLICKHOUSE audit inconclusive: no service confirmed; 1/1 target unreachable or failed before detection"
+        "[!] No CLICKHOUSE service detected on target; 1/1 target unreachable or failed before detection"
     ]
 
 
@@ -365,7 +365,7 @@ def test_mixed_detected_and_transport_failure_has_no_aggregate_warning(
 
     assert result.detected_count == 1
     assert len([line for line in emitted if "ClickHouse Database" in line]) == 1
-    assert not any("audit inconclusive" in line for line in emitted)
+    assert not any("No CLICKHOUSE service detected" in line for line in emitted)
 
 
 def test_clickhouse_spec_disables_deep_checks_without_session() -> None:

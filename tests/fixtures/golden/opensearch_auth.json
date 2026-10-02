@@ -275,6 +275,11 @@
     "detect_signals": [
       "opensearch_security_realm"
     ],
+    "detection_signals": [
+      "elastic.probe",
+      "elastic.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover": true,
     "discover_coverage": {
       "complete": true,

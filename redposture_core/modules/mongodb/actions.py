@@ -1033,7 +1033,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             provided_password = record.get("provided_password")
             password_text = "<empty>" if provided_password == "" else str(provided_password or "")
             return f"{prefix} [-] {username}:{password_text}"
-        return f"{prefix} [-] authentication required"
+        return ""
     err = _clip(str(record.get("error") or "connection failed"), 96)
     return f"{prefix} [!] connection failed err={err}"
 
@@ -1322,11 +1322,17 @@ def _render_colored_mongodb_line(console: Console, line: str) -> bool:
         console,
         line,
         tag=_MONGODB_TAG,
-        counts=(CountColorRule("DBs", "red"), CountColorRule("collections", "red"), CountColorRule("documents", "red")),
+        counts=(
+            CountColorRule("DBs", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("collections", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("documents", "red", unknown_color="orange", zero_color="bright_green"),
+        ),
     ):
         return True
     if line.startswith(_MONGODB_TAG) and "\t" in line:
-        return render_tagged_detail_line(console, line, tag=_MONGODB_TAG, default_color="orange")
+        return render_tagged_detail_line(
+            console, line, tag=_MONGODB_TAG, default_color="orange", resource_counts=("documents",)
+        )
     return False
 
 

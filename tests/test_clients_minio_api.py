@@ -90,6 +90,32 @@ def test_signed_request_attaches_authorization_header():
     assert "x-amz-date" in sent
 
 
+def test_signed_request_uses_public_reverse_proxy_path_in_signature(monkeypatch):
+    pool = _FakePool(403, _ACCESS_DENIED_XML, {"Server": "MinIO"})
+    captured = {}
+    original_sign = minio_api.s3_sigv4.sign_request
+
+    def capture_sign(**kwargs):
+        captured["path"] = kwargs["path"]
+        return original_sign(**kwargs)
+
+    monkeypatch.setattr(minio_api.s3_sigv4, "sign_request", capture_sign)
+    client = minio_api.MinioClient(
+        pool,
+        scheme="https",
+        host="minio.example",
+        port=443,
+        base_path="/edge/storage",
+        access_key="AKID",
+        secret_key="SECRET",
+    )
+    client.get_service_root(signed=True)
+    sent = pool.calls[0]
+    assert sent["url"] == "https://minio.example:443/edge/storage/"
+    assert captured["path"] == "/edge/storage/"
+    assert sent["headers"]["Authorization"].startswith("AWS4-HMAC-SHA256 ")
+
+
 def test_list_objects_v2_builds_bounded_query():
     pool = _FakePool(200, b"<ListBucketResult></ListBucketResult>")
     client = minio_api.MinioClient(pool, scheme="https", host="h", port=443)

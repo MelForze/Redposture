@@ -75,6 +75,7 @@ class HttpTargetBinding:
 
     scheme: str | None = None
     base_path: str = ""
+    route_state: Any | None = field(default=None, compare=False, repr=False)
 
 
 _HTTP_TARGET_BINDING: ContextVar[HttpTargetBinding | None] = ContextVar(
@@ -119,13 +120,17 @@ def infer_http_base_path(path: str, api_prefixes: tuple[str, ...] = ()) -> str:
 
 
 @contextmanager
-def http_target_context(target: Any, *, api_prefixes: tuple[str, ...] = ()) -> Iterator[None]:
+def http_target_context(
+    target: Any, *, api_prefixes: tuple[str, ...] = (), route_state: Any | None = None
+) -> Iterator[None]:
     """Bind a parsed target's scheme/base path for synchronous module calls."""
 
     scheme_raw = str(getattr(target, "scheme", "") or "").strip().lower()
     scheme = scheme_raw if scheme_raw in {"http", "https"} else None
     base_path = infer_http_base_path(str(getattr(target, "path", "") or ""), api_prefixes)
-    token = _HTTP_TARGET_BINDING.set(HttpTargetBinding(scheme=scheme, base_path=base_path))
+    if route_state is not None:
+        base_path = str(getattr(route_state, "_http_effective_base_path", base_path))
+    token = _HTTP_TARGET_BINDING.set(HttpTargetBinding(scheme=scheme, base_path=base_path, route_state=route_state))
     try:
         yield
     finally:
@@ -134,6 +139,41 @@ def http_target_context(target: Any, *, api_prefixes: tuple[str, ...] = ()) -> I
 
 def current_http_target_binding() -> HttpTargetBinding:
     return _HTTP_TARGET_BINDING.get() or HttpTargetBinding()
+
+
+def pin_http_redirect_path(response: HttpResponse, *, method: str) -> None:
+    """Remember a safe probe's redirected API mount for later lifecycle hooks.
+
+    A login/IdP redirect cannot change the mount unless its final URL retains
+    the exact endpoint suffix. This is provisional until the product detector
+    confirms the response; unconfirmed services never enter auth/data stages.
+    """
+
+    binding = _HTTP_TARGET_BINDING.get()
+    if binding is None or method.upper() not in {"GET", "HEAD"} or response.error or not response.redirected:
+        return
+    original_path = urllib.parse.urlsplit(str(response.request_url or "")).path or "/"
+    final_path = urllib.parse.urlsplit(str(response.final_url or "")).path or "/"
+    prefix = binding.base_path
+    if prefix and original_path.startswith(prefix + "/"):
+        endpoint = original_path[len(prefix) :]
+    elif original_path == prefix:
+        endpoint = "/"
+    else:
+        endpoint = original_path
+    if endpoint == "/":
+        if not final_path.endswith("/"):
+            return
+        effective = final_path.rstrip("/")
+    elif final_path.endswith(endpoint):
+        effective = final_path[: -len(endpoint)].rstrip("/")
+    else:
+        return
+    effective = _normalize_url_path(effective)
+    route_state = binding.route_state
+    if route_state is not None:
+        route_state._http_effective_base_path = effective
+    _HTTP_TARGET_BINDING.set(HttpTargetBinding(scheme=binding.scheme, base_path=effective, route_state=route_state))
 
 
 def join_http_target_path(path: str) -> str:
@@ -588,7 +628,7 @@ class HttpApiClient:
         def send_hop(method: str, url: str, headers: dict[str, str], body: bytes | None) -> HttpResponse:
             return self._send_with_retries(HttpRequest(method, url, headers, body), timeout=timeout)
 
-        return follow_redirects(
+        response = follow_redirects(
             send_hop,
             request.method,
             request.url,
@@ -596,6 +636,8 @@ class HttpApiClient:
             body=body,
             allow_cross_origin=self.config.allow_cross_origin_redirects,
         )
+        pin_http_redirect_path(response, method=request.method)
+        return response
 
     def _send_with_retries(self, request: HttpRequest, *, timeout: float | None = None) -> HttpResponse:
         # A transport failure does not tell us whether the peer applied a

@@ -85,6 +85,7 @@ class MinioClient:
         access_key: str | None = None,
         secret_key: str | None = None,
         session_token: str | None = None,
+        base_path: str = "",
     ) -> None:
         self._pool = pool
         self.scheme = scheme
@@ -93,11 +94,12 @@ class MinioClient:
         self.access_key = access_key
         self.secret_key = secret_key
         self.session_token = session_token
+        self.base_path = "/" + str(base_path or "").strip("/") if str(base_path or "").strip("/") else ""
 
     @property
     def base_url(self) -> str:
         host = f"[{self.host}]" if ":" in self.host and not self.host.startswith("[") else self.host
-        return f"{self.scheme}://{host}:{self.port}"
+        return f"{self.scheme}://{host}:{self.port}{self.base_path}"
 
     @property
     def _host_header(self) -> str:
@@ -116,7 +118,8 @@ class MinioClient:
         response_cap: int | None = None,
         body: bytes | None = None,
     ) -> MinioResponse:
-        url = f"{self.base_url}{path}"
+        endpoint = path if path.startswith("/") else "/" + path
+        url = f"{self.base_url}{endpoint}"
         if query:
             url = f"{url}?{query}"
         headers: dict[str, str] = dict(extra_headers or {})

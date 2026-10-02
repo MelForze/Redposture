@@ -17,6 +17,11 @@
     "cap_read": true,
     "checked_endpoints": 4,
     "credential_hits": 0,
+    "detection_signals": [
+      "proxmox.probe",
+      "proxmox.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover_bytes_scanned": 0,
     "discover_creds": false,
     "endpoint_results": [

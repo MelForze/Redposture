@@ -56,6 +56,51 @@ def test_build_docker_url_and_request_with_fake_connection() -> None:
     assert _Connection.calls[0][0:2] == ("GET", "/version")
 
 
+def test_docker_client_keeps_reverse_proxy_prefix_for_detection_and_inventory() -> None:
+    _Connection.calls = []
+    _Connection.response = _Response(200, b'{"Version":"25.0.5","ApiVersion":"1.45"}')
+    client = DockerEngineClient("127.0.0.1", 2375, base_path="/proxy/docker", http_connection_cls=_Connection)
+    assert client.version()["Version"] == "25.0.5"
+    assert [path for _method, path, _body, _headers in _Connection.calls] == ["/proxy/docker/version"]
+
+
+def test_docker_client_reuses_confirmed_redirect_origin_for_later_requests() -> None:
+    class RedirectResponse(_Response):
+        def getheaders(self):
+            return [("Location", "http://docker.example:4243/edge/docker/version")]
+
+    class QueueConnection(_Connection):
+        origins: list[tuple[str, int]] = []
+        paths: list[str] = []
+        responses = [
+            RedirectResponse(302, b"", "Found"),
+            _Response(200, b'{"Version":"25.0.5","ApiVersion":"1.45"}'),
+            _Response(200, b'{"ServerVersion":"25.0.5","OSType":"linux"}'),
+        ]
+
+        def __init__(self, host, port, **kwargs) -> None:
+            super().__init__(host, port, **kwargs)
+            self.host = host
+            self.port = port
+
+        def request(self, method, path, body=None, headers=None) -> None:
+            self.__class__.origins.append((self.host, self.port))
+            self.__class__.paths.append(path)
+
+        def getresponse(self):
+            return self.__class__.responses.pop(0)
+
+    client = DockerEngineClient("source.example", 2375, http_connection_cls=QueueConnection)
+    assert client.version()["Version"] == "25.0.5"
+    assert client.info()["ServerVersion"] == "25.0.5"
+    assert QueueConnection.origins == [
+        ("source.example", 2375),
+        ("docker.example", 4243),
+        ("docker.example", 4243),
+    ]
+    assert QueueConnection.paths == ["/version", "/edge/docker/version", "/edge/docker/info"]
+
+
 def test_request_raises_http_error_for_denied_status() -> None:
     _Connection.response = _Response(403, b'{"message":"forbidden"}', "Forbidden")
     client = DockerEngineClient("127.0.0.1", 2375, http_connection_cls=_Connection)

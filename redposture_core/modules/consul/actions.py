@@ -73,6 +73,7 @@ class ConsulLifecycleState:
     http: HttpSessionPool | None = None
     host: str | None = None
     port: int | None = None
+    base_path: str = ""
 
     def close(self) -> None:
         if self.http is not None:
@@ -183,9 +184,11 @@ def _http_request(
             scheme = effective_state_scheme
             use_https = scheme == "https"
     parsed_path = urllib.parse.urlsplit(path)
-    url = urllib.parse.urlunsplit(
-        (scheme, format_http_authority(host, port), parsed_path.path or "/", parsed_path.query, "")
-    )
+    request_path = parsed_path.path or "/"
+    if isinstance(replay, ConsulLifecycleState) and replay.base_path:
+        if request_path != replay.base_path and not request_path.startswith(replay.base_path + "/"):
+            request_path = replay.base_path + request_path
+    url = urllib.parse.urlunsplit((scheme, format_http_authority(host, port), request_path, parsed_path.query, ""))
     request_headers = {
         "User-Agent": "RedPosture/1.0",
         "Accept": "application/json",
@@ -226,6 +229,9 @@ def _http_request(
             fallback_host=host,
             fallback_port=port,
         )
+        final_path = urllib.parse.urlsplit(str(getattr(response, "final_url", None) or "")).path
+        if bool(getattr(response, "redirected", False)) and final_path.endswith(parsed_path.path):
+            replay.base_path = final_path[: -len(parsed_path.path)].rstrip("/")
     return int(response.status), response.body, {str(k).lower(): str(v) for k, v in response.headers.items()}, None
 
 
@@ -3503,8 +3509,6 @@ def _auth_summary_line(record: dict[str, Any]) -> str | None:
         if label == ":":
             label = "basic auth"
     if auth_valid is True:
-        if bool(record.get("rce")):
-            return f"[+] {label} Pwned! {_scope_counts_suffix(auth_scopes)}"
         return f"[+] {label} {_scope_counts_suffix(auth_scopes)}"
     line = f"[-] {label} failed"
     if auth_error:
@@ -3990,6 +3994,7 @@ def _render_colored_consul_line(console: Console, line: str) -> bool:
             CountColorRule("services", "red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("agent", "red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("agents", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("count", "red", unknown_color="orange", zero_color="bright_green"),
         ),
     ):
         return True

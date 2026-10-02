@@ -1,0 +1,119 @@
+[
+  {
+    "anonymous_dags_allowed": false,
+    "api_endpoint": "http://127.0.0.1:18080",
+    "api_generation": "v1",
+    "auth_method": "native",
+    "auth_required": true,
+    "credential_verification_status": "available",
+    "dags_allowed": false,
+    "detection": {
+      "git_version": ".release:f56f13442613912725d307aafc537cc76277c2d1",
+      "v1_version_status": 200,
+      "v2_version_status": 404
+    },
+    "detection_signals": [
+      "airflow.probe",
+      "airflow.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
+    "host": "127.0.0.1",
+    "is_airflow": true,
+    "module": "airflow",
+    "port": 18080,
+    "service": "airflow",
+    "show_keys_requested": true,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "variable_keys": [],
+    "variable_keys_count": 0,
+    "variable_keys_error": "http_403",
+    "variable_keys_total": 0,
+    "variable_keys_truncated": false,
+    "version": "2.9.2"
+  },
+  {
+    "anonymous_dags_allowed": true,
+    "api_endpoint": "http://127.0.0.1:18081",
+    "api_generation": "v1",
+    "auth_method": "anonymous",
+    "auth_required": false,
+    "credential_verification_status": "unavailable",
+    "dags_allowed": true,
+    "detection": {
+      "git_version": ".release:f56f13442613912725d307aafc537cc76277c2d1",
+      "v1_version_status": 200,
+      "v2_version_status": 404
+    },
+    "detection_signals": [
+      "airflow.probe",
+      "airflow.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
+    "host": "127.0.0.1",
+    "is_airflow": true,
+    "module": "airflow",
+    "port": 18081,
+    "service": "airflow",
+    "show_keys_requested": true,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "variable_keys": [
+      "warehouse_password"
+    ],
+    "variable_keys_count": 1,
+    "variable_keys_total": 1,
+    "variable_keys_truncated": false,
+    "version": "2.9.2"
+  }
+]

@@ -210,7 +210,7 @@ def test_runtime_valid_default_tags_permissions_enum_and_scope(monkeypatch):
     assert record["enumeration"]["queues"]["items"][0]["messages"] == 3
     assert "unexpected_secret" not in str(record)
     assert any("guest" in line and "[+]" in line for line in lines)
-    assert any("Show Queues" in line for line in lines)
+    assert any("Queues Enumeration" in line for line in lines)
     assert any("/api/queues/%2F?" in call["url"] for call in pool.calls)
 
 
@@ -279,7 +279,8 @@ def test_scoped_vhosts_fall_back_to_visible_list_for_restricted_user(monkeypatch
 def test_detection_does_not_send_credentials_to_unrelated_http(monkeypatch, reply):
     pool = FakePool([reply, HttpResponse(200, b"<html>login</html>", {})])
     record, _ = run_broker(monkeypatch, pool, "--defcreds")
-    assert record["detection_status"] == "not_rabbitmq"
+    assert record["detection_status"] == "not_service"
+    assert record["detection_detail_status"] == "not_rabbitmq"
     assert not any(call["headers"].get("Authorization") for call in pool.calls)
 
 
@@ -452,13 +453,13 @@ def test_enum_dedup_keeps_endpoint_verdicts_and_first_snapshot(enumeration_recor
     second["enumeration"]["queues"]["items"][1].update(messages=100, consumers=2)
     original = deepcopy(second)
     lines = renderer(text_record(second))
-    assert sum("Show Queues" in line for line in first + lines) == 1
+    assert sum("Queues Enumeration" in line for line in first + lines) == 1
     assert any("Same cluster; enumeration shown at http://localhost:15672" in line for line in lines)
     assert any("RabbitMQ Management" in line for line in lines)
     assert any("guest (admin:True)" in line for line in lines)
     assert second == original
     # A new command has no cross-run/global suppression state.
-    assert any("Show Queues" in line for line in render.RabbitMQTextRenderer()(text_record(second)))
+    assert any("Queues Enumeration" in line for line in render.RabbitMQTextRenderer()(text_record(second)))
 
 
 @pytest.mark.parametrize(
@@ -492,7 +493,7 @@ def test_enum_dedup_never_hides_unconfirmed_or_different_views(enumeration_recor
     elif difference == "path":
         second["api_endpoint"] += "/other-broker"
     lines = renderer(text_record(second))
-    assert any("Show Queues" in line for line in lines)
+    assert any("Queues Enumeration" in line for line in lines)
     assert not any("Same cluster" in line for line in lines)
 
 
@@ -520,7 +521,7 @@ def test_multiport_enum_runtime_preserves_records_and_full_debug_json(monkeypatc
         assert len(records) == 2
         assert all(record["enumeration"]["queues"]["items"] for record in records)
     else:
-        assert sum("Show Queues" in line for line in lines) == (2 if mode == "debug" else 1)
+        assert sum("Queues Enumeration" in line for line in lines) == (2 if mode == "debug" else 1)
         assert sum("RabbitMQ Management" in line for line in lines) == 2
 
 
@@ -544,7 +545,7 @@ def test_unavailable_cluster_id_does_not_block_enumeration(monkeypatch, reply):
 
     record, lines = run_broker(monkeypatch, UnidentifiedBroker(), "-u", "guest", "-p", "guest", "--enum")
     assert "cluster_id" not in record
-    assert any("Show Queues" in line for line in lines)
+    assert any("Queues Enumeration" in line for line in lines)
 
 
 @pytest.mark.parametrize("section", ["vhosts", "queues", "exchanges", "bindings", "nodes", "permissions"])
@@ -554,7 +555,7 @@ def test_show_flags_select_only_requested_sections(monkeypatch, section):
     assert set(record["enumeration"]) == (set() if section == "permissions" else {section})
     for other in ("queues", "exchanges", "bindings", "nodes"):
         assert any(urlsplit(call["url"]).path.endswith("/api/" + other) for call in pool.calls) == (other == section)
-    assert any("Show Permissions" in line for line in lines) == (section == "permissions")
+    assert any("Permissions Enumeration" in line for line in lines) == (section == "permissions")
     assert record["permissions"]  # Evidence stays available in structured records.
 
 
@@ -586,8 +587,8 @@ def test_show_flags_combine_and_vhost_scope_does_not_filter_nodes(monkeypatch):
 def test_enum_includes_all_sections_and_explicit_flag_does_not_duplicate(monkeypatch):
     record, lines = run_broker(monkeypatch, BrokerPool(), "-u", "guest", "-p", "guest", "--enum", "--show-nodes")
     assert set(record["enumeration"]) == {"vhosts", "queues", "exchanges", "bindings", "nodes"}
-    assert sum("Show Nodes" in line for line in lines) == 1
-    assert any("Show Permissions" in line for line in lines)
+    assert sum("Nodes Enumeration" in line for line in lines) == 1
+    assert any("Permissions Enumeration" in line for line in lines)
 
 
 def test_show_nodes_reports_denied_instead_of_empty_success(monkeypatch):
@@ -595,8 +596,8 @@ def test_show_nodes_reports_denied_instead_of_empty_success(monkeypatch):
         monkeypatch, BrokerPool(denied_permissions=True), "-u", "guest", "-p", "guest", "--show-nodes"
     )
     assert record["enumeration"]["nodes"]["status"] == "denied"
-    assert any("Show Nodes (Count:0) (status:denied)" in line for line in lines)
-    assert not any("Show Permissions" in line for line in lines)
+    assert any("Nodes Enumeration (Count:0) (status:denied)" in line for line in lines)
+    assert not any("Permissions Enumeration" in line for line in lines)
 
 
 def test_show_nodes_limit_and_debug_permissions(monkeypatch):
@@ -605,8 +606,8 @@ def test_show_nodes_limit_and_debug_permissions(monkeypatch):
     )
     assert record["enumeration"]["nodes"]["truncated"]
     assert len(record["enumeration"]["nodes"]["items"]) == 1
-    assert any("Show Nodes (Count:1) (status:ok) (truncated:True)" in line for line in lines)
-    assert any("Show Permissions" in line for line in lines)
+    assert any("Nodes Enumeration (Count:1) (status:ok) (truncated:True)" in line for line in lines)
+    assert any("Permissions Enumeration" in line for line in lines)
 
 
 def test_node_health_detail_colors():

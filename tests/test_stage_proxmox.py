@@ -1801,7 +1801,7 @@ def test_audit_proxmox_targets_can_suppress_fail_status_lines(monkeypatch) -> No
 
     assert (total, token_ok, insufficient, auth_failed, fail, credential_hits) == (1, 0, 0, 0, 1, 0)
     assert len(lines) == 1
-    assert "PROXMOX audit inconclusive" in lines[0]
+    assert "[!] No PROXMOX service detected" in lines[0]
     assert all("Connection refused" not in line and "timed out" not in line for line in lines)
 
 

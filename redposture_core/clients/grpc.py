@@ -88,6 +88,7 @@ class GrpcTlsConfig:
     cert_file: str | None = None
     key_file: str | None = None
     server_name: str | None = None
+    proxy_path: str = ""
 
 
 def _grpc_authority(host: str, port: int) -> str:
@@ -833,6 +834,12 @@ def _grpc_web_call(
     tls_config: GrpcTlsConfig | None = None,
 ) -> _GrpcWebCallResult:
     started = time.monotonic()
+    base_path = str(getattr(tls_config, "proxy_path", "") or "").rstrip("/")
+    if base_path:
+        base_path = "/" + base_path.strip("/")
+        endpoint = path if path.startswith("/") else "/" + path
+        if endpoint != base_path and not endpoint.startswith(base_path + "/"):
+            path = base_path + endpoint
     result: _GrpcWebCallResult = _GrpcWebCallResult(
         {
             "timestamp": utc_now_iso(),
@@ -892,9 +899,6 @@ def _grpc_web_call(
         messages, trailers, frame_error = _decode_grpc_web_frames(response_body)
         result["messages"] = messages
         result["response_trailers"] = trailers
-        result["is_grpc_web"] = "application/grpc-web" in content_type.lower() or "grpc-status" in trailers
-        result["is_grpc"] = bool(result["is_grpc_web"])
-
         grpc_status_raw = trailers.get("grpc-status") or response_headers.get("grpc-status")
         if grpc_status_raw is not None:
             try:
@@ -908,6 +912,25 @@ def _grpc_web_call(
             result["error"] = parse_error
         if frame_error and result.get("error") is None:
             result["error"] = frame_error
+        # A reverse proxy may copy a gRPC-Web Content-Type onto an HTML login
+        # page or a truncated response. Require a complete protocol response
+        # with a valid status before confirming the service.
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        valid_media_type = media_type in {
+            "application/grpc-web",
+            "application/grpc-web+proto",
+            "application/grpc-web-text",
+            "application/grpc-web-text+proto",
+        }
+        result["is_grpc_web"] = bool(
+            http_status == 200
+            and valid_media_type
+            and parse_error is None
+            and frame_error is None
+            and isinstance(result["grpc_status"], int)
+            and 0 <= result["grpc_status"] <= 16
+        )
+        result["is_grpc"] = bool(result["is_grpc_web"])
         if not result["is_grpc_web"] and result.get("error") is None:
             result["error"] = "not a gRPC-Web endpoint"
     except (OSError, TimeoutError, ValueError, ssl.SSLError) as exc:

@@ -53,17 +53,23 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
     )
 
     def _detect(ctx: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/version", "/api", "/apis")):
+        with http_target_context(
+            ctx.target, route_state=getattr(ctx, "lifecycle_state", None), api_prefixes=("/version", "/api", "/apis")
+        ):
             result = actions.detect_kubeapi(ctx, options)
         return AuditRecord.from_mapping(result, module="kubeapi", service="kubeapi")
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/version", "/api", "/apis")):
+        with http_target_context(
+            ctx.target, route_state=getattr(ctx, "lifecycle_state", None), api_prefixes=("/version", "/api", "/apis")
+        ):
             result = actions.authenticate_kubeapi(ctx, record, options)
         return AuditRecord.from_mapping(result, module="kubeapi", service="kubeapi")
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/version", "/api", "/apis")):
+        with http_target_context(
+            ctx.target, route_state=getattr(ctx, "lifecycle_state", None), api_prefixes=("/version", "/api", "/apis")
+        ):
             result = actions.collect_kubeapi_data(ctx, record, options)
         return AuditRecord.from_mapping(result, module="kubeapi", service="kubeapi")
 

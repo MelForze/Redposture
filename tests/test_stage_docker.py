@@ -260,7 +260,7 @@ def test_auth_required_and_not_docker_branches(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(docker_stage, "_probe_docker", auth_probe)
     auth_record = docker_stage._audit_docker_host("127.0.0.1", 2376, 1.0, 0)
     assert auth_record["status"] == "auth_required"
-    assert "authentication required" in docker_stage._format_record(auth_record, "txt")
+    assert docker_stage._format_record(auth_record, "txt") == ""
 
     def not_docker_probe(*_args, **_kwargs):
         return None, None, None, "not Docker Engine API endpoint (status:404)", False
@@ -409,7 +409,7 @@ def test_probe_docker_preserves_mtls_error_after_plaintext_https_hint(
 
     rc = docker_stage.run_docker_stage(_args(port=2376, insecure=True), logger=object())
     assert rc == 1
-    assert "audit inconclusive" in capsys.readouterr().out
+    assert "[!] No DOCKER service detected" in capsys.readouterr().out
 
     class ForbiddenClient:
         def __init__(self, _transport: str) -> None:

@@ -2928,7 +2928,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             )
             return f"{prefix} [-] {username}:{default_password}"
         else:
-            return f"{prefix} [-] authentication required"
+            return ""
 
     if status == "unknown_auth":
         label = (
@@ -2977,10 +2977,8 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
                 suffix = f" {_caps_suffix(record)}"
                 selected_success_rendered = True
             lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
-        elif verification == "unavailable":
-            lines.append(f"{prefix} [!] {username}:{password_text} (verification unavailable)")
-        elif verification == "error":
-            lines.append(f"{prefix} [!] {username}:{password_text} (verification error)")
+        elif verification in {"unavailable", "error"}:
+            continue
         else:
             lines.append(f"{prefix} [-] {username}:{password_text}")
     return lines
@@ -3002,12 +3000,14 @@ def _render_colored_postgres_line(console: Console, line: str) -> bool:
             BooleanColorRule("execute", unknown_color="orange"),
             BooleanColorRule("read", unknown_color="orange"),
         ),
-        counts=(CountColorRule("DBs", "orange"),),
+        counts=(CountColorRule("DBs", "red", unknown_color="orange", zero_color="bright_green"),),
         extra_spans=_postgres_extra_color_spans,
     ):
         return True
     if line.startswith("POSTGRES") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="POSTGRES", default_color="orange")
+        return render_tagged_detail_line(
+            console, line, tag="POSTGRES", default_color="orange", resource_counts=("Rows",)
+        )
     return False
 
 

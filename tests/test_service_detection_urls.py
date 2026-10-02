@@ -80,6 +80,8 @@ def test_console_is_visible_without_s3_credential_attempts(monkeypatch):
     record = result.records[0]
     assert record["console_endpoint"] == "https://host:8083"
     assert record["api_endpoint"] is None
+    assert record["detection_status"] == "confirmed"
+    assert record["detection_detail_status"] == "console"
     assert record["credential_verification_status"] == "unavailable"
     assert any("MinIO Console (S3 API:unverified)" in line for line in lines)
     assert not any(headers.get("Authorization") for _, headers in pool.calls)
@@ -230,8 +232,8 @@ def test_minio_debug_distinguishes_unrelated_http_and_connection_failure(monkeyp
     output = capsys.readouterr().out
     assert "all minio targets are unreachable" not in output
     if transport_error:
-        assert "audit inconclusive" in output
-        assert "No MINIO service detected" not in output
+        assert "[!] No MINIO service detected" in output
+        assert "unreachable or failed before detection" in output
     else:
         assert "No MINIO service detected" in output
-        assert "audit inconclusive" not in output
+        assert "unreachable or failed before detection" not in output

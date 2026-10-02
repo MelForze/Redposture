@@ -548,7 +548,7 @@ def test_grpc_defcreds_sweeps_every_candidate_and_keeps_the_first_success(
             )
             == second_success
         )
-        return ok, candidates[0] if ok else None, {}
+        return ok, candidates[0] if ok else None, {"attempts": [{"verdict": "valid" if ok else "rejected"}]}
 
     def fake_reflection(*_args, **_kwargs):
         nonlocal capability_calls

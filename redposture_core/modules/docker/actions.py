@@ -15,7 +15,7 @@ from ...clients.docker_engine import (
     find_container_id,
     normalize_docker_error,
 )
-from ...clients.http_api import http_response_requires_https
+from ...clients.http_api import http_response_requires_https, infer_http_base_path
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...stage_runtime import (
@@ -94,6 +94,7 @@ def _docker_client(
     tls_ca: str | None,
     tls_cert: str | None,
     tls_key: str | None,
+    base_path: str = "",
 ) -> DockerEngineClient:
     return DockerEngineClient(
         host,
@@ -104,6 +105,7 @@ def _docker_client(
         ca_file=tls_ca,
         cert_file=tls_cert,
         key_file=tls_key,
+        base_path=base_path,
     )
 
 
@@ -126,6 +128,7 @@ def _probe_docker(
     tls_ca: str | None,
     tls_cert: str | None,
     tls_key: str | None,
+    base_path: str = "",
 ) -> tuple[DockerEngineClient | None, dict[str, Any] | None, str | None, str | None, bool | None]:
     last_error: str | None = None
     tls_error: str | None = None
@@ -141,6 +144,7 @@ def _probe_docker(
             tls_ca=tls_ca,
             tls_cert=tls_cert,
             tls_key=tls_key,
+            **({"base_path": base_path} if base_path else {}),
         )
         try:
             client.ping()
@@ -315,6 +319,7 @@ def _audit_docker_host(
     container_selector: str | None = None,
     exec_cmd: str | None = None,
     run_deep_checks: bool = True,
+    target_path: str | None = None,
 ) -> dict[str, Any]:
     record = _base_record(host, port)
     attempts = max(1, int(retries) + 1)
@@ -325,6 +330,7 @@ def _audit_docker_host(
     auth_required: bool | None = None
 
     for attempt in range(attempts):
+        base_path = infer_http_base_path(str(target_path or ""), ("/_ping", "/version", "/info", "/containers"))
         client, version, transport, last_error, auth_required = _probe_docker(
             host,
             port,
@@ -333,6 +339,7 @@ def _audit_docker_host(
             tls_ca=tls_ca,
             tls_cert=tls_cert,
             tls_key=tls_key,
+            **({"base_path": base_path} if base_path else {}),
         )
         if client is not None and (version is not None or auth_required):
             break
@@ -522,6 +529,7 @@ def _audit_docker_host_stage(
     run_deep_checks: bool = True,
     debug: bool = False,
     debug_emit: Callable[[str], None] | None = None,
+    target_path: str | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     attempts = max(1, int(retries) + 1)
@@ -542,6 +550,7 @@ def _audit_docker_host_stage(
         container_selector=container_selector if run_deep_checks else None,
         exec_cmd=exec_cmd if run_deep_checks else None,
         run_deep_checks=run_deep_checks,
+        **({"target_path": target_path} if target_path else {}),
     )
     elapsed_ms = int((time.monotonic() - started) * 1000)
     status = str(record.get("status") or "fail")
@@ -609,7 +618,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if status == "valid_credentials":
         return f"{prefix} [+] TLS client certificate accepted{_caps_suffix(record)}"
     if status == "auth_required":
-        return f"{prefix} [-] authentication required (transport:{record.get('transport_mode') or '-'})"
+        return ""
     if status == "not_docker":
         return f"{prefix} [-] not Docker Engine API endpoint err={_clip(str(record.get('error') or '-'), 96)}"
     if status == "detected":
@@ -829,12 +838,13 @@ def _render_colored_docker_line(console: Console, line: str) -> bool:
         console,
         line,
         tag=_DOCKER_TAG,
+        literals=(("transport:plaintext", "yellow"), ("transport:tls", "bright_green")),
         counts=(
-            CountColorRule("containers", "red"),
-            CountColorRule("images", "red"),
-            CountColorRule("networks", "red"),
-            CountColorRule("volumes", "red"),
-            CountColorRule("count", "orange"),
+            CountColorRule("containers", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("images", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("networks", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("volumes", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("count", "red", unknown_color="orange", zero_color="bright_green"),
         ),
     ):
         return True

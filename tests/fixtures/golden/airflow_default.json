@@ -5,23 +5,23 @@
     "api_generation": "v1",
     "auth_method": "native",
     "auth_required": true,
-    "authenticated_connections_access": "allowed",
-    "authenticated_connections_count": 1,
-    "authenticated_connections_http_status": 200,
-    "authenticated_dags_access": "allowed",
-    "authenticated_dags_count": 1,
-    "authenticated_dags_http_status": 200,
-    "authenticated_keys_access": "allowed",
-    "authenticated_keys_count": 1,
-    "authenticated_keys_http_status": 200,
+    "authenticated_connections_access": "denied",
+    "authenticated_connections_count": null,
+    "authenticated_connections_http_status": 403,
+    "authenticated_dags_access": "denied",
+    "authenticated_dags_count": null,
+    "authenticated_dags_http_status": 403,
+    "authenticated_keys_access": "denied",
+    "authenticated_keys_count": null,
+    "authenticated_keys_http_status": 403,
     "credential_results": [
       {
-        "error_code": null,
-        "state": "valid",
-        "username": "airflow"
+        "error_code": "403",
+        "state": "valid_but_restricted",
+        "username": "admin"
       }
     ],
-    "credential_state": "valid",
+    "credential_state": "valid_but_restricted",
     "credential_verification_status": "available",
     "dags_allowed": false,
     "default_credentials": true,
@@ -30,6 +30,10 @@
       "v1_version_status": 200,
       "v2_version_status": 404
     },
+    "detection_signals": [
+      "airflow.probe",
+      "airflow.product_fingerprint"
+    ],
     "detection_status": "confirmed",
     "host": "127.0.0.1",
     "is_airflow": true,
@@ -75,6 +79,9 @@
       "v1_transport_error": "[Errno 61] Connection refused",
       "v2_transport_error": "[Errno 61] Connection refused"
     },
+    "detection_signals": [
+      "airflow.probe"
+    ],
     "detection_status": "transport_failure",
     "host": "127.0.0.1",
     "is_airflow": false,
@@ -100,6 +107,9 @@
       "v1_transport_error": "[Errno 61] Connection refused",
       "v2_transport_error": "[Errno 61] Connection refused"
     },
+    "detection_signals": [
+      "airflow.probe"
+    ],
     "detection_status": "transport_failure",
     "host": "127.0.0.1",
     "is_airflow": false,
@@ -125,6 +135,9 @@
       "v1_transport_error": "[Errno 61] Connection refused",
       "v2_transport_error": "[Errno 61] Connection refused"
     },
+    "detection_signals": [
+      "airflow.probe"
+    ],
     "detection_status": "transport_failure",
     "host": "127.0.0.1",
     "is_airflow": false,
@@ -150,6 +163,9 @@
       "v1_transport_error": "[Errno 61] Connection refused",
       "v2_transport_error": "[Errno 61] Connection refused"
     },
+    "detection_signals": [
+      "airflow.probe"
+    ],
     "detection_status": "transport_failure",
     "host": "127.0.0.1",
     "is_airflow": false,

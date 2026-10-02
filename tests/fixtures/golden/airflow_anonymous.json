@@ -65,6 +65,10 @@
       "v1_version_status": 200,
       "v2_version_status": 404
     },
+    "detection_signals": [
+      "airflow.probe",
+      "airflow.product_fingerprint"
+    ],
     "detection_status": "confirmed",
     "discover_report": {
       "api_generation": "v1",

@@ -40,6 +40,11 @@
     "default_credentials": false,
     "defcreds_enabled": false,
     "detection_error_kind": "auth",
+    "detection_signals": [
+      "clickhouse.probe",
+      "clickhouse.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover_report": null,
     "discover_requested": false,
     "effective_database": "default",
@@ -206,8 +211,8 @@
         "error": null,
         "rows": [
           "[\"billing/gateway/api_key\", \"svc-billing\", \"prod\", \"vault\", \"billing-api-key-2026\", \"<ISO>\", \"<ISO>\"]",
-          "[\"etl/s3/access_key\", \"svc-etl\", \"stage\", \"aws-secrets-manager\", \"AKIA...REDACTED\", \"<ISO>\", \"<ISO>\"]",
-          "[\"clickhouse/reporting/password\", \"svc-reporting\", \"prod\", \"vault\", \"vault://prod/clickhouse/reporting#password\", \"<ISO>\", \"<ISO>\"]"
+          "[\"clickhouse/reporting/password\", \"svc-reporting\", \"prod\", \"vault\", \"vault://prod/clickhouse/reporting#password\", \"<ISO>\", \"<ISO>\"]",
+          "[\"etl/s3/access_key\", \"svc-etl\", \"stage\", \"aws-secrets-manager\", \"AKIA...REDACTED\", \"<ISO>\", \"<ISO>\"]"
         ],
         "table": "secure.secrets_inventory"
       },
@@ -226,9 +231,9 @@
         ],
         "error": null,
         "rows": [
+          "[\"repl_audit_20260311_03\", \"secure-ch\", \"dr-secure-ch\", \"secure.audit_log\", 8831, 23110, \"warn\", \"<ISO>\", \"<ISO>\", \"svc-secops\"]",
           "[\"repl_orders_20260311_01\", \"eu-1-ch\", \"dr-eu-1-ch\", \"analytics.orders\", 12034, 14820, \"ok\", \"<ISO>\", \"<ISO>\", \"svc-etl\"]",
-          "[\"repl_sessions_20260311_02\", \"eu-1-ch\", \"dr-eu-1-ch\", \"analytics.sessions\", 984221, 90755, \"ok\", \"<ISO>\", \"<ISO>\", \"svc-etl\"]",
-          "[\"repl_audit_20260311_03\", \"secure-ch\", \"dr-secure-ch\", \"secure.audit_log\", 8831, 23110, \"warn\", \"<ISO>\", \"<ISO>\", \"svc-secops\"]"
+          "[\"repl_sessions_20260311_02\", \"eu-1-ch\", \"dr-eu-1-ch\", \"analytics.sessions\", 984221, 90755, \"ok\", \"<ISO>\", \"<ISO>\", \"svc-etl\"]"
         ],
         "table": "warehouse.replication_jobs"
       }

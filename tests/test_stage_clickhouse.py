@@ -696,7 +696,7 @@ def test_audit_clickhouse_targets_suppresses_timeout_and_refused_failures(monkey
 
     assert totals == (1, 0, 0, 0, 0, 1)
     assert len(emitted) == 1
-    assert "CLICKHOUSE audit inconclusive" in emitted[0]
+    assert "[!] No CLICKHOUSE service detected" in emitted[0]
     assert "unreachable or failed before detection" in emitted[0]
     assert all("Connection refused" not in line and "timed out" not in line for line in emitted)
 

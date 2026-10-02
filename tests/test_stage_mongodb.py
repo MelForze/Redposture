@@ -895,7 +895,7 @@ def test_open_client_for_successful_record_and_shell_access_denied(monkeypatch: 
         )
         == 1
     )
-    assert any("authentication required" in line for line in lines)
+    assert any("auth required:True" in line for line in lines)
 
 
 def test_run_mongodb_stage_credential_file_does_not_use_tcp_prefilter(

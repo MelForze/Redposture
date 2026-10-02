@@ -131,6 +131,11 @@
       "root_tagline",
       "root_version_shape"
     ],
+    "detection_signals": [
+      "elastic.probe",
+      "elastic.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover": true,
     "discover_coverage": {
       "complete": true,
@@ -239,9 +244,9 @@
     "discover_error_detail": null,
     "discover_findings": [
       {
-        "confidence": "very_high",
+        "confidence": "high",
         "detectors": [
-          "private_key_pem"
+          "base64_credential"
         ],
         "fingerprint": "sha256:<DOCKER_ID>",
         "locations": [
@@ -253,28 +258,134 @@
           }
         ],
         "occurrence_count": 1,
-        "score": 100,
-        "secret_type": "private_key",
-        "value": "-----BEGIN PRIVATE KEY-----\nQ29ycHVzUHJpdmF0ZUtleTIwMjY=\n-----END PRIVATE KEY-----"
+        "score": 78,
+        "secret_type": "encoded_credentials",
+        "value": "{CorpusEncodedCredential2026}"
       },
       {
-        "confidence": "very_high",
+        "confidence": "high",
         "detectors": [
-          "private_key_pem"
+          "credential_pair",
+          "sensitive_field"
         ],
         "fingerprint": "sha256:<DOCKER_ID>",
         "locations": [
           {
-            "id": "service-account",
+            "id": "azure-uri-kv",
             "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/service-account",
+            "object": "redposture-discover-corpus-v2/azure-uri-kv",
             "source_kind": "document"
           }
         ],
         "occurrence_count": 1,
-        "score": 100,
-        "secret_type": "private_key",
-        "value": "-----BEGIN PRIVATE KEY-----\nQ29ycHVzU2VydmljZUFjY291bnRLZXk=\n-----END PRIVATE KEY-----"
+        "score": 85,
+        "secret_type": "secret",
+        "value": "CorpusKeyValueSecret!2026"
+      },
+      {
+        "confidence": "high",
+        "detectors": [
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "log-2",
+            "index": "redposture-logs-2026.05",
+            "object": "redposture-logs-2026.05/log-2",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 85,
+        "secret_type": "password",
+        "value": "metricspass"
+      },
+      {
+        "confidence": "medium",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "duplicate",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/duplicate",
+            "source_kind": "document"
+          },
+          {
+            "id": "duplicate",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/duplicate",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 73,
+        "secret_type": "secret",
+        "value": "CorpusDynamicFieldSecret!2026"
+      },
+      {
+        "confidence": "medium",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 73,
+        "secret_type": "secret",
+        "value": "CorpusNestedApiKey!2026"
+      },
+      {
+        "confidence": "medium",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "secret-1",
+            "index": "redposture-secrets-2026.05",
+            "object": "redposture-secrets-2026.05/secret-1",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 73,
+        "secret_type": "secret",
+        "value": "elastic-prod-api-key-2026"
+      },
+      {
+        "confidence": "medium",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "semantic-pair",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/semantic-pair",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 73,
+        "secret_type": "secret",
+        "value": "CorpusSemanticApiKey!2026"
       },
       {
         "confidence": "very_high",
@@ -300,6 +411,25 @@
       {
         "confidence": "very_high",
         "detectors": [
+          "azure_sas"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "azure-uri-kv",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/azure-uri-kv",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 96,
+        "secret_type": "azure_sas_signature",
+        "value": "CorpusAzureSasSignature+2026="
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
           "azure_storage_connection_string",
           "credential_pair"
         ],
@@ -316,6 +446,111 @@
         "score": 98,
         "secret_type": "azure_storage_key",
         "value": "CorpusAzureAccountKey2026+/="
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "base64_credential",
+          "credential_pair"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 92,
+        "secret_type": "password",
+        "value": "CorpusDockerPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "basic_auth",
+          "credential_pair"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "jwt-jwe-auth",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 92,
+        "secret_type": "password",
+        "value": "CorpusBasicPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "bearer_auth"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "jwt-jwe-auth",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "bearer_token",
+        "value": "CorpusBearerToken.2026-AbCdEfGh"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "credential_pair",
+          "credential_uri"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "azure-uri-kv",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/azure-uri-kv",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 92,
+        "secret_type": "password",
+        "value": "CorpusDsnPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "credential_pair",
+          "credential_uri"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "secret-2",
+            "index": "redposture-secrets-2026.05",
+            "object": "redposture-secrets-2026.05/secret-2",
+            "source_kind": "document"
+          },
+          {
+            "id": "secret-2",
+            "index": "redposture-secrets-2026.05",
+            "object": "redposture-secrets-2026.05/secret-2",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 92,
+        "secret_type": "password",
+        "value": "PayDb!2026"
       },
       {
         "confidence": "very_high",
@@ -377,6 +612,44 @@
       {
         "confidence": "very_high",
         "detectors": [
+          "jwe_structure"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "jwt-jwe-auth",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 95,
+        "secret_type": "jwe",
+        "value": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..Y29ycHVzaXY.Y29ycHVzY2lwaGVydGV4dA.Y29ycHVzdGFn"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "jwt_structure"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "jwt-jwe-auth",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 95,
+        "secret_type": "jwt",
+        "value": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjb3JwdXMtMjAyNiJ9.CorpusSignature2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
           "npm_token_format"
         ],
         "fingerprint": "sha256:<DOCKER_ID>",
@@ -392,6 +665,399 @@
         "score": 98,
         "secret_type": "npm_token",
         "value": "npm_CorpusNpmToken2026ABCDEFGHIJ"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          },
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusEmbeddedClientSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          },
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          },
+          {
+            "id": "duplicate",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/duplicate",
+            "source_kind": "document"
+          },
+          {
+            "id": "duplicate",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/duplicate",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 4,
+        "score": 90,
+        "secret_type": "password",
+        "value": "CorpusPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          },
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 90,
+        "secret_type": "password",
+        "value": "CorpusUnindexedPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          },
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusClientSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "azure_storage_key",
+        "value": "CorpusAzureStorageKey!2026-NotBase64"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "service-account",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/service-account",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusServiceAccountSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/_settings",
+            "source_kind": "index_settings"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "password",
+        "value": "CorpusIndexSettingPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "/_cluster/settings",
+            "source_kind": "cluster_settings"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "password",
+        "value": "CorpusClusterSettingPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "_mapping",
+            "source_kind": "mapping_configuration"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusDynamicTemplateToken!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "_mapping",
+            "source_kind": "mapping_configuration"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusFieldMetaSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "_mapping",
+            "source_kind": "mapping_configuration"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusMappingMetaSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "_mapping",
+            "source_kind": "mapping_configuration"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusRuntimeParamSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "redposture-corpus-component-v2",
+            "source_kind": "component_templates"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusComponentTemplateToken!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "redposture-corpus-index-template-v2",
+            "source_kind": "index_templates"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusIndexTemplateSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "redposture-corpus-legacy-v2",
+            "source_kind": "legacy_templates"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusLegacyTemplateSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "redposture-corpus-pipeline-v2",
+            "source_kind": "ingest_pipelines"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "password",
+        "value": "CorpusPipelineFailurePassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "redposture-corpus-pipeline-v2",
+            "source_kind": "ingest_pipelines"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusPipelineToken!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "private_key_pem"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "private-and-encoded",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/private-and-encoded",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 100,
+        "secret_type": "private_key",
+        "value": "-----BEGIN PRIVATE KEY-----\nQ29ycHVzUHJpdmF0ZUtleTIwMjY=\n-----END PRIVATE KEY-----"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "private_key_pem"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "service-account",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/service-account",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 100,
+        "secret_type": "private_key",
+        "value": "-----BEGIN PRIVATE KEY-----\nQ29ycHVzU2VydmljZUFjY291bnRLZXk=\n-----END PRIVATE KEY-----"
       },
       {
         "confidence": "very_high",
@@ -449,667 +1115,6 @@
         "score": 98,
         "secret_type": "vault_token",
         "value": "hvs.CorpusVaultToken2026ABCDE"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "azure_sas"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "azure-uri-kv",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/azure-uri-kv",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 96,
-        "secret_type": "azure_sas_signature",
-        "value": "CorpusAzureSasSignature+2026="
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "jwe_structure"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "jwt-jwe-auth",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 95,
-        "secret_type": "jwe",
-        "value": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..Y29ycHVzaXY.Y29ycHVzY2lwaGVydGV4dA.Y29ycHVzdGFn"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "jwt_structure"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "jwt-jwe-auth",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 95,
-        "secret_type": "jwt",
-        "value": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjb3JwdXMtMjAyNiJ9.CorpusSignature2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "credential_pair",
-          "credential_uri"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "azure-uri-kv",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/azure-uri-kv",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 92,
-        "secret_type": "password",
-        "value": "CorpusDsnPassword!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "basic_auth",
-          "credential_pair"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "jwt-jwe-auth",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 92,
-        "secret_type": "password",
-        "value": "CorpusBasicPassword!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "credential_pair",
-          "credential_uri"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "secret-2",
-            "index": "redposture-secrets-2026.05",
-            "object": "redposture-secrets-2026.05/secret-2",
-            "source_kind": "document"
-          },
-          {
-            "id": "secret-2",
-            "index": "redposture-secrets-2026.05",
-            "object": "redposture-secrets-2026.05/secret-2",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 2,
-        "score": 92,
-        "secret_type": "password",
-        "value": "PayDb!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "base64_credential",
-          "credential_pair"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "nested-credentials",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/nested-credentials",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 92,
-        "secret_type": "password",
-        "value": "CorpusDockerPassword!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "sensitive-fields",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/sensitive-fields",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "azure_storage_key",
-        "value": "CorpusAzureStorageKey!2026-NotBase64"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "bearer_auth"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "jwt-jwe-auth",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "bearer_token",
-        "value": "CorpusBearerToken.2026-AbCdEfGh"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "object": "redposture-corpus-pipeline-v2",
-            "source_kind": "ingest_pipelines"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "password",
-        "value": "CorpusPipelineFailurePassword!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "sensitive-fields",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/sensitive-fields",
-            "source_kind": "document"
-          },
-          {
-            "id": "sensitive-fields",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/sensitive-fields",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 2,
-        "score": 90,
-        "secret_type": "password",
-        "value": "CorpusUnindexedPassword!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/_settings",
-            "source_kind": "index_settings"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "password",
-        "value": "CorpusIndexSettingPassword!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "object": "/_cluster/settings",
-            "source_kind": "cluster_settings"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "password",
-        "value": "CorpusClusterSettingPassword!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "sensitive-fields",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/sensitive-fields",
-            "source_kind": "document"
-          },
-          {
-            "id": "sensitive-fields",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/sensitive-fields",
-            "source_kind": "document"
-          },
-          {
-            "id": "duplicate",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/duplicate",
-            "source_kind": "document"
-          },
-          {
-            "id": "duplicate",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/duplicate",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 4,
-        "score": 90,
-        "secret_type": "password",
-        "value": "CorpusPassword!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "object": "redposture-corpus-index-template-v2",
-            "source_kind": "index_templates"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusIndexTemplateSecret!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "object": "_mapping",
-            "source_kind": "mapping_configuration"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusMappingMetaSecret!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "object": "redposture-corpus-legacy-v2",
-            "source_kind": "legacy_templates"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusLegacyTemplateSecret!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "object": "_mapping",
-            "source_kind": "mapping_configuration"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusFieldMetaSecret!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "object": "redposture-corpus-component-v2",
-            "source_kind": "component_templates"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusComponentTemplateToken!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "service-account",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/service-account",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusServiceAccountSecret!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "sensitive-fields",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/sensitive-fields",
-            "source_kind": "document"
-          },
-          {
-            "id": "sensitive-fields",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/sensitive-fields",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 2,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusClientSecret!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "object": "_mapping",
-            "source_kind": "mapping_configuration"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusDynamicTemplateToken!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "object": "_mapping",
-            "source_kind": "mapping_configuration"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusRuntimeParamSecret!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "object": "redposture-corpus-pipeline-v2",
-            "source_kind": "ingest_pipelines"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusPipelineToken!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "nested-credentials",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/nested-credentials",
-            "source_kind": "document"
-          },
-          {
-            "id": "nested-credentials",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/nested-credentials",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 2,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusEmbeddedClientSecret!2026"
-      },
-      {
-        "confidence": "high",
-        "detectors": [
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "log-2",
-            "index": "redposture-logs-2026.05",
-            "object": "redposture-logs-2026.05/log-2",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 85,
-        "secret_type": "password",
-        "value": "metricspass"
-      },
-      {
-        "confidence": "high",
-        "detectors": [
-          "credential_pair",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "azure-uri-kv",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/azure-uri-kv",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 85,
-        "secret_type": "secret",
-        "value": "CorpusKeyValueSecret!2026"
-      },
-      {
-        "confidence": "high",
-        "detectors": [
-          "base64_credential"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "private-and-encoded",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/private-and-encoded",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 78,
-        "secret_type": "encoded_credentials",
-        "value": "{CorpusEncodedCredential2026}"
-      },
-      {
-        "confidence": "medium",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "duplicate",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/duplicate",
-            "source_kind": "document"
-          },
-          {
-            "id": "duplicate",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/duplicate",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 2,
-        "score": 73,
-        "secret_type": "secret",
-        "value": "CorpusDynamicFieldSecret!2026"
-      },
-      {
-        "confidence": "medium",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "secret-1",
-            "index": "redposture-secrets-2026.05",
-            "object": "redposture-secrets-2026.05/secret-1",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 73,
-        "secret_type": "secret",
-        "value": "elastic-prod-api-key-2026"
-      },
-      {
-        "confidence": "medium",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "semantic-pair",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/semantic-pair",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 73,
-        "secret_type": "secret",
-        "value": "CorpusSemanticApiKey!2026"
-      },
-      {
-        "confidence": "medium",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "nested-credentials",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/nested-credentials",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 73,
-        "secret_type": "secret",
-        "value": "CorpusNestedApiKey!2026"
       }
     ],
     "discover_results": [

@@ -161,6 +161,11 @@
     "checked_endpoints": 3,
     "credential_hits": 0,
     "defcreds_enabled": true,
+    "detection_signals": [
+      "proxmox.probe",
+      "proxmox.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover_bytes_scanned": 0,
     "discover_creds": false,
     "endpoint_results": [

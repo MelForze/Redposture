@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from ...clients.http_api import http_response_origin, http_response_requires_https, http_scheme_candidates
 from ...clients.http_session import HttpSessionPool
@@ -103,6 +103,10 @@ class RabbitMQLifecycleState:
                 fallback_host=self.host,
                 fallback_port=self.port,
             )
+            final_path = urlsplit(str(response.final_url or "")).path
+            endpoint = "/api/overview"
+            if response.redirect_history and final_path.endswith(endpoint):
+                self.base_path = final_path[: -len(endpoint)].rstrip("/")
             break
         self.overview = response
         return response

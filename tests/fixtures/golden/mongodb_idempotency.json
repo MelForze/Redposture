@@ -245,26 +245,16 @@
     "nosql_command_result": null,
     "operation_results": [
       {
-        "database": "billing",
-        "ok": true,
-        "operation": "list_collections"
-      },
-      {
-        "collection": "invoices",
-        "database": "billing",
+        "collection": "audit_events",
+        "database": "redposture",
         "ok": true,
         "operation": "count_documents"
       },
       {
-        "collection": "invoices",
-        "database": "billing",
-        "ok": true,
-        "operation": "find_documents"
-      },
-      {
+        "collection": "audit_events",
         "database": "redposture",
         "ok": true,
-        "operation": "list_collections"
+        "operation": "find_documents"
       },
       {
         "collection": "demo_accounts",
@@ -279,14 +269,14 @@
         "operation": "find_documents"
       },
       {
-        "collection": "audit_events",
-        "database": "redposture",
+        "collection": "invoices",
+        "database": "billing",
         "ok": true,
         "operation": "count_documents"
       },
       {
-        "collection": "audit_events",
-        "database": "redposture",
+        "collection": "invoices",
+        "database": "billing",
         "ok": true,
         "operation": "find_documents"
       },
@@ -301,6 +291,16 @@
         "database": "redposture",
         "ok": true,
         "operation": "find_documents"
+      },
+      {
+        "database": "billing",
+        "ok": true,
+        "operation": "list_collections"
+      },
+      {
+        "database": "redposture",
+        "ok": true,
+        "operation": "list_collections"
       }
     ],
     "partial": false,

@@ -283,6 +283,11 @@
     ],
     "default_credentials": true,
     "defcreds_enabled": true,
+    "detection_signals": [
+      "grafana.probe",
+      "grafana.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "effective_password": "admin",
     "effective_username": "admin",
     "error": null,
@@ -610,6 +615,11 @@
     ],
     "default_credentials": true,
     "defcreds_enabled": true,
+    "detection_signals": [
+      "grafana.probe",
+      "grafana.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "effective_password": "admin",
     "effective_username": "admin",
     "error": null,
@@ -937,6 +947,11 @@
     ],
     "default_credentials": true,
     "defcreds_enabled": true,
+    "detection_signals": [
+      "grafana.probe",
+      "grafana.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "effective_password": "admin",
     "effective_username": "admin",
     "error": null,
@@ -1264,6 +1279,11 @@
     ],
     "default_credentials": true,
     "defcreds_enabled": true,
+    "detection_signals": [
+      "grafana.probe",
+      "grafana.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "effective_password": "admin",
     "effective_username": "admin",
     "error": null,
@@ -1591,6 +1611,11 @@
     ],
     "default_credentials": true,
     "defcreds_enabled": true,
+    "detection_signals": [
+      "grafana.probe",
+      "grafana.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "effective_password": "admin",
     "effective_username": "admin",
     "error": null,

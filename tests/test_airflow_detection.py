@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
+
 from redposture_core.clients.airflow_api import AirflowResponse
 from redposture_core.modules.airflow import actions
 
@@ -76,3 +82,72 @@ def test_detect_transport_failure_when_both_version_probes_fail():
     c = _FakeClient({"/api/v2/version": "TRANSPORT", "/api/v1/version": "TRANSPORT"})
     d = actions.detect_airflow(c)
     assert d.status == "transport_failure"
+
+
+def test_real_airflow_211_problem_with_null_detail_confirms_version_only_endpoint() -> None:
+    problem = (
+        b'{"detail":null,"status":403,"title":"Forbidden",'
+        b'"type":"https://airflow.apache.org/docs/apache-airflow/2.11.2/'
+        b'stable-rest-api-ref.html#section/Errors/PermissionDenied"}'
+    )
+    client = _FakeClient(
+        {
+            "/api/v2/version": (404, b""),
+            "/api/v1/version": (200, b'{"git_version":"","version":"2.11.2"}'),
+            "/api/v1/dags": (403, problem),
+        }
+    )
+    result = actions.detect_airflow(client)
+    assert result.status == "confirmed"
+    assert result.api_generation == "v1" and result.version == "2.11.2"
+
+
+def test_generic_problem_with_null_detail_does_not_confirm_airflow() -> None:
+    client = _FakeClient(
+        {
+            "/api/v1/version": (200, b'{"version":"2.11.2"}'),
+            "/api/v1/dags": (
+                403,
+                b'{"detail":null,"status":403,"title":"Forbidden",'
+                b'"type":"https://example.invalid/docs/Errors/PermissionDenied"}',
+            ),
+        }
+    )
+    assert actions.detect_airflow(client).status == "not_airflow"
+
+
+def test_generic_problem_with_detail_does_not_confirm_version_only_airflow() -> None:
+    client = _FakeClient(
+        {
+            "/api/v1/version": (200, b'{"version":"2.11.2"}'),
+            "/api/v1/dags": (403, b'{"detail":"Access denied","status":403,"title":"Forbidden"}'),
+        }
+    )
+    assert actions.detect_airflow(client).status == "not_airflow"
+
+
+@given(st.text(max_size=512))
+def test_untrusted_problem_type_cannot_crash_detection_or_confirm_foreign_service(problem_type: str) -> None:
+    problem = json.dumps(
+        {
+            "detail": None,
+            "status": 403,
+            "title": "Forbidden",
+            "type": problem_type,
+        }
+    ).encode()
+    client = _FakeClient(
+        {
+            "/api/v1/version": (200, b'{"version":"2.11.2"}'),
+            "/api/v1/dags": (403, problem),
+        }
+    )
+    result = actions.detect_airflow(client)
+    assert result.status == "not_airflow"
+
+
+@pytest.mark.parametrize("problem_type", ["http://[", "https://[x", "http://[::1", "//[bad"])
+def test_malformed_problem_uri_never_crashes_detection(problem_type: str) -> None:
+    problem = json.dumps({"detail": None, "status": 403, "title": "Forbidden", "type": problem_type}).encode()
+    client = _FakeClient({"/api/v1/version": (200, b'{"version":"2.11.2"}'), "/api/v1/dags": (403, problem)})
+    assert actions.detect_airflow(client).status == "not_airflow"

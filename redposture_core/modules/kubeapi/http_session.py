@@ -16,6 +16,7 @@ from ...clients.http_api import (
     HttpResponse,
     join_http_target_path,
     normalize_http_error,
+    pin_http_redirect_path,
 )
 from ...clients.http_redirects import follow_redirects, http_origin
 from ...clients.tls_cache import clear_tls_context_cache, shared_client_ssl_context
@@ -168,7 +169,9 @@ class KubeApiHttpSession:
             path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
             return self._request_once(method, path, headers, body, timeout=timeout, response_size_cap=response_size_cap)
 
-        return follow_redirects(send, method, initial_url, headers=headers, body=body)
+        response = follow_redirects(send, method, initial_url, headers=headers, body=body)
+        pin_http_redirect_path(response, method=method)
+        return response
 
     def _request_once(
         self,

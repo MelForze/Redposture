@@ -23,6 +23,10 @@
       "overview_status": 401,
       "rabbitmq_realm": true
     },
+    "detection_signals": [
+      "rabbitmq.probe",
+      "rabbitmq.product_fingerprint"
+    ],
     "detection_status": "confirmed",
     "effective_username": "admin",
     "enumeration": {
@@ -128,21 +132,13 @@
         "items": [
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 0,
-            "messages_ready": 0,
-            "messages_unacknowledged": 0,
             "type": "classic",
             "vhost": "staging"
           },
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 5,
-            "messages_ready": 5,
-            "messages_unacknowledged": 0,
             "type": "classic",
             "vhost": "staging"
           }

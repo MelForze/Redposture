@@ -634,15 +634,21 @@ def build_proxmox_spec(args: Any) -> ModuleAuditSpec:
     full_credential_sweep = bool(getattr(args, "defcreds", False))
 
     def _detect_with_target(ctx: AuditHookContext) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/api2/json",)):
+        with http_target_context(
+            ctx.target, route_state=getattr(ctx, "lifecycle_state", None), api_prefixes=("/api2/json",)
+        ):
             return _proxmox_detect(ctx)
 
     def _auth_with_target(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/api2/json",)):
+        with http_target_context(
+            ctx.target, route_state=getattr(ctx, "lifecycle_state", None), api_prefixes=("/api2/json",)
+        ):
             return _proxmox_auth(ctx, record)
 
     def _data_with_target(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/api2/json",)):
+        with http_target_context(
+            ctx.target, route_state=getattr(ctx, "lifecycle_state", None), api_prefixes=("/api2/json",)
+        ):
             return _proxmox_data(ctx, record)
 
     return ModuleAuditSpec(

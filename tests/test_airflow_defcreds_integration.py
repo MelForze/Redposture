@@ -30,12 +30,18 @@ class _AirflowQaServer(ThreadingHTTPServer):
         valid: set[Credential] | None = None,
         transient: set[Credential] | None = None,
         anonymous: bool = False,
+        base_path: str = "",
+        generic_auth_error: bool = False,
+        real_211_problem: bool = False,
     ) -> None:
         super().__init__(("127.0.0.1", 0), _AirflowQaHandler)
         self.generation = generation
         self.valid = set(valid or ())
         self.transient = set(transient or ())
         self.anonymous = anonymous
+        self.base_path = base_path
+        self.generic_auth_error = generic_auth_error
+        self.real_211_problem = real_211_problem
         self.calls: list[tuple[str, str, str | None]] = []
         self.basic_dag_requests: list[Credential] = []
         self.token_attempts: list[Credential] = []
@@ -81,12 +87,31 @@ class _AirflowQaHandler(BaseHTTPRequestHandler):
 
     def _problem(self, status: int) -> None:
         title = "Unauthorized" if status == 401 else "Forbidden"
+        if self.qa.real_211_problem:
+            self._reply(
+                status,
+                {
+                    "detail": None,
+                    "status": status,
+                    "title": title,
+                    "type": (
+                        "https://airflow.apache.org/docs/apache-airflow/2.11.2/"
+                        "stable-rest-api-ref.html#section/Errors/PermissionDenied"
+                    ),
+                },
+            )
+            return
         self._reply(status, {"status": status, "title": title, "detail": "Access denied"})
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
-        path = urlsplit(self.path).path
+        raw_path = urlsplit(self.path).path
+        path = raw_path.removeprefix(self.qa.base_path) if raw_path.startswith(self.qa.base_path + "/") else raw_path
         authorization = self.headers.get("Authorization")
-        self.qa.calls.append(("GET", path, authorization))
+        self.qa.calls.append(("GET", raw_path, authorization))
+
+        if self.qa.base_path and not raw_path.startswith(self.qa.base_path + "/"):
+            self._reply(404)
+            return
 
         if path == "/api/v2/version":
             if self.qa.generation == "v2":
@@ -96,7 +121,13 @@ class _AirflowQaHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/v1/version":
             if self.qa.generation == "v1":
-                self._reply(200, {"version": "2.11.1", "git_version": "qa"})
+                self._reply(
+                    200,
+                    {
+                        "version": "2.11.2" if self.qa.real_211_problem else "2.11.1",
+                        "git_version": "" if self.qa.real_211_problem else "qa",
+                    },
+                )
             else:
                 self._reply(404)
             return
@@ -117,15 +148,21 @@ class _AirflowQaHandler(BaseHTTPRequestHandler):
                 self._reply(503, {"detail": "temporary backend failure"})
                 return
         if credential not in self.qa.valid:
-            self._problem(401 if path.endswith("/dags") else 403)
+            if self.qa.generic_auth_error and path.endswith("/dags"):
+                self._reply(401, {"detail": "Not authenticated"})
+            else:
+                self._problem(401 if path.endswith("/dags") else 403)
             return
         key = "dags" if path.endswith("/dags") else "variables" if path.endswith("/variables") else "connections"
         self._reply(200, {key: [], "total_entries": 0})
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-        path = urlsplit(self.path).path
-        self.qa.calls.append(("POST", path, self.headers.get("Authorization")))
-        if path != "/auth/token" or self.qa.generation != "v2":
+        raw_path = urlsplit(self.path).path
+        path = raw_path.removeprefix(self.qa.base_path) if raw_path.startswith(self.qa.base_path + "/") else raw_path
+        self.qa.calls.append(("POST", raw_path, self.headers.get("Authorization")))
+        if (self.qa.base_path and not raw_path.startswith(self.qa.base_path + "/")) or (
+            path != "/auth/token" or self.qa.generation != "v2"
+        ):
             self._reply(404)
             return
         try:
@@ -154,8 +191,19 @@ def _serve(
     valid: set[Credential] | None = None,
     transient: set[Credential] | None = None,
     anonymous: bool = False,
+    base_path: str = "",
+    generic_auth_error: bool = False,
+    real_211_problem: bool = False,
 ) -> Iterator[_AirflowQaServer]:
-    server = _AirflowQaServer(generation, valid=valid, transient=transient, anonymous=anonymous)
+    server = _AirflowQaServer(
+        generation,
+        valid=valid,
+        transient=transient,
+        anonymous=anonymous,
+        base_path=base_path,
+        generic_auth_error=generic_auth_error,
+        real_211_problem=real_211_problem,
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -199,6 +247,89 @@ def _plan_pairs(plan: AuditCommandPlan) -> list[Credential]:
     return [(str(run.username), str(run.password)) for run in plan.credential_runs]
 
 
+def _run_explicit(
+    server: _AirflowQaServer, *, target_path: str = "", password: str = "test", output_format: str = "txt"
+) -> tuple[AuditCommandResult, list[str]]:
+    args = parse_args(
+        [
+            "airflow",
+            "-t",
+            f"http://127.0.0.1:{server.server_port}{target_path}",
+            "-u",
+            "test",
+            "-p",
+            password,
+            "--timeout",
+            "1",
+            "--retries",
+            "0",
+            "--workers",
+            "1",
+            "--format",
+            output_format,
+        ]
+    )
+    lines: list[str] = []
+    result = AuditCommandRunner(args=args, spec=build_airflow_spec(args), emit_line=lines.append).run_plan(
+        build_airflow_plan(args)
+    )
+    return result, lines
+
+
+def test_airflow_reverse_proxy_prefix_keeps_detection_and_basic_auth_on_same_path() -> None:
+    with _serve("v1", valid={("test", "test")}, base_path="/airflow") as server:
+        result, lines = _run_explicit(server, target_path="/airflow/api/v1/version")
+
+    assert result.detected_count == 1
+    assert result.records[0]["api_endpoint"] == f"http://127.0.0.1:{server.server_port}/airflow"
+    assert any("[*] Airflow" in line for line in lines)
+    assert any("[+] test:test (Dags:0) (Keys:0) (Connections:0)" in line for line in lines)
+    assert all(path.startswith("/airflow/") for _, path, _ in server.calls)
+    assert any(path == "/airflow/api/v1/dags" and auth and auth.startswith("Basic ") for _, path, auth in server.calls)
+
+
+def test_airflow3_reverse_proxy_prefix_keeps_jwt_exchange_and_capabilities_on_same_path() -> None:
+    with _serve("v2", valid={("test", "test")}, base_path="/airflow") as server:
+        result, lines = _run_explicit(server, target_path="/airflow/api/v2/version")
+    assert result.detected_count == 1
+    assert any("[+] test:test (Dags:0) (Keys:0) (Connections:0)" in line for line in lines)
+    assert all(path.startswith("/airflow/") for _, path, _ in server.calls)
+    assert any(method == "POST" and path == "/airflow/auth/token" for method, path, _ in server.calls)
+    assert any(path == "/airflow/api/v2/dags" and auth and auth.startswith("Bearer ") for _, path, auth in server.calls)
+
+
+def test_airflow_single_rejected_credential_is_visible() -> None:
+    with _serve("v1") as server:
+        result, lines = _run_explicit(server, password="wrong")
+    assert result.detected_count == 1
+    assert any("[-] test:wrong" in line for line in lines)
+
+
+def test_airflow_rejected_credential_is_redacted_from_json() -> None:
+    with _serve("v1") as server:
+        result, lines = _run_explicit(server, password="wrong", output_format="json")
+    assert result.detected_count == 1
+    payload = next(json.loads(line) for line in lines if line.startswith("{") and '"service": "airflow"' in line)
+    assert payload["credential_state"] == "invalid"
+    assert "credential_password" not in payload
+    assert "wrong" not in json.dumps(payload)
+
+
+def test_airflow_generic_proxy_401_keeps_unverified_credential_out_of_txt() -> None:
+    with _serve("v1", generic_auth_error=True) as server:
+        result, lines = _run_explicit(server, password="wrong")
+    assert result.detected_count == 1
+    assert not any("test:wrong" in line for line in lines)
+
+
+def test_real_airflow_2112_null_detail_auth_error_runs_credentials_after_detection() -> None:
+    with _serve("v1", valid={("test", "test")}, real_211_problem=True) as server:
+        result, lines = _run_explicit(server)
+    assert result.detected_count == 1
+    assert any("Airflow (auth required:True)" in line and "version:2.11.2" in line for line in lines)
+    assert any("[+] test:test (Dags:0) (Keys:0) (Connections:0)" in line for line in lines)
+
+
 def test_airflow2_defcreds_checks_every_pair_and_continues_after_success_and_transient_failure() -> None:
     valid = {("admin", "admin"), ("airflow", "airflow")}
     with _serve("v1", valid=valid, transient={("service", "service")}) as server:
@@ -208,11 +339,11 @@ def test_airflow2_defcreds_checks_every_pair_and_continues_after_success_and_tra
     assert len(expected) == 18
     assert server.basic_dag_requests[: len(expected)] == expected
     assert set(server.basic_dag_requests[: len(expected)]) == set(expected)
-    credential_lines = [line for line in lines if "\t [+] " in line or "\t [-] " in line]
-    assert len(credential_lines) == len(expected)
+    credential_lines = [line for line in lines if "\t [+] " in line or "\t [-] " in line or "\t [!] " in line]
+    assert len(credential_lines) == len(expected) - 1
     assert any("[+] admin:admin (Dags:0) (Keys:0) (Connections:0)" in line for line in credential_lines)
     assert any("[+] airflow:airflow" in line for line in credential_lines)
-    assert any("[-] service:service" in line for line in credential_lines)
+    assert not any("service:service" in line for line in credential_lines)
     assert result.detected_count == 1 and result.operational_failure_count == 0
 
 

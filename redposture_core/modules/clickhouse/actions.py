@@ -16,6 +16,7 @@ from typing import Any
 from uuid import UUID
 
 from ...clients import transport
+from ...clients.http_api import infer_http_base_path
 from ...console import Console
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
 from ...rendering import (
@@ -165,6 +166,7 @@ class _ChTlsConfig:
     cert_file: str | None = None
     key_file: str | None = None
     server_name: str | None = None
+    proxy_path: str = ""
 
 
 def _ch_transport_kwargs(
@@ -195,6 +197,7 @@ def _ch_transport_from_context(ctx: Any) -> tuple[_ChTlsConfig | None, Any | Non
         cert_file=getattr(args, "tls_cert", None),
         key_file=getattr(args, "tls_key", None),
         server_name=getattr(args, "tls_server_name", None),
+        proxy_path=infer_http_base_path(str(getattr(getattr(ctx, "target", None), "path", "") or "")),
     )
     proxy = getattr(args, "_proxy_config", getattr(args, "proxy", None))
     return tls, proxy
@@ -526,6 +529,8 @@ def _open_clickhouse_client(
             "connect_timeout": float(timeout),
             "send_receive_timeout": float(timeout),
         }
+        if tls.proxy_path:
+            kwargs["proxy_path"] = tls.proxy_path
         if tls.enabled:
             kwargs.update(
                 {
@@ -2858,7 +2863,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             return ""
         if int(record.get("credential_attempt_count", record.get("attempted_credentials", 0)) or 0) > 0:
             return f"{prefix} [-] authentication required (credentials invalid)"
-        return f"{prefix} [-] authentication required"
+        return ""
 
     fail_line = f"{prefix} [!] connection failed"
     if err != "-":
@@ -3319,7 +3324,11 @@ def _render_colored_clickhouse_line(console: Console, line: str) -> bool:
             BooleanColorRule("execute", unknown_color="orange"),
             BooleanColorRule("admin", unknown_color="orange"),
         ),
-        counts=(CountColorRule("DBs", "orange"),),
+        counts=(
+            CountColorRule("DBs", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("occurrences", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("tables", "red", unknown_color="orange", zero_color="bright_green"),
+        ),
         extra_spans=_clickhouse_finding_color_spans,
     ):
         return True

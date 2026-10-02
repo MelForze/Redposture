@@ -1449,9 +1449,9 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
     if show_keys and key_names:
         total = record.get("key_count")
         if key_limit is not None and isinstance(total, int) and total > len(displayed_key_names):
-            lines.append(f"{prefix} [*] Show Keys (showing:{len(displayed_key_names)} of {total})")
+            lines.append(f"{prefix} [*] Keys Enumeration (showing:{len(displayed_key_names)} of {total})")
         else:
-            lines.append(f"{prefix} [*] Show Keys")
+            lines.append(f"{prefix} [*] Keys Enumeration")
         for item in displayed_key_names:
             lines.append(f"{prefix} {_format_redis_text(item)}")
     if query_key and isinstance(query_key_value, str):
@@ -1510,7 +1510,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         elif record.get("default_credentials_attempted"):
             base = f"{prefix} [-] redis:redis"
         else:
-            base = f"{prefix} [-] authentication required"
+            return ""
         return base
 
     fail_line = f"{prefix} [!] connection failed"

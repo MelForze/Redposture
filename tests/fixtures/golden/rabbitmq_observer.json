@@ -23,6 +23,10 @@
       "overview_status": 401,
       "rabbitmq_realm": true
     },
+    "detection_signals": [
+      "rabbitmq.probe",
+      "rabbitmq.product_fingerprint"
+    ],
     "detection_status": "confirmed",
     "effective_username": "observer",
     "enumeration": {
@@ -486,121 +490,73 @@
         "items": [
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 3,
-            "messages_ready": 3,
-            "messages_unacknowledged": 0,
             "type": "classic",
             "vhost": "/"
           },
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 7,
-            "messages_ready": 7,
-            "messages_unacknowledged": 0,
             "type": "quorum",
             "vhost": "payments"
           },
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 4,
-            "messages_ready": 4,
-            "messages_unacknowledged": 0,
             "type": "classic",
             "vhost": "payments"
           },
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 14,
-            "messages_ready": 14,
-            "messages_unacknowledged": 0,
             "type": "classic",
             "vhost": "prod/orders"
           },
           {
             "auto_delete": false,
-            "consumers": 1,
             "durable": true,
-            "messages": 10,
-            "messages_ready": 9,
-            "messages_unacknowledged": 1,
             "type": "quorum",
             "vhost": "prod/orders"
           },
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 4,
-            "messages_ready": 4,
-            "messages_unacknowledged": 0,
             "type": "classic",
             "vhost": "prod/orders"
           },
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 4,
-            "messages_ready": 4,
-            "messages_unacknowledged": 0,
             "type": "classic",
             "vhost": "prod/orders"
           },
           {
             "auto_delete": false,
-            "consumers": 1,
             "durable": true,
-            "messages": 10,
-            "messages_ready": 9,
-            "messages_unacknowledged": 1,
             "type": "quorum",
             "vhost": "prod/orders"
           },
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 0,
-            "messages_ready": 0,
-            "messages_unacknowledged": 0,
             "type": "quorum",
             "vhost": "prod/orders"
           },
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 0,
-            "messages_ready": 0,
-            "messages_unacknowledged": 0,
             "type": "classic",
             "vhost": "prod/orders"
           },
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 0,
-            "messages_ready": 0,
-            "messages_unacknowledged": 0,
             "type": "classic",
             "vhost": "staging"
           },
           {
             "auto_delete": false,
-            "consumers": 0,
             "durable": true,
-            "messages": 5,
-            "messages_ready": 5,
-            "messages_unacknowledged": 0,
             "type": "classic",
             "vhost": "staging"
           }

@@ -156,11 +156,11 @@ def test_detail_lines_buckets_header_and_streamed_objects_header_only():
     )
     lines = render._format_minio_detail_records(rec, "txt")
     body = "\n".join(lines)
-    assert f"{_PFX} [*] Show Buckets (Count:2)" in lines
+    assert f"{_PFX} [*] Buckets Enumeration (Count:2)" in lines
     assert f"{_PFX} bulk" in lines
     assert f"{_PFX} public" in lines
     # objects are streamed by the runtime -> only the header is rendered here
-    assert f"{_PFX} [*] Show Objects (Count:5000)" in lines
+    assert f"{_PFX} [*] Objects Enumeration (Count:5000)" in lines
     assert not any("/" in line.split("\t")[-1] and "size:" in line for line in lines)
     assert "[+] bucket" not in body and "[+] object" not in body
     # clickhouse-style finding line: type, then value=/place= (no "secret" word)
@@ -255,7 +255,7 @@ def test_streamed_object_line_is_orange_and_bucket_header_renders():
     rec = _record(buckets=[{"name": "bulk"}], objects_streamed=True, objects_count=3)
     lines = render._format_minio_detail_records(rec, "txt")
 
-    header = next(line for line in lines if "Show Objects" in line)
+    header = next(line for line in lines if "Objects Enumeration" in line)
     console = _Console()
     assert render._render_colored_minio_line(console, header) is True
 
@@ -359,10 +359,10 @@ def test_credential_attempts_render_accepted_non_selected():
     assert not any("minioadmin" in line for line in lines)  # winner skipped (shown by _format_record)
 
 
-def test_credential_attempts_empty_for_single_or_json():
+def test_single_invalid_attempt_is_definitive_and_json_uses_structured_result():
     assert render._format_credential_attempts_records(_record(), "txt") == []
     single = _record(attempted_credentials=[{"username": "a", "password": "b", "credential_state": "invalid"}])
-    assert render._format_credential_attempts_records(single, "txt") == []
+    assert render._format_credential_attempts_records(single, "txt") == [f"{_PFX} [-] a:b"]
     multi = _record(
         attempted_credentials=[
             {"username": "a", "password": "b", "credential_state": "invalid"},
@@ -372,16 +372,16 @@ def test_credential_attempts_empty_for_single_or_json():
     assert render._format_credential_attempts_records(multi, "json") == []
 
 
-def test_unavailable_credential_has_neutral_result():
+def test_unavailable_credential_has_no_unsupported_txt_verdict():
     rec = _record(
         credential_state="verification_unavailable",
         credential_results=[{"access_key": "AKID", "state": "verification_unavailable"}],
     )
-    assert render._format_record(rec, "txt") == f"{_PFX} [!] AKID (credential verification unavailable)"
+    assert render._format_record(rec, "txt") == ""
     assert render._format_record(rec, "json") == ""
 
 
-def test_unavailable_attempts_are_neutral_and_not_duplicated():
+def test_unavailable_attempts_do_not_obscure_definitive_rejection():
     rec = _record(
         credential_state="verification_unavailable",
         credential_results=[{"access_key": "admin", "state": "verification_unavailable"}],
@@ -394,12 +394,10 @@ def test_unavailable_attempts_are_neutral_and_not_duplicated():
     assert render._format_record(rec, "txt") == ""
     assert render._format_credential_attempts_records(rec, "txt") == [
         f"{_PFX} [-] admin:bad",
-        f"{_PFX} [!] admin:unknown1 (credential verification unavailable)",
-        f"{_PFX} [!] admin:unknown2 (credential verification unavailable)",
     ]
 
 
-def test_unavailable_attempt_is_shown_alongside_accepted_credential():
+def test_unavailable_attempt_is_suppressed_alongside_accepted_credential():
     rec = _record(
         credential_state="valid",
         credential_results=[{"access_key": "admin", "state": "valid"}],
@@ -410,6 +408,4 @@ def test_unavailable_attempt_is_shown_alongside_accepted_credential():
         ],
     )
     assert "[+] admin:working" in render._format_record(rec, "txt")
-    assert render._format_credential_attempts_records(rec, "txt") == [
-        f"{_PFX} [!] admin:unknown (credential verification unavailable)",
-    ]
+    assert render._format_credential_attempts_records(rec, "txt") == []

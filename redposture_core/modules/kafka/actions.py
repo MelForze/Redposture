@@ -1627,16 +1627,16 @@ def _max_messages_is_explicit(record: dict[str, Any]) -> bool:
 
 
 def _tls_suffix(record: dict[str, Any]) -> str:
-    # Kafka: annotate the *detect* line only with `(tls:true|false)`. On the
+    # Kafka: annotate the *detect* line only with `(tls:True|False)`. On the
     # credential/status line the transport is already implied by the detect
     # line above it, so duplicating the marker just adds noise. Emit both
-    # boolean forms (not just tls:true) so the reader can see at a glance
+    # boolean forms (not just tls:True) so the reader can see at a glance
     # that plaintext was confirmed rather than "TLS status unknown".
     mode = record.get("transport_mode")
     if mode == "tls":
-        return " (tls:true)"
+        return " (tls:True)"
     if mode == "plaintext":
-        return " (tls:false)"
+        return " (tls:False)"
     return ""
 
 
@@ -1721,7 +1721,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             provided_password = record.get("provided_password")
             password_text = "<empty>" if provided_password == "" else str(provided_password or "")
             return f"{prefix} [-] {username}:{password_text}"
-        return f"{prefix} [-] authentication required"
+        return ""
 
     if status == "unknown_auth":
         line = f"{prefix} [!] auth status unknown"
@@ -1991,9 +1991,9 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
     if show_topics and topic_names:
         total = record.get("topic_count")
         if show_topics_limit is not None and isinstance(total, int) and total > len(displayed_topic_names):
-            lines.append(f"{prefix} [*] Show Topics (showing:{len(displayed_topic_names)} of {total})")
+            lines.append(f"{prefix} [*] Topics Enumeration (showing:{len(displayed_topic_names)} of {total})")
         else:
-            lines.append(f"{prefix} [*] Show Topics")
+            lines.append(f"{prefix} [*] Topics Enumeration")
         for item in displayed_topic_names:
             lines.append(f"{prefix} {item}{_topic_marker_suffix(item)}")
     # `--topic X` (without `--dump`) prints a standalone header + partition
@@ -2085,6 +2085,8 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
         line,
         tag="KAFKA",
         literals=(
+            LiteralColorRule("(tls:True)", "bright_green"),
+            LiteralColorRule("(tls:False)", "red"),
             LiteralColorRule("(tls:true)", "bright_green"),
             LiteralColorRule("(tls:false)", "red"),
             LiteralColorRule("(read:true)", "red"),
@@ -2097,8 +2099,8 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
             LiteralColorRule("(delete:false)", "bright_green"),
         ),
         counts=(
-            CountColorRule("topics", "red"),
-            CountColorRule("partitions", "red"),
+            CountColorRule("topics", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("partitions", "red", unknown_color="orange", zero_color="bright_green"),
         ),
     ):
         return True
@@ -2126,10 +2128,11 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
         # token (including parens) uniformly painted by semantic — red
         # for "dangerous power confirmed" / "plaintext confirmed",
         # bright_green for "ACL blocked" / "TLS active".
-        for match in re.finditer(r"\((?:read|write|create|delete|tls):(?:true|false)\)", right):
+        for match in re.finditer(r"\((?:read|write|create|delete|tls):(?:true|false|True|False)\)", right):
             token = match.group(0)
             if token in {
                 "(tls:false)",
+                "(tls:False)",
                 "(read:true)",
                 "(write:true)",
                 "(create:true)",
@@ -2138,6 +2141,7 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
                 spans.append((match.start(), match.end(), "red"))
             elif token in {
                 "(tls:true)",
+                "(tls:True)",
                 "(read:false)",
                 "(write:false)",
                 "(create:false)",

@@ -1862,7 +1862,7 @@ def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(m
 
     assert (total, open_no_auth, weak, valid, auth_required, failed) == (1, 0, 0, 0, 0, 1)
     assert len(lines) == 1
-    assert "POSTGRES audit inconclusive" in lines[0]
+    assert "[!] No POSTGRES service detected" in lines[0]
     assert "unreachable or failed before detection" in lines[0]
     assert all("Connection refused" not in line and "timed out" not in line for line in lines)
 

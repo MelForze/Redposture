@@ -1272,11 +1272,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             f"(anonymous:blocked) (collections:{collections_text})"
         )
     if status == "auth_required":
-        line = f"{prefix} [-] authentication required for collections"
-        detail = str(record.get("collections_list_error") or "").strip()
-        if detail:
-            return f"{line} err={_clip(detail, 96)}"
-        return line
+        return ""
     if status == "unknown_auth":
         line = f"{prefix} [!] auth status unknown"
         detail = str(record.get("collections_list_error") or "").strip()
@@ -1537,7 +1533,10 @@ def _render_colored_qdrant_line(console: Console, line: str) -> bool:
             RegexColorRule(r"(?i)\(idor:true\)", "red"),
             RegexColorRule(r"RCE!", "orange"),
         ),
-        counts=(CountColorRule("collections", "red"),),
+        counts=(
+            CountColorRule("collections", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("count", "red", unknown_color="orange", zero_color="bright_green"),
+        ),
     ):
         return True
     if line.startswith(_QDRANT_TAG) and "\t" in line:

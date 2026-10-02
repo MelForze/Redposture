@@ -88,17 +88,12 @@ def _detected_record() -> dict[str, Any]:
     }
 
 
-def test_normal_txt_prints_each_public_root_unverified_basic_pair_without_reason() -> None:
+def test_normal_txt_omits_public_root_unverified_basic_pairs() -> None:
     attempts = [_attempt("changeme"), _attempt("elastic"), _attempt("password")]
 
     lines = actions._format_credential_attempts_records(_record(attempts), "txt")
 
-    assert len(lines) == 3
-    assert any(line.endswith("[-] elastic:changeme") for line in lines)
-    assert any(line.endswith("[-] elastic:elastic") for line in lines)
-    assert any(line.endswith("[-] elastic:password") for line in lines)
-    assert all("anonymously accessible" not in line for line in lines)
-    assert all("err=" not in line for line in lines)
+    assert lines == []
 
 
 def test_debug_txt_keeps_each_pair_and_full_diagnostic() -> None:
@@ -114,7 +109,7 @@ def test_debug_txt_keeps_each_pair_and_full_diagnostic() -> None:
     assert all("network_attempted=True" in line for line in lines)
 
 
-def test_inconclusive_root_fallback_remains_a_warning() -> None:
+def test_inconclusive_root_fallback_is_debug_only() -> None:
     attempt = _attempt(
         "changeme",
         error="authentication endpoint is unsupported and root fallback is inconclusive",
@@ -123,9 +118,10 @@ def test_inconclusive_root_fallback_remains_a_warning() -> None:
 
     lines = actions._format_credential_attempts_records(_record([attempt]), "txt")
 
-    assert len(lines) == 1
-    assert "[!] elastic:changeme" in lines[0]
-    assert "root fallback is inconclusive" in lines[0]
+    assert lines == []
+    debug_lines = actions._format_credential_attempts_records(_record([attempt]), "txt", debug=True)
+    assert len(debug_lines) == 1
+    assert "[!] elastic:changeme" in debug_lines[0]
 
 
 def test_verified_and_definitively_rejected_candidates_keep_markers() -> None:

@@ -180,9 +180,8 @@ def test_postgres_unavailable_attempt_is_not_rendered_as_rejected() -> None:
         },
         "txt",
     )
-    assert "[!] postgres:postgres (verification unavailable)" in lines[0]
-    assert "[-] postgres:postgres" not in lines[0]
-    assert "[-] admin:admin" in lines[1]
+    assert len(lines) == 1
+    assert lines[0].endswith("[-] admin:admin")
 
 
 def test_postgres_cli_accepts_stop_on_success_with_defcreds() -> None:

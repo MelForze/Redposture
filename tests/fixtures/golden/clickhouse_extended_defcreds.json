@@ -232,6 +232,11 @@
     "default_credentials": false,
     "defcreds_enabled": true,
     "detection_error_kind": null,
+    "detection_signals": [
+      "clickhouse.probe",
+      "clickhouse.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover_report": {
       "bytes_scanned": 434176,
       "checkpoint": "<OUT_DIR>/clickhouse-discover.checkpoint.json",
@@ -251,14 +256,14 @@
         "analytics.orders.currency": {
           "approximate_total_rows": 4,
           "bytes_scanned": 12,
-          "completed_chunks": 1,
+          "completed_chunks": 2,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
+          "total_chunks": 2,
+          "total_partitions": 2,
           "type": "FixedString(3)"
         },
         "analytics.orders.customer_id": {
@@ -270,14 +275,14 @@
         "analytics.orders.metadata": {
           "approximate_total_rows": 4,
           "bytes_scanned": 154,
-          "completed_chunks": 1,
+          "completed_chunks": 2,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
+          "total_chunks": 2,
+          "total_partitions": 2,
           "type": "String"
         },
         "analytics.orders.order_id": {
@@ -289,53 +294,53 @@
         "analytics.orders.payment_ref": {
           "approximate_total_rows": 4,
           "bytes_scanned": 40,
-          "completed_chunks": 1,
+          "completed_chunks": 2,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
+          "total_chunks": 2,
+          "total_partitions": 2,
           "type": "String"
         },
         "analytics.orders.promo_code": {
           "approximate_total_rows": 4,
           "bytes_scanned": 21,
-          "completed_chunks": 1,
+          "completed_chunks": 2,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
+          "total_chunks": 2,
+          "total_partitions": 2,
           "type": "Nullable(String)"
         },
         "analytics.orders.region": {
           "approximate_total_rows": 4,
           "bytes_scanned": 8,
-          "completed_chunks": 1,
+          "completed_chunks": 2,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
+          "total_chunks": 2,
+          "total_partitions": 2,
           "type": "LowCardinality(String)"
         },
         "analytics.orders.status": {
           "approximate_total_rows": 4,
           "bytes_scanned": 24,
-          "completed_chunks": 1,
+          "completed_chunks": 2,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
+          "total_chunks": 2,
+          "total_partitions": 2,
           "type": "LowCardinality(String)"
         },
         "analytics.sessions.auth_provider": {
@@ -813,8 +818,6 @@
           "confidence": "high",
           "database": "discovery",
           "fingerprint": "<DOCKER_ID>",
-          "first_seen": 1790288451.74193,
-          "last_seen": 1790288451.74193,
           "location_count": 1,
           "locations": [
             {
@@ -846,8 +849,6 @@
           "confidence": "high",
           "database": "discovery",
           "fingerprint": "<DOCKER_ID>",
-          "first_seen": 1790288451.74195,
-          "last_seen": 1790288451.74195,
           "location_count": 1,
           "locations": [
             {
@@ -879,8 +880,6 @@
           "confidence": "high",
           "database": "analytics",
           "fingerprint": "<DOCKER_ID>",
-          "first_seen": 1790288451.720908,
-          "last_seen": 1790288451.720908,
           "location_count": 1,
           "locations": [
             {
@@ -912,8 +911,6 @@
           "confidence": "high",
           "database": "analytics",
           "fingerprint": "<DOCKER_ID>",
-          "first_seen": 1790288451.720882,
-          "last_seen": 1790288451.720882,
           "location_count": 1,
           "locations": [
             {
@@ -945,8 +942,6 @@
           "confidence": "high",
           "database": "discovery",
           "fingerprint": "<DOCKER_ID>",
-          "first_seen": 1790288451.7419908,
-          "last_seen": 1790288451.7419908,
           "location_count": 1,
           "locations": [
             {
@@ -978,8 +973,6 @@
           "confidence": "high",
           "database": "discovery",
           "fingerprint": "<DOCKER_ID>",
-          "first_seen": 1790288451.742006,
-          "last_seen": 1790288451.763971,
           "location_count": 3,
           "locations": [
             {
@@ -1447,12 +1440,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "COLUMNS",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "COLUMNS"
         },
         {
           "columns": [
@@ -1653,12 +1643,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "KEY_COLUMN_USAGE",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "KEY_COLUMN_USAGE"
         },
         {
           "columns": [
@@ -1843,12 +1830,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "REFERENTIAL_CONSTRAINTS",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "REFERENTIAL_CONSTRAINTS"
         },
         {
           "columns": [
@@ -1969,12 +1953,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "SCHEMATA",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "SCHEMATA"
         },
         {
           "columns": [
@@ -2271,12 +2252,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "STATISTICS",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "STATISTICS"
         },
         {
           "columns": [
@@ -2413,12 +2391,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "TABLES",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "TABLES"
         },
         {
           "columns": [
@@ -2587,12 +2562,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "VIEWS",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "VIEWS"
         },
         {
           "columns": [
@@ -3017,12 +2989,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "columns",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "columns"
         },
         {
           "columns": [
@@ -3223,12 +3192,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "key_column_usage",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "key_column_usage"
         },
         {
           "columns": [
@@ -3413,12 +3379,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "referential_constraints",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "referential_constraints"
         },
         {
           "columns": [
@@ -3539,12 +3502,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "schemata",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "schemata"
         },
         {
           "columns": [
@@ -3841,12 +3801,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "statistics",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "statistics"
         },
         {
           "columns": [
@@ -3983,12 +3940,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "tables",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "tables"
         },
         {
           "columns": [
@@ -4157,12 +4111,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "views",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "views"
         },
         {
           "columns": [
@@ -4251,20 +4202,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "toYYYYMM(created_at)",
-          "partitions": [
-            {
-              "bytes": 1286,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "202609",
-              "rows": 4
-            }
-          ],
           "primary_key": "customer_id, created_at",
           "sorting_key": "customer_id, created_at",
-          "table": "orders",
-          "total_bytes": 1286,
-          "total_rows": 4
+          "table": "orders"
         },
         {
           "columns": [
@@ -4361,20 +4301,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [
-            {
-              "bytes": 1494,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "all",
-              "rows": 4
-            }
-          ],
           "primary_key": "user_id, issued_at",
           "sorting_key": "user_id, issued_at",
-          "table": "sessions",
-          "total_bytes": 1494,
-          "total_rows": 4
+          "table": "sessions"
         },
         {
           "columns": [
@@ -4439,27 +4368,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "toYYYYMM(event_date)",
-          "partitions": [
-            {
-              "bytes": 1208,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "202608",
-              "rows": 2
-            },
-            {
-              "bytes": 114351,
-              "max_block": 3,
-              "min_block": 2,
-              "partition_id": "202609",
-              "rows": 5002
-            }
-          ],
           "primary_key": "event_date, id",
           "sorting_key": "event_date, id",
-          "table": "secret_corpus",
-          "total_bytes": 115559,
-          "total_rows": 5004
+          "table": "secret_corpus"
         },
         {
           "columns": [
@@ -4516,20 +4427,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [
-            {
-              "bytes": 916,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "all",
-              "rows": 3
-            }
-          ],
           "primary_key": "client_id",
           "sorting_key": "client_id",
-          "table": "api_clients",
-          "total_bytes": 916,
-          "total_rows": 3
+          "table": "api_clients"
         },
         {
           "columns": [
@@ -4954,12 +4854,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "COLUMNS",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "COLUMNS"
         },
         {
           "columns": [
@@ -5160,12 +5057,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "KEY_COLUMN_USAGE",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "KEY_COLUMN_USAGE"
         },
         {
           "columns": [
@@ -5350,12 +5244,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "REFERENTIAL_CONSTRAINTS",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "REFERENTIAL_CONSTRAINTS"
         },
         {
           "columns": [
@@ -5476,12 +5367,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "SCHEMATA",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "SCHEMATA"
         },
         {
           "columns": [
@@ -5778,12 +5666,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "STATISTICS",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "STATISTICS"
         },
         {
           "columns": [
@@ -5920,12 +5805,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "TABLES",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "TABLES"
         },
         {
           "columns": [
@@ -6094,12 +5976,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "VIEWS",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "VIEWS"
         },
         {
           "columns": [
@@ -6524,12 +6403,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "columns",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "columns"
         },
         {
           "columns": [
@@ -6730,12 +6606,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "key_column_usage",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "key_column_usage"
         },
         {
           "columns": [
@@ -6920,12 +6793,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "referential_constraints",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "referential_constraints"
         },
         {
           "columns": [
@@ -7046,12 +6916,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "schemata",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "schemata"
         },
         {
           "columns": [
@@ -7348,12 +7215,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "statistics",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "statistics"
         },
         {
           "columns": [
@@ -7490,12 +7354,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "tables",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "tables"
         },
         {
           "columns": [
@@ -7664,12 +7525,9 @@
           "engine": "View",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "views",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "views"
         },
         {
           "columns": [
@@ -7806,20 +7664,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "toDate(ts)",
-          "partitions": [
-            {
-              "bytes": 2550,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "20260924",
-              "rows": 8
-            }
-          ],
           "primary_key": "service, ts, trace_id",
           "sorting_key": "service, ts, trace_id",
-          "table": "events",
-          "total_bytes": 2550,
-          "total_rows": 8
+          "table": "events"
         },
         {
           "columns": [
@@ -7860,20 +7707,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "toDate(ts)",
-          "partitions": [
-            {
-              "bytes": 820,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "20260924",
-              "rows": 10
-            }
-          ],
           "primary_key": "metric_name, ts",
           "sorting_key": "metric_name, ts",
-          "table": "metric_samples",
-          "total_bytes": 820,
-          "total_rows": 10
+          "table": "metric_samples"
         },
         {
           "columns": [
@@ -7898,12 +7734,9 @@
           "engine": "SystemAggregateFunctionCombinators",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "aggregate_function_combinators",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "aggregate_function_combinators"
         },
         {
           "columns": [
@@ -7976,12 +7809,9 @@
           "engine": "SystemAsynchronousInserts",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "asynchronous_inserts",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "asynchronous_inserts"
         },
         {
           "columns": [
@@ -8166,12 +7996,9 @@
           "engine": "SystemAsyncLoader",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "asynchronous_loader",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "asynchronous_loader"
         },
         {
           "columns": [
@@ -8220,20 +8047,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "toYYYYMM(event_date)",
-          "partitions": [
-            {
-              "bytes": 5971,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "202609",
-              "rows": 917
-            }
-          ],
           "primary_key": "metric, event_date, event_time",
           "sorting_key": "metric, event_date, event_time",
-          "table": "asynchronous_metric_log",
-          "total_bytes": 5971,
-          "total_rows": 917
+          "table": "asynchronous_metric_log"
         },
         {
           "columns": [
@@ -8266,12 +8082,9 @@
           "engine": "SystemAsynchronousMetrics",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "asynchronous_metrics",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "asynchronous_metrics"
         },
         {
           "columns": [
@@ -8408,12 +8221,9 @@
           "engine": "SystemBackups",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "backups",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "backups"
         },
         {
           "columns": [
@@ -8438,12 +8248,9 @@
           "engine": "SystemBuildOptions",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "build_options",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "build_options"
         },
         {
           "columns": [
@@ -8532,12 +8339,9 @@
           "engine": "SystemCertificates",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "certificates",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "certificates"
         },
         {
           "columns": [
@@ -8706,12 +8510,9 @@
           "engine": "SystemClusters",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "clusters",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "clusters"
         },
         {
           "columns": [
@@ -8736,12 +8537,9 @@
           "engine": "SystemTableCollations",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "collations",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "collations"
         },
         {
           "columns": [
@@ -8918,12 +8716,9 @@
           "engine": "SystemColumns",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "columns",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "columns"
         },
         {
           "columns": [
@@ -8940,12 +8735,9 @@
           "engine": "SystemContributors",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "contributors",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "contributors"
         },
         {
           "columns": [
@@ -8978,12 +8770,9 @@
           "engine": "SystemCurrentRoles",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "current_roles",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "current_roles"
         },
         {
           "columns": [
@@ -9016,12 +8805,9 @@
           "engine": "SystemDashboards",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "dashboards",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "dashboards"
         },
         {
           "columns": [
@@ -9110,12 +8896,9 @@
           "engine": "SystemDataSkippingIndices",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "data_skipping_indices",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "data_skipping_indices"
         },
         {
           "columns": [
@@ -9148,12 +8931,9 @@
           "engine": "SystemTableDataTypeFamilies",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "data_type_families",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "data_type_families"
         },
         {
           "columns": [
@@ -9170,12 +8950,9 @@
           "engine": "SystemDatabaseEngines",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "database_engines",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "database_engines"
         },
         {
           "columns": [
@@ -9248,12 +9025,9 @@
           "engine": "SystemDatabases",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "databases",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "databases"
         },
         {
           "columns": [
@@ -9358,12 +9132,9 @@
           "engine": "SystemDetachedParts",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "detached_parts",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "detached_parts"
         },
         {
           "columns": [
@@ -9412,12 +9183,9 @@
           "engine": "SystemDetachedTables",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "detached_tables",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "detached_tables"
         },
         {
           "columns": [
@@ -9626,12 +9394,9 @@
           "engine": "SystemDictionaries",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "dictionaries",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "dictionaries"
         },
         {
           "columns": [
@@ -9760,12 +9525,9 @@
           "engine": "SystemDisks",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "disks",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "disks"
         },
         {
           "columns": [
@@ -9894,12 +9656,9 @@
           "engine": "SystemDDLWorkerQueue",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "distributed_ddl_queue",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "distributed_ddl_queue"
         },
         {
           "columns": [
@@ -9996,12 +9755,9 @@
           "engine": "SystemDistributionQueue",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "distribution_queue",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "distribution_queue"
         },
         {
           "columns": [
@@ -10042,12 +9798,9 @@
           "engine": "SystemDNSCache",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "dns_cache",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "dns_cache"
         },
         {
           "columns": [
@@ -10112,12 +9865,9 @@
           "engine": "SystemMarkedDroppedTables",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "dropped_tables",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "dropped_tables"
         },
         {
           "columns": [
@@ -10654,12 +10404,9 @@
           "engine": "SystemDroppedTablesParts",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "dropped_tables_parts",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "dropped_tables_parts"
         },
         {
           "columns": [
@@ -10700,12 +10447,9 @@
           "engine": "SystemEnabledRoles",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "enabled_roles",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "enabled_roles"
         },
         {
           "columns": [
@@ -10770,20 +10514,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "toYYYYMM(event_date)",
-          "partitions": [
-            {
-              "bytes": 885,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "202609",
-              "rows": 1
-            }
-          ],
           "primary_key": "event_date, event_time",
           "sorting_key": "event_date, event_time",
-          "table": "error_log",
-          "total_bytes": 885,
-          "total_rows": 1
+          "table": "error_log"
         },
         {
           "columns": [
@@ -10848,12 +10581,9 @@
           "engine": "SystemErrors",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "errors",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "errors"
         },
         {
           "columns": [
@@ -10894,12 +10624,9 @@
           "engine": "SystemEvents",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "events",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "events"
         },
         {
           "columns": [
@@ -11028,12 +10755,9 @@
           "engine": "SystemFilesystemCache",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "filesystem_cache",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "filesystem_cache"
         },
         {
           "columns": [
@@ -11154,12 +10878,9 @@
           "engine": "SystemFilesystemCacheSettings",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "filesystem_cache_settings",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "filesystem_cache_settings"
         },
         {
           "columns": [
@@ -11208,12 +10929,9 @@
           "engine": "SystemFormats",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "formats",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "formats"
         },
         {
           "columns": [
@@ -11318,12 +11036,9 @@
           "engine": "SystemFunctions",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "functions",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "functions"
         },
         {
           "columns": [
@@ -11340,12 +11055,9 @@
           "engine": "SystemNumbers",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "generateSeries",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "generateSeries"
         },
         {
           "columns": [
@@ -11362,12 +11074,9 @@
           "engine": "SystemNumbers",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "generate_series",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "generate_series"
         },
         {
           "columns": [
@@ -11440,12 +11149,9 @@
           "engine": "SystemGrants",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "grants",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "grants"
         },
         {
           "columns": [
@@ -11534,12 +11240,9 @@
           "engine": "SystemGraphite",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "graphite_retentions",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "graphite_retentions"
         },
         {
           "columns": [
@@ -11588,12 +11291,9 @@
           "engine": "SystemJemallocBins",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "jemalloc_bins",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "jemalloc_bins"
         },
         {
           "columns": [
@@ -11746,12 +11446,9 @@
           "engine": "SystemKafkaConsumers",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "kafka_consumers",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "kafka_consumers"
         },
         {
           "columns": [
@@ -11768,12 +11465,9 @@
           "engine": "SystemKeywords",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "keywords",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "keywords"
         },
         {
           "columns": [
@@ -11814,12 +11508,9 @@
           "engine": "SystemLicenses",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "licenses",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "licenses"
         },
         {
           "columns": [
@@ -11844,12 +11535,9 @@
           "engine": "SystemMacros",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "macros",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "macros"
         },
         {
           "columns": [
@@ -11930,12 +11618,9 @@
           "engine": "SystemMergeTreeSettings",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "merge_tree_settings",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "merge_tree_settings"
         },
         {
           "columns": [
@@ -12136,12 +11821,9 @@
           "engine": "SystemMerges",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "merges",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "merges"
         },
         {
           "columns": [
@@ -20126,20 +19808,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "toYYYYMM(event_date)",
-          "partitions": [
-            {
-              "bytes": 133081,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "202609",
-              "rows": 2
-            }
-          ],
           "primary_key": "event_date, event_time",
           "sorting_key": "event_date, event_time",
-          "table": "metric_log",
-          "total_bytes": 133081,
-          "total_rows": 2
+          "table": "metric_log"
         },
         {
           "columns": [
@@ -20180,12 +19851,9 @@
           "engine": "SystemMetrics",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "metrics",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "metrics"
         },
         {
           "columns": [
@@ -20226,12 +19894,9 @@
           "engine": "SystemModels",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "models",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "models"
         },
         {
           "columns": [
@@ -20304,12 +19969,9 @@
           "engine": "SystemMoves",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "moves",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "moves"
         },
         {
           "columns": [
@@ -20430,12 +20092,9 @@
           "engine": "SystemMutations",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "mutations",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "mutations"
         },
         {
           "columns": [
@@ -20596,12 +20255,9 @@
           "engine": "MySQLBinlogs",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "mysql_binlogs",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "mysql_binlogs"
         },
         {
           "columns": [
@@ -20626,12 +20282,9 @@
           "engine": "SystemNamedCollections",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "named_collections",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "named_collections"
         },
         {
           "columns": [
@@ -20648,12 +20301,9 @@
           "engine": "SystemNumbers",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "numbers",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "numbers"
         },
         {
           "columns": [
@@ -20670,12 +20320,9 @@
           "engine": "SystemNumbers",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "numbers_mt",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "numbers_mt"
         },
         {
           "columns": [
@@ -20692,12 +20339,9 @@
           "engine": "SystemOne",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "one",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "one"
         },
         {
           "columns": [
@@ -20818,12 +20462,9 @@
           "engine": "SystemShardMoves",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "part_moves_between_shards",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "part_moves_between_shards"
         },
         {
           "columns": [
@@ -21360,12 +21001,9 @@
           "engine": "SystemParts",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "parts",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "parts"
         },
         {
           "columns": [
@@ -21814,12 +21452,9 @@
           "engine": "SystemPartsColumns",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "parts_columns",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "parts_columns"
         },
         {
           "columns": [
@@ -21860,12 +21495,9 @@
           "engine": "SystemPrivileges",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "privileges",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "privileges"
         },
         {
           "columns": [
@@ -22218,12 +21850,9 @@
           "engine": "SystemProcesses",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "processes",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "processes"
         },
         {
           "columns": [
@@ -22736,12 +22365,9 @@
           "engine": "SystemProjectionParts",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "projection_parts",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "projection_parts"
         },
         {
           "columns": [
@@ -23158,12 +22784,9 @@
           "engine": "SystemProjectionPartsColumns",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "projection_parts_columns",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "projection_parts_columns"
         },
         {
           "columns": [
@@ -23236,12 +22859,9 @@
           "engine": "SystemQueryCache",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "query_cache",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "query_cache"
         },
         {
           "columns": [
@@ -23890,20 +23510,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "toYYYYMM(event_date)",
-          "partitions": [
-            {
-              "bytes": 7023,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "202609",
-              "rows": 2
-            }
-          ],
           "primary_key": "event_date, event_time",
           "sorting_key": "event_date, event_time",
-          "table": "query_log",
-          "total_bytes": 7023,
-          "total_rows": 2
+          "table": "query_log"
         },
         {
           "columns": [
@@ -24024,12 +23633,9 @@
           "engine": "SystemQuotaLimits",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "quota_limits",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "quota_limits"
         },
         {
           "columns": [
@@ -24254,12 +23860,9 @@
           "engine": "SystemQuotaUsage",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "quota_usage",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "quota_usage"
         },
         {
           "columns": [
@@ -24332,12 +23935,9 @@
           "engine": "SystemQuotas",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "quotas",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "quotas"
         },
         {
           "columns": [
@@ -24570,12 +24170,9 @@
           "engine": "SystemQuotasUsage",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "quotas_usage",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "quotas_usage"
         },
         {
           "columns": [
@@ -24648,12 +24245,9 @@
           "engine": "SystemRemoteDataPaths",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "remote_data_paths",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "remote_data_paths"
         },
         {
           "columns": [
@@ -24958,12 +24552,9 @@
           "engine": "SystemReplicas",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "replicas",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "replicas"
         },
         {
           "columns": [
@@ -25100,12 +24691,9 @@
           "engine": "SystemReplicatedFetches",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "replicated_fetches",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "replicated_fetches"
         },
         {
           "columns": [
@@ -25186,12 +24774,9 @@
           "engine": "SystemReplicatedMergeTreeSettings",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "replicated_merge_tree_settings",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "replicated_merge_tree_settings"
         },
         {
           "columns": [
@@ -25368,12 +24953,9 @@
           "engine": "SystemReplicationQueue",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "replication_queue",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "replication_queue"
         },
         {
           "columns": [
@@ -25414,12 +24996,9 @@
           "engine": "SystemRocksDB",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "rocksdb",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "rocksdb"
         },
         {
           "columns": [
@@ -25476,12 +25055,9 @@
           "engine": "SystemRoleGrants",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "role_grants",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "role_grants"
         },
         {
           "columns": [
@@ -25514,12 +25090,9 @@
           "engine": "SystemRoles",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "roles",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "roles"
         },
         {
           "columns": [
@@ -25616,12 +25189,9 @@
           "engine": "SystemRowPolicies",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "row_policies",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "row_policies"
         },
         {
           "columns": [
@@ -25694,12 +25264,9 @@
           "engine": "SystemS3Queue",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "s3queue",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "s3queue"
         },
         {
           "columns": [
@@ -25924,12 +25491,9 @@
           "engine": "SystemScheduler",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "scheduler",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "scheduler"
         },
         {
           "columns": [
@@ -26002,12 +25566,9 @@
           "engine": "SystemSettingsChanges",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "schema_inference_cache",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "schema_inference_cache"
         },
         {
           "columns": [
@@ -26080,12 +25641,9 @@
           "engine": "SystemServerSettings",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "server_settings",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "server_settings"
         },
         {
           "columns": [
@@ -26182,12 +25740,9 @@
           "engine": "SystemSettings",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "settings",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "settings"
         },
         {
           "columns": [
@@ -26212,12 +25767,9 @@
           "engine": "SystemSettingsChanges",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "settings_changes",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "settings_changes"
         },
         {
           "columns": [
@@ -26306,12 +25858,9 @@
           "engine": "SystemSettingsProfileElements",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "settings_profile_elements",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "settings_profile_elements"
         },
         {
           "columns": [
@@ -26376,12 +25925,9 @@
           "engine": "SystemSettingsProfiles",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "settings_profiles",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "settings_profiles"
         },
         {
           "columns": [
@@ -26422,12 +25968,9 @@
           "engine": "SystemStackTrace",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "stack_trace",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "stack_trace"
         },
         {
           "columns": [
@@ -26516,12 +26059,9 @@
           "engine": "SystemStoragePolicies",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "storage_policies",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "storage_policies"
         },
         {
           "columns": [
@@ -26554,12 +26094,9 @@
           "engine": "SystemSymbols",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "symbols",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "symbols"
         },
         {
           "columns": [
@@ -26640,12 +26177,9 @@
           "engine": "SystemTableEngines",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "table_engines",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "table_engines"
         },
         {
           "columns": [
@@ -26678,12 +26212,9 @@
           "engine": "SystemTableFunctions",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "table_functions",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "table_functions"
         },
         {
           "columns": [
@@ -26964,12 +26495,9 @@
           "engine": "SystemTables",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "tables",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "tables"
         },
         {
           "columns": [
@@ -27170,20 +26698,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "toYYYYMM(event_date)",
-          "partitions": [
-            {
-              "bytes": 22973,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "202609",
-              "rows": 371
-            }
-          ],
           "primary_key": "event_date, event_time",
           "sorting_key": "event_date, event_time",
-          "table": "text_log",
-          "total_bytes": 22973,
-          "total_rows": 371
+          "table": "text_log"
         },
         {
           "columns": [
@@ -27200,12 +26717,9 @@
           "engine": "SystemTimeZones",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "time_zones",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "time_zones"
         },
         {
           "columns": [
@@ -27334,20 +26848,9 @@
           "engine": "MergeTree",
           "inventory_errors": [],
           "partition_key": "toYYYYMM(event_date)",
-          "partitions": [
-            {
-              "bytes": 1730,
-              "max_block": 1,
-              "min_block": 1,
-              "partition_id": "202609",
-              "rows": 6
-            }
-          ],
           "primary_key": "event_date, event_time",
           "sorting_key": "event_date, event_time",
-          "table": "trace_log",
-          "total_bytes": 1730,
-          "total_rows": 6
+          "table": "trace_log"
         },
         {
           "columns": [
@@ -27388,12 +26891,9 @@
           "engine": "SystemUserDirectories",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "user_directories",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "user_directories"
         },
         {
           "columns": [
@@ -27450,12 +26950,9 @@
           "engine": "SystemUserProcesses",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "user_processes",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "user_processes"
         },
         {
           "columns": [
@@ -27592,12 +27089,9 @@
           "engine": "SystemUsers",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "users",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "users"
         },
         {
           "columns": [
@@ -27774,12 +27268,9 @@
           "engine": "SystemViewRefreshes",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "view_refreshes",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "view_refreshes"
         },
         {
           "columns": [
@@ -27796,12 +27287,9 @@
           "engine": "SystemWarnings",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "warnings",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "warnings"
         },
         {
           "columns": [
@@ -27818,12 +27306,9 @@
           "engine": "SystemZeros",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "zeros",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "zeros"
         },
         {
           "columns": [
@@ -27840,12 +27325,9 @@
           "engine": "SystemZeros",
           "inventory_errors": [],
           "partition_key": "",
-          "partitions": [],
           "primary_key": "",
           "sorting_key": "",
-          "table": "zeros_mt",
-          "total_bytes": null,
-          "total_rows": null
+          "table": "zeros_mt"
         }
       ],
       "inventory_errors": [],

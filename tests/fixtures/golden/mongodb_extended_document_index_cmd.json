@@ -102,13 +102,13 @@
         "collection": "demo_accounts",
         "database": "redposture",
         "ok": true,
-        "operation": "list_indexes"
+        "operation": "find_documents"
       },
       {
         "collection": "demo_accounts",
         "database": "redposture",
         "ok": true,
-        "operation": "find_documents"
+        "operation": "list_indexes"
       },
       {
         "database": "redposture",

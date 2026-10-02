@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from redposture_core.modules.consul import actions as consul
 from redposture_core.modules.elastic import actions as elastic
@@ -12,6 +15,12 @@ from redposture_core.modules.grafana import actions as grafana
 from redposture_core.modules.proxmox import actions as proxmox
 from redposture_core.modules.qdrant import actions as qdrant
 from redposture_core.modules.redis import actions as redis
+
+_JSON = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.text(max_size=128),
+    lambda children: st.lists(children, max_size=5) | st.dictionaries(st.text(max_size=32), children, max_size=5),
+    max_leaves=18,
+)
 
 
 def test_grafana_detection_rejects_generic_health_and_redirect() -> None:
@@ -38,6 +47,16 @@ def test_proxmox_detection_requires_product_specific_marker() -> None:
     )
     assert proxmox._looks_like_proxmox_response(401, b'{"data":null}', {"Server": "pve-api-daemon"}) is True
     assert proxmox._looks_like_proxmox_response(200, b'{"data":{"clustername":"lab"}}', {}) is True
+    assert (
+        proxmox._looks_like_proxmox_response(
+            200, b'{"data":{"version":"8.2.2","release":"8.2","repoid":"abc1234"}}', {"Server": "nginx"}
+        )
+        is True
+    )
+    assert (
+        proxmox._looks_like_proxmox_response(200, b'{"data":{"version":"8.2.2","release":"8.2"}}', {"Server": "nginx"})
+        is False
+    )
 
 
 def test_qdrant_detection_rejects_generic_result_envelope() -> None:
@@ -105,3 +124,16 @@ def test_elastic_generic_root_is_not_a_hard_fingerprint() -> None:
         None,
     )
     assert canonical["signal_kind"] == "hard_positive"
+
+
+@given(_JSON)
+def test_http_product_fingerprint_parsers_handle_arbitrary_json(payload: Any) -> None:
+    raw = json.dumps(payload, ensure_ascii=False)
+    assert isinstance(proxmox._looks_like_proxmox_response(200, raw.encode(), {"Server": "nginx"}), bool)
+    assert isinstance(grafana._looks_like_grafana_health(200, raw), tuple)
+    assert isinstance(qdrant._qdrant_looks_like_response(payload), bool)
+    gitlab_version = gitlab._detect_version_payload(payload)
+    assert gitlab_version is None or isinstance(gitlab_version, str)
+    assert isinstance(etcd._looks_like_etcd_version(payload), tuple)
+    elastic_probe = elastic._classify_detect_probe("/", 200, raw.encode(), {"Server": "nginx"}, None)
+    assert elastic_probe["signal_kind"] in {"neutral", "soft_positive", "hard_positive", "negative"}

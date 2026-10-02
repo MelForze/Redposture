@@ -308,7 +308,7 @@ def test_kafka_error_helpers_and_format_record_statuses() -> None:
         "KAFKA   \t127.0.0.1\t9092\t [-] admin:admin",
         "KAFKA   \t127.0.0.1\t9092\t [-] kafka:password",
     ]
-    assert "[-] authentication required" in kafka._format_record({**base, "status": "auth_required"}, "txt")
+    assert kafka._format_record({**base, "status": "auth_required"}, "txt") == ""
     assert "[!] auth status unknown err=weird" in kafka._format_record(
         {**base, "status": "unknown_auth", "error": "weird"},
         "txt",
@@ -607,7 +607,7 @@ def test_format_topics_detail_records_text_and_json() -> None:
     }
     lines = kafka._format_topics_detail_records(record, "txt")
     joined = "\n".join(lines)
-    assert "[*] Show Topics" in joined
+    assert "[*] Topics Enumeration" in joined
     # `--topic X --dump` now folds partition-info into the Dump header
     # instead of emitting `[*] Topic X` + `X(partitions:N)` + `[*] Dump
     # Topic X (max:M)` — three lines collapsed to one.
@@ -1891,7 +1891,7 @@ def test_kafka_format_detail_records_additional_empty_and_json_branches() -> Non
         "dump_error": "metadata unavailable",
     }
     limited_text = "\n".join(kafka._format_topics_detail_records(limited_record, "txt"))
-    assert "Show Topics (showing:2 of 3)" in limited_text
+    assert "Topics Enumeration (showing:2 of 3)" in limited_text
     assert "Topic missing" in limited_text
     assert "[-] metadata unavailable" in limited_text
 
@@ -2252,7 +2252,7 @@ def test_kafka_lifecycle_checks_sasl_plaintext_before_tls_fallback(monkeypatch: 
 
 def test_kafka_tls_marker_only_on_detect_line() -> None:
     """`_format_detect_record` must annotate the detect line with
-    `(tls:true)` / `(tls:false)` per `transport_mode`. `_format_record`
+    `(tls:True)` / `(tls:False)` per `transport_mode`. `_format_record`
     (the status/credential line) must NOT duplicate the marker — the
     transport is already established by the detect line above and adding
     it to every credential line is noise the user asked to remove.
@@ -2260,10 +2260,10 @@ def test_kafka_tls_marker_only_on_detect_line() -> None:
     base = {"host": "127.0.0.1", "port": 9093, "topic_count": 2, "auth_required": True}
 
     tls_detect = {**base, "is_kafka": True, "transport_mode": "tls"}
-    assert " (tls:true)" in kafka._format_detect_record(tls_detect, "txt")
+    assert " (tls:True)" in kafka._format_detect_record(tls_detect, "txt")
 
     plain_detect = {**base, "is_kafka": True, "transport_mode": "plaintext"}
-    assert " (tls:false)" in kafka._format_detect_record(plain_detect, "txt")
+    assert " (tls:False)" in kafka._format_detect_record(plain_detect, "txt")
 
     # No transport_mode → no marker (backward compat with legacy records).
     legacy_detect = {**base, "is_kafka": True}

@@ -222,6 +222,23 @@ def test_shared_nested_scheduler_runs_dynamic_follow_up_work() -> None:
     assert completed == [1, 2, 3, 4]
 
 
+def test_shared_nested_scheduler_preserves_target_http_context_without_cross_target_leak() -> None:
+    from types import SimpleNamespace
+
+    from redposture_core.clients.http_api import http_target_context, join_http_target_path
+
+    scheduler = SharedNestedScheduler(max_workers=2)
+    try:
+        with http_target_context(SimpleNamespace(scheme="https", path="/first")):
+            first = scheduler.map_ordered([1, 2], lambda _item: join_http_target_path("/api/health"))
+        with http_target_context(SimpleNamespace(scheme="https", path="/second")):
+            second = scheduler.map_ordered([1, 2], lambda _item: join_http_target_path("/api/health"))
+    finally:
+        scheduler.close()
+    assert first == ["/first/api/health"] * 2
+    assert second == ["/second/api/health"] * 2
+
+
 @pytest.mark.parametrize("worker_limit", [32, 64])
 def test_shared_nested_scheduler_enforces_command_wide_peak(worker_limit: int) -> None:
     scheduler = SharedNestedScheduler(max_workers=worker_limit)

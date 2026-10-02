@@ -1164,7 +1164,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
                 n_attempts_raw = legacy
         if int(n_attempts_raw or 0) > 0:
             return f"{prefix} [-] authentication required (credentials invalid)"
-        return f"{prefix} [-] authentication required"
+        return ""
     if status == "unknown_auth":
         line = f"{prefix} [!] auth status unknown"
         if err != "-":
@@ -1349,7 +1349,7 @@ def _render_colored_grafana_line(console: Console, line: str) -> bool:
         line,
         tag="GRAFANA",
         literals=(("auth required:sso", "bright_green"), ("provider:keycloak", "cyan")),
-        counts=(CountColorRule("datasources", "red"),),
+        counts=(CountColorRule("datasources", "red", unknown_color="orange", zero_color="bright_green"),),
     ):
         return True
     if line.startswith("GRAFANA") and "\t" in line:

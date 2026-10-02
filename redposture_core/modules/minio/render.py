@@ -25,7 +25,7 @@ from ...rendering import (
     sanitize_report_payload,
 )
 
-_UNDETECTED = {"not_minio", "transport_failure", ""}
+_UNDETECTED = {"not_minio", "not_service", "transport_failure", ""}
 
 
 def _prefix(record: dict[str, Any]) -> str:
@@ -40,7 +40,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     """One-line detection summary: `[*] MinIO (auth required:X) [(version:Y)]`."""
     if output_format != "txt":
         return ""
-    detection_status = str(record.get("detection_status") or "")
+    detection_status = str(record.get("detection_detail_status") or record.get("detection_status") or "")
     if detection_status in _UNDETECTED:
         return ""
     if detection_status == "console":
@@ -70,7 +70,7 @@ def _admin_text(record: dict[str, Any]) -> str:
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
-    """Per-credential result, including a neutral line when verification is unavailable.
+    """Render only a verified credential result.
 
     The `[+]` marker already means the credential is valid, so the line does not
     repeat a `(credential:valid)` field. Capabilities are boolean (`admin:True`).
@@ -87,10 +87,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if results and isinstance(results[0], dict):
         access_key = results[0].get("access_key")
     if state == "verification_unavailable":
-        attempts = record.get("attempted_credentials")
-        if isinstance(attempts, list) and len(attempts) >= 2:
-            return ""  # Each attempt is rendered below, without duplicating the selected one.
-        return f"{_prefix(record)} [!] {access_key or '?'} (credential verification unavailable)"
+        # An opaque proxy response is not evidence that this access key worked
+        # or failed. Keep the aggregate state in JSON, never as a TXT result.
+        return ""
     parts = [f"(admin:{_admin_text(record)})"]
     # A present list means the corresponding flag ran; show the count (even 0).
     buckets = record.get("buckets")
@@ -120,14 +119,14 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
     """Per-credential lines for `--defcreds` (every pair checked), like zookeeper.
 
     The accepted, selected credential is rendered by `_format_record` (with its
-    admin/enumeration suffix), so it is skipped here; the remaining attempts show as
-    `[-] user:pass` (rejected), `[+] user:pass` (another working default),
-    or `[!] user:pass` with a neutral explanation if verification was unavailable.
+    admin/enumeration suffix), so it is skipped here. The remaining attempts
+    appear only when a signed response proves them valid or invalid. Ambiguous
+    attempts are omitted from TXT; the aggregate state remains in JSON.
     """
     if output_format != "txt":
         return []
     attempts = record.get("attempted_credentials")
-    if not isinstance(attempts, list) or len(attempts) < 2:
+    if not isinstance(attempts, list) or not attempts:
         return []
     prefix = _prefix(record)
     results = record.get("credential_results") or []
@@ -147,11 +146,7 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         # defaults can share a username). Mirrors the other 13 default-cred modules.
         if accepted:
             lines.append(f"{prefix} [+] {username}:{_password_text(attempt.get('password'))}")
-        elif attempt.get("credential_state") == "verification_unavailable":
-            lines.append(
-                f"{prefix} [!] {username}:{_password_text(attempt.get('password'))} (credential verification unavailable)"
-            )
-        else:
+        elif attempt.get("credential_state") == "invalid":
             lines.append(f"{prefix} [-] {username}:{_password_text(attempt.get('password'))}")
     return lines
 
@@ -233,7 +228,7 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
     write_probe = write_probe if isinstance(write_probe, dict) else {}
     buckets = [b for b in (record.get("buckets") or []) if isinstance(b, dict) and b.get("name")]
     if buckets:
-        lines.append(f"{prefix} [*] Show Buckets (Count:{len(buckets)})")
+        lines.append(f"{prefix} [*] Buckets Enumeration (Count:{len(buckets)})")
         for bucket in buckets:
             name = bucket["name"]
             wp = write_probe.get(name)
@@ -249,7 +244,7 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
     # section header carrying the total count captured during streaming.
     objects_count = record.get("objects_count")
     if record.get("objects_streamed") and isinstance(objects_count, int):
-        lines.append(f"{prefix} [*] Show Objects (Count:{objects_count})")
+        lines.append(f"{prefix} [*] Objects Enumeration (Count:{objects_count})")
     for leftover in record.get("write_probe_leftovers") or []:
         if isinstance(leftover, dict):
             lines.append(f"{prefix} [!] canary left behind: {leftover.get('bucket', '?')}/{leftover.get('key', '?')}")
@@ -394,10 +389,10 @@ def _render_colored_minio_line(console: Console, line: str) -> bool:
         ),
         counts=(
             # Enumerated data resources are exposure -> red (like zookeeper znodes).
-            CountColorRule("buckets", "true_red"),
-            CountColorRule("objects", "true_red"),
+            CountColorRule("buckets", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("objects", "true_red", unknown_color="orange", zero_color="bright_green"),
             # The `[*] Show … (Count:N)` section headers tie to their orange items.
-            CountColorRule("Count", "orange"),
+            CountColorRule("Count", "red", unknown_color="orange", zero_color="bright_green"),
         ),
         extra_spans=_minio_extra_spans,
     ):

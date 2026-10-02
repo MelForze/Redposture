@@ -20,9 +20,11 @@ from ...clients.http_api import (
     HttpApiClient,
     HttpClientConfig,
     build_http_target_url,
+    format_http_authority,
     http_response_origin,
     http_response_requires_https,
     http_scheme_candidates,
+    infer_http_base_path,
     resolve_http_scheme,
 )
 from ...clients.http_session import HttpSessionPool
@@ -73,6 +75,7 @@ class RegistryLifecycleState:
     scheme: str | None = None
     host: str | None = None
     port: int | None = None
+    base_path: str = ""
     origin_resolved: bool = False
 
     def close(self) -> None:
@@ -96,6 +99,10 @@ def registry_lifecycle_state_factory(ctx: Any) -> RegistryLifecycleState:
         scheme=target_scheme if target_scheme in {"http", "https"} else None,
         host=str(getattr(ctx, "host", "") or "") or None,
         port=int(ctx.port) if getattr(ctx, "port", None) is not None else None,
+        base_path=infer_http_base_path(
+            str(getattr(getattr(ctx, "target", None), "path", "") or ""),
+            ("/v2", "/service/rest", "/api/v2.0", "/jwt/auth"),
+        ),
     )
 
 
@@ -289,12 +296,17 @@ def _http_request(
         )
         response = None
         for scheme in schemes:
-            url = build_http_target_url(
-                request_host,
-                request_port,
-                _normalize_path(path),
-                default_scheme=str(scheme),
-                override_bound_scheme=True,
+            parsed_endpoint = urllib.parse.urlsplit(_normalize_path(path))
+            endpoint_path = parsed_endpoint.path or "/"
+            request_path = state.base_path + endpoint_path if state.base_path else endpoint_path
+            url = urllib.parse.urlunsplit(
+                (
+                    str(scheme),
+                    format_http_authority(request_host, request_port),
+                    request_path,
+                    parsed_endpoint.query,
+                    "",
+                )
             )
             response = state.http.request(
                 method,
@@ -316,6 +328,9 @@ def _http_request(
                     fallback_host=request_host,
                     fallback_port=request_port,
                 )
+                final_path = urllib.parse.urlsplit(str(response.final_url or "")).path
+                if response.redirected and final_path.endswith(endpoint_path):
+                    state.base_path = final_path[: -len(endpoint_path)].rstrip("/")
                 state.origin_resolved = True
                 break
         assert response is not None
@@ -1829,7 +1844,8 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
     is_nexus: bool | None = None
     nexus_info: dict[str, Any] | None = None
     nexus_error: str | None = None
-    if bool(options["nexus"]) and not is_registry:
+    selected_vendors = {vendor for vendor in ("nexus", "harbor", "gitlab") if bool(getattr(ctx.args, vendor, False))}
+    if bool(options["nexus"]) and (not is_registry or "nexus" in selected_vendors):
         nexus_info, nexus_error = _fetch_nexus_info(
             str(ctx.host),
             int(ctx.port),
@@ -1847,6 +1863,8 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
             is_nexus = True
             status = "open_no_auth"
             auth_required = False
+        elif nexus_error == "not nexus":
+            is_nexus = False
     payload = _registry_lifecycle_payload(
         ctx,
         options,
@@ -1872,8 +1890,15 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
                 payload["harbor_info"] = harbor_info
             elif harbor_error:
                 payload["harbor_error"] = harbor_error
+    if selected_vendors and not any(payload.get(f"is_{vendor}") is True for vendor in selected_vendors):
+        # An explicit vendor flag is a product selector. --enum-cve also probes
+        # vendors, but does not narrow a generic Registry scan.
+        payload["is_registry"] = False
+        payload["status"] = "not_registry"
+        payload["auth_required"] = None
+        payload["error"] = f"requested {'/'.join(sorted(selected_vendors))} fingerprint not confirmed"
     payload["nexus_info"] = nexus_info
-    stage_result = status if status in {"fail", "not_registry"} else "ok"
+    stage_result = str(payload["status"]) if payload["status"] in {"fail", "not_registry"} else "ok"
     return _registry_append_lifecycle_stage(
         payload,
         stage_name=_STAGE_DETECT_PROTOCOL,
@@ -3272,7 +3297,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             password_text = "<empty>" if provided_password == "" else str(provided_password or "")
             line = f"{prefix} [-] {username}:{password_text}"
         else:
-            line = f"{prefix} [-] authentication required"
+            return ""  # The service line already says auth required:True.
         return line
 
     if status == "not_registry":
@@ -3476,8 +3501,13 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     prefix = _nxc_prefix(record)
     lines: list[str] = []
 
-    if show_images:
-        lines.append(f"{prefix} [*] Show Images")
+    # Auth can gate the deep stage before it populates images_error. In that
+    # case an empty inventory is not evidence that the registry has no images.
+    images_blocked_by_auth = not images and (
+        record.get("status") == "auth_required" or images_error == "authentication required"
+    )
+    if show_images and not images_blocked_by_auth:
+        lines.append(f"{prefix} [*] Images Enumeration")
         if images:
             for item in images:
                 lines.append(f"{prefix} {item}")
@@ -3497,15 +3527,15 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             lines.append(f"{prefix} [*] Harbor detected")
         if harbor and not suppress_vendor_inventory:
             if harbor_projects:
-                lines.append(f"{prefix} [*] Harbor Projects")
+                lines.append(f"{prefix} [*] Harbor Projects Enumeration")
                 for item in harbor_projects:
                     lines.append(f"{prefix} {item}")
             if harbor_repositories:
-                lines.append(f"{prefix} [*] Harbor Repositories")
+                lines.append(f"{prefix} [*] Harbor Repositories Enumeration")
                 for item in harbor_repositories:
                     lines.append(f"{prefix} {item}")
             if harbor_artifacts:
-                lines.append(f"{prefix} [*] Harbor Artifacts")
+                lines.append(f"{prefix} [*] Harbor Artifacts Enumeration")
                 for item in harbor_artifacts:
                     lines.append(f"{prefix} {item}")
         if harbor and harbor_error:
@@ -3542,7 +3572,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             if probe_error:
                 lines.append(f"{prefix} [-] {probe_error}")
             if not suppress_vendor_inventory and gitlab_repository_details:
-                lines.append(f"{prefix} [*] GitLab Repositories")
+                lines.append(f"{prefix} [*] GitLab Repositories Enumeration")
                 for gitlab_repo in gitlab_repository_details:
                     repo_name = str(gitlab_repo.get("repository") or "").strip() or "-"
                     tags_count = gitlab_repo.get("tags_count")
@@ -3553,13 +3583,13 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                         f"{prefix} {repo_name} (tags:{tags_count_text}) (latest:{latest_tag}) (last pushed:{last_pushed})"
                     )
             elif not suppress_vendor_inventory and gitlab_repositories:
-                lines.append(f"{prefix} [*] GitLab Repositories")
+                lines.append(f"{prefix} [*] GitLab Repositories Enumeration")
                 for item in gitlab_repositories:
                     lines.append(f"{prefix} {item}")
             elif not suppress_vendor_inventory and images_error:
                 lines.append(f"{prefix} [-] GitLab repositories unavailable: {images_error}")
-            elif not suppress_vendor_inventory:
-                lines.append(f"{prefix} [*] GitLab Repositories")
+            elif not suppress_vendor_inventory and record.get("status") != "auth_required":
+                lines.append(f"{prefix} [*] GitLab Repositories Enumeration")
                 lines.append(f"{prefix} <no repositories>")
     elif show_gitlab_presence and is_gitlab is False:
         if debug:
@@ -3568,7 +3598,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         lines.append(f"{prefix} [!] GitLab presence unknown: {gitlab_error}")
 
     if show_tags and repository_raw:
-        lines.append(f"{prefix} [*] Show Tags {repository_raw}")
+        lines.append(f"{prefix} [*] Tags Enumeration {repository_raw}")
         if selected_repository_tags:
             for item in selected_repository_tags:
                 lines.append(f"{prefix} {item}")
@@ -3623,7 +3653,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             lines.append(f"{prefix} [*] Nexus Repository detected")
         if nexus:
             if not suppress_vendor_inventory and nexus_repository_details:
-                lines.append(f"{prefix} [*] Nexus Repositories")
+                lines.append(f"{prefix} [*] Nexus Repositories Enumeration")
                 for nexus_repo in nexus_repository_details:
                     repo_name = str(nexus_repo.get("name") or "").strip() or "-"
                     repo_type = str(nexus_repo.get("type") or "").strip() or "-"
@@ -3635,11 +3665,11 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                         f"{prefix} {repo_name} (type:{repo_type}) (online:{online_text}) (components:{components_text})"
                     )
             elif not suppress_vendor_inventory and nexus_repositories:
-                lines.append(f"{prefix} [*] Nexus Repositories")
+                lines.append(f"{prefix} [*] Nexus Repositories Enumeration")
                 for item in nexus_repositories:
                     lines.append(f"{prefix} {item}")
-            if assets_enabled:
-                lines.append(f"{prefix} [*] Nexus Assets")
+            if assets_enabled and not (record.get("status") == "auth_required" and not nexus_assets):
+                lines.append(f"{prefix} [*] Nexus Assets Enumeration")
                 if nexus_assets:
                     for asset in nexus_assets:
                         url = str(asset.get("download_url") or "").strip() or "-"
@@ -3740,11 +3770,18 @@ def _render_colored_registry_line(console: Console, line: str) -> bool:
         console,
         line,
         tag="REGISTRY",
-        counts=(CountColorRule("images", "red", unknown_color="orange", zero_color="bright_green"),),
+        counts=(
+            CountColorRule("images", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("layers", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("components", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("tags", "red", unknown_color="orange", zero_color="bright_green"),
+        ),
     ):
         return True
     if line.startswith("REGISTRY") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="REGISTRY", default_color="orange")
+        return render_tagged_detail_line(
+            console, line, tag="REGISTRY", default_color="orange", resource_counts=("components", "tags", "layers")
+        )
     return False
 
 

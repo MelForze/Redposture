@@ -1284,7 +1284,7 @@ def _render_colored_gitlab_line(console: Console, line: str) -> bool:
             ("(issues:True)", "red"),
             ("(members:True)", "red"),
         ),
-        counts=(CountColorRule("projects", "red"),),
+        counts=(CountColorRule("projects", "red", unknown_color="orange", zero_color="bright_green"),),
     ):
         return True
     if line.startswith("GITLAB") and "\t" in line:

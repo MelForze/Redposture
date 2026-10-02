@@ -4777,26 +4777,6 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     return f"{line} err={err}" if err != "-" else line
 
 
-def _is_public_root_unverified_attempt(attempt: Mapping[str, Any]) -> bool:
-    if str(attempt.get("status") or "") != "credentials_unverified_anonymous":
-        return False
-    detail = attempt.get("auth_error_detail")
-    if isinstance(detail, Mapping):
-        detail_type = str(detail.get("type") or "")
-        fallback_endpoint = str(detail.get("fallback_endpoint") or "")
-        reason = str(detail.get("reason") or "")
-        if (
-            detail_type == "authentication_unverified"
-            and fallback_endpoint == "/"
-            and "anonymously accessible" in reason.lower()
-        ):
-            return True
-    error = str(attempt.get("error") or "")
-    if "root endpoint is also anonymously accessible" in error.lower():
-        return True
-    return False
-
-
 def _format_credential_attempts_records(
     record: dict[str, Any],
     output_format: str,
@@ -4810,9 +4790,6 @@ def _format_credential_attempts_records(
         return []
     prefix = _nxc_prefix(record)
     lines: list[str] = []
-    full_default_sweep = len(attempts) > 1 and any(
-        isinstance(attempt, dict) and str(attempt.get("source") or "") == "default" for attempt in attempts
-    )
     accepted_statuses = {"valid_credentials", "weak_default_creds"}
     rejected_statuses = {"auth_required", "invalid_credentials_anonymous"}
     selected_username = str(record.get("provided_username") or record.get("effective_username") or "")
@@ -4848,15 +4825,8 @@ def _format_credential_attempts_records(
             marker = "[-]"
         else:
             marker = "[!]"
-        if not debug and full_default_sweep and marker == "[!]":
-            marker = "[-]"
-        if (
-            not debug
-            and marker == "[!]"
-            and (username is not None or password is not None)
-            and _is_public_root_unverified_attempt(attempt)
-        ):
-            marker = "[-]"
+        if not debug and marker == "[!]":
+            continue
         suffix = ""
         if marker == "[!]" and error:
             suffix = f" err={error if debug else _clip(error, 120)}"

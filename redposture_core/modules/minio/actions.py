@@ -267,7 +267,23 @@ def _is_admin_info_response(body: bytes) -> bool:
         data = json.loads(body)
     except (ValueError, TypeError):
         return False
-    return isinstance(data, dict) and any(key in data for key in ("servers", "mode", "version"))
+    return isinstance(data, dict) and isinstance(data.get("servers"), list)
+
+
+def _signed_credential_verdict(resp: MinioResponse, access_key: str | None, *, admin: bool = False) -> CredentialResult:
+    if resp.transport_error:
+        return CredentialResult(state="transient_failure", access_key=access_key)
+    if 200 <= resp.http_status < 300:
+        valid_shape = _is_admin_info_response(resp.body) if admin else _is_service_bucket_listing(resp.body)
+        state = "valid" if resp.http_status == 200 and valid_shape else "verification_unavailable"
+        return CredentialResult(state=state, access_key=access_key)
+    code = resp.error.code if resp.error is not None else ""
+    if code in _INVALID_CRED_CODES:
+        return CredentialResult(state="invalid", access_key=access_key, error_code=code)
+    if code == "AccessDenied":
+        # MinIO checked the signature before denying this read-only operation.
+        return CredentialResult(state="valid_but_restricted", access_key=access_key, error_code=code)
+    return CredentialResult(state="verification_unavailable", access_key=access_key, error_code=code or None)
 
 
 def verify_credential(client: MinioClient) -> CredentialResult:
@@ -278,24 +294,14 @@ def verify_credential(client: MinioClient) -> CredentialResult:
     if _is_minio_console(resp) or _is_s3_request_on_console_port(resp):
         # Some proxies redirect even a signed GET / to the browser UI. Verify
         # against the confirmed API listener's Admin endpoint instead.
-        resp = client.admin_info(signed=True)
-        if resp.transport_error:
-            return CredentialResult(state="transient_failure", access_key=access_key)
-        if resp.http_status == 200 and _is_admin_info_response(resp.body):
-            return CredentialResult(state="valid", access_key=access_key)
-    if 200 <= resp.http_status < 300:
-        state = (
-            "valid" if resp.http_status == 200 and _is_service_bucket_listing(resp.body) else "verification_unavailable"
-        )
-        return CredentialResult(state=state, access_key=access_key)
-    code = resp.error.code if resp.error is not None else ""
-    if code in _INVALID_CRED_CODES:
-        return CredentialResult(state="invalid", access_key=access_key, error_code=code)
-    if code == "AccessDenied":
-        # Подпись принята сервером (иначе был бы SignatureDoesNotMatch) -> креды
-        # валидны, просто нет прав на пробную операцию.
-        return CredentialResult(state="valid_but_restricted", access_key=access_key, error_code=code)
-    return CredentialResult(state="verification_unavailable", access_key=access_key, error_code=code or None)
+        return _signed_credential_verdict(client.admin_info(signed=True), access_key, admin=True)
+    result = _signed_credential_verdict(resp, access_key)
+    if result.state == "verification_unavailable" and callable(getattr(client, "admin_info", None)):
+        # A reverse proxy may block signed S3 GET / while forwarding the MinIO
+        # Admin API. Only a shaped Admin response or MinIO S3 error decides the
+        # credential; generic 200/403/HTML remains inconclusive.
+        return _signed_credential_verdict(client.admin_info(signed=True), access_key, admin=True)
+    return result
 
 
 def _json_object(body: bytes) -> dict[str, Any] | None:
@@ -452,7 +458,7 @@ class MinioLifecycleState:
     otherwise untrusted TLS endpoint must never abort the scan.
     """
 
-    def __init__(self, args: Any, host: str, port: int, *, scheme: str | None = None) -> None:
+    def __init__(self, args: Any, host: str, port: int, *, scheme: str | None = None, base_path: str = "") -> None:
         self.host = str(host)
         self.port = int(port)
         if scheme not in {None, "http", "https"}:
@@ -464,6 +470,7 @@ class MinioLifecycleState:
         self.resolved_scheme: str | None = "https" if scheme == "https" else None
         self.resolved_host = self.host
         self.resolved_port = self.port
+        self.base_path = base_path
         self._https_probe_attempted = False
         self.pool = HttpSessionPool(
             timeout=float(getattr(args, "timeout", 5.0) or 5.0),
@@ -478,6 +485,7 @@ class MinioLifecycleState:
             scheme=scheme,
             host=self.resolved_host,
             port=self.resolved_port,
+            base_path=self.base_path,
         )
         return client.get_service_root(signed=False)
 
@@ -521,6 +529,10 @@ class MinioLifecycleState:
             self.resolved_scheme = self._remember_origin(selected) or guess
             return self.resolved_scheme
         final_scheme = self._remember_final_origin(resp)
+        if resp.redirect_history and resp.final_url and _has_s3_shape(resp):
+            # Only an S3-shaped final response can establish the mounted API
+            # path. A console/SSO redirect must not become the signed origin.
+            self.base_path = (urlsplit(resp.final_url).path or "/").rstrip("/")
         mismatch = bool(resp.transport_error and _transport_mismatch(guess, resp.transport_error))
         tls_required = guess == "http" and http_response_requires_https(resp.http_status, resp.body)
         if final_scheme in {"http", "https"} and final_scheme != guess:
@@ -546,6 +558,9 @@ class MinioLifecycleState:
                 self.resolved_scheme = scheme
                 self.resolved_host = self.host
                 self.resolved_port = port
+                # The alternate API listener is addressed directly, without
+                # the reverse-proxy mount used by the console URL.
+                self.base_path = ""
                 return replace(detection, console_endpoint=console_endpoint)
         return None
 
@@ -573,7 +588,13 @@ class MinioLifecycleState:
 def minio_lifecycle_state_factory(ctx: Any) -> MinioLifecycleState:
     target = getattr(ctx, "target", None)
     scheme = getattr(target, "scheme", None)
-    return MinioLifecycleState(ctx.args, ctx.host, ctx.port, scheme=scheme)
+    from ...clients.http_api import infer_http_base_path
+
+    base_path = infer_http_base_path(
+        str(getattr(target, "path", "") or ""),
+        ("/minio/health", "/minio/admin"),
+    )
+    return MinioLifecycleState(ctx.args, ctx.host, ctx.port, scheme=scheme, base_path=base_path)
 
 
 def _client_for(ctx: Any, credential: Any) -> MinioClient:
@@ -583,16 +604,19 @@ def _client_for(ctx: Any, credential: Any) -> MinioClient:
         pool = state.pool
         host = state.resolved_host
         port = state.resolved_port
+        base_path = state.base_path
     else:
         scheme = "https" if int(ctx.port) in _TLS_PORTS else "http"
         pool = HttpSessionPool(timeout=float(getattr(ctx.args, "timeout", 5.0) or 5.0), insecure=True)
         host = str(ctx.host)
         port = int(ctx.port)
+        base_path = ""
     return MinioClient(
         pool,
         scheme=scheme,
         host=host,
         port=port,
+        base_path=base_path,
         access_key=getattr(credential, "username", None),
         secret_key=getattr(credential, "password", None),
         session_token=getattr(ctx.args, "session_token", None),
@@ -637,7 +661,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
     }
     if detection.status == "transport_failure":
         # Surface the transport error so the runtime classifies this as a
-        # pre-detection operational failure (reported as "audit inconclusive")
+        # pre-detection operational failure (reported in the no-service summary)
         # rather than a conclusive "no service".
         record["operational_failure"] = True
         transport_error = detection.evidence.get("transport_error")

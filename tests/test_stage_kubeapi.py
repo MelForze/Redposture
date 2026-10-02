@@ -919,8 +919,8 @@ def test_format_detail_records_and_target_dispatch(monkeypatch: pytest.MonkeyPat
     lines = kube._format_detail_records(record, "txt")
     joined = "\n".join(lines)
     assert "[*] Namespaces" in joined
-    assert "[*] Pods (namespace:default)" in joined
-    assert "[*] Secrets (namespace:default)" in joined
+    assert "[*] Pods Enumeration (namespace:default)" in joined
+    assert "[*] Secrets Enumeration (namespace:default)" in joined
     assert "default/db-secret (type:Opaque) (keys:1)" in joined
     assert "[-] exec failed (exit:126) err=exit 126" in joined
     assert "[*] STDERR" in joined

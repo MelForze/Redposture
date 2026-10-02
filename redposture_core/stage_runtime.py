@@ -21,7 +21,12 @@ from .audit_models import StageTrace
 from .clients.tls_cache import tls_context_cache_stats
 from .cve import CveCatalog, ProductResolver, enumerate_record, load_catalog, render_finding_lines
 from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle
-from .rendering import normalize_report_line_for_storage, sanitize_report_line
+from .rendering import (
+    format_report_line_for_console,
+    normalize_report_line_for_storage,
+    sanitize_report_line,
+    suppress_redundant_auth_requirement,
+)
 from .scheduler import BoundedScheduler, SharedNestedScheduler
 from .show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from .targeting import (
@@ -422,6 +427,7 @@ def _build_colored_emit(console: Any, colorize: Callable[[Any, str], bool] | Non
     file output never reaches here (the sink writes files directly)."""
 
     def emit(line: str) -> None:
+        line = format_report_line_for_console(line)
         if colorize is not None and colorize(console, line):
             return
         console.plain(line)
@@ -710,7 +716,7 @@ class AuditCommandResult:
     record_retention_truncated: bool = False
     operational_failure_count: int = 0
     # True when run_plan already emitted a run-level outcome summary (an
-    # "audit inconclusive" / "No X service detected" fallback line, or its JSON
+    # no-service fallback line (with an incomplete-scan suffix when needed), or its JSON
     # summary). Callers use it to suppress a coarser, redundant fallback message.
     summary_emitted: bool = False
 
@@ -1551,7 +1557,7 @@ def is_pre_detect_operational_failure(record: AuditRecord | dict[str, Any]) -> b
     payload = record.to_dict() if isinstance(record, AuditRecord) else dict(record)
     if _record_looks_detected(payload):
         return False
-    if payload.get("operational_failure") is True:
+    if payload.get("operational_failure") is True or payload.get("detection_status") == "transport_failure":
         return True
     text = _record_noise_text(payload)
     return bool(text and any(marker in text for marker in _PRE_DETECT_OPERATIONAL_MARKERS))
@@ -1810,6 +1816,61 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
     )
 
 
+_HTTP_DETECTION_MODULES = frozenset(
+    {
+        "airflow",
+        "consul",
+        "docker",
+        "elastic",
+        "etcd",
+        "gitlab",
+        "grafana",
+        "kubeapi",
+        "minio",
+        "proxmox",
+        "qdrant",
+        "rabbitmq",
+        "registry",
+        "clickhouse",
+        "grpc",
+    }
+)
+
+
+def _with_http_detection_diagnostics(record: AuditRecord, *, confirmed: bool) -> AuditRecord:
+    """Attach a comparable detection verdict without changing legacy fields."""
+
+    module = str(record.module or record.service or "").lower()
+    if module not in _HTTP_DETECTION_MODULES:
+        return record
+    extra = dict(record.extra)
+    if confirmed:
+        status = "confirmed"
+    elif (
+        str(record.status or "").lower() == "probable" or str(extra.get("detection_status") or "").lower() == "probable"
+    ):
+        status = "probable"
+    elif is_pre_detect_operational_failure(record) or str(record.status or "").lower() == "connection_failed":
+        status = "transport_failure"
+    else:
+        status = "not_service"
+    signals = extra.get("detection_signals")
+    if not isinstance(signals, list):
+        signals = []
+    signals = [str(signal) for signal in signals if isinstance(signal, str) and signal]
+    if not signals:
+        signals = [f"{module}.probe"]
+    if confirmed and f"{module}.product_fingerprint" not in signals:
+        # This code denotes acceptance by the module's strict product parser;
+        # it does not assert that any particular optional header was present.
+        signals.append(f"{module}.product_fingerprint")
+    previous_status = extra.get("detection_status")
+    if isinstance(previous_status, str) and previous_status and previous_status != status:
+        extra.setdefault("detection_detail_status", previous_status)
+    extra.update({"detection_status": status, "detection_signals": signals})
+    return replace(record, extra=extra)
+
+
 class AuditCommandRunner:
     """Command-level runner for staged audit modules.
 
@@ -1885,6 +1946,7 @@ class AuditCommandRunner:
             lines = []
         if output_format != "txt":
             return lines
+        lines = suppress_redundant_auth_requirement(lines)
         cve_lines = render_finding_lines(record.to_dict(), label=self.spec.label, host=record.host, port=record.port)
         if cve_lines:
             return [*lines[:1], *cve_lines, *lines[1:]]
@@ -2120,7 +2182,14 @@ class AuditCommandRunner:
 
         def _finalize_record(record: AuditRecord) -> None:
             nonlocal operational_failure_count, record_count
+            record = _with_http_detection_diagnostics(record, confirmed=self._is_detected(record))
             record = self._with_cve_enumeration(record)
+            if debug_emit is not None and self.spec.module in _HTTP_DETECTION_MODULES:
+                debug_emit(
+                    f"detection: host={record.host} port={record.port} "
+                    f"status={record.extra.get('detection_status')} "
+                    f"signals={','.join(record.extra.get('detection_signals') or []) or '-'}"
+                )
             if debug_emit is not None and self._cve_catalog is not None:
                 cve_result = record.extra.get("cve_enumeration")
                 if isinstance(cve_result, dict):
@@ -2200,6 +2269,11 @@ class AuditCommandRunner:
         inconclusive = detected_count == 0 and operational_failure_count > 0
         partial = detected_count > 0 and operational_failure_count > 0
         conclusive_negative_count = max(0, record_count - operational_failure_count)
+        no_service_message = (
+            f"No {self.spec.label} service detected on {fallback_target_count} target(s)"
+            if fallback_target_count > 1
+            else f"No {self.spec.label} service detected on target"
+        )
         summary_emitted = False
         if (inconclusive or partial) and plan.output_format == "json":
             summary = {
@@ -2237,17 +2311,14 @@ class AuditCommandRunner:
             total = fallback_target_count
             target_word = "target" if total == 1 else "targets"
             fallback_lines = (
-                f"[!] {self.spec.label} audit inconclusive: no service confirmed; "
+                f"[!] {no_service_message}; "
                 f"{operational_failure_count}/{total} {target_word} unreachable or failed before detection",
             )
             emitted_lines += len(fallback_lines)
             summary_emitted = True
             sink.emit_many(fallback_lines)
         elif detected_count == 0 and emitted_lines == 0 and fallback_target_count > 0 and plan.output_format != "json":
-            if fallback_target_count > 1:
-                fallback_lines = (f"[*] No {self.spec.label} service detected on {fallback_target_count} target(s)",)
-            else:
-                fallback_lines = (f"[*] No {self.spec.label} service detected on target",)
+            fallback_lines = (f"[*] {no_service_message}",)
             emitted_lines += len(fallback_lines)
             summary_emitted = True
             sink.emit_many(fallback_lines)
@@ -3381,10 +3452,9 @@ def run_basic_host_audit(
         console.error(f"failed to process {name} output: {exc}")
         return 2
     if cfg.debug and result.detected_count == 0 and not result.summary_emitted and hasattr(console, "warn"):
-        # Only a last-resort note: when run_plan already emitted a run-level
-        # outcome summary ("audit inconclusive" for operational failures, or
-        # "No X service detected" for a conclusive negative), this coarser and
-        # potentially misleading "unreachable" line would just duplicate it.
+        # Only a last-resort note: when run_plan already emitted a no-service
+        # summary (with a failure count where needed), this coarser and
+        # potentially misleading "unreachable" line would duplicate it.
         console.warn(f"all {name} targets are unreachable")
     return command_result_exit_code(result)
 

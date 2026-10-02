@@ -71,6 +71,11 @@
     "detect_signals": [
       "security_exception_missing_auth"
     ],
+    "detection_signals": [
+      "elastic.probe",
+      "elastic.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "discover": false,
     "discover_error": null,
     "discover_error_detail": null,

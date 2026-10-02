@@ -75,17 +75,29 @@ def build_qdrant_spec(args: Any) -> ModuleAuditSpec:
     )
 
     def _detect(ctx: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/collections", "/service/info")):
+        with http_target_context(
+            ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
+            api_prefixes=("/collections", "/service/info"),
+        ):
             result = actions.detect_qdrant(ctx, options)
         return AuditRecord.from_mapping(result, module="qdrant", service="qdrant")
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/collections", "/service/info")):
+        with http_target_context(
+            ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
+            api_prefixes=("/collections", "/service/info"),
+        ):
             result = actions.authenticate_qdrant(ctx, record, options)
         return AuditRecord.from_mapping(result, module="qdrant", service="qdrant")
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
-        with http_target_context(ctx.target, api_prefixes=("/collections", "/service/info")):
+        with http_target_context(
+            ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
+            api_prefixes=("/collections", "/service/info"),
+        ):
             result = actions.collect_qdrant_data(ctx, record, options)
         return AuditRecord.from_mapping(result, module="qdrant", service="qdrant")
 

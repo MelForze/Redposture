@@ -323,86 +323,86 @@
     "nosql_command_result": null,
     "operation_results": [
       {
+        "collection": "audit_events",
+        "database": "redposture",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "ok": true,
+        "operation": "find_documents"
+      },
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "ok": true,
+        "operation": "list_indexes"
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "find_documents"
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "ok": true,
+        "operation": "list_indexes"
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "ok": true,
+        "operation": "find_documents"
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "ok": true,
+        "operation": "list_indexes"
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "ok": true,
+        "operation": "count_documents"
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "ok": true,
+        "operation": "find_documents"
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "ok": true,
+        "operation": "list_indexes"
+      },
+      {
         "database": "billing",
         "ok": true,
         "operation": "list_collections"
       },
       {
-        "collection": "invoices",
-        "database": "billing",
-        "ok": true,
-        "operation": "count_documents"
-      },
-      {
-        "collection": "invoices",
-        "database": "billing",
-        "ok": true,
-        "operation": "list_indexes"
-      },
-      {
-        "collection": "invoices",
-        "database": "billing",
-        "ok": true,
-        "operation": "find_documents"
-      },
-      {
         "database": "redposture",
         "ok": true,
         "operation": "list_collections"
-      },
-      {
-        "collection": "audit_events",
-        "database": "redposture",
-        "ok": true,
-        "operation": "count_documents"
-      },
-      {
-        "collection": "audit_events",
-        "database": "redposture",
-        "ok": true,
-        "operation": "list_indexes"
-      },
-      {
-        "collection": "audit_events",
-        "database": "redposture",
-        "ok": true,
-        "operation": "find_documents"
-      },
-      {
-        "collection": "demo_accounts",
-        "database": "redposture",
-        "ok": true,
-        "operation": "count_documents"
-      },
-      {
-        "collection": "demo_accounts",
-        "database": "redposture",
-        "ok": true,
-        "operation": "list_indexes"
-      },
-      {
-        "collection": "demo_accounts",
-        "database": "redposture",
-        "ok": true,
-        "operation": "find_documents"
-      },
-      {
-        "collection": "service_tokens",
-        "database": "redposture",
-        "ok": true,
-        "operation": "count_documents"
-      },
-      {
-        "collection": "service_tokens",
-        "database": "redposture",
-        "ok": true,
-        "operation": "list_indexes"
-      },
-      {
-        "collection": "service_tokens",
-        "database": "redposture",
-        "ok": true,
-        "operation": "find_documents"
       }
     ],
     "partial": false,

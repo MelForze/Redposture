@@ -197,6 +197,7 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
     def _detect(ctx: AuditHookContext) -> AuditRecord:
         with http_target_context(
             ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
             api_prefixes=("/_security", "/_plugins", "/_cluster", "/_cat", "/_nodes"),
         ):
             result = actions.detect_elastic(ctx, options)
@@ -205,6 +206,7 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
     def _auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         with http_target_context(
             ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
             api_prefixes=("/_security", "/_plugins", "/_cluster", "/_cat", "/_nodes"),
         ):
             result = actions.authenticate_elastic(ctx, record, options)
@@ -213,6 +215,7 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
     def _data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         with http_target_context(
             ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
             api_prefixes=("/_security", "/_plugins", "/_cluster", "/_cat", "/_nodes"),
         ):
             result = actions.collect_elastic_data(ctx, record, options)
@@ -221,6 +224,7 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
     def _capabilities(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         with http_target_context(
             ctx.target,
+            route_state=getattr(ctx, "lifecycle_state", None),
             api_prefixes=("/_security", "/_plugins", "/_cluster", "/_cat", "/_nodes"),
         ):
             result = actions.inspect_elastic_capabilities(ctx, record, options)

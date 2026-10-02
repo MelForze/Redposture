@@ -121,6 +121,7 @@ class DockerEngineClient:
         ca_file: str | None = None,
         cert_file: str | None = None,
         key_file: str | None = None,
+        base_path: str = "",
         http_connection_cls: type[http.client.HTTPConnection] | None = None,
         https_connection_cls: type[http.client.HTTPSConnection] | None = None,
     ) -> None:
@@ -132,6 +133,7 @@ class DockerEngineClient:
         self.ca_file = ca_file
         self.cert_file = cert_file
         self.key_file = key_file
+        self.base_path = "/" + str(base_path or "").strip("/") if str(base_path or "").strip("/") else ""
         self.http_connection_cls = http_connection_cls or http.client.HTTPConnection
         self.https_connection_cls = https_connection_cls or http.client.HTTPSConnection
         self._connection_origin = ("https" if self.transport == "tls" else "http", self.host, self.port)
@@ -186,11 +188,12 @@ class DockerEngineClient:
         response_size_cap: int = 10 * 1024 * 1024,
     ) -> DockerHTTPResponse:
         body: bytes | None = None
-        authority_host = self.host
+        scheme, current_host, current_port = self._connection_origin
+        authority_host = current_host
         if ":" in authority_host and not authority_host.startswith("["):
             authority_host = f"[{authority_host}]"
         req_headers = {
-            "Host": f"{authority_host}:{self.port}",
+            "Host": f"{authority_host}:{current_port}",
             "User-Agent": "redposture",
             "Accept": "application/json",
         }
@@ -239,13 +242,20 @@ class DockerEngineClient:
                 failure = DockerEngineConnectionError(normalize_docker_error(exc))
                 raise failure from exc
 
-        scheme = "https" if self.transport == "tls" else "http"
-        url = f"{scheme}://{authority_host}:{self.port}{path}"
+        endpoint = path if path.startswith("/") else "/" + path
+        if self.base_path and endpoint != self.base_path and not endpoint.startswith(self.base_path + "/"):
+            endpoint = self.base_path + endpoint
+        url = f"{scheme}://{authority_host}:{current_port}{endpoint}"
         result = follow_redirects(send, method, url, headers=req_headers, body=body)
         if failure is not None:
             raise failure
         if result.error:
             raise DockerEngineError(result.error)
+        if result.redirected and 200 <= result.status < 300 and result.final_url:
+            requested_path = urlsplit(path).path or "/"
+            final_path = urlsplit(result.final_url).path or "/"
+            if requested_path != "/" and final_path.endswith(requested_path):
+                self.base_path = final_path[: -len(requested_path)].rstrip("/")
         if result.status not in (allow_statuses or set(range(200, 300))):
             raise DockerEngineHTTPError(result.status, last_reason, result.body, result.headers)
         return DockerHTTPResponse(result.status, last_reason, result.headers, result.body)

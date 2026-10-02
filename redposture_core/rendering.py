@@ -101,6 +101,44 @@ def normalize_report_line_for_storage(line: str) -> str:
     return "\t".join(parts)
 
 
+def format_report_line_for_console(line: str) -> str:
+    """Align every module's console label without changing structural TSV tabs.
+
+    Use the same label width for marker and detail lines, regardless of legacy
+    renderer padding. Stored reports keep the unpadded label; structured output
+    and run-level messages remain unchanged.
+    """
+
+    parts = line.split("\t", 3)
+    if len(parts) < 4:
+        return line
+    parts[0] = f"{parts[0].rstrip(' '):<15}"
+    return "\t".join(parts)
+
+
+def suppress_redundant_auth_requirement(lines: Iterable[str]) -> list[str]:
+    """Keep auth failures, omitting a bare requirement already in a service row."""
+
+    materialized = list(lines)
+    confirmed_prefixes: set[tuple[str, ...]] = set()
+    for line in materialized:
+        parts = line.split("\t", 3)
+        if len(parts) == 4 and parts[3].lstrip().startswith("[*] "):
+            if re.search(r"\(auth required:(?:True|sso)\)", parts[3]):
+                confirmed_prefixes.add(tuple(part.rstrip(" ") for part in parts[:3]))
+    result: list[str] = []
+    for line in materialized:
+        parts = line.split("\t", 3)
+        if (
+            len(parts) == 4
+            and tuple(part.rstrip(" ") for part in parts[:3]) in confirmed_prefixes
+            and parts[3].strip() == "[-] authentication required"
+        ):
+            continue
+        result.append(line)
+    return result
+
+
 def format_count_value(value: object, *, state: str | None = None) -> str:
     """Render a text count without conflating unknown values with zero."""
 
@@ -307,6 +345,7 @@ def render_tagged_detail_line(
     default_color: str = "white",
     count_pattern_color: str = "white",
     strip_paren_wrappers: bool = True,
+    resource_counts: Iterable[str] = (),
 ) -> bool:
     """Render a standard TAG host port detail payload line without marker.
 
@@ -333,6 +372,28 @@ def render_tagged_detail_line(
     left, right = line.rsplit("\t", 1)
     rest = left[len(tag) :] if left.startswith(tag) else left
     resolved_spans = list(spans) if spans else _detect_count_pattern_spans(right, count_pattern_color)
+    count_spans = collect_count_spans(
+        right,
+        (CountColorRule(field, "red", unknown_color="orange", zero_color="bright_green") for field in resource_counts),
+    )
+    if count_spans:
+        resolved_spans = [
+            span
+            for span in resolved_spans
+            if not any(span[0] < count[1] and count[0] < span[1] for count in count_spans)
+        ]
+        if not strip_paren_wrappers:
+            framed_spans: list[tuple[int, int, str]] = []
+            for start, end, color in count_spans:
+                framed_spans.extend(
+                    (
+                        (start, start + 1, count_pattern_color),
+                        (start + 1, end - 1, color),
+                        (end - 1, end, count_pattern_color),
+                    )
+                )
+            count_spans = framed_spans
+        resolved_spans.extend(count_spans)
     right_colored = colorize_spans(
         console,
         right,

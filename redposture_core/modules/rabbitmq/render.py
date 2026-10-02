@@ -136,11 +136,13 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
     for attempt in record.get("attempted_credentials", []):
         user = attempt.get("username")
         state = attempt.get("credential_state", "unverified")
+        if state not in {"valid", "rejected"}:
+            continue
         if state == "valid" and user == record.get("credential_username") and not selected_skipped:
             selected_skipped = True
             continue
-        marker = "+" if state == "valid" else "-" if state == "rejected" else "!"
-        suffix = "" if state in {"valid", "rejected"} else f" ({_safe(state)})"
+        marker = "+" if state == "valid" else "-"
+        suffix = ""
         if state == "valid":
             suffix = f" (admin:{_admin_text(attempt.get('admin'))})"
         lines.append(f"{_prefix(record)} [{marker}] {_credential_label(user, attempt)}{suffix}")
@@ -148,7 +150,7 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
 
 
 def _section(prefix: str, title: str, count: int, status: str, truncated: bool, *, debug: bool) -> str:
-    line = f"{prefix} [*] Show {title} (Count:{count})"
+    line = f"{prefix} [*] {title} Enumeration (Count:{count})"
     if status != "ok" or debug:
         line += f" (status:{_safe(status)})"
     if truncated or debug:
@@ -262,6 +264,7 @@ def _render_colored_rabbitmq_line(console: Console, line: str) -> bool:
         default_color="orange",
         count_pattern_color="white",
         strip_paren_wrappers=False,
+        resource_counts=("messages", "consumers", "messages_ready", "messages_unacknowledged"),
     )
 
 

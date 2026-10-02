@@ -11,6 +11,11 @@
     "can_list_namespaces": true,
     "can_list_pods": true,
     "can_list_secrets": null,
+    "detection_signals": [
+      "kubeapi.probe",
+      "kubeapi.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "error": null,
     "exec_command": null,
     "exec_pod": null,

@@ -175,3 +175,32 @@ def test_console_wrong_port_error_uses_admin_verifier(admin_response: MinioRespo
 def test_unrelated_invalid_argument_remains_unverified() -> None:
     response = _resp(400, S3Error(400, "InvalidArgument", "unrelated"))
     assert actions.verify_credential(_StubClient(response)).state == "verification_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("admin_response", "expected"),
+    [
+        (_resp(200, body=b'{"servers":[]}'), "valid"),
+        (_resp(403, S3Error(403, "InvalidAccessKeyId", "")), "invalid"),
+        (_resp(403, S3Error(403, "AccessDenied", "")), "valid_but_restricted"),
+        (_resp(403, body=b"<html>proxy denied</html>"), "verification_unavailable"),
+    ],
+)
+def test_ambiguous_signed_s3_root_uses_independent_admin_verifier(admin_response: MinioResponse, expected: str) -> None:
+    class AmbiguousClient(_StubClient):
+        def admin_info(self, *, signed: bool) -> MinioResponse:
+            assert signed is True
+            return admin_response
+
+    result = actions.verify_credential(AmbiguousClient(_resp(404)))
+    assert result.state == expected
+
+
+@pytest.mark.parametrize("body", [b'{"version":"1.0"}', b'{"mode":"online"}', b'{"servers":"not-a-list"}'])
+def test_generic_admin_json_cannot_validate_minio_credentials(body: bytes) -> None:
+    class GenericAdminClient(_StubClient):
+        def admin_info(self, *, signed: bool) -> MinioResponse:
+            assert signed is True
+            return _resp(200, body=body)
+
+    assert actions.verify_credential(GenericAdminClient(_resp(404))).state == "verification_unavailable"

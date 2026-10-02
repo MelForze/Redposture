@@ -3047,7 +3047,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
                 return f"{prefix} [!] {_credentials_label(record)} (unsupported:SASL)"
             if record.get("provided_credentials_ok") is False or credential_verdict == "rejected":
                 return f"{prefix} [-] {_credentials_label(record)}"
-            return f"{prefix} [!] {_credentials_label(record)} (unverified)"
+            return ""
         return ""
 
     if status == "fail" and record.get("provided_credentials") and err.lower().startswith("authentication failed"):
@@ -3083,17 +3083,12 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             attempt.get("provided_credentials_ok") is False
             or str(attempt.get("credential_verdict") or "").strip().lower() == "rejected"
         )
-        credential_verdict = str(attempt.get("credential_verdict") or "").strip().lower()
         status = str(attempt.get("status") or "")
         accepted = verified or status in {"valid_credentials", "weak_default_creds"}
         if explicitly_rejected:
             lines.append(f"{prefix} [-] {username}:{password_text}")
             continue
         if not accepted:
-            if credential_verdict in {"verification_unavailable", "unverified", "unverified_anonymous"}:
-                continue
-            detail = "unsupported:SASL" if credential_verdict == "unsupported_sasl" else "unverified"
-            lines.append(f"{prefix} [!] {username}:{password_text} ({detail})")
             continue
         caps = "" if credential_caps_rendered else _credential_znode_caps_suffix(record, username=username)
         if caps:
@@ -3289,7 +3284,7 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str, *,
     prefix = _nxc_prefix(record)
     lines = []
     if show_znodes and znode_details:
-        lines.append(f"{prefix} [*] Show Znodes (Count:{shown_count})")
+        lines.append(f"{prefix} [*] Znodes Enumeration (Count:{shown_count})")
         if debug and unknown_note:
             lines.append(f"{prefix} [*] {unknown_note}")
         if debug and truncation_note:
@@ -3351,9 +3346,12 @@ def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
             console,
             line,
             tag=tag,
-            literals=(("(transport:plaintext)", "yellow"),),
+            literals=(("(transport:plaintext)", "yellow"), ("(transport:tls)", "bright_green")),
             booleans=(BooleanColorRule("create"), BooleanColorRule("delete")),
-            counts=(CountColorRule("znodes", "red"),),
+            counts=(
+                CountColorRule("znodes", "red", unknown_color="orange", zero_color="bright_green"),
+                CountColorRule("Count", "red", unknown_color="orange", zero_color="bright_green"),
+            ),
         ):
             return True
         if line.startswith(tag) and "\t" in line:

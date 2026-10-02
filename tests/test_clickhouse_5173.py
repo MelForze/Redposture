@@ -169,6 +169,30 @@ def test_http_client_receives_both_timeouts(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured["send_receive_timeout"] == 4.25
 
 
+def test_http_client_uses_public_reverse_proxy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    module = SimpleNamespace(get_client=lambda **kwargs: captured.update(kwargs) or _Client())
+    monkeypatch.setattr(actions, "_load_clickhouse_connect_module", lambda: module)
+    actions._open_clickhouse_client(
+        "http",
+        "127.0.0.1",
+        8123,
+        4.25,
+        "default",
+        "",
+        "default",
+        tls_config=actions._ChTlsConfig(proxy_path="/edge/clickhouse"),
+    )
+    assert captured["proxy_path"] == "/edge/clickhouse"
+
+
+def test_clickhouse_transport_derives_proxy_path_from_target_url() -> None:
+    ctx = SimpleNamespace(args=SimpleNamespace(), target=SimpleNamespace(path="/edge/clickhouse"))
+    tls, _proxy = actions._ch_transport_from_context(ctx)
+    assert tls is not None
+    assert tls.proxy_path == "/edge/clickhouse"
+
+
 def test_check_grant_unsupported_is_cached_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     queries: list[str] = []
 

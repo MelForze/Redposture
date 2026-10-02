@@ -30,6 +30,10 @@
       "s3_shape": true,
       "server_minio": true
     },
+    "detection_signals": [
+      "minio.probe",
+      "minio.product_fingerprint"
+    ],
     "detection_status": "confirmed",
     "host": "127.0.0.1",
     "identity_kind": "delegated_admin",

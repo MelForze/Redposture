@@ -24,12 +24,18 @@ class _Console:
 
 def test_detect_line_auth_required_and_version():
     line = render._format_detect_record(_record(version="2.9.3"), "txt")
-    assert line == f"{_PFX} [*] Airflow (auth required:True) (Dags allowed anonymously:unknown) (version:2.9.3)"
+    assert line == (
+        f"{_PFX} [*] Airflow (auth required:True) (Dags allowed:unknown) "
+        "(Keys allowed:unknown) (Connections allowed:unknown) (version:2.9.3)"
+    )
 
 
 def test_detect_line_does_not_infer_anonymous_role_when_open():
     line = render._format_detect_record(_record(auth_required=False, anonymous_role="admin", version="3.0.2"), "txt")
-    assert line == f"{_PFX} [*] Airflow (auth required:False) (Dags allowed anonymously:unknown) (version:3.0.2)"
+    assert line == (
+        f"{_PFX} [*] Airflow (auth required:False) (Dags allowed:unknown) "
+        "(Keys allowed:unknown) (Connections allowed:unknown) (version:3.0.2)"
+    )
 
 
 def test_detect_line_no_anon_when_auth_required():
@@ -42,8 +48,8 @@ def test_detect_line_sso_keeps_boolean_in_record_but_renders_method():
         _record(auth_required=True, auth_method="sso", sso_provider="keycloak", version="2.11.1"), "txt"
     )
     assert line == (
-        f"{_PFX} [*] Airflow (auth required:sso) (Dags allowed anonymously:unknown) "
-        "(provider:keycloak) (version:2.11.1)"
+        f"{_PFX} [*] Airflow (auth required:sso) (Dags allowed:unknown) "
+        "(Keys allowed:unknown) (Connections allowed:unknown) (provider:keycloak) (version:2.11.1)"
     )
 
 
@@ -121,11 +127,18 @@ def test_detect_coloring_auth_and_anon():
 
 
 def test_detect_line_and_color_expose_anonymous_dag_access():
-    line = render._format_detect_record(_record(dags_allowed=True), "txt")
-    assert "(Dags allowed anonymously:True)" in line
+    line = render._format_detect_record(_record(dags_allowed=True, keys_allowed=False, connections_allowed=True), "txt")
+    assert "(Dags allowed:True) (Keys allowed:False) (Connections allowed:True)" in line
     console = _Console()
     render._render_colored_airflow_line(console, line)
-    assert "<true_red>Dags allowed anonymously:True</true_red>" in console.lines[0]
+    assert "<true_red>Dags allowed:True</true_red>" in console.lines[0]
+    assert "<bright_green>Keys allowed:False</bright_green>" in console.lines[0]
+    assert "<true_red>Connections allowed:True</true_red>" in console.lines[0]
+
+
+def test_show_keys_denial_is_silent_when_authentication_is_required():
+    record = _record(show_keys_requested=True, variable_keys_error="http_403")
+    assert render._format_show_keys_records(record, "txt") == []
 
 
 def test_authenticated_credential_line_reports_counts_and_access_once():

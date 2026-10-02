@@ -535,7 +535,7 @@ def test_audit_zookeeper_suppresses_unexpected_eof_when_suppression_enabled(monk
 
     assert (total, open_no_auth, valid, auth_required, failed) == (1, 0, 0, 0, 1)
     assert len(lines) == 1
-    assert "ZOOKEEPER audit inconclusive" in lines[0]
+    assert "[!] No ZOOKEEPER service detected" in lines[0]
     assert all("Connection refused" not in line for line in lines)
 
 
@@ -1978,7 +1978,7 @@ def test_format_znodes_detail_records_cover_text_and_json_paths() -> None:
     }
 
     txt_lines = _format_znodes_detail_records(record, "txt")
-    assert any("[*] Show Znodes" in line for line in txt_lines)
+    assert any("[*] Znodes Enumeration" in line for line in txt_lines)
     assert any("[*] Znode /brokers" in line for line in txt_lines)
     assert any("[*] Dump Znode /brokers" in line for line in txt_lines)
     assert any("[-] Access Denied" in line for line in txt_lines)
@@ -2052,7 +2052,7 @@ def test_format_znodes_detail_records_shows_truncation_note() -> None:
         ],
     }
     txt_lines = _format_znodes_detail_records(record, "txt")
-    assert any("Show Znodes (Count:2)" in line for line in txt_lines)
+    assert any("Znodes Enumeration (Count:2)" in line for line in txt_lines)
     assert not any("showing first" in line for line in txt_lines)
     debug_lines = _format_znodes_detail_records(record, "txt", debug=True)
     assert any("showing first 2 of 3000 znodes (max_znodes=2000)" in line for line in debug_lines)
@@ -5884,7 +5884,7 @@ def test_zookeeper_credential_attempt_renderer_distinguishes_rejected_and_unveri
     rendered = lifecycle_actions._format_credential_attempts_records(record, "txt")
 
     assert any("[-] bad:secret" in line for line in rendered)
-    assert any("[!] sasl:secret (unsupported:SASL)" in line for line in rendered)
+    assert not any("sasl:secret" in line for line in rendered)
     assert not any("network:secret" in line for line in rendered)
 
 

@@ -15,7 +15,7 @@ from typing import Any
 
 from ..network_proxy import ProxyConfig, open_connection_via_proxy
 from . import transport
-from .http_api import HttpResponse, normalize_http_error
+from .http_api import HttpResponse, normalize_http_error, pin_http_redirect_path
 from .http_redirects import RequestPreparer, follow_redirects
 from .tls_cache import shared_client_ssl_context
 
@@ -330,7 +330,7 @@ class HttpSessionPool:
                 time.sleep(min(1.5, 0.2 * (2**attempt)))
             raise AssertionError("unreachable")
 
-        return follow_redirects(
+        response = follow_redirects(
             send,
             method,
             url,
@@ -340,6 +340,8 @@ class HttpSessionPool:
             preserve_authorization=preserve_authorization_on_cross_origin,
             prepare_request=prepare_request,
         )
+        pin_http_redirect_path(response, method=method)
+        return response
 
     def stats(self) -> dict[str, int]:
         with self._lock:

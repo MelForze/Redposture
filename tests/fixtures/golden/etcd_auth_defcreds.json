@@ -111,6 +111,11 @@
       }
     ],
     "defcreds_enabled": true,
+    "detection_signals": [
+      "etcd.probe",
+      "etcd.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
     "dump_keys": false,
     "effective_password": "rootpass",
     "effective_username": "root",

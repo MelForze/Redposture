@@ -16,7 +16,7 @@ import urllib.parse
 from collections.abc import Mapping
 from types import TracebackType
 
-from ...clients.http_api import HttpResponse, join_http_target_path, normalize_http_error
+from ...clients.http_api import HttpResponse, join_http_target_path, normalize_http_error, pin_http_redirect_path
 from ...clients.http_redirects import follow_redirects, http_origin
 from ...clients.tls_cache import shared_client_ssl_context
 
@@ -303,7 +303,9 @@ class ElasticHttpSession:
             return result
 
         url = f"{normalized_scheme}://{self._authority(normalized_scheme)}{normalized_path}"
-        return follow_redirects(send, normalized_method, url, headers=normalized_headers, body=body)
+        response = follow_redirects(send, normalized_method, url, headers=normalized_headers, body=body)
+        pin_http_redirect_path(response, method=normalized_method)
+        return response
 
     def close(self) -> None:
         """Permanently close the session and its active connection."""

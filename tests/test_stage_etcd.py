@@ -214,7 +214,7 @@ def test_format_record_for_main_statuses() -> None:
     assert anonymous_json["key_count"] == 3
 
     line_auth = _format_record({**base, "status": "auth_required"}, "txt")
-    assert "[-] authentication required" in line_auth
+    assert line_auth == ""
 
     line_unknown = _format_record({**base, "status": "unknown_auth", "error": "weird"}, "txt")
     assert "[!] auth status unknown" in line_unknown
@@ -255,7 +255,7 @@ def test_format_keys_detail_records_builds_text_sections() -> None:
         "key_count": 2,
     }
     lines = _format_keys_detail_records(record, "txt")
-    assert any("[*] Show Keys" in line for line in lines)
+    assert any("[*] Keys Enumeration" in line for line in lines)
     assert any("[*] Dump Key /a" in line for line in lines)
     assert any("[*] Dump Keys" in line for line in lines)
 
@@ -745,7 +745,7 @@ def test_audit_etcd_targets_emits_detect_status_and_key_lines(monkeypatch) -> No
     detect_line = next(line for line in lines if "[*] etcd Database" in line)
     assert "(auth required:False)" in detect_line
     assert not any("[+] anonymous access" in line for line in lines)
-    assert any("[*] Show Keys" in line for line in lines)
+    assert any("[*] Keys Enumeration" in line for line in lines)
     assert any("[*] Dump Keys" in line for line in lines)
 
 
