@@ -13,9 +13,60 @@ BLACKBOX_COMPAT_MODULES = {
     "dns",
 }
 
-SUPPORTED_SERVICES = {"postgres", "redis", "proxmox", "blackbox"}
+SUPPORTED_SERVICES = {
+    "postgres",
+    "redis",
+    "proxmox",
+    "blackbox",
+    "mysql",
+    "json",
+    "elasticsearch",
+    "snmp",
+    "ipmi",
+}
 
 SCAN_EXPORTERS = (
+    {
+        "name": "mysqld_exporter",
+        "port": 9104,
+        "detect_path": "/metrics",
+        "markers": ("mysqld_exporter_build_info", "# HELP mysql_up"),
+        "trigger_path": "/probe",
+        "target_fmt": "{our_host}:3306",
+    },
+    {
+        "name": "json_exporter",
+        "port": 7979,
+        "detect_path": "/",
+        "markers": ("Prometheus Exporter for converting json to metrics",),
+        "trigger_path": "/probe",
+        "trigger_query": "module=default",
+        "target_fmt": "http://{our_host}:7979/",
+    },
+    {
+        "name": "elasticsearch_exporter",
+        "port": 9114,
+        "detect_path": "/metrics",
+        "markers": ("elasticsearch_exporter_build_info",),
+        "trigger_path": "/probe",
+        "target_fmt": "http://{our_host}:9200/",
+    },
+    {
+        "name": "snmp_exporter",
+        "port": 9116,
+        "detect_path": "/metrics",
+        "markers": ("snmp_exporter_build_info",),
+        "trigger_path": "/snmp",
+        "target_fmt": "udp://{our_host}:161",
+    },
+    {
+        "name": "ipmi_exporter",
+        "port": 9290,
+        "detect_path": "/metrics",
+        "markers": ("ipmi_exporter_build_info",),
+        "trigger_path": "/ipmi",
+        "target_fmt": "{our_host}:623",
+    },
     {
         "name": "redis_exporter",
         "port": 9121,

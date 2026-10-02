@@ -167,7 +167,7 @@ def configure_trigger_parser(
         metavar="names",
         help=(
             "Comma-separated exporter filter for trigger "
-            "(aliases: redis,postgres,blackbox,proxmox or full names like redis_exporter)."
+            "(aliases: redis,postgres,blackbox,proxmox,mysql,json,elasticsearch,snmp,ipmi)."
         ),
     )
     actions.add_argument(

@@ -42,8 +42,15 @@ redposture --version
   Full options: `redposture <module> -h`.
 
 Normal TXT shows confirmed services, credentials and findings. Unconfirmed services
-and pre-detection failures stay in debug/JSON; a fully negative scan prints one summary.
+and pre-detection failures stay in debug/JSON; a scan with no confirmed service prints
+one `No MODULE service detected` summary. If some targets could not be checked,
+the same line includes their count, uses `[!]`, and the command exits nonzero.
 Errors after service confirmation remain visible. SSO is shown as `auth required:sso`.
+The HTTP-facing audit modules require a product-specific API or protocol fingerprint:
+generic login/SSO pages, status codes and a lone `version` field do not start credential,
+discovery or CVE checks. JSON includes `detection_status` (`confirmed`, `probable`,
+`not_service`, `transport_failure`) and `detection_signals`; an older module-specific
+status, when present, is retained as `detection_detail_status`.
 
 Main workers default to 64 below 1000 expanded `host:port` tasks, otherwise 128;
 `-w` overrides this. The shared nested pool uses 32/64, capped by `-w`.
@@ -63,6 +70,14 @@ attempt; the canonical HTTP 400 `Client sent an HTTP request to an HTTPS server`
 switch GET/HEAD discovery to HTTPS. Later checks reuse the resolved origin; changing
 requests are not replayed to select a scheme. Automatic TLS detection can accept untrusted
 server certificates. mTLS still needs a client certificate; `--insecure` does not supply one.
+For an HTTP service behind a reverse proxy, supply its mounted URL (for example
+`https://host/airflow/api/v1/version`); known API suffixes are removed from the
+base path and later checks retain `/airflow`. Use the DNS name required by an nginx
+virtual host so Host and SNI select the intended site; an IP alone cannot identify it.
+A verified credential prints `[+]` and a definitive rejection prints `[-]`.
+Inconclusive per-pair checks never appear as rejected pairs in ordinary TXT.
+JSON preserves the aggregate verification state without disclosing attempted
+secrets.
 
 ## Default credentials checked by `--defcreds`
 
@@ -101,6 +116,8 @@ redposture airflow -t targets.txt --enum-cve
 redposture airflow -t targets.txt --defcreds
 redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --show-keys --show-connections --discover
 ```
+
+In the first Airflow line, `Dags/Keys/Connections allowed` describe anonymous read access; the credential line reports access after login. With `--enum-cve --show-keys --show-connections --discover`, live TXT follows service → credentials → CVE → keys → connections → discovery.
 
 ### ClickHouse
 
@@ -256,6 +273,11 @@ redposture redis -t redis.example -u auditor -p 'password' --show-keys 20 --dump
 
 ### Registry
 
+`--harbor`, `--gitlab` and `--nexus` select the requested vendor, while
+`--docker` checks the generic Registry v2 API. An unrelated Registry is not
+reported under a vendor selector. Inventory sections use `Enumeration`
+headings; sections skipped because authentication is required are omitted.
+
 ```bash
 redposture registry -t https://registry.example --enum-cve
 redposture registry -t https://registry.example -u auditor -p 'password' --docker --images
@@ -277,6 +299,13 @@ redposture exporters scan -t targets.txt
 redposture exporters collect -t targets.txt --deep
 redposture exporters trigger -t targets.txt --callback-dns callback.example --with-listen
 ```
+
+Trigger supports Redis, Postgres, Blackbox, Proxmox, MySQL, JSON, Elasticsearch,
+SNMP and IPMI exporters. Select a type with `-e mysql`, `-e json`, `-e elasticsearch`,
+`-e snmp` or `-e ipmi`; `--with-listen` starts the matching callback listener.
+SNMP and IPMI callbacks use UDP. An accepted exporter request alone is inconclusive;
+the listener must observe the outbound request. Percona MongoDB exporter is excluded:
+its `/scrape?target=` only selects hosts already configured in `--mongodb.uri`.
 
 ## Offline CVE enumeration
 
@@ -338,6 +367,8 @@ pytest
 CI locks are in `requirements/`; update with `scripts/update_ci_locks.sh`.
 Heavy QA stays local: `./scripts/run_qa_handoff.sh full` or `versions` on a checkout
 with the local lab. Run them sequentially and use fresh artifact directories.
+Focused HTTP detection QA: `./scripts/run_http_detection_qa.sh` writes a report under
+`.redposture/qa/` and uses the real Docker service matrix when Docker is available.
 `lab/`, `lab_tests/`, `qa_tests/` and `.redposture/` are excluded from Git.
 
 ## License

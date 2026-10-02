@@ -7,6 +7,10 @@ cd "${ROOT_DIR}" || exit 1
 export DOCKER_CONTEXT="${DOCKER_CONTEXT:-default}"
 
 OUT_DIR="${1:-/tmp/redposture_lab_matrix_seq_$(date +%Y%m%d_%H%M%S)}"
+case "${OUT_DIR}" in
+  /*) ;;
+  *) OUT_DIR="${ROOT_DIR}/${OUT_DIR}" ;;
+esac
 STATUS_FILE="${OUT_DIR}/matrix-status.tsv"
 VERIFY_SCRIPT="${ROOT_DIR}/scripts/verify_postrun.py"
 MATRIX_PROFILE="${REDPOSTURE_MATRIX_PROFILE:-balanced}"
@@ -30,6 +34,10 @@ elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
 else
   PYTHON_BIN="python3"
 fi
+case "${PYTHON_BIN}" in
+  /*) ;;
+  */*) PYTHON_BIN="${ROOT_DIR}/${PYTHON_BIN}" ;;
+esac
 
 EXPORTER_PORTS="7777,9100,9102,9104,9113,9114,9116,9117,9119,9121,9127,9128,9131,9150,9182,9187,9216,9221,9256,9290,9308,9342,9349,9399,9419,9427,9854,19101,19119,19854,29854,17777,19100,19102,19104,19113,19114,19115,19117,19121,19128,19131,19150,19182,19187,19219,19221,19290,19308,19399,19419"
 
@@ -299,10 +307,15 @@ run_case() {
 
   local json_path="${OUT_DIR}/json/${label}.json"
   local log_path="${OUT_DIR}/logs/${label}.log"
+  local output_args=(--format json --output "${json_path}")
+  if [ "${REDPOSTURE_REVIEW_CAPTURE_TXT:-0}" = "1" ]; then
+    json_path="${OUT_DIR}/logs/${label}.txt"
+    output_args=(--no-color --output "${json_path}")
+  fi
   echo "== ${label} =="
-  printf '%q ' "${PYTHON_BIN}" "${ROOT_DIR}/redposture.py" "$@" --format json --output "${json_path}" > "${OUT_DIR}/logs/${label}.command.txt"
+  printf '%q ' "${PYTHON_BIN}" "${ROOT_DIR}/redposture.py" "$@" "${output_args[@]}" > "${OUT_DIR}/logs/${label}.command.txt"
   set +e
-  "${PYTHON_BIN}" "${ROOT_DIR}/redposture.py" "$@" --format json --output "${json_path}" >"${log_path}" 2>&1
+  "${PYTHON_BIN}" "${ROOT_DIR}/redposture.py" "$@" "${output_args[@]}" >"${log_path}" 2>&1
   local rc=$?
   set -e
 
@@ -479,7 +492,8 @@ run_exporters_cases() {
   run_case exporters exporters_scan 0 exporters scan -t 127.0.0.1 -p "${EXPORTER_PORTS}"
   run_case exporters exporters_collect 0 exporters collect -t 127.0.0.1 -p "${EXPORTER_PORTS}" --deep --save-responses-dir "${OUT_DIR}/collect_raw"
   run_case exporters exporters_trigger 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121,19308" --with-listen --listen-seconds 8 \
-    --postgres-port 15432 --redis-port 16379 --proxmox-port 28006 --blackbox-port 29115
+    --postgres-port 15432 --redis-port 16379 --proxmox-port 28006 --blackbox-port 29115 \
+    --mysql-port 13306 --json-port 17979 --elasticsearch-port 19200 --snmp-port 1161 --ipmi-port 16230
   run_case exporters exporters_scan_url_http 0 exporters scan -t "http://127.0.0.1:19100/metrics?from=matrix"
   run_case exporters exporters_scan_url_https_transport_fail 1 exporters scan -t "https://127.0.0.1:19100/metrics"
   run_case exporters exporters_collect_url_http 0 exporters collect -t "http://127.0.0.1:19100/debug/vars" --exporters node --save-responses-dir "${OUT_DIR}/collect_raw_url"
@@ -1052,6 +1066,11 @@ run_service_block keeper run_keeper_cases
 run_service_block proxmox run_proxmox_cases
 if is_extended_matrix; then
   run_service_block proxy-isolated run_proxy_isolated_cases
+fi
+
+if [ "${REDPOSTURE_REVIEW_CAPTURE_TXT:-0}" = "1" ]; then
+  echo "review TXT capture passed: ${STATUS_FILE}"
+  exit 0
 fi
 
 "${PYTHON_BIN}" "${VERIFY_SCRIPT}" --status-file "${STATUS_FILE}" --out-dir "${OUT_DIR}" --profile "${MATRIX_PROFILE}"

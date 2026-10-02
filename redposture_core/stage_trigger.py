@@ -28,6 +28,11 @@ from .stage_runtime import LineOutputSink, start_command_progress
 from .utils import collect_scan_ports, collect_scan_target_specs, normalize_ip_literal, normalize_scan_host, utc_now_iso
 
 _TRIGGER_EXPORTER_DISPLAY_NAMES = {
+    "mysqld_exporter": "MySQL Exporter",
+    "json_exporter": "JSON Exporter",
+    "elasticsearch_exporter": "Elasticsearch Exporter",
+    "snmp_exporter": "SNMP Exporter",
+    "ipmi_exporter": "IPMI Exporter",
     "blackbox_exporter": "Blackbox Exporter",
     "postgres_exporter": "Postgres Exporter",
     "redis_exporter": "Redis Exporter",
@@ -35,6 +40,11 @@ _TRIGGER_EXPORTER_DISPLAY_NAMES = {
 }
 
 _EXPORTER_TO_LISTENER_SERVICE = {
+    "mysqld_exporter": "mysql",
+    "json_exporter": "json",
+    "elasticsearch_exporter": "elasticsearch",
+    "snmp_exporter": "snmp",
+    "ipmi_exporter": "ipmi",
     "blackbox_exporter": "blackbox",
     "postgres_exporter": "postgres",
     "redis_exporter": "redis",
@@ -42,6 +52,18 @@ _EXPORTER_TO_LISTENER_SERVICE = {
 }
 
 _TRIGGER_EXPORTER_ALIASES = {
+    "mysql": "mysqld_exporter",
+    "mysqld": "mysqld_exporter",
+    "mysqld_exporter": "mysqld_exporter",
+    "json": "json_exporter",
+    "json_exporter": "json_exporter",
+    "elastic": "elasticsearch_exporter",
+    "elasticsearch": "elasticsearch_exporter",
+    "elasticsearch_exporter": "elasticsearch_exporter",
+    "snmp": "snmp_exporter",
+    "snmp_exporter": "snmp_exporter",
+    "ipmi": "ipmi_exporter",
+    "ipmi_exporter": "ipmi_exporter",
     "blackbox": "blackbox_exporter",
     "blackbox_exporter": "blackbox_exporter",
     "postgres": "postgres_exporter",
@@ -279,6 +301,15 @@ def _with_listen_target_fmt(exporter: dict[str, Any], args: argparse.Namespace) 
         if trigger_path == "/pve":
             return f"{{our_host}}:{proxmox_port}"
         return f"https://{{our_host}}:{proxmox_port}/api2/json/access/ticket"
+    for profile_name, service_name, default_port, scheme, suffix in (
+        ("mysqld_exporter", "mysql", 13306, "", ""),
+        ("json_exporter", "json", 17979, "http://", "/"),
+        ("elasticsearch_exporter", "elasticsearch", 19200, "http://", "/"),
+        ("snmp_exporter", "snmp", 1161, "udp://", ""),
+        ("ipmi_exporter", "ipmi", 16230, "", ""),
+    ):
+        if exporter_name == profile_name:
+            return f"{scheme}{{our_host}}:{int(getattr(args, f'{service_name}_port', default_port))}{suffix}"
     return None
 
 
@@ -314,7 +345,7 @@ def _parse_trigger_exporter_filter(raw: str | None) -> set[str]:
         raise ValueError(
             "unsupported trigger exporters: "
             + ", ".join(sorted(unknown))
-            + " (supported: blackbox,postgres,proxmox,redis)"
+            + " (supported: blackbox,elasticsearch,ipmi,json,mysql,postgres,proxmox,redis,snmp)"
         )
     return selected
 
@@ -980,8 +1011,10 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             return 2
         trigger_exporters = _expand_trigger_exporters_postgres_auth_modules(trigger_exporters, postgres_auth_modules)
         console.debug("postgres auth_module probes=" + ",".join(postgres_auth_modules))
+    if getattr(args, "with_listen", False):
+        enabled_exporters = {str(item.get("name") or "") for item in trigger_exporters}
+        _auto_adjust_listener_services_for_trigger_exporters(args, enabled_exporters, console)
     if selected_trigger_exporters:
-        _auto_adjust_listener_services_for_trigger_exporters(args, selected_trigger_exporters, console)
         console.debug(
             "trigger exporters filter=" + ",".join(sorted(str(item.get("name") or "") for item in trigger_exporters))
         )

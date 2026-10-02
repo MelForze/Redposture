@@ -179,7 +179,7 @@ def _add_listener_flags(parser: argparse.ArgumentParser | argparse._ArgumentGrou
         "--services",
         default="postgres,redis,proxmox,blackbox",
         metavar="services",
-        help="Comma-separated services: postgres,redis,proxmox,blackbox.",
+        help="Comma-separated listeners: postgres,redis,proxmox,blackbox,mysql,json,elasticsearch,snmp,ipmi.",
     )
     parser.add_argument("-b", "--bind", default="0.0.0.0", metavar="addr", help="Listen address for all services.")
     parser.add_argument(
@@ -220,6 +220,20 @@ def _add_listener_flags(parser: argparse.ArgumentParser | argparse._ArgumentGrou
         metavar="port",
         help="Blackbox listener port.",
     )
+    for service, default_port in (
+        ("mysql", 13306),
+        ("json", 17979),
+        ("elasticsearch", 19200),
+        ("snmp", 1161),
+        ("ipmi", 16230),
+    ):
+        parser.add_argument(
+            f"--{service}-port",
+            type=_port,
+            default=default_port,
+            metavar="port",
+            help=f"{service} callback listener port.",
+        )
     parser.add_argument("--cert-file", default=None, metavar="path", help="TLS cert path for postgres/proxmox HTTPS.")
     parser.add_argument("--key-file", default=None, metavar="path", help="TLS key path for postgres/proxmox HTTPS.")
 

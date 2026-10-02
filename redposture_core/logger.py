@@ -24,6 +24,11 @@ _COLORS = {
 }
 
 _SERVICE_TAGS = {
+    "mysql": "MYSQL",
+    "json": "JSON",
+    "elasticsearch": "ELASTICSEARCH",
+    "snmp": "SNMP",
+    "ipmi": "IPMI",
     "postgres": "Postgres",
     "redis": "REDIS",
     "etcd": "ETCD",
@@ -36,6 +41,11 @@ _SERVICE_TAGS = {
 }
 
 _CALLBACK_EXPORTER_NAMES = {
+    "mysql": "MySQL Exporter",
+    "json": "JSON Exporter",
+    "elasticsearch": "Elasticsearch Exporter",
+    "snmp": "SNMP Exporter",
+    "ipmi": "IPMI Exporter",
     "postgres": "Postgres Exporter",
     "redis": "Redis Exporter",
     "proxmox": "Proxmox Exporter",

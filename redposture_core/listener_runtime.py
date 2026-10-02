@@ -16,6 +16,8 @@ from .servers import (
     RunningServer,
     build_ssl_context,
     make_blackbox_handler,
+    make_callback_server,
+    make_exporter_http_callback_handler,
     make_http_server,
     make_postgres_server,
     make_proxmox_handler,
@@ -184,6 +186,38 @@ def _start_servers(
                 lambda: make_http_server(args.bind, args.blackbox_port, blackbox_handler, ssl_context=None),
                 tls=False,
             )
+        for service, port in (
+            ("mysql", getattr(args, "mysql_port", 13306)),
+            ("snmp", getattr(args, "snmp_port", 1161)),
+            ("ipmi", getattr(args, "ipmi_port", 16230)),
+        ):
+            if service in services:
+
+                def _callback_factory(service: str = service, port: int = port) -> Any:
+                    return make_callback_server(args.bind, port, service, logger)
+
+                _start_listener(
+                    service,
+                    port,
+                    _callback_factory,
+                    tls=False,
+                )
+        for service, port in (
+            ("json", getattr(args, "json_port", 17979)),
+            ("elasticsearch", getattr(args, "elasticsearch_port", 19200)),
+        ):
+            if service in services:
+                handler = make_exporter_http_callback_handler(logger, service)
+
+                def _http_callback_factory(port: int = port, handler: type[Any] = handler) -> Any:
+                    return make_http_server(args.bind, port, handler)
+
+                _start_listener(
+                    service,
+                    port,
+                    _http_callback_factory,
+                    tls=False,
+                )
     except BaseException:
         # Roll back the complete partially-started listener set for every
         # failure class, including SSL configuration errors and unexpected
@@ -194,8 +228,10 @@ def _start_servers(
     console.success("listeners started")
     for item in running:
         scheme = "https" if item.tls and item.name == "proxmox" else "tcp"
-        if item.name == "blackbox":
+        if item.name in {"blackbox", "json", "elasticsearch"}:
             scheme = "http"
+        if item.name in {"snmp", "ipmi"}:
+            scheme = "udp"
         if item.name == "proxmox" and not item.tls:
             scheme = "http"
         console.info(f"{item.name}: {scheme}://{item.bind}:{item.port}")

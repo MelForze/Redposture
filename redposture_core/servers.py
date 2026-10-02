@@ -86,6 +86,124 @@ class ThreadingTCPReuseServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+class ThreadingUDPReuseServer(socketserver.ThreadingUDPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+class MySQLCallbackHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        sock = self.request
+        assert isinstance(sock, socket.socket)
+        sock.settimeout(3)
+        salt = b"redposture-mysql-salt"
+        handshake = (
+            b"\x0a5.7.0-redposture\x00"
+            + (1).to_bytes(4, "little")
+            + salt[:8]
+            + b"\x00\xff\xf7\x21\x02\x00\xff\x81\x15"
+            + b"\x00" * 10
+            + salt[8:]
+            + b"\x00mysql_native_password\x00"
+        )
+        try:
+            sock.sendall(len(handshake).to_bytes(3, "little") + b"\x00" + handshake)
+            header = recv_exact(sock, 4)
+            packet_length = int.from_bytes(header[:3], "little")
+            if header[3] != 1 or not 32 <= packet_length <= 65536:
+                return
+            recv_exact(sock, min(packet_length, 64))
+            self.server.attempt_logger.log(  # type: ignore[attr-defined]
+                "mysql", self.client_address, protocol="mysql", listen_port=server_listen_port(self.server)
+            )
+        except (OSError, ConnectionError):
+            return
+
+
+class SNMPCallbackHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        packet, _sock = self.request
+        if len(packet) < 8 or packet[0] != 0x30:
+            return
+        length_byte = packet[1]
+        offset = 2
+        if length_byte & 0x80:
+            length_size = length_byte & 0x7F
+            if length_size < 1 or length_size > 2 or len(packet) < 2 + length_size:
+                return
+            offset += length_size
+        if len(packet) <= offset or packet[offset] != 0x02:
+            return
+        self.server.attempt_logger.log(  # type: ignore[attr-defined]
+            "snmp", self.client_address, protocol="snmp", listen_port=server_listen_port(self.server)
+        )
+
+
+class IPMICallbackHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        packet, _sock = self.request
+        if len(packet) < 4 or packet[:2] != b"\x06\x00" or packet[3] & 0x0F != 0x07:
+            return
+        self.server.attempt_logger.log(  # type: ignore[attr-defined]
+            "ipmi", self.client_address, protocol="rmcp", listen_port=server_listen_port(self.server)
+        )
+
+
+def make_callback_server(bind: str, port: int, service: str, logger: AttemptLogger) -> Any:
+    handlers: dict[str, type[socketserver.BaseRequestHandler]] = {
+        "mysql": MySQLCallbackHandler,
+        "snmp": SNMPCallbackHandler,
+        "ipmi": IPMICallbackHandler,
+    }
+    server_type = ThreadingUDPReuseServer if service in {"snmp", "ipmi"} else ThreadingTCPReuseServer
+    server: Any = server_type((bind, port), handlers[service])
+    server.attempt_logger = logger
+    return server
+
+
+def make_exporter_http_callback_handler(logger: AttemptLogger, service: str) -> type[BaseHTTPRequestHandler]:
+    class ExporterCallbackHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def _respond(self, method: str) -> None:
+            path = urlparse(self.path).path
+            if service == "elasticsearch":
+                if path not in {"/", "/_cluster/health", "/_nodes", "/_nodes/stats"}:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                payload: dict[str, Any] = (
+                    {"cluster_name": "redposture", "status": "green", "timed_out": False}
+                    if path == "/_cluster/health"
+                    else {"name": "redposture", "cluster_name": "redposture", "version": {"number": "8.0.0"}}
+                )
+            else:
+                payload = {"redposture": 1}
+            if method == "POST":
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                _read_bounded_body(self.rfile, length)
+            logger.log(
+                service, self.client_address, method=method, path=path, listen_port=server_listen_port(self.server)
+            )
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            self._respond("GET")
+
+        def do_POST(self) -> None:
+            self._respond("POST")
+
+    return ExporterCallbackHandler
+
+
 # C4 fix: hard cap on the number of bytes any listener will read from a request
 # body. Real probes send at most a few kilobytes; anything above this is either
 # a slow-client DoS or a probe smuggling in an oversized payload. Keeps the
