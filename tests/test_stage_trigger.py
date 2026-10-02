@@ -99,11 +99,14 @@ def test_trigger_small_helpers_cover_text_json_and_filters() -> None:
         "success": True,
         "probe_success": True,
         "status": "200",
+        "profile_parameter": "auth_module",
+        "profile_name": "basic",
     }
     rec = trigger._json_record_from_trigger_event(event)
     assert rec is not None
     assert rec["status"] == "trigger_success"
     assert rec["http_status"] == 200
+    assert rec["profile_name"] == "basic"
 
     assert trigger._parse_trigger_exporter_filter(None) == set()
     assert trigger._parse_trigger_exporter_filter("redis,postgres_exporter") == {

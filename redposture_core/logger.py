@@ -84,6 +84,9 @@ _PRIORITY_KEYS = (
     "username",
     "pass",
     "password",
+    "api_key",
+    "token",
+    "community",
     "error",
     "error_message",
 )
@@ -269,6 +272,9 @@ class AttemptLogger:
             listen_port,
             str(event.get("username") or ""),
             password_token,
+            str(event.get("api_key") or ""),
+            str(event.get("token") or ""),
+            str(event.get("community") or ""),
             str(event.get("method") or ""),
             str(event.get("path") or ""),
             str(event.get("command") or ""),
@@ -368,7 +374,12 @@ class AttemptLogger:
             return False
         username = event.get("username")
         password = event.get("password")
-        return username not in (None, "") and password not in (None, "")
+        return (
+            (username not in (None, "") and password not in (None, ""))
+            or event.get("api_key") not in (None, "")
+            or event.get("token") not in (None, "")
+            or event.get("community") not in (None, "")
+        )
 
     def _is_trigger_ssrf_event(self, event: dict[str, Any]) -> bool:
         return self._is_trigger_callback_event(event) and not self._is_trigger_cred_event(event)

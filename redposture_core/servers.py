@@ -120,6 +120,58 @@ class MySQLCallbackHandler(socketserver.BaseRequestHandler):
             return
 
 
+def _snmp_community_from_packet(packet: bytes) -> str | None:
+    """Return a cleartext v1/v2c community from a complete BER SNMP message."""
+
+    def read_length(offset: int) -> tuple[int, int] | None:
+        if offset >= len(packet):
+            return None
+        first = packet[offset]
+        offset += 1
+        if first < 0x80:
+            return first, offset
+        length_size = first & 0x7F
+        if not 1 <= length_size <= 2 or offset + length_size > len(packet):
+            return None
+        length = int.from_bytes(packet[offset : offset + length_size], "big")
+        return length, offset + length_size
+
+    if len(packet) < 8 or packet[0] != 0x30:
+        return None
+    outer = read_length(1)
+    if outer is None:
+        return None
+    outer_length, offset = outer
+    if outer_length != len(packet) - offset or packet[offset] != 0x02:
+        return None
+    version_length = read_length(offset + 1)
+    if version_length is None:
+        return None
+    length, offset = version_length
+    if length != 1 or offset + length + 2 > len(packet) or packet[offset] not in {0, 1}:
+        return None
+    offset += length
+    if packet[offset] != 0x04:
+        return None
+    community_length = read_length(offset + 1)
+    if community_length is None:
+        return None
+    length, offset = community_length
+    if not 1 <= length <= 256 or offset + length + 2 > len(packet):
+        return None
+    community = packet[offset : offset + length]
+    offset += length
+    if not 0xA0 <= packet[offset] <= 0xA8:
+        return None
+    pdu_length = read_length(offset + 1)
+    if pdu_length is None:
+        return None
+    length, offset = pdu_length
+    if offset + length != len(packet) or not all(0x20 <= char <= 0x7E for char in community):
+        return None
+    return community.decode("ascii")
+
+
 class SNMPCallbackHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         packet, _sock = self.request
@@ -134,8 +186,13 @@ class SNMPCallbackHandler(socketserver.BaseRequestHandler):
             offset += length_size
         if len(packet) <= offset or packet[offset] != 0x02:
             return
+        community = _snmp_community_from_packet(packet)
         self.server.attempt_logger.log(  # type: ignore[attr-defined]
-            "snmp", self.client_address, protocol="snmp", listen_port=server_listen_port(self.server)
+            "snmp",
+            self.client_address,
+            protocol="snmp",
+            community=community,
+            listen_port=server_listen_port(self.server),
         )
 
 
@@ -185,8 +242,14 @@ def make_exporter_http_callback_handler(logger: AttemptLogger, service: str) -> 
                 except ValueError:
                     length = 0
                 _read_bounded_body(self.rfile, length)
+            auth_fields = _exporter_http_auth_fields(self.headers.get("Authorization"), self.headers.get("X-API-Key"))
             logger.log(
-                service, self.client_address, method=method, path=path, listen_port=server_listen_port(self.server)
+                service,
+                self.client_address,
+                method=method,
+                path=path,
+                listen_port=server_listen_port(self.server),
+                **auth_fields,
             )
             body = json.dumps(payload).encode("utf-8")
             self.send_response(HTTPStatus.OK)
@@ -202,6 +265,26 @@ def make_exporter_http_callback_handler(logger: AttemptLogger, service: str) -> 
             self._respond("POST")
 
     return ExporterCallbackHandler
+
+
+def _exporter_http_auth_fields(authorization: str | None, x_api_key: str | None) -> dict[str, str]:
+    """Record only credentials actually delivered to our HTTP callback."""
+
+    if authorization:
+        scheme, _, value = authorization.strip().partition(" ")
+        value = value.strip()
+        if scheme.lower() == "basic":
+            username, password = parse_basic_auth(authorization)
+            if username and password:
+                return {"auth_scheme": "basic", "username": username, "password": password}
+        elif scheme.lower() in {"apikey", "bearer"} and value and len(value) <= 4096:
+            key = "api_key" if scheme.lower() == "apikey" else "token"
+            return {"auth_scheme": scheme.lower(), key: value}
+    if x_api_key:
+        value = x_api_key.strip()
+        if value and len(value) <= 4096:
+            return {"auth_scheme": "x-api-key", "api_key": value}
+    return {}
 
 
 # C4 fix: hard cap on the number of bytes any listener will read from a request

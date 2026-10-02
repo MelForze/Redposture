@@ -183,7 +183,8 @@ def test_scan_exporters_and_trigger_counts_progress_events_and_not_found() -> No
     progress_totals: list[int] = []
     exporters = [
         _exporter("redis_exporter", 19121, "redis_up"),
-        _exporter("postgres_exporter", 19187, "pg_up") | {"target_fmt": "postgresql://{our_host}:5432/postgres"},
+        _exporter("postgres_exporter", 19187, "pg_up")
+        | {"target_fmt": "postgresql://{our_host}:5432/postgres", "trigger_query": "auth_module=custom"},
     ]
 
     def fake_get(url: str, _timeout: float, _retries: int) -> tuple[int, str]:

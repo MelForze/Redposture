@@ -307,6 +307,17 @@ SNMP and IPMI callbacks use UDP. An accepted exporter request alone is inconclus
 the listener must observe the outbound request. Percona MongoDB exporter is excluded:
 its `/scrape?target=` only selects hosts already configured in `--mongodb.uri`.
 
+After detecting an exporter, trigger tries its default probe and a bounded list of
+common named profiles (`auth_module`, `module`, or SNMP `auth`) serially. It keeps
+testing after a callback because another profile may forward credentials. Guessed
+profiles are paced, not retried, and stop after repeated exporter failures. The
+`CRED!` marker requires credentials actually received by the callback; an HTTP
+callback can capture Basic, Bearer, API-key or `X-API-Key` authentication. Custom
+profile names can be provided through `--profiles-file`, or through
+`--postgres-auth-module` for Postgres.
+SNMPv1/v2c callbacks additionally show the community string; SNMPv3 and MySQL
+challenge-response do not expose a plaintext password to these listeners.
+
 ## Offline CVE enumeration
 
 `--enum-cve` matches a confirmed product and exact version against the bundled catalog.

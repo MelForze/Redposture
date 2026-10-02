@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from redposture_core.constants import SCAN_EXPORTERS
-from redposture_core.exporters.trigger import trigger_detected_exporter_task
+from redposture_core.exporters.trigger import trigger_detected_exporter_task, trigger_query_variants
 from redposture_core.logger import AttemptLogger
 from redposture_core.servers import (
     make_callback_server,
@@ -50,9 +50,9 @@ def test_new_trigger_profiles_use_documented_endpoint_and_callback_listener(
         return 200, "# no proof of callback\n"
 
     result = trigger_detected_exporter_task(None, "exporter.example", patched, ["127.0.0.1"], 1, 0, get_text)
-    assert result["attempted"] == 1
+    assert result["attempted"] == len(trigger_query_variants(patched))
     assert result["success"] == 0
-    assert result["unconfirmed"] == 1
+    assert result["unconfirmed"] == len(trigger_query_variants(patched))
     parsed = urlparse(seen[0])
     assert parsed.path == path
     assert parse_qs(parsed.query)["target"] == [target]

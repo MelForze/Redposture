@@ -120,6 +120,8 @@ def _json_record_from_trigger_event(event: dict[str, Any]) -> dict[str, Any] | N
         "callback_target": _as_text(event.get("callback_target")),
         "trigger_url": _as_text(event.get("trigger_url")),
         "target": _as_text(event.get("target")),
+        "profile_parameter": _as_text(event.get("profile_parameter")),
+        "profile_name": _as_text(event.get("profile_name")),
         "success": confirmed,
         "accepted": accepted,
         "confirmed": confirmed,
@@ -818,6 +820,7 @@ def _run_trigger_requests(
         progress_add_total=progress_add_total,
         scheme=scheme,
         tls_context=tls_context,
+        profile_delay=0.05,
     )
     attempted = int(summary.get("attempted", 0))
     accepted = int(summary.get("accepted", 0))

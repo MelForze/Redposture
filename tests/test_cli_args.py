@@ -362,7 +362,10 @@ def test_exporters_subcommands_help_has_grouped_sections() -> None:
 
     assert "\nCommon:\n" in scan_help and "\nActions:\n" in scan_help
     assert "\nCommon:\n" in collect_help and "\nActions:\n" in collect_help
-    assert "\nCommon:\n" in trigger_help and "\nActions:\n" in trigger_help and "\nListener:\n" in trigger_help
+    assert "\nCommon:\n" in trigger_help
+    assert "\nTrigger callbacks:\n" in trigger_help
+    assert "\nCallback listeners:\n" in trigger_help
+    assert "\nPostgres exporter:\n" in trigger_help
 
 
 def test_postgres_rows_and_dump_limit_flags_are_parsed() -> None:
@@ -893,6 +896,20 @@ def test_trigger_postgres_auth_module_flags_are_parsed() -> None:
         ]
     )
     assert args.postgres_auth_modules == ["lab,readonly", "prod"]
+
+
+def test_trigger_help_groups_common_and_exporter_specific_flags(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["exporters", "trigger", "--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert help_text.index("Trigger callbacks:") < help_text.index("Postgres exporter:")
+    assert help_text.index("Postgres exporter:") < help_text.index("Elasticsearch exporter:")
+    postgres_section = help_text.split("Postgres exporter:", 1)[1].split("Redis exporter:", 1)[0]
+    assert "--postgres-auth-module" in postgres_section
+    assert "--postgres-port" in postgres_section
+    assert "--postgres-tls" in postgres_section
+    assert help_text.count("--postgres-auth-module") == 2  # usage plus one section
 
 
 def test_trigger_output_flag_is_parsed() -> None:

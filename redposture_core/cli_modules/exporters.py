@@ -106,8 +106,8 @@ def configure_trigger_parser(
     add_listener_flags: Callable[..., None],
 ) -> None:
     common = parser.add_argument_group("Common")
-    actions = parser.add_argument_group("Actions")
-    listener = parser.add_argument_group("Listener")
+    actions = parser.add_argument_group("Trigger callbacks")
+    listener = parser.add_argument_group("Callback listeners")
 
     add_output_flags(common)
     add_log_flag(common)
@@ -170,27 +170,46 @@ def configure_trigger_parser(
             "(aliases: redis,postgres,blackbox,proxmox,mysql,json,elasticsearch,snmp,ipmi)."
         ),
     )
-    actions.add_argument(
+    add_listener_flags(listener)
+    checks = parser.add_argument_group("Credential checks (Redis/Postgres)")
+    checks.add_argument(
         "-check",
         "--check-credentials",
         action="store_true",
-        help=(
-            "With --with-listen, validate captured Redis/Postgres credentials against source exporter IPs "
-            "(Redis:6379, Postgres:5432)."
-        ),
+        help="Validate captured Redis/Postgres credentials against source exporter IPs.",
     )
-    actions.add_argument(
-        "--postgres-auth-module",
-        dest="postgres_auth_modules",
-        action="append",
-        default=None,
-        metavar="name",
-        help=(
-            "Postgres exporter auth_module value(s) for /probe (repeatable; comma-separated values supported). "
-            "Examples: stage,prod,test. When multiple are provided, trigger attempts are repeated per auth_module."
-        ),
+
+    # The listener flag builder is shared with `exporters listen`. Move actions
+    # between argparse help groups here without registering flags twice.
+    callback_groups = (
+        ("Postgres exporter", ("postgres_port", "postgres_tls")),
+        ("Redis exporter", ("redis_port",)),
+        ("Proxmox exporter", ("proxmox_port",)),
+        ("Blackbox exporter", ("blackbox_port",)),
+        ("MySQL exporter", ("mysql_port",)),
+        ("JSON exporter", ("json_port",)),
+        ("Elasticsearch exporter", ("elasticsearch_port",)),
+        ("SNMP exporter", ("snmp_port",)),
+        ("IPMI exporter", ("ipmi_port",)),
     )
-    add_listener_flags(listener)
+    for title, destinations in callback_groups:
+        group = parser.add_argument_group(title)
+        for destination in destinations:
+            action = next(item for item in listener._group_actions if item.dest == destination)
+            listener._group_actions.remove(action)
+            group._group_actions.append(action)
+        if title == "Postgres exporter":
+            group.add_argument(
+                "--postgres-auth-module",
+                dest="postgres_auth_modules",
+                action="append",
+                default=None,
+                metavar="name",
+                help=(
+                    "Postgres /probe auth_module value(s), repeatable or comma-separated. "
+                    "An explicit non-default name replaces automatic guesses."
+                ),
+            )
     parser.set_defaults(workers=50)
     for action in parser._actions:
         if getattr(action, "dest", None) == "workers":
