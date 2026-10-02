@@ -116,12 +116,12 @@ def test_trigger_small_helpers_cover_text_json_and_filters() -> None:
     with pytest.raises(ValueError):
         trigger._parse_trigger_exporter_filter("unknown")
 
-    assert trigger._parse_postgres_auth_modules(["a,b", "b", "c"]) == ["a", "b", "c"]
-    assert trigger._merge_trigger_query_auth_module("x=1&auth_module=old", "new") == "x=1&auth_module=new"
+    assert trigger._parse_explicit_profile_names(["a,b", "b", "c"]) == ["a", "b", "c"]
+    assert trigger._merge_trigger_query_profile("x=1&auth_module=old", "auth_module", "new") == "x=1&auth_module=new"
 
-    expanded = trigger._expand_trigger_exporters_postgres_auth_modules(
+    expanded = trigger._expand_trigger_exporter_profiles(
         [{"name": "postgres_exporter", "trigger_query": "x=1"}, {"name": "redis_exporter"}],
-        ["scram", "md5"],
+        {"postgres_exporter": ["scram", "md5"]},
     )
     assert len(expanded) == 3
     assert sum(1 for item in expanded if item["name"] == "postgres_exporter") == 2
@@ -146,9 +146,114 @@ def test_auto_adjust_listener_services_for_trigger_exporters() -> None:
     trigger._auto_adjust_listener_services_for_trigger_exporters(args, {"postgres_exporter"}, console)
     assert set(str(args.services).split(",")) == {"redis", "postgres"}
 
-    args_default = argparse.Namespace(with_listen=True, services="postgres,redis,proxmox,blackbox", debug=False)
+    args_default = argparse.Namespace(
+        with_listen=True,
+        services="postgres,redis,proxmox,blackbox,mysql,json,elasticsearch,snmp,ipmi",
+        debug=False,
+    )
     trigger._auto_adjust_listener_services_for_trigger_exporters(args_default, {"redis_exporter"}, console)
     assert args_default.services == "redis"
+
+    from redposture_core.cli_args import parse_args
+
+    explicit = parse_args(
+        [
+            "exporters",
+            "trigger",
+            "-t",
+            "127.0.0.1",
+            "-s",
+            "postgres,redis,proxmox,blackbox,mysql,json,elasticsearch,snmp,ipmi",
+        ]
+    )
+    trigger._auto_adjust_listener_services_for_trigger_exporters(explicit, {"redis_exporter"}, console)
+    assert set(explicit.services.split(",")) == {
+        "postgres",
+        "redis",
+        "proxmox",
+        "blackbox",
+        "mysql",
+        "json",
+        "elasticsearch",
+        "snmp",
+        "ipmi",
+    }
+
+
+@pytest.mark.parametrize(
+    ("exporter", "parameter"),
+    [
+        ("mysqld_exporter", "auth_module"),
+        ("elasticsearch_exporter", "auth_module"),
+        ("postgres_exporter", "auth_module"),
+        ("json_exporter", "module"),
+        ("blackbox_exporter", "module"),
+        ("proxmox_exporter", "module"),
+        ("snmp_exporter", "auth"),
+        ("ipmi_exporter", "module"),
+    ],
+)
+def test_explicit_profiles_apply_only_to_their_exporter(exporter: str, parameter: str) -> None:
+    from urllib.parse import parse_qs
+
+    profiles = [{"name": exporter, "trigger_query": "x=1"}, {"name": "redis_exporter"}]
+    expanded = trigger._expand_trigger_exporter_profiles(profiles, {exporter: ["site-prod", "backup"]})
+    assert len(expanded) == 3
+    assert expanded[-1] == {"name": "redis_exporter"}
+    assert [parse_qs(str(item["trigger_query"]))[parameter] for item in expanded[:2]] == [
+        ["site-prod"],
+        ["backup"],
+    ]
+    assert all(parse_qs(str(item["trigger_query"]))["x"] == ["1"] for item in expanded[:2])
+
+
+@pytest.mark.parametrize(
+    ("exporter", "destination", "parameter"),
+    [
+        ("mysqld_exporter", "mysql_auth_modules", "auth_module"),
+        ("elasticsearch_exporter", "elastic_auth_modules", "auth_module"),
+        ("postgres_exporter", "postgres_auth_modules", "auth_module"),
+        ("json_exporter", "json_modules", "module"),
+        ("blackbox_exporter", "blackbox_modules", "module"),
+        ("proxmox_exporter", "proxmox_modules", "module"),
+        ("snmp_exporter", "snmp_auth_modules", "auth"),
+        ("ipmi_exporter", "ipmi_modules", "module"),
+    ],
+)
+def test_trigger_stage_passes_explicit_profile_to_request_runner(
+    monkeypatch: pytest.MonkeyPatch, exporter: str, destination: str, parameter: str
+) -> None:
+    from urllib.parse import parse_qs
+
+    observed: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        trigger,
+        "collect_scan_target_specs",
+        lambda *_a, **_k: [argparse.Namespace(host="127.0.0.1", scheme=None, explicit_port=None)],
+    )
+    monkeypatch.setattr(
+        trigger,
+        "load_profiles",
+        lambda _path: {"trigger_exporters": [{"name": exporter, "port": 9114, "trigger_query": "x=1"}]},
+    )
+    monkeypatch.setattr(trigger, "start_command_progress", lambda *_a, **_k: None)
+
+    def fake_run(
+        _args: object,
+        _logger: object,
+        _console: object,
+        _hosts: object,
+        _targets: object,
+        exporters: list[dict[str, object]],
+        **_kwargs: object,
+    ) -> dict[str, int]:
+        observed.extend(exporters)
+        return {"attempted": 0, "triggered": 0}
+
+    monkeypatch.setattr(trigger, "_run_trigger_requests", fake_run)
+    assert run_trigger_stage(_base_args(**{destination: ["site,backup"]}), AttemptLogger()) == 0
+    assert [parse_qs(str(item["trigger_query"]))[parameter] for item in observed] == [["site"], ["backup"]]
+    assert all(item["explicit_profile"] is True for item in observed)
 
 
 def test_trigger_with_listen_starts_listeners_before_scan(monkeypatch: pytest.MonkeyPatch) -> None:

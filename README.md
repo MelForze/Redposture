@@ -303,6 +303,8 @@ redposture exporters trigger -t targets.txt --callback-dns callback.example
 Trigger supports Redis, Postgres, Blackbox, Proxmox, MySQL, JSON, Elasticsearch,
 SNMP and IPMI exporters. Select a type with `-e mysql`, `-e json`, `-e elasticsearch`,
 `-e snmp` or `-e ipmi`; matching callback listeners start automatically.
+All nine matching listener types are enabled by default; `-e` narrows the
+exporters and their listeners, while `-s` selects listeners explicitly.
 Exporter scan, collect and trigger skip HTTPS certificate and hostname verification
 by default; use `--no-insecure` to verify against system roots or `--tls-ca file`
 to verify against a supplied CA. In trigger, `--no-postgres-tls` disables the
@@ -317,8 +319,11 @@ testing after a callback because another profile may forward credentials. Guesse
 profiles are paced, not retried, and stop after repeated exporter failures. The
 `CRED!` marker requires credentials actually received by the callback; an HTTP
 callback can capture Basic, Bearer, API-key or `X-API-Key` authentication. Custom
-profile names can be provided through `--profiles-file`, or through
-`--postgres-auth-module` for Postgres.
+profile names can be provided through `--profiles-file` or each exporter's
+explicit profile flag (for example `--mysql-auth-module`, `--elastic-auth-module`,
+`--postgres-auth-module`, `--blackbox-module` or `--snmp-auth`). These flags use
+the exporter's own query parameter, rather than a shared `auth_mode`; Redis has
+no named probe profile. Use `-check` to verify captured Redis/Postgres credentials.
 SNMPv1/v2c callbacks additionally show the community string; SNMPv3 and MySQL
 challenge-response do not expose a plaintext password to these listeners.
 

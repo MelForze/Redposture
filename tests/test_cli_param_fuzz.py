@@ -492,7 +492,7 @@ _STAGE_CASES = (
     _stage_case("collect", "failed to parse --ports", "exporters", "collect", "-t", "127.0.0.1", "-p", "bad"),
     _stage_case(
         "trigger",
-        "--check-credentials requires listeners; omit --no-with-listen",
+        "-check requires listeners; omit --no-with-listen",
         "exporters",
         "trigger",
         "-t",
@@ -500,7 +500,7 @@ _STAGE_CASES = (
         "--callback-ip",
         "127.0.0.1",
         "--no-with-listen",
-        "--check-credentials",
+        "-check",
     ),
     _stage_case(
         "trigger",

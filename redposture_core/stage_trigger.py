@@ -74,7 +74,18 @@ _TRIGGER_EXPORTER_ALIASES = {
     "proxmox_exporter": "proxmox_exporter",
 }
 
-_DEFAULT_LISTENER_SERVICES_RAW = "postgres,redis,proxmox,blackbox"
+_DEFAULT_LISTENER_SERVICES_RAW = "postgres,redis,proxmox,blackbox,mysql,json,elasticsearch,snmp,ipmi"
+
+_EXPLICIT_PROFILE_OPTIONS = {
+    "mysqld_exporter": ("mysql_auth_modules", "auth_module", "--mysql-auth-module"),
+    "elasticsearch_exporter": ("elastic_auth_modules", "auth_module", "--elastic-auth-module"),
+    "postgres_exporter": ("postgres_auth_modules", "auth_module", "--postgres-auth-module"),
+    "json_exporter": ("json_modules", "module", "--json-module"),
+    "blackbox_exporter": ("blackbox_modules", "module", "--blackbox-module"),
+    "proxmox_exporter": ("proxmox_modules", "module", "--proxmox-module"),
+    "snmp_exporter": ("snmp_auth_modules", "auth", "--snmp-auth"),
+    "ipmi_exporter": ("ipmi_modules", "module", "--ipmi-module"),
+}
 
 
 def _clip_text(value: str, width: int) -> str:
@@ -352,7 +363,7 @@ def _parse_trigger_exporter_filter(raw: str | None) -> set[str]:
     return selected
 
 
-def _parse_postgres_auth_modules(raw_values: list[str] | None) -> list[str]:
+def _parse_explicit_profile_names(raw_values: list[str] | None) -> list[str]:
     if not raw_values:
         return []
     result: list[str] = []
@@ -369,29 +380,32 @@ def _parse_postgres_auth_modules(raw_values: list[str] | None) -> list[str]:
     return result
 
 
-def _merge_trigger_query_auth_module(raw_query: str | None, auth_module: str) -> str:
+def _merge_trigger_query_profile(raw_query: str | None, parameter: str, profile: str) -> str:
     pairs = [
-        (k, v) for k, v in parse_qsl(str(raw_query or "").lstrip("?"), keep_blank_values=True) if k != "auth_module"
+        (key, value)
+        for key, value in parse_qsl(str(raw_query or "").lstrip("?"), keep_blank_values=True)
+        if key != parameter
     ]
-    pairs.append(("auth_module", auth_module))
+    pairs.append((parameter, profile))
     return urlencode(pairs, doseq=True)
 
 
-def _expand_trigger_exporters_postgres_auth_modules(
+def _expand_trigger_exporter_profiles(
     trigger_exporters: list[dict[str, Any]],
-    auth_modules: list[str],
+    overrides: dict[str, list[str]],
 ) -> list[dict[str, Any]]:
-    if not auth_modules:
-        return list(trigger_exporters)
     expanded: list[dict[str, Any]] = []
     for exporter in trigger_exporters:
         name = str(exporter.get("name") or "").strip().lower()
-        if name != "postgres_exporter":
+        profiles = overrides.get(name)
+        if not profiles:
             expanded.append(dict(exporter))
             continue
-        for auth_module in auth_modules:
+        parameter = _EXPLICIT_PROFILE_OPTIONS[name][1]
+        for profile in profiles:
             item = dict(exporter)
-            item["trigger_query"] = _merge_trigger_query_auth_module(item.get("trigger_query"), auth_module)
+            item["trigger_query"] = _merge_trigger_query_profile(item.get("trigger_query"), parameter, profile)
+            item["explicit_profile"] = True
             expanded.append(item)
     return expanded
 
@@ -446,7 +460,9 @@ def _auto_adjust_listener_services_for_trigger_exporters(
     except ValueError:
         return
 
-    if str(getattr(args, "services", "")) == _DEFAULT_LISTENER_SERVICES_RAW:
+    if str(getattr(args, "services", "")) == _DEFAULT_LISTENER_SERVICES_RAW and not getattr(
+        args, "_services_option_provided", False
+    ):
         adjusted_services = required_services
     else:
         adjusted_services = current_services | required_services
@@ -919,7 +935,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.error("--listen-seconds must be > 0")
         return 2
     if getattr(args, "check_credentials", False) and not getattr(args, "with_listen", False):
-        console.error("--check-credentials requires listeners; omit --no-with-listen")
+        console.error("-check requires listeners; omit --no-with-listen")
         return 2
     if output_format == "json" and getattr(args, "with_listen", False) and stream_to_stdout:
         console.error("--format json with listeners enabled requires --output")
@@ -953,7 +969,11 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     except ValueError as exc:
         console.error(str(exc))
         return 2
-    postgres_auth_modules = _parse_postgres_auth_modules(getattr(args, "postgres_auth_modules", None))
+    explicit_profiles = {
+        exporter_name: profile_names
+        for exporter_name, (destination, _parameter, _flag) in _EXPLICIT_PROFILE_OPTIONS.items()
+        if (profile_names := _parse_explicit_profile_names(getattr(args, destination, None)))
+    }
 
     if not target_specs:
         if targets and getattr(args, "out_targets", None):
@@ -1008,12 +1028,14 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if selected_trigger_exporters and not trigger_exporters:
         console.error("no trigger exporters matched filter")
         return 2
-    if postgres_auth_modules:
-        if not any(str(item.get("name") or "").strip().lower() == "postgres_exporter" for item in trigger_exporters):
-            console.error("--postgres-auth-module requires postgres_exporter to be enabled in trigger exporters")
+    enabled_names = {str(item.get("name") or "").strip().lower() for item in trigger_exporters}
+    for exporter_name, profile_names in explicit_profiles.items():
+        _destination, parameter, flag = _EXPLICIT_PROFILE_OPTIONS[exporter_name]
+        if exporter_name not in enabled_names:
+            console.error(f"{flag} requires {exporter_name} to be enabled in trigger exporters")
             return 2
-        trigger_exporters = _expand_trigger_exporters_postgres_auth_modules(trigger_exporters, postgres_auth_modules)
-        console.debug("postgres auth_module probes=" + ",".join(postgres_auth_modules))
+        console.debug(f"{exporter_name} {parameter} probes=" + ",".join(profile_names))
+    trigger_exporters = _expand_trigger_exporter_profiles(trigger_exporters, explicit_profiles)
     if getattr(args, "with_listen", False):
         enabled_exporters = {str(item.get("name") or "") for item in trigger_exporters}
         _auto_adjust_listener_services_for_trigger_exporters(args, enabled_exporters, console)

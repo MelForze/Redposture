@@ -49,6 +49,12 @@ def test_explicit_custom_profile_is_not_overridden_by_guesses() -> None:
     assert trigger_query_variants({"name": "redis_exporter"}) == [""]
 
 
+def test_explicit_default_profile_does_not_start_guess_sweep() -> None:
+    assert trigger_query_variants(
+        {"name": "elasticsearch_exporter", "trigger_query": "auth_module=default", "explicit_profile": True}
+    ) == ["auth_module=default"]
+
+
 def test_trigger_continues_after_earlier_ssrf_or_unknown_profile() -> None:
     exporter = {
         "name": "elasticsearch_exporter",

@@ -188,6 +188,16 @@ def configure_trigger_parser(
         ("SNMP exporter", ("snmp_port",)),
         ("IPMI exporter", ("ipmi_port",)),
     )
+    profile_flags = {
+        "Postgres exporter": ("--postgres-auth-module", "postgres_auth_modules", "auth_module"),
+        "MySQL exporter": ("--mysql-auth-module", "mysql_auth_modules", "auth_module"),
+        "Elasticsearch exporter": ("--elastic-auth-module", "elastic_auth_modules", "auth_module"),
+        "JSON exporter": ("--json-module", "json_modules", "module"),
+        "Blackbox exporter": ("--blackbox-module", "blackbox_modules", "module"),
+        "Proxmox exporter": ("--proxmox-module", "proxmox_modules", "module"),
+        "SNMP exporter": ("--snmp-auth", "snmp_auth_modules", "auth"),
+        "IPMI exporter": ("--ipmi-module", "ipmi_modules", "module"),
+    }
     check_action: argparse.Action | None = None
     for title, destinations in callback_groups:
         group = parser.add_argument_group(title)
@@ -198,24 +208,23 @@ def configure_trigger_parser(
         if title == "Postgres exporter":
             check_action = group.add_argument(
                 "-check",
-                "--check-credentials",
                 action="store_true",
+                dest="check_credentials",
                 help="Validate captured Redis/Postgres credentials against source exporter IPs.",
-            )
-            group.add_argument(
-                "--postgres-auth-module",
-                dest="postgres_auth_modules",
-                action="append",
-                default=None,
-                metavar="name",
-                help=(
-                    "Postgres /probe auth_module value(s), repeatable or comma-separated. "
-                    "An explicit non-default name replaces automatic guesses."
-                ),
             )
         elif title == "Redis exporter":
             assert check_action is not None
             group._group_actions.append(check_action)
+        if title in profile_flags:
+            flag, destination, parameter = profile_flags[title]
+            group.add_argument(
+                flag,
+                dest=destination,
+                action="append",
+                default=None,
+                metavar="name",
+                help=f"Explicit {parameter} value(s), repeatable or comma-separated; replaces automatic guesses.",
+            )
     parser.set_defaults(workers=50)
     for action in parser._actions:
         if getattr(action, "dest", None) == "workers":

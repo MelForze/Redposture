@@ -888,7 +888,7 @@ def test_trigger_listener_defaults() -> None:
     assert args.with_listen is True
     assert args.callback_ip == "10.0.0.2"
     assert args.callback_dns is None
-    assert args.services == "postgres,redis,proxmox,blackbox"
+    assert args.services == "postgres,redis,proxmox,blackbox,mysql,json,elasticsearch,snmp,ipmi"
     assert args.bind == "0.0.0.0"
     assert args.postgres_port == 5432
     assert args.redis_port == 6379
@@ -936,13 +936,58 @@ def test_trigger_help_groups_common_and_exporter_specific_flags(capsys: pytest.C
     assert "  --postgres-tls" not in postgres_section
     assert help_text.count("--postgres-auth-module") == 2  # usage plus one section
     redis_section = help_text.split("Redis exporter:", 1)[1].split("Proxmox exporter:", 1)[0]
-    assert "-check, --check-credentials" in postgres_section
-    assert "-check, --check-credentials" in redis_section
+    assert "-check" in postgres_section
+    assert "-check" in redis_section
+    assert "--check-credentials" not in help_text
     assert "Credential checks (Redis/Postgres):" not in help_text
     assert "--elastic-port" in help_text
     assert "--elasticsearch-port" not in help_text
     assert "--no-with-listen" in help_text
     assert "  --with-listen" not in help_text
+
+
+@pytest.mark.parametrize(
+    ("flag", "destination"),
+    [
+        ("--mysql-auth-module", "mysql_auth_modules"),
+        ("--elastic-auth-module", "elastic_auth_modules"),
+        ("--json-module", "json_modules"),
+        ("--blackbox-module", "blackbox_modules"),
+        ("--proxmox-module", "proxmox_modules"),
+        ("--snmp-auth", "snmp_auth_modules"),
+        ("--ipmi-module", "ipmi_modules"),
+    ],
+)
+def test_trigger_accepts_explicit_exporter_profiles(flag: str, destination: str) -> None:
+    args = parse_args(["exporters", "trigger", "-t", "127.0.0.1", flag, "site-prod", flag, "backup"])
+    assert getattr(args, destination) == ["site-prod", "backup"]
+
+
+def test_trigger_check_has_only_short_spelling() -> None:
+    base = ["exporters", "trigger", "-t", "127.0.0.1"]
+    assert parse_args(base + ["-check"]).check_credentials is True
+    with pytest.raises(SystemExit) as exc:
+        parse_args(base + ["--check-credentials"])
+    assert exc.value.code == 2
+
+
+def test_trigger_profile_flags_are_grouped_with_their_exporters(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["exporters", "trigger", "--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    groups = (
+        ("Postgres exporter", "Redis exporter", "--postgres-auth-module"),
+        ("Proxmox exporter", "Blackbox exporter", "--proxmox-module"),
+        ("Blackbox exporter", "MySQL exporter", "--blackbox-module"),
+        ("MySQL exporter", "JSON exporter", "--mysql-auth-module"),
+        ("JSON exporter", "Elasticsearch exporter", "--json-module"),
+        ("Elasticsearch exporter", "SNMP exporter", "--elastic-auth-module"),
+        ("SNMP exporter", "IPMI exporter", "--snmp-auth"),
+    )
+    for first, second, flag in groups:
+        assert flag in help_text.split(f"{first}:", 1)[1].split(f"{second}:", 1)[0]
+    assert "--ipmi-module" in help_text.split("IPMI exporter:", 1)[1]
 
 
 def test_exporter_true_defaults_have_only_negative_override_flags() -> None:

@@ -90,7 +90,7 @@ def trigger_query_variants(exporter: dict[str, Any]) -> list[str]:
     selected = [value for key, value in pairs if key == parameter]
     # An explicitly configured, nonstandard name is intentional. Do not
     # replace it with guesses or multiply an explicit Postgres module list.
-    if selected and selected[-1] != "default":
+    if exporter.get("explicit_profile") or (selected and selected[-1] != "default"):
         return [base_query]
     variants = [base_query]
     for name in names:

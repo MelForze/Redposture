@@ -177,7 +177,7 @@ def _add_listener_flags(parser: argparse.ArgumentParser | argparse._ArgumentGrou
     parser.add_argument(
         "-s",
         "--services",
-        default="postgres,redis,proxmox,blackbox",
+        default="postgres,redis,proxmox,blackbox,mysql,json,elasticsearch,snmp,ipmi",
         metavar="services",
         help="Comma-separated listeners: postgres,redis,proxmox,blackbox,mysql,json,elasticsearch,snmp,ipmi.",
     )
@@ -561,6 +561,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     workers_option_was_provided = _option_provided(raw_argv, "-w", "--workers")
     retries_option_was_provided = _option_provided(raw_argv, "-r", "--retries")
     timeout_option_was_provided = _option_provided(raw_argv, "--timeout")
+    services_option_was_provided = _option_provided(raw_argv, "-s", "--services")
     raw_argv = _normalize_multi_port_port_flag(raw_argv)
     parser = build_parser()
 
@@ -603,4 +604,5 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parsed._workers_option_provided = workers_option_was_provided
     parsed._retries_option_provided = retries_option_was_provided
     parsed._timeout_option_provided = timeout_option_was_provided
+    parsed._services_option_provided = services_option_was_provided
     return parsed

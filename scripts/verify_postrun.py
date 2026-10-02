@@ -2424,7 +2424,7 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_exporters_collect_zero_max_inflight": ("value must be > 0",),
     "fuzz_exporters_trigger_missing_callback": ("trigger requires --callback-ip and/or --callback-dns",),
     "fuzz_exporters_trigger_bad_callback_ip": ("--callback-ip must be a valid IP address",),
-    "fuzz_exporters_trigger_check_without_listen": ("--check-credentials requires listeners; omit --no-with-listen",),
+    "fuzz_exporters_trigger_check_without_listen": ("-check requires listeners; omit --no-with-listen",),
     "fuzz_exporters_trigger_json_listen_without_output": ("--format json with listeners enabled requires --output",),
     "fuzz_exporters_trigger_negative_listen_seconds": ("--listen-seconds must be > 0",),
     **{f"fuzz_{module}_missing_targets": (f"{module} requires -t/--targets",) for module in _MISSING_TARGET_MODULES},
