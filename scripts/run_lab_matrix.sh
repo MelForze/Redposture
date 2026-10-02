@@ -184,7 +184,7 @@ fi
 
 run_case exporters exporters_scan 0 exporters scan -t 127.0.0.1 -p "${EXPORTER_PORTS}"
 run_case exporters exporters_collect 0 exporters collect -t 127.0.0.1 -p "${EXPORTER_PORTS}" --deep --save-responses-dir "${OUT_DIR}/collect_raw"
-run_case exporters exporters_trigger 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121,19308" --with-listen --listen-seconds 8 \
+run_case exporters exporters_trigger 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121,19308" --listen-seconds 8 \
   --postgres-port 15432 --redis-port 16379 --proxmox-port 28006 --blackbox-port 29115
 run_case exporters exporters_scan_url_http 0 exporters scan -t "http://127.0.0.1:19100/metrics?from=matrix"
 run_case exporters exporters_scan_url_https_transport_fail 1 exporters scan -t "https://127.0.0.1:19100/metrics"

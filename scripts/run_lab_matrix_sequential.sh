@@ -389,12 +389,12 @@ run_negative_cli_cases() {
   run_raw_case exporters fuzz_exporters_scan_missing_targets 2 exporters scan -p 9100 -ot excluded.invalid
   run_raw_case exporters fuzz_exporters_scan_invalid_ports 2 exporters scan -t 127.0.0.1 -p bad
   run_raw_case exporters fuzz_exporters_scan_zero_timeout 2 exporters scan -t 127.0.0.1 --timeout 0
-  run_raw_case exporters fuzz_exporters_collect_zero_max_inflight 2 exporters collect -t 127.0.0.1 -ot excluded.invalid --max-inflight 0 --tls-ca /tmp/redposture-missing-ca.pem --tls-cert /tmp/redposture-missing-cert.pem --tls-key /tmp/redposture-missing-key.pem --insecure
+  run_raw_case exporters fuzz_exporters_collect_zero_max_inflight 2 exporters collect -t 127.0.0.1 -ot excluded.invalid --max-inflight 0 --tls-ca /tmp/redposture-missing-ca.pem --tls-cert /tmp/redposture-missing-cert.pem --tls-key /tmp/redposture-missing-key.pem
   run_raw_case exporters fuzz_exporters_trigger_missing_callback 2 exporters trigger -t 127.0.0.1 -ot excluded.invalid --no-with-listen
   run_raw_case exporters fuzz_exporters_trigger_bad_callback_ip 2 exporters trigger -t 127.0.0.1 --callback-ip 999.999.999.999 --no-with-listen
   run_raw_case exporters fuzz_exporters_trigger_check_without_listen 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --no-with-listen --check-credentials
-  run_raw_case exporters fuzz_exporters_trigger_json_listen_without_output 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --with-listen --format json
-  run_raw_case exporters fuzz_exporters_trigger_negative_listen_seconds 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --with-listen --listen-seconds -1
+  run_raw_case exporters fuzz_exporters_trigger_json_listen_without_output 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --format json
+  run_raw_case exporters fuzz_exporters_trigger_negative_listen_seconds 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --listen-seconds -1
 
   run_raw_case registry fuzz_registry_missing_targets 2 registry -ot excluded.invalid --docker --images
   run_raw_case grafana fuzz_grafana_missing_targets 2 grafana -ot excluded.invalid --defcreds
@@ -491,9 +491,9 @@ run_negative_cli_cases() {
 run_exporters_cases() {
   run_case exporters exporters_scan 0 exporters scan -t 127.0.0.1 -p "${EXPORTER_PORTS}"
   run_case exporters exporters_collect 0 exporters collect -t 127.0.0.1 -p "${EXPORTER_PORTS}" --deep --save-responses-dir "${OUT_DIR}/collect_raw"
-  run_case exporters exporters_trigger 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121,19308" --with-listen --listen-seconds 8 \
+  run_case exporters exporters_trigger 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121,19308" --listen-seconds 8 \
     --postgres-port 15432 --redis-port 16379 --proxmox-port 28006 --blackbox-port 29115 \
-    --mysql-port 13306 --json-port 17979 --elasticsearch-port 19200 --snmp-port 1161 --ipmi-port 16230
+    --mysql-port 13306 --json-port 17979 --elastic-port 19200 --snmp-port 1161 --ipmi-port 16230
   run_case exporters exporters_scan_url_http 0 exporters scan -t "http://127.0.0.1:19100/metrics?from=matrix"
   run_case exporters exporters_scan_url_https_transport_fail 1 exporters scan -t "https://127.0.0.1:19100/metrics"
   run_case exporters exporters_collect_url_http 0 exporters collect -t "http://127.0.0.1:19100/debug/vars" --exporters node --save-responses-dir "${OUT_DIR}/collect_raw_url"

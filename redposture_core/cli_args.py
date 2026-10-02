@@ -190,10 +190,11 @@ def _add_listener_flags(parser: argparse.ArgumentParser | argparse._ArgumentGrou
         help="Postgres listener port.",
     )
     parser.add_argument(
-        "--postgres-tls",
-        action=argparse.BooleanOptionalAction,
+        "--no-postgres-tls",
+        dest="postgres_tls",
+        action="store_false",
         default=True,
-        help="Enable STARTTLS for postgres SSLRequest listener.",
+        help="Disable STARTTLS for the Postgres callback listener.",
     )
     parser.add_argument(
         "--redis-port",
@@ -228,7 +229,8 @@ def _add_listener_flags(parser: argparse.ArgumentParser | argparse._ArgumentGrou
         ("ipmi", 16230),
     ):
         parser.add_argument(
-            f"--{service}-port",
+            "--elastic-port" if service == "elasticsearch" else f"--{service}-port",
+            dest=f"{service}_port",
             type=_port,
             default=default_port,
             metavar="port",
@@ -580,7 +582,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         return args
 
     if raw_argv[0] == COMMAND_LISTEN:
-        parser.error("direct 'listen' mode removed; use 'exporters trigger --with-listen ...'")
+        parser.error("direct 'listen' mode removed; use 'exporters trigger ...'")
 
     if raw_argv[0] == COMMAND_SCAN:
         parser.error("direct 'scan' mode removed; use 'exporters scan ...'")

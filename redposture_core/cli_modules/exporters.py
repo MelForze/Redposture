@@ -27,7 +27,7 @@ def _add_exporter_tls_flags(group: Any) -> None:
         dest="tls_ca",
         default=None,
         metavar="file",
-        help="CA bundle used to verify HTTPS exporter targets.",
+        help="CA bundle used to verify HTTPS exporter targets (enables verification).",
     )
     group.add_argument(
         "--tls-cert",
@@ -44,9 +44,11 @@ def _add_exporter_tls_flags(group: Any) -> None:
         help="Client private key for mTLS exporter targets (requires --tls-cert).",
     )
     group.add_argument(
-        "--insecure",
-        action="store_true",
-        help="Disable HTTPS certificate and hostname verification.",
+        "--no-insecure",
+        dest="insecure",
+        action="store_false",
+        default=True,
+        help="Verify HTTPS certificate and hostname (disabled by default).",
     )
 
 
@@ -146,10 +148,11 @@ def configure_trigger_parser(
         help="Optional callback DNS name; trigger sends targets for both IP and DNS.",
     )
     actions.add_argument(
-        "--with-listen",
-        action=argparse.BooleanOptionalAction,
+        "--no-with-listen",
+        dest="with_listen",
+        action="store_false",
         default=True,
-        help="Start listeners first, then run trigger stage, then keep listeners running.",
+        help="Run trigger without starting callback listeners.",
     )
     actions.add_argument(
         "--listen-seconds",
@@ -157,7 +160,7 @@ def configure_trigger_parser(
         type=_positive_seconds,
         default=None,
         metavar="seconds",
-        help="With --with-listen, stop listeners automatically after N seconds.",
+        help="With listeners enabled, stop them automatically after N seconds.",
     )
     actions.add_argument(
         "-e",
@@ -171,13 +174,6 @@ def configure_trigger_parser(
         ),
     )
     add_listener_flags(listener)
-    checks = parser.add_argument_group("Credential checks (Redis/Postgres)")
-    checks.add_argument(
-        "-check",
-        "--check-credentials",
-        action="store_true",
-        help="Validate captured Redis/Postgres credentials against source exporter IPs.",
-    )
 
     # The listener flag builder is shared with `exporters listen`. Move actions
     # between argparse help groups here without registering flags twice.
@@ -192,6 +188,7 @@ def configure_trigger_parser(
         ("SNMP exporter", ("snmp_port",)),
         ("IPMI exporter", ("ipmi_port",)),
     )
+    check_action: argparse.Action | None = None
     for title, destinations in callback_groups:
         group = parser.add_argument_group(title)
         for destination in destinations:
@@ -199,6 +196,12 @@ def configure_trigger_parser(
             listener._group_actions.remove(action)
             group._group_actions.append(action)
         if title == "Postgres exporter":
+            check_action = group.add_argument(
+                "-check",
+                "--check-credentials",
+                action="store_true",
+                help="Validate captured Redis/Postgres credentials against source exporter IPs.",
+            )
             group.add_argument(
                 "--postgres-auth-module",
                 dest="postgres_auth_modules",
@@ -210,6 +213,9 @@ def configure_trigger_parser(
                     "An explicit non-default name replaces automatic guesses."
                 ),
             )
+        elif title == "Redis exporter":
+            assert check_action is not None
+            group._group_actions.append(check_action)
     parser.set_defaults(workers=50)
     for action in parser._actions:
         if getattr(action, "dest", None) == "workers":
@@ -301,11 +307,11 @@ def configure_collect_parser(
         help="Maximum in-flight collect HTTP requests (default: adaptive from worker count).",
     )
     actions.add_argument(
-        "--adaptive-collect",
+        "--no-adaptive-collect",
         dest="adaptive_collect",
-        action=argparse.BooleanOptionalAction,
+        action="store_false",
         default=True,
-        help="Enable adaptive preflight planning to reduce unnecessary collect requests.",
+        help="Disable adaptive preflight planning for collect requests.",
     )
     actions.add_argument(
         "-e",

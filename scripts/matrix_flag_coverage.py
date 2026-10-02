@@ -46,6 +46,9 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "tls_key": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",
         "insecure": "this matrix has no untrusted-certificate exporter; shared transport tests cover verification policy.",
     },
+    "exporters collect": {
+        "insecure": "verified HTTPS override is covered by parser and shared transport tests; the live exporter matrix uses HTTP.",
+    },
     "exporters trigger": {
         "bind": "listener bind address is covered by listener unit tests; live matrix avoids host bind variability.",
         "cert_file": "TLS listener certificate wiring is unit-tested; live trigger coverage uses no-listen mode.",

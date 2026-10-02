@@ -44,7 +44,7 @@ def build_exporter_tls_context(
     if not any((insecure, ca_file, cert_file, key_file)):
         return None
     return shared_client_ssl_context(
-        insecure=insecure,
+        insecure=insecure and not bool(ca_file),
         ca_file=ca_file,
         cert_file=cert_file,
         key_file=key_file,

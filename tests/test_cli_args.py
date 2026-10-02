@@ -717,7 +717,7 @@ def test_clickhouse_help_orders_show_columns_column_dump() -> None:
     assert show_columns_idx < column_idx < dump_idx
 
 
-def test_trigger_with_listen_flag_parses_listener_options() -> None:
+def test_trigger_listener_options_keep_true_defaults() -> None:
     args = parse_args(
         [
             "exporters",
@@ -728,14 +728,13 @@ def test_trigger_with_listen_flag_parses_listener_options() -> None:
             "10.0.0.2",
             "--redis-port",
             "16379",
-            "--postgres-tls",
-            "--with-listen",
         ]
     )
     assert args.command == COMMAND_EXPORTERS
     assert args.exporters_action == "trigger"
     assert args.redis_port == 16379
     assert args.postgres_tls is True
+    assert args.with_listen is True
 
 
 def test_trigger_listen_seconds_flag_is_parsed() -> None:
@@ -767,6 +766,31 @@ def test_exporter_actions_accept_singular_port_alias(action: str) -> None:
     args = parse_args(["exporters", action, "-t", "10.0.0.1:8085", "--port", "9100"])
 
     assert args.ports == "9100"
+
+
+@pytest.mark.parametrize("action", ["scan", "collect", "trigger"])
+def test_exporter_tls_skips_server_verification_by_default(action: str) -> None:
+    argv = ["exporters", action, "-t", "127.0.0.1"]
+    assert parse_args(argv).insecure is True
+    assert parse_args(argv + ["--no-insecure"]).insecure is False
+    with pytest.raises(SystemExit) as exc:
+        parse_args(argv + ["--insecure"])
+    assert exc.value.code == 2
+
+
+def test_exporter_ca_enables_verification_even_with_insecure_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core.exporters import http_client
+
+    observed: dict[str, object] = {}
+
+    def fake_context(**kwargs: object) -> object:
+        observed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(http_client, "shared_client_ssl_context", fake_context)
+    http_client.build_exporter_tls_context(insecure=True, ca_file="ca.pem")
+    assert observed["insecure"] is False
+    assert observed["ca_file"] == "ca.pem"
 
 
 def test_trigger_listener_defaults_have_tls_enabled() -> None:
@@ -859,8 +883,8 @@ def test_trigger_can_parse_without_callback_values() -> None:
     assert args.callback_dns is None
 
 
-def test_trigger_with_listen_flag_and_listener_defaults() -> None:
-    args = parse_args(["exporters", "trigger", "-t", "10.0.0.1", "--callback-ip", "10.0.0.2", "--with-listen"])
+def test_trigger_listener_defaults() -> None:
+    args = parse_args(["exporters", "trigger", "-t", "10.0.0.1", "--callback-ip", "10.0.0.2"])
     assert args.with_listen is True
     assert args.callback_ip == "10.0.0.2"
     assert args.callback_dns is None
@@ -908,8 +932,47 @@ def test_trigger_help_groups_common_and_exporter_specific_flags(capsys: pytest.C
     postgres_section = help_text.split("Postgres exporter:", 1)[1].split("Redis exporter:", 1)[0]
     assert "--postgres-auth-module" in postgres_section
     assert "--postgres-port" in postgres_section
-    assert "--postgres-tls" in postgres_section
+    assert "--no-postgres-tls" in postgres_section
+    assert "  --postgres-tls" not in postgres_section
     assert help_text.count("--postgres-auth-module") == 2  # usage plus one section
+    redis_section = help_text.split("Redis exporter:", 1)[1].split("Proxmox exporter:", 1)[0]
+    assert "-check, --check-credentials" in postgres_section
+    assert "-check, --check-credentials" in redis_section
+    assert "Credential checks (Redis/Postgres):" not in help_text
+    assert "--elastic-port" in help_text
+    assert "--elasticsearch-port" not in help_text
+    assert "--no-with-listen" in help_text
+    assert "  --with-listen" not in help_text
+
+
+def test_exporter_true_defaults_have_only_negative_override_flags() -> None:
+    trigger_args = ["exporters", "trigger", "-t", "127.0.0.1", "--callback-ip", "127.0.0.1"]
+    parsed = parse_args(trigger_args + ["--no-postgres-tls", "--no-with-listen"])
+    assert parsed.postgres_tls is False
+    assert parsed.with_listen is False
+    for old_flag in ("--postgres-tls", "--with-listen"):
+        with pytest.raises(SystemExit) as exc:
+            parse_args(trigger_args + [old_flag])
+        assert exc.value.code == 2
+
+    collect_args = ["exporters", "collect", "-t", "127.0.0.1"]
+    assert parse_args(collect_args).adaptive_collect is True
+    assert parse_args(collect_args + ["--no-adaptive-collect"]).adaptive_collect is False
+    with pytest.raises(SystemExit) as exc:
+        parse_args(collect_args + ["--adaptive-collect"])
+    assert exc.value.code == 2
+
+
+def test_trigger_elastic_listener_port_uses_short_flag() -> None:
+    args = parse_args(
+        ["exporters", "trigger", "-t", "127.0.0.1", "--callback-ip", "127.0.0.1", "--elastic-port", "19201"]
+    )
+    assert args.elasticsearch_port == 19201
+    with pytest.raises(SystemExit) as exc:
+        parse_args(
+            ["exporters", "trigger", "-t", "127.0.0.1", "--callback-ip", "127.0.0.1", "--elasticsearch-port", "19201"]
+        )
+    assert exc.value.code == 2
 
 
 def test_trigger_output_flag_is_parsed() -> None:

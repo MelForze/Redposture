@@ -297,12 +297,16 @@ redposture zookeeper -t zk.example -u auditor -p 'password' --show-znodes 20 --d
 ```bash
 redposture exporters scan -t targets.txt
 redposture exporters collect -t targets.txt --deep
-redposture exporters trigger -t targets.txt --callback-dns callback.example --with-listen
+redposture exporters trigger -t targets.txt --callback-dns callback.example
 ```
 
 Trigger supports Redis, Postgres, Blackbox, Proxmox, MySQL, JSON, Elasticsearch,
 SNMP and IPMI exporters. Select a type with `-e mysql`, `-e json`, `-e elasticsearch`,
-`-e snmp` or `-e ipmi`; `--with-listen` starts the matching callback listener.
+`-e snmp` or `-e ipmi`; matching callback listeners start automatically.
+Exporter scan, collect and trigger skip HTTPS certificate and hostname verification
+by default; use `--no-insecure` to verify against system roots or `--tls-ca file`
+to verify against a supplied CA. In trigger, `--no-postgres-tls` disables the
+Postgres callback listener's default TLS, and `--no-with-listen` skips listeners.
 SNMP and IPMI callbacks use UDP. An accepted exporter request alone is inconclusive;
 the listener must observe the outbound request. Percona MongoDB exporter is excluded:
 its `/scrape?target=` only selects hosts already configured in `--mongodb.uri`.

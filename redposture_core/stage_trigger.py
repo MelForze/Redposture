@@ -919,10 +919,10 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.error("--listen-seconds must be > 0")
         return 2
     if getattr(args, "check_credentials", False) and not getattr(args, "with_listen", False):
-        console.error("--check-credentials requires --with-listen")
+        console.error("--check-credentials requires listeners; omit --no-with-listen")
         return 2
     if output_format == "json" and getattr(args, "with_listen", False) and stream_to_stdout:
-        console.error("--format json with --with-listen requires --output")
+        console.error("--format json with listeners enabled requires --output")
         return 2
 
     try:
