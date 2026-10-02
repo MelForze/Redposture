@@ -31,11 +31,21 @@ _GITLAB_BASIC_PAIRS = (
     ("root", "root"),
     ("root", "password"),
     ("root", "admin"),
+    ("root", "changeme"),
+    ("root", "gitlab"),
+    ("root", "admin123"),
     ("admin", "admin"),
     ("admin", "password"),
+    ("admin", "changeme"),
+    ("admin", "gitlab"),
     ("gitlab", "gitlab"),
+    ("gitlab", "password"),
+    ("gitlab", "admin"),
     ("user", "user"),
+    ("user", "password"),
     ("test", "test"),
+    ("guest", "guest"),
+    ("dev", "dev"),
 )
 
 

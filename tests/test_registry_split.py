@@ -50,6 +50,122 @@ def test_harbor_checks_documented_initial_pair_first() -> None:
     assert (plan.credential_runs[0].username, plan.credential_runs[0].password) == ("admin", "Harbor12345")
 
 
+@pytest.mark.parametrize(
+    ("command", "added_pairs", "expected_count"),
+    [
+        (
+            "gitlab",
+            {
+                ("root", "changeme"),
+                ("root", "gitlab"),
+                ("root", "admin123"),
+                ("admin", "changeme"),
+                ("admin", "gitlab"),
+                ("gitlab", "password"),
+                ("gitlab", "admin"),
+                ("guest", "guest"),
+                ("dev", "dev"),
+                ("user", "password"),
+            },
+            18,
+        ),
+        (
+            "harbor",
+            {
+                ("admin", "admin123"),
+                ("admin", "123456"),
+                ("root", "admin"),
+                ("root", "changeme"),
+                ("user", "password"),
+                ("guest", "guest"),
+                ("dev", "dev"),
+                ("service", "service"),
+                ("admin", "harbor"),
+                ("admin", "harbor123"),
+                ("admin", "Harbor123"),
+                ("harbor", "harbor"),
+                ("harbor", "password"),
+            },
+            21,
+        ),
+        (
+            "nexus",
+            {
+                ("admin", "123456"),
+                ("root", "admin"),
+                ("root", "changeme"),
+                ("user", "password"),
+                ("guest", "guest"),
+                ("dev", "dev"),
+                ("service", "service"),
+                ("admin", "nexus"),
+                ("admin", "nexus123"),
+                ("admin", "sonatype"),
+                ("nexus", "password"),
+                ("nexus", "admin"),
+            },
+            21,
+        ),
+        (
+            "docker-registry",
+            {
+                ("admin", "admin123"),
+                ("admin", "123456"),
+                ("root", "admin"),
+                ("root", "changeme"),
+                ("user", "password"),
+                ("guest", "guest"),
+                ("dev", "dev"),
+                ("service", "service"),
+                ("registry", "admin"),
+                ("registry", "changeme"),
+                ("registry", "registry123"),
+                ("docker", "docker"),
+                ("docker", "password"),
+            },
+            22,
+        ),
+    ],
+)
+def test_registry_default_candidates_include_expanded_weak_pairs_without_duplicates(
+    command: str, added_pairs: set[tuple[str, str]], expected_count: int
+) -> None:
+    args = parse_args([command, "-t", "host", "--defcreds"])
+    plan = (
+        gitlab_stage.build_gitlab_plan(args)
+        if command == "gitlab"
+        else oci_stage.build_registry_plan(args, product=command)
+    )
+    pairs = [(run.username, run.password) for run in plan.credential_runs]
+    assert added_pairs <= set(pairs)
+    assert len(pairs) == len(set(pairs)) == expected_count
+    assert all(run.source == "default" for run in plan.credential_runs)
+
+
+@pytest.mark.parametrize(
+    ("command", "username", "password"),
+    [
+        ("gitlab", "root", "changeme"),
+        ("harbor", "admin", "harbor"),
+        ("nexus", "admin", "nexus"),
+        ("docker-registry", "registry", "changeme"),
+    ],
+)
+def test_explicit_registry_pair_precedes_matching_default_without_duplicate(
+    command: str, username: str, password: str
+) -> None:
+    args = parse_args([command, "-t", "host", "-u", username, "-p", password, "--defcreds"])
+    plan = (
+        gitlab_stage.build_gitlab_plan(args)
+        if command == "gitlab"
+        else oci_stage.build_registry_plan(args, product=command)
+    )
+    matching = [run for run in plan.credential_runs if (run.username, run.password) == (username, password)]
+    assert len(matching) == 1
+    assert plan.credential_runs[0] == matching[0]
+    assert matching[0].source == "provided"
+
+
 def test_generic_registry_rejects_confirmed_harbor_and_harbor_accepts_it(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         oci_actions,
