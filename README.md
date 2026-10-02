@@ -184,6 +184,10 @@ GitLab detects the web/API, Container Registry, or both. `--token` belongs to th
 web/API; `--registry-token` belongs to the Container Registry. OCI inventory appears
 in the nested `container_registry` JSON object. Web login pairs use an isolated
 CSRF session per attempt and stop at SSO, CAPTCHA or rate limiting.
+GitLab, Harbor, Nexus and Docker Registry share the Airflow-style TXT layout:
+one product line, then verified credentials and requested inventory sections
+with item counts. Terminal colors distinguish access and nonzero counts; `-o`
+keeps four tab-separated fields without ANSI escapes. JSON fields are unchanged.
 
 ### Grafana
 

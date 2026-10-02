@@ -1003,7 +1003,7 @@ def test_audit_gitlab_targets_and_run_stage_paths(
         suppress_timeout_status_lines=True,
     )
     assert totals == (2, 1, 1)
-    assert any("GitLab Service" in line for line in emitted)
+    assert any("[*] GitLab (auth required:unknown)" in line for line in emitted)
     assert not any("connection failed" in line for line in emitted)
     assert len(logged) == 2
     assert output_path.read_text(encoding="utf-8")

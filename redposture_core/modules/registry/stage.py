@@ -17,7 +17,7 @@ from ...stage_runtime import (
     merge_audit_credential_runs,
     run_basic_host_audit,
 )
-from . import actions, policy, render
+from . import actions, policy, product_render, render
 
 _DEFAULT_PORT = 5000
 _DEFAULT_PORTS: tuple[int, ...] | None = (5000, 15000, 25000)
@@ -126,9 +126,9 @@ def build_registry_spec(args: Any, *, product: str = "registry") -> ModuleAuditS
         data=_data if use_lifecycle_hooks else None,
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
-        render_module=render,
+        render_module=render if product == "registry" else product_render,
         structured_output_redact_fields=("provided_password",),
-        colorize=render._render_colored_registry_line,
+        colorize=(render if product == "registry" else product_render)._render_colored_registry_line,
         is_detected=lambda record: (
             record.extra.get("is_registry") is True
             and (

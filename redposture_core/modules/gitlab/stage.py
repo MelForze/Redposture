@@ -278,6 +278,7 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
         if use_lifecycle_hooks
         else None,
         render_module=render,
+        defer_detect_output_until_auth=True,
         structured_output_redact_fields=("provided_password",),
         colorize=render._render_colored_gitlab_line,
         is_detected=lambda record: record.extra.get("is_gitlab") is True,
