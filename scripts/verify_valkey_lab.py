@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -100,7 +101,9 @@ def main() -> int:
             *extra,
             "--enum-cve",
         ]
-        result = subprocess.run([*command, "--format", "json"], capture_output=True, text=True, check=True, timeout=90)
+        json_command = [*command, "--format", "json"]
+        (output / f"{name}.command.txt").write_text(shlex.join(json_command) + "\n", encoding="utf-8")
+        result = subprocess.run(json_command, capture_output=True, text=True, check=True, timeout=90)
         (output / f"{name}.jsonl").write_text(result.stdout + result.stderr, encoding="utf-8")
         record = _record(result.stdout)
         validate_valkey_record(record, version_known=known, credentials=credentials)
@@ -109,8 +112,10 @@ def main() -> int:
             assert "ValkeyFixtureSecret!2026" in json.dumps(record.get("key_values"))
         for mode, options in (("txt", []), ("debug", ["--debug"])):
             tsv = output / f"{name}-{mode}.tsv"
+            txt_command = [*command, *options, "--no-color", "-o", str(tsv)]
+            (output / f"{name}-{mode}.command.txt").write_text(shlex.join(txt_command) + "\n", encoding="utf-8")
             result = subprocess.run(
-                [*command, *options, "--no-color", "-o", str(tsv)],
+                txt_command,
                 capture_output=True,
                 text=True,
                 check=True,

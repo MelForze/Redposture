@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -65,7 +66,9 @@ def main() -> int:
             "--enum-cve",
             *extra,
         ]
-        run = subprocess.run([*command, "--format", "json"], check=True, capture_output=True, text=True, timeout=180)
+        json_command = [*command, "--format", "json"]
+        (output / f"{name}.command.txt").write_text(shlex.join(json_command) + "\n")
+        run = subprocess.run(json_command, check=True, capture_output=True, text=True, timeout=180)
         (output / f"{name}.jsonl").write_text(run.stdout + run.stderr)
         record = _record(run.stdout)
         assert record.get("is_harbor") is True
@@ -78,8 +81,10 @@ def main() -> int:
             assert not any(item.get("privileges_required") == "L" for item in record["cve_enumeration"]["findings"])
         for mode, options in (("txt", []), ("debug", ["--debug"])):
             target = output / f"{name}-{mode}.tsv"
+            txt_command = [*command, *options, "--no-color", "-o", str(target)]
+            (output / f"{name}-{mode}.command.txt").write_text(shlex.join(txt_command) + "\n")
             run = subprocess.run(
-                [*command, *options, "--no-color", "-o", str(target)],
+                txt_command,
                 check=True,
                 capture_output=True,
                 text=True,

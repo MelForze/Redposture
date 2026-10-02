@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -40,7 +41,9 @@ def main() -> int:
             "--enum-cve",
             *(["--token", token] if token else []),
         ]
-        run = subprocess.run([*command, "--format", "json"], capture_output=True, text=True, check=True, timeout=180)
+        json_command = [*command, "--format", "json"]
+        (output / f"{name}.command.txt").write_text(shlex.join(json_command) + "\n")
+        run = subprocess.run(json_command, capture_output=True, text=True, check=True, timeout=180)
         (output / f"{name}.jsonl").write_text(run.stdout + run.stderr)
         record = _record(run.stdout)
         assert record.get("is_gitlab") is True
@@ -62,8 +65,10 @@ def main() -> int:
         }
         for mode, options in (("txt", []), ("debug", ["--debug"])):
             target = output / f"{name}-{mode}.tsv"
+            txt_command = [*command, *options, "--no-color", "-o", str(target)]
+            (output / f"{name}-{mode}.command.txt").write_text(shlex.join(txt_command) + "\n")
             run = subprocess.run(
-                [*command, *options, "--no-color", "-o", str(target)],
+                txt_command,
                 capture_output=True,
                 text=True,
                 check=True,
