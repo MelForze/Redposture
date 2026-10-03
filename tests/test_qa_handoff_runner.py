@@ -56,6 +56,15 @@ def test_real_gitlab_qa_cleans_up_its_project_even_after_failure(
     calls: list[str] = []
     monkeypatch.setattr(qa, "_docker_project_is_empty", lambda _project: True)
     monkeypatch.setattr(qa, "_gitlab_ports_are_free", lambda _compose: (True, []))
+    monkeypatch.setattr(qa, "compose_images", lambda _compose: ["gitlab/gitlab-ce:test"])
+    monkeypatch.setattr(qa, "missing_images", lambda _refs: ["gitlab/gitlab-ce:test"])
+
+    def remove_images(references: list[str]) -> list[str]:
+        assert references == ["gitlab/gitlab-ce:test"]
+        calls.append("remove-image")
+        return []
+
+    monkeypatch.setattr(qa, "remove_images", remove_images)
     monkeypatch.setattr(qa, "_json_record", lambda _log: {"is_gitlab": True, "download_result": {"status": "ok"}})
     monkeypatch.setattr(qa, "validate_gitlab_download", lambda _record, _root: (True, "hashes match"))
 
@@ -68,7 +77,9 @@ def test_real_gitlab_qa_cleans_up_its_project_even_after_failure(
     monkeypatch.setattr(qa, "_run_logged", run)
     result = qa._gitlab_blob_qa(tmp_path / "gitlab", "redposture-qa-owned", sys.executable)
     assert result["status"] == ("failed" if failing_step else "passed")
-    assert calls == (["up", "seed", "down"] if failing_step else ["up", "seed", "download", "down"])
+    assert calls == (
+        ["up", "seed", "down", "remove-image"] if failing_step else ["up", "seed", "download", "down", "remove-image"]
+    )
 
 
 def test_handoff_report_contains_statuses_and_revision(tmp_path: Path) -> None:

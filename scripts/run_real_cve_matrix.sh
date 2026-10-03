@@ -13,8 +13,18 @@ if [[ -z "$PYTHON_BIN" ]]; then
   fi
 fi
 
+QA_IMAGE_SNAPSHOT=""
 cleanup() {
-  docker compose --project-name "$PROJECT" --file "$COMPOSE_FILE" down --volumes --remove-orphans
+  local rc=0
+  docker compose --project-name "$PROJECT" --file "$COMPOSE_FILE" down --volumes --remove-orphans || rc=$?
+  if [[ -n "$QA_IMAGE_SNAPSHOT" ]]; then
+    if "$PYTHON_BIN" "$ROOT_DIR/scripts/qa_owned_images.py" cleanup "$QA_IMAGE_SNAPSHOT"; then
+      rm -f "$QA_IMAGE_SNAPSHOT"
+    else
+      rc=1
+    fi
+  fi
+  return "$rc"
 }
 if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" ]] ||
    [[ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT")" ]]; then
@@ -22,6 +32,11 @@ if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")"
   exit 2
 fi
 trap cleanup EXIT
+if [[ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" == "1" ]]; then
+  QA_IMAGE_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/redposture-cve-images.XXXXXX")"
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/qa_owned_images.py" snapshot "$QA_IMAGE_SNAPSHOT" -- \
+    docker compose --project-name "$PROJECT" --file "$COMPOSE_FILE"
+fi
 
 for image in $(docker compose --project-name "$PROJECT" --file "$COMPOSE_FILE" config --images | sort -u); do
   if docker image inspect "$image" >/dev/null 2>&1; then

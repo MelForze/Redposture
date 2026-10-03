@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -23,6 +24,7 @@ if str(ROOT) not in sys.path:
 from redposture_core.cli_args import build_parser  # noqa: E402
 from redposture_core.cve import normalize_version  # noqa: E402
 from scripts.check_compose_readiness import readiness_issues  # noqa: E402
+from scripts.qa_owned_images import compose_images, missing_images, remove_images  # noqa: E402
 from scripts.qa_service_policy import startup_timeout  # noqa: E402
 from scripts.run_extended_version_matrix import _record  # noqa: E402
 
@@ -151,7 +153,11 @@ def wait_ready(
             for container in containers:
                 state = container.get("State", {})
                 name = str(container.get("Name", "")).removeprefix("/")
-                terminal = state.get("Status") == "dead" or state.get("OOMKilled") is True
+                terminal = (
+                    state.get("Status") == "dead"
+                    or state.get("OOMKilled") is True
+                    or (state.get("Status") == "exited" and state.get("ExitCode") != 0)
+                )
                 restart_loop = state.get("Status") in {"restarting", "exited"} and container.get("RestartCount", 0) >= 3
                 seed_failed = name in allowed and state.get("Status") == "exited" and state.get("ExitCode") != 0
                 if terminal or restart_loop or seed_failed:
@@ -191,7 +197,12 @@ def run_case(case: dict[str, Any], destination: Path, *, validate_only: bool) ->
     project_name = f"{project_prefix}-versions-{case['fixture']}"
     compose = ["docker", "compose", "-p", project_name, "-f", str(base)]
     owns_stack = False
+    clean_images = os.environ.get("REDPOSTURE_QA_CLEAN_IMAGES") == "1" and not validate_only
+    new_images: list[str] = []
     try:
+        if clean_images and case.get("fixture") == "registry-harbor-real" and case.get("prepare"):
+            release = str(case["prepare"][2])
+            new_images.extend(missing_images([f"goharbor/prepare:{release}"]))
         if case.get("environment"):
             environment_file = directory / "compose.env"
             environment_file.write_text(
@@ -222,6 +233,8 @@ def run_case(case: dict[str, Any], destination: Path, *, validate_only: bool) ->
         if validate_only:
             result["status"] = "validated"
             return result
+        if clean_images:
+            new_images.extend(missing_images(compose_images(compose)))
         if run([*compose, "ps", "--all", "-q"], log, timeout=30).strip():
             raise RuntimeError("version Compose project already exists; stop it explicitly before rerunning")
         if run(
@@ -290,7 +303,14 @@ def run_case(case: dict[str, Any], destination: Path, *, validate_only: bool) ->
                 raise AssertionError("action cases missing or exit codes mismatched")
             result["action_cases"] = len(rows)
         result["status"] = "passed"
-    except (AssertionError, OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+    except (
+        AssertionError,
+        OSError,
+        ValueError,
+        RuntimeError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as exc:
         result["error"] = str(exc)
     finally:
         if owns_stack:
@@ -309,6 +329,20 @@ def run_case(case: dict[str, Any], destination: Path, *, validate_only: bool) ->
                 run([*compose, "down", "-v", "--remove-orphans"], directory / "cleanup.log", timeout=180)
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 result["cleanup_error"] = str(exc)
+                result["status"] = "failed"
+        if clean_images:
+            try:
+                errors = remove_images(new_images)
+                if errors:
+                    result["image_cleanup_error"] = errors
+                    result["status"] = "failed"
+                if case.get("prepared_compose") and "cleanup_error" not in result:
+                    # The QA-owned Harbor data bind mount is no longer needed
+                    # once its Compose project has been removed.
+                    shutil.rmtree(directory / "prepared" / "data", ignore_errors=True)
+                    shutil.rmtree(directory / "prepared" / "logs", ignore_errors=True)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                result["image_cleanup_error"] = str(exc)
                 result["status"] = "failed"
         result["duration_seconds"] = round(time.monotonic() - started, 2)
     return result

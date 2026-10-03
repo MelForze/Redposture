@@ -232,6 +232,38 @@ def test_release_runner_cleanup_failure_fails_case(tmp_path: Path, monkeypatch: 
     assert any("down" in command for command in calls)
 
 
+def test_release_runner_removes_only_new_images_after_failed_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import run_service_version_matrix as matrix
+
+    events: list[str] = []
+    monkeypatch.setenv("REDPOSTURE_QA_CLEAN_IMAGES", "1")
+    monkeypatch.setattr(matrix, "compose_images", lambda _compose: ["existing:1", "new:2"])
+    monkeypatch.setattr(matrix, "missing_images", lambda _refs: ["new:2"])
+
+    def remove_images(references: list[str]) -> list[str]:
+        assert references == ["new:2"]
+        events.append("remove-image")
+        return []
+
+    def fake_run(command: list[str], _log: Path, **_kwargs: Any) -> str:
+        if "config" in command:
+            return json.dumps({"services": {"server": {"image": "existing:1"}}})
+        if "up" in command:
+            events.append("up")
+            raise RuntimeError("startup failed")
+        if "down" in command:
+            events.append("down")
+        return ""
+
+    monkeypatch.setattr(matrix, "run", fake_run)
+    monkeypatch.setattr(matrix, "remove_images", remove_images)
+    result = run_case({"id": "product-2", "fixture": "example", "images": {}}, tmp_path, validate_only=False)
+    assert result["status"] == "failed"
+    assert events == ["up", "down", "remove-image"]
+
+
 def test_release_runner_saves_health_and_oom_evidence_before_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -313,6 +345,7 @@ def test_minio_release_identity_accepts_iso_and_release_tag_only_for_same_instan
         ({"Status": "running", "OOMKilled": True}, 0, "server"),
         ({"Status": "restarting"}, 3, "server"),
         ({"Status": "exited", "ExitCode": 1}, 0, "seed"),
+        ({"Status": "exited", "ExitCode": 2}, 0, "oracle"),
     ],
 )
 def test_release_readiness_fails_fast_on_terminal_state_or_seed_failure(

@@ -50,6 +50,10 @@ if [ -d "${OUT_DIR}" ] && [ -n "$(ls -A "${OUT_DIR}")" ]; then
   exit 2
 fi
 mkdir -p "${OUT_DIR}/logs" "${OUT_DIR}/json"
+if [ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" = "1" ]; then
+  "${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_owned_images.py" snapshot-refs \
+    "${OUT_DIR}/images/harbor-prepare.json" goharbor/prepare:v2.11.1
+fi
 
 if [ ! -d "${LAB_DIR}/services" ]; then
   echo "[error] local lab services directory not found: ${LAB_DIR}/services" >&2
@@ -151,11 +155,54 @@ compose_service() {
 
 cleanup_current_service() {
   if [ -n "${CURRENT_SERVICE}" ]; then
-    compose_service "${CURRENT_SERVICE}" down >/dev/null 2>&1 || true
+    if [ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" = "1" ]; then
+      compose_service "${CURRENT_SERVICE}" down --volumes >/dev/null 2>&1 || true
+      cleanup_service_images "${CURRENT_SERVICE}" || true
+    else
+      compose_service "${CURRENT_SERVICE}" down >/dev/null 2>&1 || true
+    fi
     CURRENT_SERVICE=""
+  fi
+  if [ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" = "1" ] &&
+     [ -f "${OUT_DIR}/images/harbor-prepare.json" ]; then
+    "${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_owned_images.py" cleanup \
+      "${OUT_DIR}/images/harbor-prepare.json" || true
   fi
 }
 trap cleanup_current_service EXIT
+
+snapshot_service_images() {
+  local service="$1"
+  [ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" = "1" ] || return 0
+  local compose_file="${LAB_DIR}/services/${service}/docker-compose.yml"
+  local snapshot="${OUT_DIR}/images/${service}.json"
+  if [ "${service}" = "registry-harbor" ]; then
+    compose_file="${OUT_DIR}/stands/harbor/docker-compose.yml"
+  fi
+  "${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_owned_images.py" snapshot "${snapshot}" -- \
+    docker compose -f "${compose_file}"
+}
+
+cleanup_service_images() {
+  local snapshot="${OUT_DIR}/images/${1}.json"
+  if [ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" = "1" ] && [ -f "${snapshot}" ]; then
+    "${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_owned_images.py" cleanup "${snapshot}"
+  fi
+  if [ "${1}" = "registry-harbor" ] &&
+     [ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" = "1" ] &&
+     [ -f "${OUT_DIR}/images/harbor-prepare.json" ]; then
+    "${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_owned_images.py" cleanup \
+      "${OUT_DIR}/images/harbor-prepare.json"
+  fi
+}
+
+cleanup_harbor_prepare_image() {
+  if [ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" = "1" ] &&
+     [ -f "${OUT_DIR}/images/harbor-prepare.json" ]; then
+    "${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_owned_images.py" cleanup \
+      "${OUT_DIR}/images/harbor-prepare.json"
+  fi
+}
 
 wait_nonempty_file() {
   local path="$1"
@@ -255,6 +302,7 @@ start_service() {
   echo
   echo "== service:${service} up =="
   CURRENT_SERVICE="${service}"
+  snapshot_service_images "${service}"
   local started_at="${SECONDS}"
   set +e
   if [ "${service}" = "registry" ]; then
@@ -292,7 +340,12 @@ start_service() {
 stop_service() {
   local service="$1"
   echo "== service:${service} down =="
-  compose_service "${service}" down
+  if [ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" = "1" ]; then
+    compose_service "${service}" down --volumes
+    cleanup_service_images "${service}"
+  else
+    compose_service "${service}" down
+  fi
   if [ "${CURRENT_SERVICE}" = "${service}" ]; then
     CURRENT_SERVICE=""
   fi
@@ -1043,6 +1096,7 @@ fi
 
 set -e
 preflight_lab_environment
+cleanup_harbor_prepare_image
 printf "module\tlabel\texpected_exit\texit_code\tjson_path\tlog_path\n" > "${STATUS_FILE}"
 
 if is_extended_matrix; then

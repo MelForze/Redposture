@@ -15,9 +15,19 @@ fi
 CERTS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redposture-minio-certs.XXXXXX")"
 export MINIO_CERTS_DIR="$CERTS_DIR"
 
+QA_IMAGE_SNAPSHOT=""
 cleanup() {
-  docker compose --project-name "$PROJECT" --file "$COMPOSE_FILE" down --volumes --remove-orphans
+  local rc=0
+  docker compose --project-name "$PROJECT" --file "$COMPOSE_FILE" down --volumes --remove-orphans || rc=$?
+  if [[ -n "$QA_IMAGE_SNAPSHOT" ]]; then
+    if "$PYTHON_BIN" "$ROOT_DIR/scripts/qa_owned_images.py" cleanup "$QA_IMAGE_SNAPSHOT"; then
+      rm -f "$QA_IMAGE_SNAPSHOT"
+    else
+      rc=1
+    fi
+  fi
   rm -rf "$CERTS_DIR"
+  return "$rc"
 }
 if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" ]] ||
    [[ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT")" ]]; then
@@ -26,6 +36,11 @@ if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")"
   exit 2
 fi
 trap cleanup EXIT
+if [[ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" == "1" ]]; then
+  QA_IMAGE_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/redposture-minio-images.XXXXXX")"
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/qa_owned_images.py" snapshot "$QA_IMAGE_SNAPSHOT" -- \
+    docker compose --project-name "$PROJECT" --file "$COMPOSE_FILE"
+fi
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj "/CN=localhost" \
   -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \

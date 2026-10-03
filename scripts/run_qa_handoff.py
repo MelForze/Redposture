@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.qa_owned_images import compose_images, missing_images, remove_images  # noqa: E402
+
 GITLAB_COMPOSE = ROOT / "lab/services/gitlab-real/docker-compose.yml"
 GITLAB_REGISTRY = "http://127.0.0.1:15003"
 GITLAB_IMAGE = "gitlab/project-api:latest"
@@ -155,12 +160,14 @@ def validate_gitlab_download(record: dict[str, Any] | None, artifact_dir: Path) 
 def _gitlab_blob_qa(destination: Path, project: str, python: str) -> dict[str, Any]:
     destination.mkdir(parents=True, exist_ok=True)
     compose = ["docker", "compose", "-p", project, "-f", str(GITLAB_COMPOSE)]
+    new_images: list[str] = []
     try:
         if not _docker_project_is_empty(project):
             return {"status": "blocked", "reason": f"Compose project {project} already exists"}
         free, busy = _gitlab_ports_are_free(compose)
         if not free:
             return {"status": "blocked", "reason": f"GitLab loopback ports already occupied: {busy}"}
+        new_images = missing_images(compose_images(compose))
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as exc:
         return {"status": "blocked", "reason": f"Docker preflight failed: {exc}"}
 
@@ -217,10 +224,19 @@ def _gitlab_blob_qa(destination: Path, project: str, python: str) -> dict[str, A
             passed, reason = validate_gitlab_download(_json_record(destination / "download.log"), destination)
             outcome.update(status="passed" if passed else "failed", reason=reason)
     finally:
-        code, duration = _run_logged([*compose, "down", "--remove-orphans"], destination / "down.log", timeout=240)
+        code, duration = _run_logged(
+            [*compose, "down", "--volumes", "--remove-orphans"], destination / "down.log", timeout=240
+        )
         checks.append({"name": "down", "exit_code": code, "duration_seconds": duration, "log": "down.log"})
         if code:
             outcome.update(status="failed", reason=f"GitLab cleanup failed (exit {code}); inspect project {project}")
+        else:
+            try:
+                errors = remove_images(new_images)
+                if errors:
+                    outcome.update(status="failed", reason=f"GitLab image cleanup failed: {errors}")
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                outcome.update(status="failed", reason=f"GitLab image cleanup failed: {exc}")
     return outcome
 
 
@@ -232,7 +248,12 @@ def _run_stage(name: str, destination: Path, prefix: str, python: str) -> dict[s
         str(ROOT / "scripts/run_full_local_qa.sh" if name == "full" else ROOT / "scripts/run_version_qa.sh"),
         str(destination / "artifacts"),
     ]
-    env = {**os.environ, "REDPOSTURE_QA_PROJECT_PREFIX": f"{prefix}-{name}", "PYTHON_BIN": python}
+    env = {
+        **os.environ,
+        "REDPOSTURE_QA_PROJECT_PREFIX": f"{prefix}-{name}",
+        "REDPOSTURE_QA_CLEAN_IMAGES": "1",
+        "PYTHON_BIN": python,
+    }
     code, duration = _run_logged(command, destination / "run.log", timeout=14400, env=env)
     return {
         "status": "passed" if code == 0 else "failed",
@@ -266,24 +287,27 @@ def _python_matrix(destination: Path) -> dict[str, Any]:
             ["bash", str(ROOT / "scripts/run_ci_job.sh"), "test"],
         ]
         steps = []
-        for index, command in enumerate(commands):
-            env = {
-                **os.environ,
-                "PATH": str(venv / "bin") + os.pathsep + os.environ.get("PATH", ""),
-                "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-                "REDPOSTURE_COVERAGE_DIR": str(case_dir / "coverage"),
-            }
-            code, duration = _run_logged(command, case_dir / f"step-{index}.log", timeout=3600, env=env)
-            steps.append(
-                {
-                    "command": _safe_command(command),
-                    "exit_code": code,
-                    "duration_seconds": duration,
-                    "log": f"step-{index}.log",
+        try:
+            for index, command in enumerate(commands):
+                env = {
+                    **os.environ,
+                    "PATH": str(venv / "bin") + os.pathsep + os.environ.get("PATH", ""),
+                    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                    "REDPOSTURE_COVERAGE_DIR": str(case_dir / "coverage"),
                 }
-            )
-            if code:
-                break
+                code, duration = _run_logged(command, case_dir / f"step-{index}.log", timeout=3600, env=env)
+                steps.append(
+                    {
+                        "command": _safe_command(command),
+                        "exit_code": code,
+                        "duration_seconds": duration,
+                        "log": f"step-{index}.log",
+                    }
+                )
+                if code:
+                    break
+        finally:
+            shutil.rmtree(venv, ignore_errors=True)
         results.append(
             {
                 "python": tag,

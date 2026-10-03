@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.qa_owned_images import compose_images, missing_images, remove_images  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -171,6 +175,8 @@ def _case(case: VersionCase, out_dir: Path) -> dict[str, Any]:
     started = time.monotonic()
     outcome: dict[str, Any] = {"case": asdict(case), "status": "failed", "log": str(log)}
     owns_stack = False
+    clean_images = os.environ.get("REDPOSTURE_QA_CLEAN_IMAGES") == "1"
+    new_images: list[str] = []
     try:
         existing = _run([*compose, "ps", "--all", "-q"], log, timeout=30)
         if existing.returncode != 0 or existing.stdout.strip():
@@ -182,6 +188,8 @@ def _case(case: VersionCase, out_dir: Path) -> dict[str, Any]:
         )
         if volumes.returncode != 0 or volumes.stdout.strip():
             raise RuntimeError("Compose volumes already exist or cannot be inspected; preserving them")
+        if clean_images:
+            new_images = missing_images(compose_images(compose))
         owns_stack = True
         startup = _run(
             [*compose, "up", "--detach", "--wait", "--wait-timeout", str(case.timeout), case.service],
@@ -216,7 +224,7 @@ def _case(case: VersionCase, out_dir: Path) -> dict[str, Any]:
         if issues:
             raise AssertionError("; ".join(issues))
         outcome["status"] = "passed"
-    except (AssertionError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+    except (AssertionError, OSError, RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         outcome["error"] = str(exc)
     finally:
         if owns_stack:
@@ -226,6 +234,15 @@ def _case(case: VersionCase, out_dir: Path) -> dict[str, Any]:
                     raise RuntimeError(f"cleanup exited {cleanup.returncode}")
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 outcome["cleanup_error"] = str(exc)
+                outcome["status"] = "failed"
+        if clean_images:
+            try:
+                errors = remove_images(new_images)
+                if errors:
+                    outcome["image_cleanup_error"] = errors
+                    outcome["status"] = "failed"
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                outcome["image_cleanup_error"] = str(exc)
                 outcome["status"] = "failed"
     outcome["duration_seconds"] = round(time.monotonic() - started, 2)
     return outcome
