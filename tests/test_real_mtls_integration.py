@@ -186,3 +186,74 @@ def test_native_transports_present_real_client_certificate(
         server.server_close()
         thread.join(timeout=3)
         assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("case", ["missing_client", "wrong_ca", "hostname_mismatch"])
+def test_kafka_real_mtls_rejects_untrusted_or_missing_identity(mtls_material: dict[str, Path], case: str) -> None:
+    server = _TlsProbeServer(mtls_material)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    sock: socket.socket | None = None
+    try:
+        config = kafka.KafkaTlsConfig(
+            ca_file=str(mtls_material["wrong_ca_cert" if case == "wrong_ca" else "ca_cert"]),
+            cert_file=None if case == "missing_client" else str(mtls_material["client_cert"]),
+            key_file=None if case == "missing_client" else str(mtls_material["client_key"]),
+        )
+        host = "127.0.0.1" if case == "hostname_mismatch" else "localhost"
+        if case == "missing_client":
+            try:
+                sock, _mode = kafka.open_kafka_socket(
+                    host, server.server_address[1], 1.0, use_tls=True, tls_config=config
+                )
+                with pytest.raises((ssl.SSLError, ConnectionError, OSError)):
+                    sock.recv(1)
+            except ssl.SSLError:
+                pass  # TLS versions can deliver the client-cert alert during handshake.
+        else:
+            with pytest.raises(ValueError, match="TLS handshake failed"):
+                kafka.open_kafka_socket(host, server.server_address[1], 1.0, use_tls=True, tls_config=config)
+        assert not server.peer_seen.is_set()
+    finally:
+        if sock is not None:
+            sock.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+
+
+@pytest.mark.known_defect_audit
+@pytest.mark.parametrize(
+    ("ca_key", "host", "expected_fragment"),
+    [
+        ("wrong_ca_cert", "localhost", "certificate verification failed"),
+        ("ca_cert", "127.0.0.1", "hostname mismatch"),
+    ],
+)
+def test_kafka_explicit_ca_reports_the_actual_tls_verification_failure(
+    mtls_material: dict[str, Path], ca_key: str, host: str, expected_fragment: str
+) -> None:
+    """Known defect: the TLS error currently claims explicit CA verification is disabled."""
+    server = _TlsProbeServer(mtls_material)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(ValueError) as caught:
+            kafka.open_kafka_socket(
+                host,
+                server.server_address[1],
+                1.0,
+                use_tls=True,
+                tls_config=kafka.KafkaTlsConfig(
+                    ca_file=str(mtls_material[ca_key]),
+                    cert_file=str(mtls_material["client_cert"]),
+                    key_file=str(mtls_material["client_key"]),
+                ),
+            )
+        assert expected_fragment in str(caught.value).casefold()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+        assert not thread.is_alive()

@@ -26,6 +26,9 @@ REDPOSTURE_CLI_PARAM_FUZZ=1 "${PYTHON_BIN}" -m pytest tests/test_cli_param_fuzz.
 echo "== 10000-example deterministic property fuzzing =="
 REDPOSTURE_HYPOTHESIS_PROFILE=redposture-local "${PYTHON_BIN}" -m pytest \
   tests/test_detection_cve_hypothesis.py tests/test_registry_nexus_detection.py \
+  tests/test_quality_discovery_properties.py tests/test_quality_discovery_stateful.py \
+  tests/test_quality_exporters_matrix.py tests/test_quality_registry_matrix.py \
+  tests/test_quality_kafka_fuzz.py tests/test_quality_proxmox_discovery.py \
   --hypothesis-seed=20260928 -q --junitxml="${ARTIFACT_DIR}/hypothesis.xml"
 echo "== local output, load, SIGINT and FD/thread soak =="
 "${PYTHON_BIN}" -m pytest -q -m local_output_audit \

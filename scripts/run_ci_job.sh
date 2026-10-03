@@ -27,6 +27,7 @@ case "${1:-}" in
     python -m compileall -q redposture_core tests
     python -m pytest -q --cov=redposture_core --cov-report=term-missing --cov-report="json:$coverage_json"
     python scripts/check_coverage_per_file.py "$coverage_json" --min 70
+    python scripts/check_quality_coverage.py "$coverage_json"
     redposture --version
     ;;
   *)

@@ -157,6 +157,166 @@ MUTATIONS = (
             "tests/test_network_fingerprint_matrix.py::test_actual_detector_rejects_other_products_over_the_network[airflow-grafana]",
         ),
     ),
+    # Registry: identity proof, architecture choice and bounded pagination.
+    Mutation(
+        name="OCI catalog stops after its first page",
+        source="redposture_core/modules/registry/actions.py",
+        original='next_path = _parse_link_next(resp_headers.get("link")) or ""',
+        replacement='next_path = ""',
+        tests=(
+            "tests/test_quality_registry_matrix.py::test_oci_catalog_pagination_preserves_unique_sorted_repositories",
+        ),
+    ),
+    Mutation(
+        name="Harbor accepts a non-numeric identity",
+        source="redposture_core/modules/registry/actions.py",
+        original='if not actual or not isinstance(payload.get("user_id"), int):',
+        replacement="if not actual:",
+        tests=("tests/test_quality_registry_matrix.py::test_harbor_identity_requires_numeric_user_id",),
+    ),
+    Mutation(
+        name="Nexus accepts an anonymous user list as credential proof",
+        source="redposture_core/modules/registry/actions.py",
+        original="if anonymous_status == 200:",
+        replacement="if anonymous_status == 401:",
+        tests=(
+            "tests/test_quality_registry_matrix.py::test_registry_credential_requires_product_specific_protected_identity[anonymous-nexus]",
+        ),
+    ),
+    Mutation(
+        name="Nexus component pagination ignores a repeated token",
+        source="redposture_core/modules/registry/actions.py",
+        original="if continuation in seen_tokens:",
+        replacement="if False and continuation in seen_tokens:",
+        tests=("tests/test_quality_registry_matrix.py::test_nexus_component_pagination_keeps_partial_evidence[loop]",),
+    ),
+    Mutation(
+        name="OCI manifest chooses ARM before Linux AMD64",
+        source="redposture_core/modules/registry/actions.py",
+        original='if os_name == "linux" and arch in {"amd64", "x86_64"}:',
+        replacement='if os_name == "linux" and arch in {"arm64"}:',
+        tests=(
+            "tests/test_quality_registry_deep.py::test_manifest_index_selects_linux_amd64_then_reads_suspicious_config",
+        ),
+    ),
+    # Discovery: independent byte/document models and malformed catalog rows.
+    Mutation(
+        name="Elastic rejects the document at the exact count limit",
+        source="redposture_core/modules/elastic/discover.py",
+        original="if self.documents + 1 > self.options.max_documents:",
+        replacement="if self.documents + 1 >= self.options.max_documents:",
+        tests=(
+            "tests/test_quality_discovery_stateful.py::test_elastic_budget_accepts_exact_document_and_byte_boundaries",
+        ),
+    ),
+    Mutation(
+        name="Elastic rejects source bytes exactly at the limit",
+        source="redposture_core/modules/elastic/discover.py",
+        original="if proposed_bytes > self.options.max_source_bytes:",
+        replacement="if proposed_bytes >= self.options.max_source_bytes:",
+        tests=(
+            "tests/test_quality_discovery_stateful.py::test_elastic_budget_accepts_exact_document_and_byte_boundaries",
+        ),
+    ),
+    Mutation(
+        name="MinIO byte reservation exceeds the target budget",
+        source="redposture_core/modules/minio/discover.py",
+        original="allowed = min(length, max(0, self.max_total_bytes - self._claimed_bytes))",
+        replacement="allowed = max(length, max(0, self.max_total_bytes - self._claimed_bytes))",
+        tests=("tests/test_quality_discovery_stateful.py::TestMinioClaimMachine",),
+    ),
+    Mutation(
+        name="Airflow log truncation reports the wrong budget boundary",
+        source="redposture_core/modules/airflow/discover.py",
+        original="if len(encoded) > remaining:",
+        replacement="if len(encoded) < remaining:",
+        tests=("tests/test_quality_discovery_properties.py::test_airflow_log_stream_never_exceeds_either_byte_budget",),
+    ),
+    Mutation(
+        name="ClickHouse reads a malformed one-column table row",
+        source="redposture_core/modules/clickhouse/discover/inventory.py",
+        original="if len(row) < 2:",
+        replacement="if len(row) < 1:",
+        tests=(
+            "tests/test_quality_discovery_properties.py::test_clickhouse_catalog_ignores_short_foreign_rows_and_invalid_size_fields",
+        ),
+    ),
+    # Exporters: bounded connection pool and callback success classification.
+    Mutation(
+        name="Exporter pool accepts one idle connection beyond per-host cap",
+        source="redposture_core/exporters/http_pool.py",
+        original="if len(bucket) >= self._max_idle_per_host:",
+        replacement="if len(bucket) > self._max_idle_per_host:",
+        tests=("tests/test_quality_exporter_pool.py::test_pool_per_origin_cap_and_context_cleanup",),
+    ),
+    Mutation(
+        name="Exporter pool accepts one idle connection beyond total cap",
+        source="redposture_core/exporters/http_pool.py",
+        original="while self._idle_total >= self._max_idle_total:",
+        replacement="while self._idle_total > self._max_idle_total:",
+        tests=(
+            "tests/test_quality_exporter_pool.py::test_pool_evicts_oldest_origin_and_never_reuses_dropped_connection",
+        ),
+    ),
+    Mutation(
+        name="Trigger waits for a fourth exporter error before stopping",
+        source="redposture_core/exporters/trigger.py",
+        original="if consecutive_exporter_failures >= 3:",
+        replacement="if consecutive_exporter_failures >= 4:",
+        tests=(
+            "tests/test_quality_exporters_matrix.py::test_all_trigger_exporters_stop_after_repeated_server_errors[mysqld_exporter]",
+        ),
+    ),
+    Mutation(
+        name="Trigger incorrectly accepts HTTP 300 as callback evidence",
+        source="redposture_core/exporters/trigger.py",
+        original="request_accepted = 200 <= trigger_status < 300",
+        replacement="request_accepted = 200 <= trigger_status <= 300",
+        tests=("tests/test_quality_exporters_matrix.py::test_trigger_acceptance_is_distinct_from_callback_proof[300]",),
+    ),
+    Mutation(
+        name="Trigger reverses probe_success evidence",
+        source="redposture_core/exporters/trigger.py",
+        original="trigger_ok = request_accepted and probe_success is True",
+        replacement="trigger_ok = request_accepted and probe_success is False",
+        tests=("tests/test_quality_exporters_matrix.py::test_trigger_acceptance_is_distinct_from_callback_proof[200]",),
+    ),
+    # Kafka: framing, codecs, SASL negotiation and ACL interpretations.
+    Mutation(
+        name="Kafka accepts a zero-length frame",
+        source="redposture_core/clients/kafka.py",
+        original="if frame_size <= 0 or frame_size > KAFKA_MAX_FRAME:",
+        replacement="if frame_size < 0 or frame_size > KAFKA_MAX_FRAME:",
+        tests=("tests/test_quality_kafka_fuzz.py::test_kafka_framed_socket_rejects_foreign_and_invalid_prefixes",),
+    ),
+    Mutation(
+        name="Kafka xerial Snappy accepts a truncated header",
+        source="redposture_core/clients/kafka.py",
+        original="if len(payload) < 16:",
+        replacement="if len(payload) < 15:",
+        tests=("tests/test_quality_kafka_fuzz.py::test_kafka_snappy_xerial_chunks_and_optional_codecs",),
+    ),
+    Mutation(
+        name="Kafka gzip decoder uses the wrong codec",
+        source="redposture_core/clients/kafka.py",
+        original="if codec == 1:",
+        replacement="if codec == 2:",
+        tests=("tests/test_quality_kafka_fuzz.py::test_kafka_snappy_xerial_chunks_and_optional_codecs",),
+    ),
+    Mutation(
+        name="Kafka SASL handshake treats unsupported version as success",
+        source="redposture_core/clients/kafka.py",
+        original="if error_code == 35:",
+        replacement="if error_code == 0:",
+        tests=("tests/test_quality_kafka_fuzz.py::test_kafka_sasl_handshake_parses_success_rejection_and_unsupported",),
+    ),
+    Mutation(
+        name="Kafka ACL treats cluster authorization failure as inconclusive",
+        source="redposture_core/clients/kafka.py",
+        original="if error_code in (29, 31):",
+        replacement="if error_code in (29,):",
+        tests=("tests/test_quality_kafka_fuzz.py::test_kafka_acl_probe_response_tristate_without_mutating_a_broker",),
+    ),
 )
 
 
