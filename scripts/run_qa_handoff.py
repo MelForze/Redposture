@@ -124,8 +124,12 @@ def _json_record(log: Path) -> dict[str, Any] | None:
             item = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(item, dict) and isinstance(item.get("download_result"), dict):
-            return item
+        if isinstance(item, dict):
+            registry = item.get("container_registry")
+            if isinstance(item.get("download_result"), dict) or (
+                isinstance(registry, dict) and isinstance(registry.get("download_result"), dict)
+            ):
+                return item
     return None
 
 
@@ -134,6 +138,11 @@ def validate_gitlab_download(record: dict[str, Any] | None, artifact_dir: Path) 
     if not record or record.get("is_gitlab") is not True:
         return False, "GitLab product was not confirmed"
     result = record.get("download_result")
+    if not isinstance(result, dict):
+        registry = record.get("container_registry")
+        if not isinstance(registry, dict) or registry.get("is_gitlab") is not True:
+            return False, "GitLab Container Registry was not confirmed"
+        result = registry.get("download_result")
     if not isinstance(result, dict) or result.get("status") != "ok":
         return False, f"download_result={result!r}"
     path = Path(str(result.get("path") or "")).resolve()

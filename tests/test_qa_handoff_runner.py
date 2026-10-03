@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from scripts import run_qa_handoff as qa
-from scripts.run_qa_handoff import LAB_TOKEN, _safe_command, validate_gitlab_download
+from scripts.run_qa_handoff import LAB_TOKEN, _json_record, _safe_command, validate_gitlab_download
 
 
 def test_gitlab_blob_handoff_requires_real_download_and_exact_digests(tmp_path: Path) -> None:
@@ -39,6 +39,38 @@ def test_gitlab_blob_handoff_rejects_paths_outside_artifact_dir(tmp_path: Path) 
     outside = tmp_path.parent / "outside-image"
     record = {"is_gitlab": True, "download_result": {"status": "ok", "path": str(outside)}}
     assert validate_gitlab_download(record, tmp_path)[0] is False
+
+
+def test_gitlab_blob_handoff_reads_download_from_confirmed_registry_surface(tmp_path: Path) -> None:
+    image = tmp_path / "downloads" / "image"
+    image.mkdir(parents=True)
+    config = b"config"
+    layer = b"layer"
+    descriptors = ["sha256:" + hashlib.sha256(blob).hexdigest() for blob in (config, layer)]
+    (image / "manifest.json").write_text(
+        json.dumps({"config": {"digest": descriptors[0]}, "layers": [{"digest": descriptors[1]}]}),
+        encoding="utf-8",
+    )
+    (image / "config.blob").write_bytes(config)
+    (image / "image.layer").write_bytes(layer)
+    log = tmp_path / "download.log"
+    log.write_text(
+        json.dumps(
+            {
+                "is_gitlab": True,
+                "detection_status": "confirmed",
+                "download_result": None,
+                "container_registry": {
+                    "is_gitlab": True,
+                    "download_result": {"status": "ok", "path": str(image)},
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert validate_gitlab_download(_json_record(log), tmp_path)[0] is True
 
 
 def test_qa_handoff_plan_is_read_only_and_redacts_lab_token(tmp_path: Path) -> None:

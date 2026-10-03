@@ -186,6 +186,7 @@ def test_command_failure_and_timeout_are_logged(tmp_path: Path) -> None:
 def test_release_runner_preserves_existing_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts import run_service_version_matrix as matrix
 
+    monkeypatch.delenv("REDPOSTURE_QA_CLEAN_IMAGES", raising=False)
     calls = []
 
     def fake_run(command: list[str], _log: Path, **_kwargs: Any) -> str:
@@ -208,6 +209,7 @@ def test_release_runner_preserves_existing_project(tmp_path: Path, monkeypatch: 
 def test_release_runner_cleanup_failure_fails_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts import run_service_version_matrix as matrix
 
+    monkeypatch.delenv("REDPOSTURE_QA_CLEAN_IMAGES", raising=False)
     calls = []
 
     def fake_run(command: list[str], _log: Path, **_kwargs: Any) -> str:
@@ -269,6 +271,7 @@ def test_release_runner_saves_health_and_oom_evidence_before_cleanup(
 ) -> None:
     from scripts import run_service_version_matrix as matrix
 
+    monkeypatch.delenv("REDPOSTURE_QA_CLEAN_IMAGES", raising=False)
     calls: list[list[str]] = []
     state = [{"Id": "owned-container", "State": {"OOMKilled": False, "Health": {"Status": "unhealthy"}}}]
     started = False
