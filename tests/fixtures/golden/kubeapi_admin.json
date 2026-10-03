@@ -11,6 +11,7 @@
     "can_list_namespaces": true,
     "can_list_pods": null,
     "can_list_secrets": true,
+    "credentials_source": "anonymous",
     "detection_signals": [
       "kubeapi.probe",
       "kubeapi.product_fingerprint"

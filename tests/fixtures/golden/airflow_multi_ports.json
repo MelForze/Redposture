@@ -5,6 +5,7 @@
     "api_generation": "v1",
     "auth_method": "native",
     "auth_required": true,
+    "connections_allowed": false,
     "credential_verification_status": "available",
     "dags_allowed": false,
     "detection": {
@@ -19,6 +20,7 @@
     "detection_status": "confirmed",
     "host": "127.0.0.1",
     "is_airflow": true,
+    "keys_allowed": false,
     "module": "airflow",
     "port": 18080,
     "service": "airflow",
@@ -50,11 +52,7 @@
       }
     ],
     "status": "detected",
-    "variable_keys": [],
-    "variable_keys_count": 0,
-    "variable_keys_error": "http_403",
-    "variable_keys_total": 0,
-    "variable_keys_truncated": false,
+    "variable_keys_error": "authentication_required",
     "version": "2.9.2"
   },
   {
@@ -63,6 +61,7 @@
     "api_generation": "v1",
     "auth_method": "anonymous",
     "auth_required": false,
+    "connections_allowed": true,
     "credential_verification_status": "unavailable",
     "dags_allowed": true,
     "detection": {
@@ -77,6 +76,7 @@
     "detection_status": "confirmed",
     "host": "127.0.0.1",
     "is_airflow": true,
+    "keys_allowed": true,
     "module": "airflow",
     "port": 18081,
     "service": "airflow",

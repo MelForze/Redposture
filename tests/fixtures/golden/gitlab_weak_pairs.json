@@ -1,5 +1,133 @@
 [
   {
+    "attempted_credentials": [
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "gitlab"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "gitlab"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "gitlab"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "user"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "user"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "test"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "guest"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "dev"
+      }
+    ],
     "auth_method": null,
     "auth_required": null,
     "clone_dir": null,
@@ -7,7 +135,7 @@
     "clone_results": [],
     "clone_scope": null,
     "container_registry": null,
-    "credentials_source": "anonymous",
+    "credentials_source": "default",
     "detection_signals": [
       "gitlab.probe",
       "gitlab.product_fingerprint"
@@ -33,8 +161,8 @@
     ],
     "port": 18080,
     "project_filters": [],
-    "provided_credentials_ok": null,
-    "provided_username": null,
+    "provided_credentials_ok": false,
+    "provided_username": "dev",
     "public_projects": [
       {
         "avatar_url": null,
@@ -168,13 +296,14 @@
         "stage_name": "data"
       }
     ],
-    "status": "detected",
+    "status": "invalid_credentials",
     "token_access": [],
     "token_projects": [],
     "token_projects_error": null,
     "token_provided": false,
     "token_user": null,
     "token_valid": null,
-    "version": null
+    "version": null,
+    "web_credential_reason": "GitLab login rejected"
   }
 ]

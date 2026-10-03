@@ -6,12 +6,15 @@
     "clone_requested": false,
     "clone_results": [],
     "clone_scope": null,
+    "container_registry": null,
+    "credentials_source": "anonymous",
     "detection_signals": [
       "gitlab.probe",
       "gitlab.product_fingerprint"
     ],
     "detection_status": "confirmed",
     "error": null,
+    "gitlab_surface": "web",
     "host": "127.0.0.1",
     "https": false,
     "is_gitlab": true,
@@ -30,6 +33,8 @@
     ],
     "port": 18080,
     "project_filters": [],
+    "provided_credentials_ok": null,
+    "provided_username": null,
     "public_projects": [
       {
         "avatar_url": null,
@@ -179,12 +184,15 @@
     "clone_requested": false,
     "clone_results": [],
     "clone_scope": null,
+    "container_registry": null,
+    "credentials_source": "anonymous",
     "detection_signals": [
       "gitlab.probe",
       "gitlab.product_fingerprint"
     ],
     "detection_status": "confirmed",
     "error": null,
+    "gitlab_surface": "web",
     "host": "127.0.0.1",
     "https": false,
     "is_gitlab": true,
@@ -203,6 +211,8 @@
     ],
     "port": 18081,
     "project_filters": [],
+    "provided_credentials_ok": null,
+    "provided_username": null,
     "public_projects": [
       {
         "avatar_url": null,
@@ -352,12 +362,15 @@
     "clone_requested": false,
     "clone_results": [],
     "clone_scope": null,
+    "container_registry": null,
+    "credentials_source": "anonymous",
     "detection_signals": [
       "gitlab.probe",
       "gitlab.product_fingerprint"
     ],
     "detection_status": "confirmed",
     "error": null,
+    "gitlab_surface": "web",
     "host": "127.0.0.1",
     "https": false,
     "is_gitlab": true,
@@ -376,6 +389,8 @@
     ],
     "port": 18082,
     "project_filters": [],
+    "provided_credentials_ok": null,
+    "provided_username": null,
     "public_projects": [
       {
         "avatar_url": null,
@@ -525,12 +540,15 @@
     "clone_requested": false,
     "clone_results": [],
     "clone_scope": null,
+    "container_registry": null,
+    "credentials_source": "anonymous",
     "detection_signals": [
       "gitlab.probe",
       "gitlab.product_fingerprint"
     ],
     "detection_status": "confirmed",
     "error": null,
+    "gitlab_surface": "web",
     "host": "127.0.0.1",
     "https": false,
     "is_gitlab": true,
@@ -549,6 +567,8 @@
     ],
     "port": 18083,
     "project_filters": [],
+    "provided_credentials_ok": null,
+    "provided_username": null,
     "public_projects": [
       {
         "avatar_url": null,
@@ -698,12 +718,15 @@
     "clone_requested": false,
     "clone_results": [],
     "clone_scope": null,
+    "container_registry": null,
+    "credentials_source": "anonymous",
     "detection_signals": [
       "gitlab.probe",
       "gitlab.product_fingerprint"
     ],
     "detection_status": "confirmed",
     "error": null,
+    "gitlab_surface": "web",
     "host": "127.0.0.1",
     "https": false,
     "is_gitlab": true,
@@ -722,6 +745,8 @@
     ],
     "port": 18084,
     "project_filters": [],
+    "provided_credentials_ok": null,
+    "provided_username": null,
     "public_projects": [
       {
         "avatar_url": null,

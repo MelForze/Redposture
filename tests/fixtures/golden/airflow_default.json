@@ -14,6 +14,7 @@
     "authenticated_keys_access": "denied",
     "authenticated_keys_count": null,
     "authenticated_keys_http_status": 403,
+    "connections_allowed": false,
     "credential_results": [
       {
         "error_code": "403",
@@ -37,6 +38,7 @@
     "detection_status": "confirmed",
     "host": "127.0.0.1",
     "is_airflow": true,
+    "keys_allowed": false,
     "module": "airflow",
     "port": 18080,
     "provided_credentials_ok": true,
@@ -69,117 +71,5 @@
     ],
     "status": "detected",
     "version": "2.9.2"
-  },
-  {
-    "api_endpoint": "http://127.0.0.1:8443",
-    "api_generation": null,
-    "auth_required": null,
-    "credential_verification_status": "unavailable",
-    "detection": {
-      "v1_transport_error": "[Errno 61] Connection refused",
-      "v2_transport_error": "[Errno 61] Connection refused"
-    },
-    "detection_signals": [
-      "airflow.probe"
-    ],
-    "detection_status": "transport_failure",
-    "host": "127.0.0.1",
-    "is_airflow": false,
-    "module": "airflow",
-    "port": 8443,
-    "service": "airflow",
-    "stages": [
-      {
-        "attempt": 1,
-        "error": "phase failed",
-        "result": "error",
-        "stage_name": "detect_protocol"
-      }
-    ],
-    "status": "fail"
-  },
-  {
-    "api_endpoint": "https://127.0.0.1:28080",
-    "api_generation": null,
-    "auth_required": null,
-    "credential_verification_status": "unavailable",
-    "detection": {
-      "v1_transport_error": "[Errno 61] Connection refused",
-      "v2_transport_error": "[Errno 61] Connection refused"
-    },
-    "detection_signals": [
-      "airflow.probe"
-    ],
-    "detection_status": "transport_failure",
-    "host": "127.0.0.1",
-    "is_airflow": false,
-    "module": "airflow",
-    "port": 28080,
-    "service": "airflow",
-    "stages": [
-      {
-        "attempt": 1,
-        "error": "phase failed",
-        "result": "error",
-        "stage_name": "detect_protocol"
-      }
-    ],
-    "status": "fail"
-  },
-  {
-    "api_endpoint": "https://127.0.0.1:8080",
-    "api_generation": null,
-    "auth_required": null,
-    "credential_verification_status": "unavailable",
-    "detection": {
-      "v1_transport_error": "[Errno 61] Connection refused",
-      "v2_transport_error": "[Errno 61] Connection refused"
-    },
-    "detection_signals": [
-      "airflow.probe"
-    ],
-    "detection_status": "transport_failure",
-    "host": "127.0.0.1",
-    "is_airflow": false,
-    "module": "airflow",
-    "port": 8080,
-    "service": "airflow",
-    "stages": [
-      {
-        "attempt": 1,
-        "error": "phase failed",
-        "result": "error",
-        "stage_name": "detect_protocol"
-      }
-    ],
-    "status": "fail"
-  },
-  {
-    "api_endpoint": "https://127.0.0.1:8081",
-    "api_generation": null,
-    "auth_required": null,
-    "credential_verification_status": "unavailable",
-    "detection": {
-      "v1_transport_error": "[Errno 61] Connection refused",
-      "v2_transport_error": "[Errno 61] Connection refused"
-    },
-    "detection_signals": [
-      "airflow.probe"
-    ],
-    "detection_status": "transport_failure",
-    "host": "127.0.0.1",
-    "is_airflow": false,
-    "module": "airflow",
-    "port": 8081,
-    "service": "airflow",
-    "stages": [
-      {
-        "attempt": 1,
-        "error": "phase failed",
-        "result": "error",
-        "stage_name": "detect_protocol"
-      }
-    ],
-    "status": "fail"
   }
 ]

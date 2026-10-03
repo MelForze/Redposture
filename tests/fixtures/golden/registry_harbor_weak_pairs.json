@@ -1,0 +1,264 @@
+[
+  {
+    "assets": false,
+    "attempted_credentials": [
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "valid_credentials",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "harbor"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "harbor"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "user"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "user"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "test"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "guest"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "dev"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "service"
+      }
+    ],
+    "auth_required": true,
+    "auth_transport_attempts": 1,
+    "credentials_source": "default",
+    "data_transport_attempts": 1,
+    "debug": false,
+    "detection_signals": [
+      "harbor.probe",
+      "harbor.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
+    "docker": false,
+    "download": false,
+    "download_result": null,
+    "error": null,
+    "gitlab": false,
+    "gitlab_error": null,
+    "gitlab_info": null,
+    "gitlab_repositories": null,
+    "gitlab_repository_details": null,
+    "harbor": true,
+    "harbor_artifacts": [
+      "core/control-plane:latest@sha256:<DOCKER_ID>",
+      "security/scanner-adapter:latest@sha256:<DOCKER_ID>"
+    ],
+    "harbor_error": null,
+    "harbor_info": {
+      "auth_mode": "db_auth",
+      "banner_message": "",
+      "current_time": "<ISO>",
+      "external_url": "http://127.0.0.1:18280",
+      "harbor_version": "v2.11.1-6b7ecba1",
+      "has_ca_root": false,
+      "notification_enable": true,
+      "oidc_provider_name": "",
+      "primary_auth_mode": false,
+      "project_creation_restriction": "everyone",
+      "read_only": false,
+      "registry_storage_provider_name": "filesystem",
+      "registry_url": "127.0.0.1:18280",
+      "self_registration": false
+    },
+    "harbor_projects": [
+      "core",
+      "library",
+      "security"
+    ],
+    "harbor_repositories": [
+      "core/control-plane",
+      "security/scanner-adapter"
+    ],
+    "host": "127.0.0.1",
+    "image": null,
+    "image_count": null,
+    "images": null,
+    "images_error": null,
+    "inspect": false,
+    "inspection_error": null,
+    "inspections": null,
+    "is_gitlab": false,
+    "is_harbor": true,
+    "is_nexus": false,
+    "is_registry": true,
+    "metadata": false,
+    "metadata_result": null,
+    "module": "harbor",
+    "nexus": false,
+    "nexus_assets": null,
+    "nexus_error": null,
+    "nexus_info": null,
+    "nexus_repositories": null,
+    "nexus_repository_details": null,
+    "port": 18280,
+    "probe_status": 200,
+    "provided_credentials": true,
+    "provided_credentials_ok": true,
+    "provided_username": "admin",
+    "repository": null,
+    "selected_repository_tags": null,
+    "service": "harbor",
+    "show_images": false,
+    "show_tags": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "valid_credentials",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "valid_credentials",
+    "tag": null,
+    "token_provided": false
+  }
+]

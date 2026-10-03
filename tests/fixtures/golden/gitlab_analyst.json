@@ -6,12 +6,15 @@
     "clone_requested": false,
     "clone_results": [],
     "clone_scope": null,
+    "container_registry": null,
+    "credentials_source": "web_token",
     "detection_signals": [
       "gitlab.probe",
       "gitlab.product_fingerprint"
     ],
     "detection_status": "confirmed",
     "error": null,
+    "gitlab_surface": "web",
     "host": "127.0.0.1",
     "https": false,
     "is_gitlab": true,
@@ -20,6 +23,8 @@
     "open_endpoints": [],
     "port": 18080,
     "project_filters": [],
+    "provided_credentials_ok": true,
+    "provided_username": null,
     "public_projects": [
       {
         "avatar_url": null,

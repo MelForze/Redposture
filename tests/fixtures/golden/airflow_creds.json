@@ -14,6 +14,7 @@
     "authenticated_keys_access": "allowed",
     "authenticated_keys_count": 1,
     "authenticated_keys_http_status": 200,
+    "connections_allowed": false,
     "credential_results": [
       {
         "error_code": null,
@@ -25,7 +26,7 @@
     "credential_verification_status": "available",
     "cve_enumeration": {
       "additional_evidence": [],
-      "catalog_version": "2026-09-20",
+      "catalog_version": "2026-10-03",
       "findings": [
         {
           "access_basis": "provided_credentials",
@@ -163,6 +164,7 @@
     "discover_requested": true,
     "host": "127.0.0.1",
     "is_airflow": true,
+    "keys_allowed": false,
     "module": "airflow",
     "port": 18080,
     "provided_credentials_ok": true,

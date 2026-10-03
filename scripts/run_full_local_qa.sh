@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
+export REDPOSTURE_QA_PROJECT_PREFIX="${REDPOSTURE_QA_PROJECT_PREFIX:-redpostureqa$$}"
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-${REDPOSTURE_QA_PROJECT_PREFIX}-matrix}"
 
 if [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
   PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/.venv/bin/python}"
@@ -14,6 +16,16 @@ mkdir -p "${ARTIFACT_DIR}"
 
 command -v docker >/dev/null
 docker compose version >/dev/null
+for project in "${COMPOSE_PROJECT_NAME}" \
+  "${REDPOSTURE_QA_PROJECT_PREFIX}-auth-matrix" \
+  "${REDPOSTURE_QA_PROJECT_PREFIX}-minio-kubeapi" \
+  "${REDPOSTURE_QA_PROJECT_PREFIX}-cve-matrix"; do
+  if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ]] ||
+     [[ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" ]]; then
+    echo "[error] QA Compose project already exists: $project" >&2
+    exit 2
+  fi
+done
 
 echo "== service fixture fidelity =="
 "${PYTHON_BIN}" lab/services/coverage.py "${ARTIFACT_DIR}/service-coverage"

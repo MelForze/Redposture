@@ -48,8 +48,8 @@ _CAPABILITY_COLOR_CASES = (
     ("rabbitmq", "(admin:False)", "bright_green"),
     ("rabbitmq", "(Count:7)", "red"),
     ("rabbitmq", "(Count:0)", "bright_green"),
-    ("registry", "(images:7)", "red"),
-    ("registry", "(images:0)", "bright_green"),
+    ("docker-registry", "(images:7)", "red"),
+    ("docker-registry", "(images:0)", "bright_green"),
 )
 
 
@@ -77,8 +77,9 @@ class _RecordingConsole:
 
 def _spec(module: str) -> ModuleAuditSpec:
     args = parse_args([module, "-t", "127.0.0.1"])
-    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-    return getattr(stage, f"build_{module}_spec")(args)
+    module_name = module.replace("-", "_")
+    stage = importlib.import_module(f"redposture_core.modules.{module_name}.stage")
+    return getattr(stage, f"build_{module_name}_spec")(args)
 
 
 def _contains_color(console: _RecordingConsole, text: str, color: str) -> bool:
@@ -98,6 +99,7 @@ def test_stored_tsv_module_tag_has_no_padding(module: str, tmp_path) -> None:
     formatter = plan.detect or plan.summary
     assert formatter is not None
     payload: dict[str, Any] = {
+        "module": module,
         "host": "127.0.0.1",
         "port": spec.default_port,
         "status": "detected",

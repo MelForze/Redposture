@@ -1,0 +1,232 @@
+[
+  {
+    "assets": false,
+    "attempted_credentials": [
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "nexus"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "nexus"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "nexus"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "user"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "user"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "test"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "guest"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "dev"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "service"
+      }
+    ],
+    "auth_required": false,
+    "auth_transport_attempts": 1,
+    "credential_verification_reason": "authentication rejected",
+    "credential_verification_status": "available",
+    "credentials_source": "default",
+    "debug": false,
+    "detection_signals": [
+      "nexus.probe",
+      "nexus.product_fingerprint"
+    ],
+    "detection_status": "confirmed",
+    "docker": false,
+    "download": false,
+    "download_result": null,
+    "error": "authentication rejected",
+    "gitlab": false,
+    "gitlab_error": null,
+    "gitlab_info": null,
+    "gitlab_repositories": null,
+    "gitlab_repository_details": null,
+    "harbor": false,
+    "harbor_artifacts": null,
+    "harbor_error": null,
+    "harbor_info": null,
+    "harbor_projects": null,
+    "harbor_repositories": null,
+    "host": "127.0.0.1",
+    "image": null,
+    "image_count": null,
+    "images": null,
+    "images_error": null,
+    "inspect": false,
+    "inspection_error": null,
+    "inspections": null,
+    "is_gitlab": null,
+    "is_harbor": null,
+    "is_nexus": true,
+    "is_registry": true,
+    "metadata": false,
+    "metadata_result": null,
+    "module": "nexus",
+    "nexus": true,
+    "nexus_assets": null,
+    "nexus_error": null,
+    "nexus_info": {
+      "raw_version": "3.72.0-04",
+      "version": "3.72.0",
+      "version_source": "server_header"
+    },
+    "nexus_repositories": null,
+    "nexus_repository_details": null,
+    "port": 15004,
+    "probe_status": 404,
+    "provided_credentials": true,
+    "provided_credentials_ok": false,
+    "provided_username": "service",
+    "repository": null,
+    "selected_repository_tags": null,
+    "service": "nexus",
+    "show_images": false,
+    "show_tags": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": "authentication rejected",
+        "result": "auth_required",
+        "stage_name": "auth_inference_credentials"
+      }
+    ],
+    "status": "auth_required",
+    "tag": null,
+    "token_provided": false
+  }
+]

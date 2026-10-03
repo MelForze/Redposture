@@ -53,6 +53,7 @@
     "provided_credentials": true,
     "provided_credentials_ok": false,
     "provided_username": null,
+    "renderer_plugin_version": null,
     "service": "grafana",
     "show_datasources": true,
     "sso_evidence": [],

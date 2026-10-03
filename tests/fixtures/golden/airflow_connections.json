@@ -28,6 +28,7 @@
     "authenticated_keys_access": "allowed",
     "authenticated_keys_count": 1,
     "authenticated_keys_http_status": 200,
+    "connections_allowed": false,
     "credential_results": [
       {
         "error_code": null,
@@ -51,6 +52,7 @@
     "detection_status": "confirmed",
     "host": "127.0.0.1",
     "is_airflow": true,
+    "keys_allowed": false,
     "module": "airflow",
     "port": 18080,
     "provided_credentials_ok": true,

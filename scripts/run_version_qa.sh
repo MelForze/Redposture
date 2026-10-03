@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
+export REDPOSTURE_QA_PROJECT_PREFIX="${REDPOSTURE_QA_PROJECT_PREFIX:-redpostureqa$$}"
 ARTIFACT_DIR="${1:-/tmp/redposture_versions_$(date -u +%Y%m%d_%H%M%S)}"
 if [ -d "${ARTIFACT_DIR}" ] && [ -n "$(ls -A "${ARTIFACT_DIR}")" ]; then
   echo "[error] version QA output directory is not empty: ${ARTIFACT_DIR}" >&2

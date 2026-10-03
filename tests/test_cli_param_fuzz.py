@@ -333,14 +333,26 @@ def _policy_case(module: str, expected_error: str, *extra: str, targets: str | N
 
 def _curated_policy_cases() -> tuple[PolicyCase, ...]:
     cases = [
-        _policy_case("registry", "use either --token or --username/--password", "--token", "tok", "-u", "u", "-p", "p"),
-        _policy_case("registry", "--show-tags requires --repository", "--docker", "--show-tags"),
-        _policy_case("registry", "--tag requires --repository", "--docker", "--tag", "latest"),
-        _policy_case(
-            "registry", "--metadata requires --repository and --tag", "--docker", "--repository", "repo", "--metadata"
+        *(
+            _policy_case(product, "use either --token or --username/--password", "--token", "tok", "-u", "u", "-p", "p")
+            for product in ("docker-registry", "harbor", "nexus")
         ),
-        _policy_case("registry", "--assets requires --nexus", "--assets"),
-        _policy_case("registry", "--download requires --image", "--docker", "--download"),
+        *(
+            _policy_case(product, "--show-tags requires --repository", "--show-tags")
+            for product in ("docker-registry", "harbor", "nexus")
+        ),
+        *(
+            _policy_case(product, "--tag requires --repository", "--tag", "latest")
+            for product in ("docker-registry", "harbor", "nexus")
+        ),
+        *(
+            _policy_case(product, "--metadata requires --repository and --tag", "--repository", "repo", "--metadata")
+            for product in ("docker-registry", "harbor", "nexus")
+        ),
+        *(
+            _policy_case(product, "--download requires --image", "--download")
+            for product in ("docker-registry", "harbor", "nexus")
+        ),
         _policy_case("consul", "--key requires --dump", "--key", "redposture/kafka/sasl_password"),
         _policy_case("consul", "--service requires --dump", "--service", "svc-redposture-api"),
         _policy_case("consul", "--agent requires --dump", "--agent", "redposture-lab-consul"),
@@ -595,8 +607,12 @@ def _run_policy_case(case: PolicyCase) -> tuple[int | None, str]:
     rc = validate_basic_module_args(args, console, module=case.module)
     if rc is not None:
         return rc, "\n".join(console.errors)
-    policy = importlib.import_module(f"redposture_core.modules.{case.module}.policy")
-    rc = policy.validate_args(args, console)
+    policy = importlib.import_module(f"redposture_core.modules.{case.module.replace('-', '_')}.policy")
+    rc = (
+        policy.validate_args(args, console, product=case.module.replace("-", "_"))
+        if case.module in {"docker-registry", "harbor", "nexus"}
+        else policy.validate_args(args, console)
+    )
     return rc, "\n".join(console.errors)
 
 

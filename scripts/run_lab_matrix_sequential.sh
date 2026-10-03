@@ -5,6 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}" || exit 1
 # Use engine socket context by default for local/CI consistency.
 export DOCKER_CONTEXT="${DOCKER_CONTEXT:-default}"
+# Never inherit Compose's directory-derived project name: a direct QA run
+# must not stop somebody else's lab stack during preflight/cleanup.
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-redpostureqa$$}"
 
 OUT_DIR="${1:-/tmp/redposture_lab_matrix_seq_$(date +%Y%m%d_%H%M%S)}"
 case "${OUT_DIR}" in
@@ -83,10 +86,10 @@ collect_lab_ports() {
 }
 
 preflight_lab_environment() {
-  echo "== pre-run: cleaning redposture lab stacks =="
+  echo "== pre-run: stopping isolated redposture lab stacks (preserving volumes) =="
   local service
   for service in "${MATRIX_SERVICES[@]}"; do
-    compose_service "${service}" down -v >/dev/null 2>&1 || true
+    compose_service "${service}" down >/dev/null 2>&1 || true
   done
 
   echo "== pre-run: verifying lab ports are free =="
@@ -136,7 +139,7 @@ compose_service() {
       "${PYTHON_BIN}" "${LAB_DIR}/services/registry-harbor-real/prepare_version.py" \
         v2.11.1 "${OUT_DIR}/stands/harbor" >>"${OUT_DIR}/logs/harbor-prepare.log" 2>&1 || return 1
     fi
-    docker compose -p redposture-matrix-harbor -f "${compose_file}" "$@"
+    docker compose -p "${COMPOSE_PROJECT_NAME:-redposture-matrix-harbor}" -f "${compose_file}" "$@"
     return
   fi
   if [ ! -f "${compose_file}" ]; then
@@ -148,7 +151,7 @@ compose_service() {
 
 cleanup_current_service() {
   if [ -n "${CURRENT_SERVICE}" ]; then
-    compose_service "${CURRENT_SERVICE}" down -v >/dev/null 2>&1 || true
+    compose_service "${CURRENT_SERVICE}" down >/dev/null 2>&1 || true
     CURRENT_SERVICE=""
   fi
 }
@@ -289,7 +292,7 @@ start_service() {
 stop_service() {
   local service="$1"
   echo "== service:${service} down =="
-  compose_service "${service}" down -v
+  compose_service "${service}" down
   if [ "${CURRENT_SERVICE}" = "${service}" ]; then
     CURRENT_SERVICE=""
   fi
@@ -324,9 +327,9 @@ run_case() {
   if [ "${rc}" -ne "${expected_exit}" ]; then
     echo "[error] ${label} exit mismatch: expected=${expected_exit} actual=${rc}" >&2
     echo "[error] log: ${log_path}" >&2
-    # The local runner validates every recorded exit after collecting all cases.
-    if [ -n "${REDPOSTURE_LOCAL_QA_SERVICE:-}" ]; then return 0; fi
-    return 1
+    # Finish the matrix so one run exposes every mismatch; postrun validates
+    # the complete status file after all services have been stopped.
+    return 0
   fi
   if [ "${rc}" -ne 0 ]; then
     echo "[warn] ${label} expected failure matched (rc=${rc})" >&2
@@ -353,8 +356,7 @@ run_text_case() {
   if [ "${rc}" -ne "${expected_exit}" ]; then
     echo "[error] ${label} exit mismatch: expected=${expected_exit} actual=${rc}" >&2
     echo "[error] log: ${log_path}" >&2
-    if [ -n "${REDPOSTURE_LOCAL_QA_SERVICE:-}" ]; then return 0; fi
-    return 1
+    return 0
   fi
 }
 
@@ -377,8 +379,7 @@ run_raw_case() {
   if [ "${rc}" -ne "${expected_exit}" ]; then
     echo "[error] ${label} exit mismatch: expected=${expected_exit} actual=${rc}" >&2
     echo "[error] log: ${log_path}" >&2
-    if [ -n "${REDPOSTURE_LOCAL_QA_SERVICE:-}" ]; then return 0; fi
-    return 1
+    return 0
   fi
   if [ "${rc}" -ne 0 ]; then
     echo "[warn] ${label} expected failure matched (rc=${rc})" >&2
@@ -511,7 +512,8 @@ run_exporters_cases() {
     run_case exporters exporters_collect_extended_controls 0 exporters collect -t 127.0.0.1 -p "19100,19121" --exporters node,blackbox --deep --no-adaptive-collect --max-inflight 4 --pprof-seconds 1 --trace-seconds 1 --checkpoint-file "${collect_checkpoint}" --save-responses-dir "${OUT_DIR}/collect_extended"
     run_case exporters exporters_collect_resume_checkpoint 0 exporters collect -t 127.0.0.1 -p "19100,19121" --exporters node --resume --checkpoint-file "${collect_checkpoint}" --save-responses-dir "${OUT_DIR}/collect_extended_resume"
     run_text_case exporters exporters_collect_debug_smoke 0 exporters collect -t 127.0.0.1 -p "19100" --exporters node --debug
-    run_case exporters exporters_trigger_extended_controls 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121,19187" --no-with-listen --exporters blackbox,postgres --services blackbox --blackbox-port 29115 --postgres-auth-module stage --no-postgres-tls
+    run_case exporters exporters_trigger_extended_controls 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19187" --exporters postgres --services postgres --postgres-port 15432 --postgres-auth-module userpass --no-postgres-tls --listen-seconds 2
+    run_case exporters exporters_trigger_without_listener 1 exporters trigger -t 127.0.0.1 --callback-ip 192.0.2.1 -p "19187" --no-with-listen --exporters postgres --services postgres --postgres-auth-module userpass --no-postgres-tls
     run_text_case exporters exporters_trigger_debug_smoke 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121" --no-with-listen --exporters blackbox --debug
   fi
 }
@@ -540,7 +542,7 @@ run_registry_harbor_cases() {
 }
 
 run_valkey_cases() {
-  "${PYTHON_BIN}" scripts/verify_valkey_lab.py "${OUT_DIR}" --project valkey
+  "${PYTHON_BIN}" scripts/verify_valkey_lab.py "${OUT_DIR}" --project "${COMPOSE_PROJECT_NAME}"
 }
 
 run_grafana_cases() {
@@ -1001,7 +1003,7 @@ run_proxy_isolated_cases() {
 }
 
 run_airflow_cases() {
-  run_case airflow airflow_default 0 airflow -t 127.0.0.1 --debug --defcreds
+  run_case airflow airflow_default 0 airflow -t http://127.0.0.1:18080 --debug --defcreds
   run_case airflow airflow_creds 0 airflow -t http://127.0.0.1:18080 -u airflow -p airflow --show-keys --discover --enum-cve --discover-time 10 --discover-max-bytes 52428800 -ot excluded.invalid
   run_case airflow airflow_anonymous 0 airflow -t http://127.0.0.1:18081 --show-keys --discover --enum-cve --discover-time 10 --discover-max-bytes 52428800 -ot excluded.invalid
   if is_extended_matrix; then

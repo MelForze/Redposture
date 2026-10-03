@@ -1014,8 +1014,10 @@ def _validate_opensearch_defcreds_contract(rows: list[dict[str, str]]) -> None:
         if not isinstance(attempts, list) or not all(isinstance(attempt, dict) for attempt in attempts):
             raise SystemExit("OpenSearch defcreds contract has invalid attempted_credentials")
         pairs = [(str(attempt.get("username") or ""), str(attempt.get("password") or "")) for attempt in attempts]
-        if pairs != list(_OPENSEARCH_DEFAULT_CREDENTIALS):
-            raise SystemExit(f"OpenSearch defcreds order mismatch: {pairs!r}")
+        if [username for username, _password in pairs] != [
+            username for username, _password in _OPENSEARCH_DEFAULT_CREDENTIALS
+        ] or any(password != "<redacted>" for _username, password in pairs):
+            raise SystemExit(f"OpenSearch defcreds order or redaction mismatch: {pairs!r}")
         for index, attempt in enumerate(attempts):
             is_winner = index == 8
             expected_status = "weak_default_creds" if is_winner else "auth_required"
@@ -1778,6 +1780,17 @@ def _validate_capability_sanity(rows: list[dict[str, str]]) -> None:
             status = str(record.get("status") or "")
             if status not in _SUCCESSFUL_AUDIT_STATUSES:
                 continue
+            if (
+                module in {"docker-registry", "harbor", "nexus"}
+                and record.get("credentials_source") == "default"
+                and not any(
+                    record.get(flag)
+                    for flag in ("show_images", "show_tags", "metadata", "inspect", "download", "assets")
+                )
+            ):
+                # A credentials-only run proves identity; it never requested
+                # inventory, so empty image/component fields are expected.
+                continue
             if any(_field_is_populated(record.get(field)) for field in capability_fields):
                 continue
             if _empty_inventory_query_completed(module, record):
@@ -2440,6 +2453,7 @@ _MISSING_TARGET_MODULES = (
 _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "exporters_scan_url_https_transport_fail": ("scan inconclusive: no exporter confirmed",),
     "exporters_collect_url_https_transport_fail": ("collect inconclusive: no exporter confirmed",),
+    "exporters_trigger_without_listener": ("trigger inconclusive: no callback attempt was confirmed",),
     "minio_default": ("partial_operational_failure",),
     "minio_creds": ("audit inconclusive: no service confirmed",),
     "minio_tls": ("operational_failures_before_detection",),
@@ -2461,6 +2475,10 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_exporters_trigger_json_listen_without_output": ("--format json with listeners enabled requires --output",),
     "fuzz_exporters_trigger_negative_listen_seconds": ("--listen-seconds must be > 0",),
     **{f"fuzz_{module}_missing_targets": (f"{module} requires -t/--targets",) for module in _MISSING_TARGET_MODULES},
+    "fuzz_registry_missing_targets": ("docker-registry requires -t/--targets",),
+    "fuzz_harbor_option_surface": ("failed to parse targets",),
+    "fuzz_nexus_option_surface": ("use either --token or --username/--password",),
+    "fuzz_gitlab_oci_option_surface": ("failed to parse targets",),
     "fuzz_registry_username_without_password": ("--username and --password must be set together",),
     "fuzz_registry_token_basic_conflict": ("use either --token or --username/--password, not both",),
     "fuzz_registry_show_tags_without_repository": ("--show-tags requires --repository",),
@@ -2574,6 +2592,7 @@ _EXPECTED_RUNTIME_FAILURE_JSON_LABELS = frozenset(
     {
         "exporters_scan_url_https_transport_fail",
         "exporters_collect_url_https_transport_fail",
+        "exporters_trigger_without_listener",
         "minio_default",
         "minio_creds",
         "minio_tls",
@@ -3164,7 +3183,12 @@ def _validate_module_schema(rows: list[dict[str, str]]) -> None:
         for record in _iter_audit_records_for_row(row):
             if str(record.get("module") or "") != module:
                 continue
-            missing = [field for field in required if field not in record]
+            record_required = required
+            if module == "gitlab" and record.get("gitlab_surface") == "container_registry":
+                record_required = ("is_gitlab", "token_provided", "container_registry")
+                if not isinstance(record.get("container_registry"), dict):
+                    raise SystemExit(f"schema regression in '{row['label']}': missing OCI surface record")
+            missing = [field for field in record_required if field not in record]
             if missing:
                 raise SystemExit(
                     f"schema regression in '{row['label']}': module={module} record missing "

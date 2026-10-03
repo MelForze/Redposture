@@ -1,16 +1,17 @@
 [
   {
     "anonymous_access": "open",
-    "auth_error": null,
+    "auth_error": "selfsubjectreviews.authentication.k8s.io is forbidden: User \"system:anonymous\" cannot create resource \"selfsubjectreviews\" in API group \"authentication.k8s.io\" at the cluster scope",
     "auth_mode": "basic",
     "auth_required": false,
-    "auth_valid": true,
-    "auth_verification_method": "namespace_list",
+    "auth_valid": null,
+    "auth_verification_method": "self_subject_review",
     "auth_verified_identity": null,
     "can_exec_pod": null,
     "can_list_namespaces": true,
     "can_list_pods": true,
     "can_list_secrets": null,
+    "credentials_source": "anonymous",
     "detection_signals": [
       "kubeapi.probe",
       "kubeapi.product_fingerprint"
@@ -81,7 +82,7 @@
         "stage_name": "data"
       }
     ],
-    "status": "auth_valid",
+    "status": "auth_unverified_anonymous",
     "tls_auto_insecure": true,
     "version": "v1.31.6+k3s1"
   }

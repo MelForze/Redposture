@@ -5,10 +5,11 @@
     "api_generation": "v1",
     "auth_method": "anonymous",
     "auth_required": false,
+    "connections_allowed": true,
     "credential_verification_status": "unavailable",
     "cve_enumeration": {
       "additional_evidence": [],
-      "catalog_version": "2026-09-20",
+      "catalog_version": "2026-10-03",
       "findings": [
         {
           "access_basis": "anonymous_access",
@@ -145,6 +146,7 @@
     "discover_requested": true,
     "host": "127.0.0.1",
     "is_airflow": true,
+    "keys_allowed": true,
     "module": "airflow",
     "port": 18081,
     "service": "airflow",

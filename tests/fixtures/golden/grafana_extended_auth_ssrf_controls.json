@@ -124,6 +124,7 @@
     "provided_credentials": true,
     "provided_credentials_ok": true,
     "provided_username": "admin",
+    "renderer_plugin_version": null,
     "service": "grafana",
     "show_datasources": true,
     "sso_evidence": [],

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -37,10 +38,15 @@ def validate_valkey_record(record: dict[str, Any], *, version_known: bool, crede
     assert all(item["product"] == "valkey" for item in enumeration.get("findings", [])), "Redis CVE leakage"
 
 
+def default_compose_project() -> str:
+    prefix = os.environ.get("REDPOSTURE_QA_PROJECT_PREFIX")
+    return f"{prefix}-versions-valkey" if prefix else "redposture-versions-valkey"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact_dir", type=Path)
-    parser.add_argument("--project", default="redposture-versions-valkey")
+    parser.add_argument("--project", default=default_compose_project())
     args = parser.parse_args()
     output = args.artifact_dir / "valkey-contracts"
     output.mkdir(parents=True)

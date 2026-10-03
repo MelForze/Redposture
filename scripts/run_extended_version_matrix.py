@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -152,11 +153,16 @@ def _case(case: VersionCase, out_dir: Path) -> dict[str, Any]:
     log = out_dir / f"{slug}.log"
     override = out_dir / f"{slug}.override.json"
     override.write_text(json.dumps({"services": {case.service: {"image": case.image}}}), encoding="utf-8")
+    project_name = (
+        f"{os.environ['REDPOSTURE_QA_PROJECT_PREFIX']}-{case.product}"
+        if os.environ.get("REDPOSTURE_QA_PROJECT_PREFIX")
+        else f"redpostureqa{os.getpid()}-{case.product}"
+    )
     compose = [
         "docker",
         "compose",
         "--project-name",
-        case.project,
+        project_name,
         "--file",
         str(ROOT / case.compose_file),
         "--file",
@@ -169,6 +175,13 @@ def _case(case: VersionCase, out_dir: Path) -> dict[str, Any]:
         existing = _run([*compose, "ps", "--all", "-q"], log, timeout=30)
         if existing.returncode != 0 or existing.stdout.strip():
             raise RuntimeError("Compose project already exists or cannot be inspected; preserving it")
+        volumes = _run(
+            ["docker", "volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={project_name}"],
+            log,
+            timeout=30,
+        )
+        if volumes.returncode != 0 or volumes.stdout.strip():
+            raise RuntimeError("Compose volumes already exist or cannot be inspected; preserving them")
         owns_stack = True
         startup = _run(
             [*compose, "up", "--detach", "--wait", "--wait-timeout", str(case.timeout), case.service],

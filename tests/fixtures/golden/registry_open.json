@@ -5,8 +5,8 @@
     "data_transport_attempts": 1,
     "debug": false,
     "detection_signals": [
-      "registry.probe",
-      "registry.product_fingerprint"
+      "docker-registry.probe",
+      "docker-registry.product_fingerprint"
     ],
     "detection_status": "confirmed",
     "docker": true,
@@ -55,7 +55,7 @@
     "is_registry": true,
     "metadata": false,
     "metadata_result": null,
-    "module": "registry",
+    "module": "docker-registry",
     "nexus": false,
     "nexus_assets": null,
     "nexus_error": null,
@@ -65,11 +65,10 @@
     "port": 15000,
     "probe_status": 200,
     "provided_credentials": false,
-    "provided_password": null,
     "provided_username": null,
     "repository": null,
     "selected_repository_tags": null,
-    "service": "registry",
+    "service": "docker-registry",
     "show_images": true,
     "show_tags": false,
     "stages": [

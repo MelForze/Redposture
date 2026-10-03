@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from redposture_core.cli_args import build_parser  # noqa: E402
 from redposture_core.cve import normalize_version  # noqa: E402
 from scripts.check_compose_readiness import readiness_issues  # noqa: E402
 from scripts.qa_service_policy import startup_timeout  # noqa: E402
@@ -121,6 +122,15 @@ def check_record(case: dict[str, Any], record: dict[str, Any]) -> None:
         raise AssertionError(f"unexpected CVE status: {enumeration.get('status')}")
 
 
+def validate_case_cli(case: dict[str, Any], parser: argparse.ArgumentParser) -> None:
+    """Reject stale command names and flags before starting expensive stands."""
+    arguments = [str(case["module"]), *(str(item) for item in case["args"]), "--enum-cve", "--format", "json"]
+    try:
+        parser.parse_args(arguments)
+    except SystemExit as exc:
+        raise ValueError(f"invalid CLI arguments in version case {case['id']}: {arguments}") from exc
+
+
 def wait_ready(
     compose: list[str], config: dict[str, Any], log: Path, timeout: int, *, readiness_url: str | None = None
 ) -> None:
@@ -177,7 +187,9 @@ def run_case(case: dict[str, Any], destination: Path, *, validate_only: bool) ->
     started = time.monotonic()
     result: dict[str, Any] = {"case": case, "status": "failed", "log": str(log)}
     base = ROOT / "lab/services" / case["fixture"] / "docker-compose.yml"
-    compose = ["docker", "compose", "-p", f"redposture-versions-{case['fixture']}", "-f", str(base)]
+    project_prefix = os.environ.get("REDPOSTURE_QA_PROJECT_PREFIX", f"redpostureqa{os.getpid()}")
+    project_name = f"{project_prefix}-versions-{case['fixture']}"
+    compose = ["docker", "compose", "-p", project_name, "-f", str(base)]
     owns_stack = False
     try:
         if case.get("environment"):
@@ -212,6 +224,12 @@ def run_case(case: dict[str, Any], destination: Path, *, validate_only: bool) ->
             return result
         if run([*compose, "ps", "--all", "-q"], log, timeout=30).strip():
             raise RuntimeError("version Compose project already exists; stop it explicitly before rerunning")
+        if run(
+            ["docker", "volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={project_name}"],
+            log,
+            timeout=30,
+        ).strip():
+            raise RuntimeError("version Compose volumes already exist; preserving them")
         # Only this newly created project is removed in finally, even on failed startup.
         owns_stack = True
         run(
@@ -317,6 +335,9 @@ def main() -> int:
         if unknown:
             parser.error(f"unknown cases: {sorted(unknown)}")
         cases = [case for case in cases if case["id"] in args.case]
+    command_parser = build_parser()
+    for case in cases:
+        validate_case_cli(case, command_parser)
     destination.mkdir(parents=True, exist_ok=True)
     results = []
     interrupted = False
