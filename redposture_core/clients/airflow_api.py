@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -31,10 +32,20 @@ class AirflowResponse:
     truncated: bool = False
 
     def json(self) -> Any | None:
-        if self.transport_error or not self.body:
+        if self.transport_error or self.truncated or not self.body:
             return None
+        body = self.body
+        encoding = next((value for key, value in self.headers.items() if key.lower() == "content-encoding"), "")
+        if encoding.strip().lower() == "gzip":
+            try:
+                decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                body = decoder.decompress(body, _RESPONSE_CAP + 1)
+                if len(body) > _RESPONSE_CAP or not decoder.eof or decoder.unused_data:
+                    return None
+            except zlib.error:
+                return None
         try:
-            return json.loads(self.body)
+            return json.loads(body)
         except (ValueError, TypeError):
             return None
 

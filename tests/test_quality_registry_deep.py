@@ -22,9 +22,8 @@ def test_product_action_facades_use_the_same_verified_registry_implementation(pr
     assert facade.collect_registry_data is actions.collect_registry_data
 
 
-@pytest.mark.known_defect_audit
 def test_gitlab_blob_download_exchanges_registry_bearer_challenge(tmp_path: Path) -> None:
-    """Known defect: manifest reads exchange Bearer tokens, blob downloads do not."""
+    """Blob downloads exchange a scoped Bearer token after a challenge."""
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
@@ -74,6 +73,61 @@ def test_gitlab_blob_download_exchanges_registry_bearer_challenge(tmp_path: Path
         )
         assert (status, size, error) == (200, len(b"registry-blob"), None)
         assert output.read_bytes() == b"registry-blob"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+
+
+def test_registry_blob_download_retries_bearer_once_and_preserves_existing_file(tmp_path: Path) -> None:
+    requests: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+            requests.append(self.path)
+            if self.path.startswith("/token"):
+                body = b'{"token":"rejected-token"}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path.startswith("/v2/demo/blobs/"):
+                self.send_response(401)
+                self.send_header(
+                    "WWW-Authenticate",
+                    f'Bearer realm="http://127.0.0.1:{self.server.server_port}/token",service="registry",scope="repository:demo:pull"',
+                )
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        output = tmp_path / "blob"
+        output.write_bytes(b"existing")
+        status, size, error = actions._http_download(
+            "127.0.0.1",
+            server.server_port,
+            "/v2/demo/blobs/sha256:abc",
+            1,
+            str(output),
+            headers={"Authorization": "Basic ZGVtbzpwYXNz"},
+        )
+        assert (status, size, error) == (401, 0, None)
+        assert output.read_bytes() == b"existing"
+        assert sum(path.startswith("/v2/demo/blobs/") for path in requests) == 2
+        assert sum(path.startswith("/token") for path in requests) == 1
     finally:
         server.shutdown()
         server.server_close()

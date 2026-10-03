@@ -1,17 +1,14 @@
-"""Opt-in reproductions from the real Airflow reverse-proxy QA stand."""
+"""Airflow reverse-proxy regression cases."""
 
 from __future__ import annotations
 
 import gzip
 import json
 
-import pytest
-
 from redposture_core.clients.airflow_api import AirflowResponse
 from redposture_core.modules.airflow.actions import detect_airflow, verify_credential
 
 
-@pytest.mark.known_defect_audit
 def test_airflow_identical_anonymous_and_bad_basic_403_cannot_verify_identity() -> None:
     problem = json.dumps(
         {
@@ -33,7 +30,6 @@ def test_airflow_identical_anonymous_and_bad_basic_403_cannot_verify_identity() 
     assert result.state == "verification_unavailable"
 
 
-@pytest.mark.known_defect_audit
 def test_airflow_gzipped_version_with_valid_health_confirms_service() -> None:
     version = gzip.compress(b'{"version":"2.9.2","git_version":""}')
     health = b'{"metadatabase":{"status":"healthy"},"scheduler":{"status":"healthy"}}'
@@ -58,3 +54,32 @@ def test_airflow_gzipped_version_with_valid_health_confirms_service() -> None:
     detection = detect_airflow(Client())
     assert detection.status == "confirmed"
     assert detection.version == "2.9.2"
+
+
+def test_airflow_403_requires_private_resource_proof_for_restricted_identity() -> None:
+    problem = b'{"status":403,"title":"Forbidden","detail":"Permission denied"}'
+    variables = b'{"variables":[],"total_entries":0}'
+
+    class Client:
+        def __init__(self, authenticated: bool, public_variables: bool) -> None:
+            self.authenticated = authenticated
+            self.public_variables = public_variables
+
+        def get(self, path: str, *, authed: bool = True) -> AirflowResponse:
+            if path.startswith("/api/v1/variables") and ((self.authenticated and authed) or self.public_variables):
+                return AirflowResponse(http_status=200, headers={}, body=variables)
+            return AirflowResponse(http_status=403, headers={}, body=problem)
+
+    private = verify_credential(lambda **kwargs: Client(bool(kwargs), False), "v1", "viewer", "secret")
+    public = verify_credential(lambda **kwargs: Client(bool(kwargs), True), "v1", "viewer", "secret")
+    assert private.state == "valid_but_restricted"
+    assert public.state == "verification_unavailable"
+
+
+def test_airflow_gzip_json_rejects_corrupt_and_oversized_payloads() -> None:
+    from redposture_core.clients.airflow_api import AirflowResponse
+
+    headers = {"content-encoding": "GZip"}
+    assert AirflowResponse(200, headers, b"not gzip").json() is None
+    oversized = gzip.compress(b'{"data":"' + b"x" * (2 * 1024 * 1024) + b'"}')
+    assert AirflowResponse(200, headers, oversized).json() is None

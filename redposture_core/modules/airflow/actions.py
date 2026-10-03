@@ -297,7 +297,7 @@ def verify_credential(pool_client_factory: Any, generation: str, username: str, 
     """Verify one credential for the pinned generation.
 
     2.x: HTTP Basic against the DAG collection (200 valid / 401 invalid / 403
-    valid_but_restricted). 3.x: POST /auth/token (200 + access_token valid / 401
+    needs independent identity proof). 3.x: POST /auth/token (200 + access_token valid / 401
     invalid); the issued JWT is kept for the resource-access probes.
     """
     if generation == "v2":
@@ -320,7 +320,17 @@ def verify_credential(pool_client_factory: Any, generation: str, username: str, 
     if resp.http_status == 401 and _looks_like_airflow_problem(resp, 401):
         return CredentialResult(state="invalid", username=username, error_code="401")
     if resp.http_status == 403 and _looks_like_airflow_problem(resp, 403):
-        return CredentialResult(state="valid_but_restricted", username=username, error_code="403")
+        for path, collection in (
+            (_ENDPOINTS["v1"]["keys"], "variables"),
+            (_ENDPOINTS["v1"]["connections"], "connections"),
+        ):
+            authenticated = _resource_access(client, path, collection)
+            if authenticated.status != "allowed":
+                continue
+            anonymous = _resource_access(pool_client_factory(), path, collection, authed=False)
+            if anonymous.status == "denied":
+                return CredentialResult(state="valid_but_restricted", username=username, error_code="403")
+        return CredentialResult(state="verification_unavailable", username=username, error_code="403")
     if resp.http_status == 200 and _looks_like_dag_collection(resp):
         return CredentialResult(state="valid", username=username)
     return CredentialResult(state="verification_unavailable", username=username, error_code=str(resp.http_status))

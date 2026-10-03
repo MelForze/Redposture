@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import ssl
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
@@ -37,6 +38,94 @@ PlanCollect = Callable[
     tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]],
 ]
 ActivatePool = Callable[[Any], Any]
+
+
+def _separate_unterminated_line(path: str, writer: Any) -> None:
+    """Keep the next JSONL row separate after a process dies mid-write."""
+    if os.path.getsize(path) == 0:
+        return
+    with open(path, "rb") as existing:
+        existing.seek(-1, os.SEEK_END)
+        if existing.read(1) == b"\n":
+            return
+    writer.write("\n")
+    writer.flush()
+
+
+def _collect_record_key(record: dict[str, Any]) -> tuple[str, str, int, str] | None:
+    try:
+        key = (
+            str(record["host"]),
+            str(record["exporter"]),
+            int(record["port"]),
+            str(record["endpoint"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return key if key[0] and key[1] and key[2] > 0 and key[3] else None
+
+
+def _existing_successful_output(
+    output_path: str, output_format: str
+) -> tuple[set[tuple[str, str, int, str]], set[str]]:
+    keys: set[tuple[str, str, int, str]] = set()
+    lines: set[str] = set()
+    with open(output_path, encoding="utf-8") as existing:
+        for raw in existing:
+            line = raw.rstrip("\r\n")
+            if output_format != "json":
+                if " [+] " in line:
+                    lines.add(line)
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and payload.get("ok") is True:
+                key = _collect_record_key(payload)
+                if key is not None:
+                    keys.add(key)
+    return keys, lines
+
+
+def _restore_checkpoint_output(
+    checkpoint_path: str,
+    output_path: str,
+    out_fh: Any,
+    emit_line: Callable[[str], None] | None,
+    output_format: str,
+    completed_jobs: set[tuple[str, str, int, str]],
+) -> None:
+    """Replay committed rows missing from an interrupted output file."""
+    if not completed_jobs or not os.path.exists(checkpoint_path):
+        return
+    committed: dict[tuple[str, str, int, str], dict[str, Any]] = {}
+    with open(checkpoint_path, encoding="utf-8") as checkpoint:
+        for raw in checkpoint:
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            key = _collect_record_key(payload)
+            if key is None:
+                continue
+            record = payload.get("record")
+            if key in completed_jobs and payload.get("ok") is True and isinstance(record, dict):
+                committed[key] = record
+            elif key in committed:
+                del committed[key]
+    if not committed:
+        return
+    with open(output_path, encoding="utf-8") as existing:
+        output_lines = Counter(line.rstrip("\r\n") for line in existing)
+    for record in committed.values():
+        line = format_collect_record(record, output_format)
+        if output_lines[line]:
+            output_lines[line] -= 1
+            continue
+        emit_output_line(out_fh, emit_line, line)
 
 
 def collect_task(
@@ -186,6 +275,8 @@ def collect_exporter_debug_data(
     index_fh: Any = None
     checkpoint_fh: Any = None
     postprocess_worker: AsyncPostprocessWorker | None = None
+    existing_success_keys: set[tuple[str, str, int, str]] = set()
+    existing_success_lines: set[str] = set()
 
     def _finalize_postprocess() -> None:
         nonlocal postprocess_worker
@@ -195,20 +286,19 @@ def collect_exporter_debug_data(
         postprocess_worker = None
 
     def _process_collect_side_effects(
-        payload: tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None],
+        payload: tuple[dict[str, Any] | None, dict[str, Any] | None],
     ) -> None:
-        callback_record, index_payload, checkpoint_payload = payload
+        callback_record, index_payload = payload
         if callback_record is not None and record_callback is not None:
             record_callback(callback_record)
         if index_payload is not None and index_fh is not None:
             index_fh.write(json.dumps(index_payload, ensure_ascii=False) + "\n")
-        if checkpoint_payload is not None and checkpoint_fh is not None:
-            checkpoint_fh.write(json.dumps(checkpoint_payload, ensure_ascii=False) + "\n")
-            checkpoint_fh.flush()
 
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, output_mode, encoding="utf-8")
+        if output_mode == "a":
+            _separate_unterminated_line(output_path, out_fh)
     if save_responses_dir:
         os.makedirs(save_responses_dir, exist_ok=True)
         index_path = os.path.join(save_responses_dir, "index.jsonl")
@@ -216,7 +306,15 @@ def collect_exporter_debug_data(
     if checkpoint_path:
         os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
         checkpoint_fh = open(checkpoint_path, checkpoint_mode, encoding="utf-8")
-    if record_callback is not None or index_fh is not None or checkpoint_fh is not None:
+        if checkpoint_mode == "a":
+            _separate_unterminated_line(checkpoint_path, checkpoint_fh)
+    if output_path and out_fh is not None and checkpoint_path and output_mode == "a" and resume_completed_jobs:
+        _restore_checkpoint_output(
+            checkpoint_path, output_path, out_fh, emit_line, output_format, resume_completed_jobs
+        )
+    if output_path and output_mode == "a" and resume_completed_jobs is not None:
+        existing_success_keys, existing_success_lines = _existing_successful_output(output_path, output_format)
+    if record_callback is not None or index_fh is not None:
         postprocess_worker = postprocess_worker_cls(
             _process_collect_side_effects,
             name="collect-postprocess",
@@ -304,22 +402,33 @@ def collect_exporter_debug_data(
                     # duplicated into JSONL checkpoints.
                     "record": {key: value for key, value in record.items() if key != "raw_body"},
                 }
+            if checkpoint_payload is not None and checkpoint_fh is not None:
+                # Commit before output. On SIGKILL between the two writes,
+                # resume can replay the complete record from this journal.
+                checkpoint_fh.write(json.dumps(checkpoint_payload, ensure_ascii=False) + "\n")
+                checkpoint_fh.flush()
             if postprocess_worker is not None:
-                postprocess_worker.put(
-                    (record if record_callback is not None else None, index_payload, checkpoint_payload)
-                )
+                postprocess_worker.put((record if record_callback is not None else None, index_payload))
                 postprocess_worker.raise_if_failed()
             else:
                 if record_callback is not None:
                     record_callback(record)
                 if index_payload is not None and index_fh is not None:
                     index_fh.write(json.dumps(index_payload, ensure_ascii=False) + "\n")
-                if checkpoint_payload is not None and checkpoint_fh is not None:
-                    checkpoint_fh.write(json.dumps(checkpoint_payload, ensure_ascii=False) + "\n")
-                    checkpoint_fh.flush()
             if pause_before_emit is not None and emit_line is not None:
                 pause_before_emit()
-            emit_output_line(out_fh, emit_line, format_collect_record(record, output_format))
+            output_line = format_collect_record(record, output_format)
+            record_key = _collect_record_key(record)
+            already_output = bool(record.get("ok")) and (
+                (output_format == "json" and record_key in existing_success_keys)
+                or (output_format != "json" and output_line in existing_success_lines)
+            )
+            if not already_output:
+                emit_output_line(out_fh, emit_line, output_line)
+                if bool(record.get("ok")):
+                    if record_key is not None:
+                        existing_success_keys.add(record_key)
+                    existing_success_lines.add(output_line)
 
             if logger is not None:
                 logger.log(

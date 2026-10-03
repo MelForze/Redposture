@@ -170,8 +170,8 @@ MUTATIONS = (
     Mutation(
         name="Harbor accepts a non-numeric identity",
         source="redposture_core/modules/registry/actions.py",
-        original='if not actual or not isinstance(payload.get("user_id"), int):',
-        replacement="if not actual:",
+        original=" or not isinstance(user_id, int)",
+        replacement="",
         tests=("tests/test_quality_registry_matrix.py::test_harbor_identity_requires_numeric_user_id",),
     ),
     Mutation(

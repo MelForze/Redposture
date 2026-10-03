@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -434,13 +435,46 @@ def _http_download(
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
-    status, size, error = HttpApiClient(HttpClientConfig(timeout=timeout, insecure=scheme == "https")).download_to_file(
-        url,
-        out_path,
-        headers=req_headers,
-        timeout=timeout,
-    )
-    return status, size, _friendly_error_text(error) if error else None
+    client = HttpApiClient(HttpClientConfig(timeout=timeout, insecure=scheme == "https"))
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=".redposture-download-", dir=os.path.dirname(out_path) or "."
+        )
+        os.close(descriptor)
+    except OSError as exc:
+        return 0, 0, _friendly_error_text(str(exc))
+    try:
+        response_headers: dict[str, str] = {}
+        status, size, error = client.download_to_file(
+            url, temporary_path, headers=req_headers, response_headers=response_headers, timeout=timeout
+        )
+        if status == 401 and not error:
+            challenge = next(
+                (value for key, value in response_headers.items() if key.lower() == "www-authenticate"), ""
+            )
+            challenge_scheme, _challenge_params = _parse_www_authenticate(challenge)
+            if challenge_scheme == "bearer":
+                token, token_error = _fetch_registry_bearer_token(challenge, timeout, request_headers=req_headers)
+                if token_error:
+                    return status, 0, token_error
+                if token:
+                    retry_headers = {**req_headers, "Authorization": f"Bearer {token}"}
+                    status, size, error = client.download_to_file(
+                        url, temporary_path, headers=retry_headers, timeout=timeout
+                    )
+        if error:
+            return status, size, _friendly_error_text(error)
+        if status == 200:
+            os.replace(temporary_path, out_path)
+        return status, size, None
+    except OSError as exc:
+        return 0, 0, _friendly_error_text(str(exc))
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            # Cleanup errors must not hide the download result.
+            pass
 
 
 def _parse_link_next(link_header: str | None) -> str | None:
@@ -2015,6 +2049,14 @@ def _verify_registry_credential(
         )
         if error:
             return None, error
+        if status == 404:
+            # Harbor 1.x exposes the same authenticated identity under the
+            # legacy API path. Only a confirmed Harbor product reaches here.
+            status, body, _headers, error = _http_request(
+                host, port, "GET", "/api/users/current", timeout, headers=headers
+            )
+            if error:
+                return None, error
         if status == 401:
             return False, "authentication rejected"
         if status != 200:
@@ -2024,7 +2066,8 @@ def _verify_registry_credential(
         except json.JSONDecodeError:
             return None, "invalid Harbor identity response"
         actual = str(payload.get("username") or "") if isinstance(payload, dict) else ""
-        if not actual or not isinstance(payload.get("user_id"), int):
+        user_id = payload.get("user_id") if isinstance(payload, dict) else None
+        if not actual or not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
             return None, "invalid Harbor identity response"
         return (True, None) if username is None or actual == username else (None, "Harbor identity mismatch")
     if product == "nexus":

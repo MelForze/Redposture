@@ -581,6 +581,7 @@ class HttpApiClient:
         out_path: str,
         *,
         headers: Mapping[str, str] | None = None,
+        response_headers: dict[str, str] | None = None,
         timeout: float | None = None,
         chunk_size: int = 1024 * 64,
     ) -> tuple[int, int, str | None]:
@@ -615,6 +616,9 @@ class HttpApiClient:
             headers=request_headers,
             allow_cross_origin=self.config.allow_cross_origin_redirects,
         )
+        if response_headers is not None:
+            response_headers.clear()
+            response_headers.update(response.headers)
         return response.status, size, response.error
 
     def send(self, request: HttpRequest, *, timeout: float | None = None) -> HttpResponse:

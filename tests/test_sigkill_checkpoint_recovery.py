@@ -94,10 +94,9 @@ def test_collect_checkpoint_ignores_torn_jsonl_tail_and_uses_latest_complete_row
     assert _load_collect_completed_jobs(str(path)) == {key}
 
 
-@pytest.mark.known_defect_audit
 @pytest.mark.skipif(not hasattr(signal, "SIGKILL"), reason="POSIX SIGKILL required")
 def test_collect_resume_does_not_duplicate_output_after_sigkill(tmp_path: Path) -> None:
-    """Document the output/checkpoint race in asynchronous postprocessing."""
+    """A committed result is not emitted twice after a crash and resume."""
 
     output = tmp_path / "collect.jsonl"
     checkpoint = tmp_path / "checkpoint.jsonl"
@@ -142,7 +141,7 @@ collect_exporter_debug_data(logger=None, hosts=['127.0.0.1'], timeout=1,
         _kill_child(child)
 
     key = ("127.0.0.1", "node_exporter", 9100, "/debug/vars")
-    assert key not in _load_collect_completed_jobs(str(checkpoint))
+    assert key in _load_collect_completed_jobs(str(checkpoint))
 
     from redposture_core.exporters.collect import collect_exporter_debug_data
 
@@ -190,10 +189,9 @@ collect_exporter_debug_data(logger=None, hosts=['127.0.0.1'], timeout=1,
     assert len([record for record in records if record.get("endpoint") == "/debug/vars"]) == 1
 
 
-@pytest.mark.known_defect_audit
 @pytest.mark.skipif(not hasattr(signal, "SIGKILL"), reason="POSIX SIGKILL required")
 def test_collect_resume_does_not_lose_output_after_sigkill(tmp_path: Path) -> None:
-    """A durable checkpoint can also win the race against the output file."""
+    """Resume replays a committed result missing from the output file."""
 
     output = tmp_path / "collect.jsonl"
     checkpoint = tmp_path / "checkpoint.jsonl"
@@ -240,4 +238,126 @@ collect.collect_exporter_debug_data(logger=None, hosts=['127.0.0.1'], timeout=1,
 
     key = ("127.0.0.1", "node_exporter", 9100, "/debug/vars")
     assert key in _load_collect_completed_jobs(str(checkpoint))
+    assert output.read_text(encoding="utf-8") == ""
+
+    from redposture_core.exporters.collect import collect_exporter_debug_data
+
+    def should_not_run(*_args: object):
+        pytest.fail("completed collect job was scheduled again")
+
+    collect_exporter_debug_data(
+        logger=None,
+        hosts=["127.0.0.1"],
+        timeout=1,
+        output_path=str(output),
+        output_format="json",
+        emit_line=None,
+        workers=1,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/debug/vars"],
+        found_by_host={"127.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+        adaptive_collect=False,
+        collect_task_fn=should_not_run,
+        checkpoint_path=str(checkpoint),
+        resume_completed_jobs=_load_collect_completed_jobs(str(checkpoint)),
+        output_mode="a",
+        checkpoint_mode="a",
+        emit_summary=False,
+    )
     assert len([line for line in output.read_text(encoding="utf-8").splitlines() if '"endpoint"' in line]) == 1
+
+
+def test_collect_resume_deduplicates_legacy_output_without_checkpoint(tmp_path: Path) -> None:
+    from redposture_core.exporters.collect import collect_exporter_debug_data
+
+    output = tmp_path / "collect.jsonl"
+    checkpoint = tmp_path / "collect.checkpoint.jsonl"
+    record = {
+        "host": "127.0.0.1",
+        "exporter": "node_exporter",
+        "port": 9100,
+        "endpoint": "/metrics",
+        "url": "http://127.0.0.1:9100/metrics",
+        "ok": True,
+        "status": 200,
+        "body": "old",
+        "timestamp": "before-kill",
+    }
+    output.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    checkpoint.write_text("", encoding="utf-8")
+
+    def fetch(*_args: object):
+        return ({**record, "body": "new", "timestamp": "after-resume"}, True)
+
+    collect_exporter_debug_data(
+        logger=None,
+        hosts=["127.0.0.1"],
+        timeout=1,
+        output_path=str(output),
+        output_format="json",
+        emit_line=None,
+        workers=1,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/metrics"],
+        found_by_host={"127.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+        adaptive_collect=False,
+        collect_task_fn=fetch,
+        checkpoint_path=str(checkpoint),
+        resume_completed_jobs=set(),
+        output_mode="a",
+        checkpoint_mode="a",
+        emit_summary=False,
+    )
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert len([row for row in rows if row.get("endpoint") == "/metrics"]) == 1
+    assert _load_collect_completed_jobs(str(checkpoint)) == {("127.0.0.1", "node_exporter", 9100, "/metrics")}
+
+
+def test_collect_resume_separates_torn_output_and_checkpoint_tails(tmp_path: Path) -> None:
+    from redposture_core.exporters.collect import collect_exporter_debug_data
+
+    output = tmp_path / "collect.jsonl"
+    checkpoint = tmp_path / "collect.checkpoint.jsonl"
+    output.write_text('{"torn":', encoding="utf-8")
+    checkpoint.write_text('{"torn":', encoding="utf-8")
+
+    def fetch(host: str, exporter: str, port: int, endpoint: str, *_args: object):
+        return (
+            {
+                "host": host,
+                "exporter": exporter,
+                "port": port,
+                "endpoint": endpoint,
+                "url": f"http://{host}:{port}{endpoint}",
+                "ok": True,
+                "status": 200,
+                "body": "recovered",
+                "timestamp": "after-resume",
+            },
+            True,
+        )
+
+    collect_exporter_debug_data(
+        logger=None,
+        hosts=["127.0.0.1"],
+        timeout=1,
+        output_path=str(output),
+        output_format="json",
+        emit_line=None,
+        workers=1,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/metrics"],
+        found_by_host={"127.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+        adaptive_collect=False,
+        collect_task_fn=fetch,
+        checkpoint_path=str(checkpoint),
+        resume_completed_jobs=set(),
+        output_mode="a",
+        checkpoint_mode="a",
+        emit_summary=False,
+    )
+    assert json.loads(output.read_text(encoding="utf-8").splitlines()[-1])["body"] == "recovered"
+    assert _load_collect_completed_jobs(str(checkpoint)) == {("127.0.0.1", "node_exporter", 9100, "/metrics")}

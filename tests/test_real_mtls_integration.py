@@ -223,7 +223,6 @@ def test_kafka_real_mtls_rejects_untrusted_or_missing_identity(mtls_material: di
         assert not thread.is_alive()
 
 
-@pytest.mark.known_defect_audit
 @pytest.mark.parametrize(
     ("ca_key", "host", "expected_fragment"),
     [
@@ -234,7 +233,7 @@ def test_kafka_real_mtls_rejects_untrusted_or_missing_identity(mtls_material: di
 def test_kafka_explicit_ca_reports_the_actual_tls_verification_failure(
     mtls_material: dict[str, Path], ca_key: str, host: str, expected_fragment: str
 ) -> None:
-    """Known defect: the TLS error currently claims explicit CA verification is disabled."""
+    """Explicit CA and hostname failures report their distinct causes."""
     server = _TlsProbeServer(mtls_material)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

@@ -273,6 +273,14 @@ def _classify_ssl_error(exc: ssl.SSLError) -> str:
     root cause the operator actually cares about.
     """
     text = str(exc or "").lower()
+    verify_detail = str(getattr(exc, "verify_message", "") or "").lower()
+    if isinstance(exc, ssl.SSLCertVerificationError) or "certificate verify failed" in text:
+        if any(
+            marker in f"{text} {verify_detail}"
+            for marker in ("hostname mismatch", "ip address mismatch", "not valid for")
+        ):
+            return "hostname mismatch: server certificate does not match the requested host"
+        return "certificate verification failed: server certificate is not trusted by the configured CA"
     if "wrong_version_number" in text or "wrong version number" in text:
         # Client sent TLS ClientHello, peer answered plaintext (or a
         # totally different protocol). Almost always means "this port
@@ -299,8 +307,8 @@ def _classify_ssl_error(exc: ssl.SSLError) -> str:
         return "peer requires client certificate (mTLS) — need --tls-cert to proceed"
     if "sslv3_alert_handshake_failure" in text or "handshake_failure" in text:
         return "peer rejected TLS handshake (cipher/protocol mismatch or client auth required)"
-    if "certificate_unknown" in text or "certificate verify failed" in text:
-        return "peer's TLS certificate is unrecognised (should be masked by CERT_NONE — file bug)"
+    if "certificate_unknown" in text:
+        return "peer rejected the TLS certificate (certificate unknown)"
     if "record layer failure" in text or "no shared cipher" in text:
         return "peer has no shared TLS cipher with client"
     # Last-resort fallback: keep the exception text but strip the noisy

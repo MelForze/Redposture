@@ -429,16 +429,20 @@ def test_http_api_client_download_to_file_success_http_error_and_io_error(monkey
             return self.status
 
     response = _ChunkResponse([b"abc", b"def"])
+    response.headers = {"X-Download": "streamed"}
     monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", lambda *_a, **_k: response)
 
     out_path = tmp_path / "download.bin"
+    response_headers: dict[str, str] = {}
     status, size, error = HttpApiClient(HttpClientConfig(timeout=1.0)).download_to_file(
         "http://127.0.0.1/file",
         str(out_path),
+        response_headers=response_headers,
         chunk_size=2,
     )
 
     assert (status, size, error) == (206, 6, None)
+    assert response_headers == {"X-Download": "streamed"}
     assert out_path.read_bytes() == b"abcdef"
 
     http_error = urllib.error.HTTPError("http://127.0.0.1/file", 404, "missing", {}, None)

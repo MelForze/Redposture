@@ -32,7 +32,7 @@ def test_v1_basic_invalid_on_401():
 def test_v1_basic_restricted_on_403():
     body = b'{"status":403,"title":"Forbidden","detail":"Permission denied"}'
     r = actions.verify_credential(lambda **k: _FakeClient(get_status=403, get_body=body), "v1", "u", "p")
-    assert r.state == "valid_but_restricted"
+    assert r.state == "verification_unavailable"
 
 
 def test_v2_token_valid_keeps_bearer():

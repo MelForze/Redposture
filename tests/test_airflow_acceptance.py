@@ -187,7 +187,7 @@ def test_anonymous_unknown_generation_falls_back_to_v1():
         (204, "verification_unavailable"),
         (299, "verification_unavailable"),
         (401, "invalid"),
-        (403, "valid_but_restricted"),
+        (403, "verification_unavailable"),
         (500, "verification_unavailable"),
         (302, "verification_unavailable"),
     ],
