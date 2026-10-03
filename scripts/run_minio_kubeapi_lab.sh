@@ -36,6 +36,7 @@ if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")"
   exit 2
 fi
 trap cleanup EXIT
+"$PYTHON_BIN" "$ROOT_DIR/scripts/prepare_minio_qa_image.py"
 if [[ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" == "1" ]]; then
   QA_IMAGE_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/redposture-minio-images.XXXXXX")"
   "$PYTHON_BIN" "$ROOT_DIR/scripts/qa_owned_images.py" snapshot "$QA_IMAGE_SNAPSHOT" -- \

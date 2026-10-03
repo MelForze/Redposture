@@ -299,6 +299,9 @@ start_service() {
   if [ "${service}" = "valkey" ]; then
     "${PYTHON_BIN}" "${LAB_DIR}/services/valkey/prepare.py"
   fi
+  if [ "${service}" = "minio" ]; then
+    "${PYTHON_BIN}" "${ROOT_DIR}/scripts/prepare_minio_qa_image.py"
+  fi
   echo
   echo "== service:${service} up =="
   CURRENT_SERVICE="${service}"
