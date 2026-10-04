@@ -1184,7 +1184,10 @@ def test_run_redis_stage_username_file_then_defaults_checks_every_pair(
 
     assert rc == 0
     expected_defaults = [
-        ("auth", username, password, False) for username, password in redis_actions._REDIS_DEFAULT_CREDENTIALS
+        ("auth", username, password, False)
+        for username, password in sorted(
+            redis_actions._REDIS_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+        )
     ]
     assert captured_calls == [
         ("detect", None, None, False),
@@ -1301,6 +1304,7 @@ def test_redis_defcreds_expand_after_provided_and_file_candidates(tmp_path) -> N
         ("admin", "admin", "default"),
         ("admin", "changeme", "default"),
         ("admin", "password", "default"),
+        ("default", "12345678", "default"),
         ("default", "changeme", "default"),
         ("default", "default", "default"),
         ("default", "password", "default"),
@@ -1381,7 +1385,10 @@ def test_redis_explicit_default_overlap_stays_provided_and_is_stably_deduplicate
     assert (runs[0].username, runs[0].password, runs[0].source) == ("redis", "redis", "provided")
     assert [(run.username, run.password) for run in runs] == [
         ("redis", "redis"),
-        *[pair for pair in redis_actions._REDIS_DEFAULT_CREDENTIALS if pair != ("redis", "redis")],
+        *sorted(
+            (pair for pair in redis_actions._REDIS_DEFAULT_CREDENTIALS if pair != ("redis", "redis")),
+            key=lambda pair: (pair[0].lower(), pair[1].lower()),
+        ),
     ]
     assert sum((run.username, run.password) == ("redis", "redis") for run in runs) == 1
 
@@ -1428,7 +1435,12 @@ def test_redis_defcreds_try_provided_before_default_and_classify_default(monkeyp
     assert commands == [
         ("PING",),
         ("AUTH", "app", "bad"),
-        *[("AUTH", username, password) for username, password in redis_actions._REDIS_DEFAULT_CREDENTIALS],
+        *[
+            ("AUTH", username, password)
+            for username, password in sorted(
+                redis_actions._REDIS_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
+        ],
         ("DBSIZE",),
     ]
     assert result.records[0]["status"] == "weak_default_creds"
@@ -1472,7 +1484,12 @@ def test_redis_defcreds_checks_full_catalog_after_late_default_success(
 
     assert commands == [
         ("PING",),
-        *[("AUTH", username, password) for username, password in redis_actions._REDIS_DEFAULT_CREDENTIALS],
+        *[
+            ("AUTH", username, password)
+            for username, password in sorted(
+                redis_actions._REDIS_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
+        ],
         ("DBSIZE",),
     ]
     assert result.records[0]["status"] == "weak_default_creds"
@@ -1523,11 +1540,14 @@ def test_redis_legacy_auth_fallback_is_deduplicated_by_password_without_skipping
     acl_pairs = [command[1:] for command in auth_commands if len(command) == 3]
     legacy_passwords = [command[1] for command in auth_commands if len(command) == 2]
 
-    assert acl_pairs == list(redis_actions._REDIS_DEFAULT_CREDENTIALS)
+    assert acl_pairs == sorted(
+        redis_actions._REDIS_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+    )
     assert legacy_passwords == [
         "admin",
         "changeme",
         "password",
+        "12345678",
         "default",
         "redis",
         "dev",

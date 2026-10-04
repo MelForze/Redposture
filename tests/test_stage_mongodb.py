@@ -303,6 +303,7 @@ def test_mongodb_small_helpers_and_collection_validation() -> None:
         ("admin", "mongo"),
         ("admin", "mongodb"),
         ("admin", "password"),
+        ("admin", "12345678"),
         ("dev", "dev"),
         ("mongo", "mongo"),
         ("mongo", "password"),
@@ -465,7 +466,7 @@ def test_run_mongodb_stage_nosql_shell_dispatches_to_action(monkeypatch: pytest.
     assert captured["shell_emit_line"] is not None
     assert captured["credential_candidates"][0] == {
         "username": "admin",
-        "password": "admin",
+        "password": "12345678",
         "source": "default",
         "default": True,
     }
@@ -948,7 +949,9 @@ def test_mongodb_credential_file_precedes_defaults_and_preserves_source(
         ("root", "root", "file"),
         *[
             (username, password, "default")
-            for username, password in mongodb._MONGODB_DEFAULT_CREDS
+            for username, password in sorted(
+                mongodb._MONGODB_DEFAULT_CREDS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
             if (username, password) != ("root", "root")
         ],
     ]

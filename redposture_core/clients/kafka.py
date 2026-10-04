@@ -41,6 +41,7 @@ _KAFKA_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("admin", "changeme"),
     ("admin", "kafka"),
     ("admin", "password"),
+    ("admin", "12345678"),
     ("broker", "broker"),
     ("broker", "brokerpass"),
     ("client", "client"),

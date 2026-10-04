@@ -27,6 +27,7 @@ _PRODUCTION_AUDIT_HOST = actions._audit_kubeapi_host
 _KUBE_BASIC_PAIRS = (
     ("admin", "admin"),
     ("admin", "password"),
+    ("admin", "12345678"),
     ("root", "root"),
     ("root", "password"),
     ("kubeadmin", "kubeadmin"),

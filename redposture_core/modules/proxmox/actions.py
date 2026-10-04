@@ -138,6 +138,7 @@ _PROXMOX_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("root@pam", "Proxmox123"),
     ("root@pam", "root"),
     ("root@pam", "toor"),
+    ("root@pam", "12345678"),
 )
 
 

@@ -783,6 +783,7 @@ def _build_credential_candidates(
             ("admin", "changeme"),
             ("admin", "grafana"),
             ("admin", "password"),
+            ("admin", "12345678"),
             ("grafana", "grafana"),
             ("grafana", "password"),
             ("root", "password"),

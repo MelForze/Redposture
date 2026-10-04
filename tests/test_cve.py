@@ -490,7 +490,7 @@ def test_proxmox_version_probe_uses_resolved_read_only_auth(monkeypatch: pytest.
 
     def request(_host: str, _port: int, path: str, *_args: object, auth_headers: dict[str, str], **_kwargs: object):
         calls.append((path, auth_headers))
-        return 200, {"data": {"version": "8.2.4"}}, {}, None
+        return 200, b'{"data":{"version":"8.2.4"}}', {}, None
 
     monkeypatch.setattr(stage.actions, "_proxmox_request", request)
     state = stage._ProxmoxLifecycleState(resolved_auth=({"Authorization": "PVE token"}, "token", None, None, []))
@@ -503,6 +503,37 @@ def test_proxmox_version_probe_uses_resolved_read_only_auth(monkeypatch: pytest.
     )
     assert stage._proxmox_version_for_context(ctx, state) == "8.2.4"
     assert calls == [("/version", {"Authorization": "PVE token"})]
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "error"),
+    [
+        (401, b'{"data":{"version":"8.2.4"}}', None),
+        (200, b'{"data":{"version":"8.2.4"}}', "connection failed"),
+        (200, b"not JSON", None),
+        (200, b'{"data":[]}', None),
+        (200, b'{"data":{"version":null}}', None),
+    ],
+)
+def test_proxmox_version_probe_rejects_unusable_response(
+    monkeypatch: pytest.MonkeyPatch, status: int, body: bytes, error: str | None
+) -> None:
+    from redposture_core.modules.proxmox import stage
+
+    monkeypatch.setattr(
+        stage.actions,
+        "_proxmox_request",
+        lambda *_args, **_kwargs: (status, body, {}, error),
+    )
+    state = stage._ProxmoxLifecycleState(resolved_auth=({"Authorization": "PVE token"}, "token", None, None, []))
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(enum_cve=True, timeout=1.0, retries=0, insecure=True, proxy=None, https=True),
+        host="10.0.0.1",
+        port=8006,
+        target=None,
+        lifecycle_state=state,
+    )
+    assert stage._proxmox_version_for_context(ctx, state) is None
 
 
 def test_registry_enum_cve_enables_vendor_fingerprints(monkeypatch: pytest.MonkeyPatch) -> None:

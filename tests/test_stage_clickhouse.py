@@ -72,6 +72,7 @@ def test_build_credential_candidates_with_defcreds() -> None:
         ("default", "clickhouse", "default"),
         ("default", "default", "default"),
         ("default", "password", "default"),
+        ("default", "12345678", "default"),
         ("root", "password", "default"),
         ("root", "root", "default"),
         ("user", "password", "default"),
@@ -92,6 +93,7 @@ def test_build_credential_candidates_with_provided_and_defcreds_deduplicates() -
         ("default", "clickhouse", "default"),
         ("default", "default", "default"),
         ("default", "password", "default"),
+        ("default", "12345678", "default"),
         ("root", "password", "default"),
         ("root", "root", "default"),
         ("user", "password", "default"),
@@ -206,7 +208,7 @@ def test_audit_clickhouse_defcreds_sweeps_all_pairs_and_keeps_first_success(
     assert record["status"] == "weak_default_creds"
     assert record["effective_username"] == "admin"
     assert record["effective_password"] == "admin"
-    assert int(record["credential_attempt_count"]) == 14
+    assert int(record["credential_attempt_count"]) == 15
     attempts = record.get("credential_attempts")
     assert isinstance(attempts, list)
     expected = clickhouse_stage._build_credential_candidates(None, None, True)
@@ -256,7 +258,7 @@ def test_audit_clickhouse_auth_required_when_all_credentials_fail(monkeypatch: p
 
     assert record["status"] == "auth_required"
     assert record["is_clickhouse"] is True
-    assert int(record["credential_attempt_count"]) == 14
+    assert int(record["credential_attempt_count"]) == 15
 
 
 def test_audit_clickhouse_marks_valid_credentials_when_provided_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1187,6 +1189,7 @@ def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
         ("clickhouse", "clickhouse"),
         ("clickhouse", "password"),
         ("default", ""),
+        ("default", "12345678"),
         ("default", "changeme"),
         ("default", "clickhouse"),
         ("default", "default"),
@@ -1210,6 +1213,7 @@ def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
         ("clickhouse", "clickhouse", "default"),
         ("clickhouse", "password", "default"),
         ("default", "", "default"),
+        ("default", "12345678", "default"),
         ("default", "changeme", "default"),
         ("default", "clickhouse", "default"),
         ("default", "default", "default"),
@@ -2003,6 +2007,7 @@ def test_clickhouse_defcreds_plan_preserves_provided_then_default_order() -> Non
         ("clickhouse", "clickhouse", "default"),
         ("clickhouse", "password", "default"),
         ("default", "", "default"),
+        ("default", "12345678", "default"),
         ("default", "changeme", "default"),
         ("default", "clickhouse", "default"),
         ("default", "default", "default"),
@@ -2051,10 +2056,13 @@ def test_clickhouse_lifecycle_renders_every_attempt_until_first_success_without_
     )
     result = runner.run_plan(plan)
 
-    expected_pairs = [
-        (username, password)
-        for username, password, _source in clickhouse_stage._build_credential_candidates(None, None, True)
-    ]
+    expected_pairs = sorted(
+        [
+            (username, password)
+            for username, password, _source in clickhouse_stage._build_credential_candidates(None, None, True)
+        ],
+        key=lambda pair: (pair[0].lower(), pair[1].lower()),
+    )
     assert auth_pairs == expected_pairs
     assert action_sessions == [("admin", "admin")]
     assert result.records[0]["status"] == "weak_default_creds"

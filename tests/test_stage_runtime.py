@@ -2823,6 +2823,87 @@ def test_monolithic_exhaustive_credentials_retains_first_success_without_rerun()
     ]
 
 
+@pytest.mark.parametrize("monolithic", [False, True])
+@pytest.mark.parametrize(
+    "signal",
+    ["http_429", "account_locked", "too_many_attempts", "too_many_requests", "locked_phrase", "http_429_error"],
+)
+def test_defcreds_stops_after_authentication_is_rate_limited(monolithic: bool, signal: str) -> None:
+    attempted: list[str | None] = []
+
+    def throttle_response(username: str | None) -> tuple[str, dict[str, object]]:
+        if username != "second":
+            return "auth_required", {"http_status": 401}
+        if signal == "http_429":
+            return "auth_required", {"http_status": 429}
+        if signal == "account_locked":
+            return "account_locked", {}
+        if signal == "too_many_requests":
+            return "auth_required", {"error": "429 Too Many Requests"}
+        if signal == "locked_phrase":
+            return "auth_required", {"error": "Account has been locked"}
+        if signal == "http_429_error":
+            return "auth_required", {"error": "unexpected HTTP 429 from /access/ticket"}
+        return "auth_required", {"error": "Too many login attempts"}
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="auth_required",
+            auth_required=True,
+            extra={"is_demo": True},
+        )
+
+    def auth(ctx, _record: AuditRecord) -> AuditRecord:
+        attempted.append(ctx.credential.username)
+        status, extra = throttle_response(ctx.credential.username)
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status=status,
+            auth_required=True,
+            extra={"is_demo": True, **extra},
+        )
+
+    def host_stage(host, port, username, password, run_deep_checks):
+        del password
+        if not run_deep_checks:
+            return {"host": host, "port": port, "module": "demo", "status": "auth_required", "is_demo": True}
+        attempted.append(username)
+        status, extra = throttle_response(username)
+        return {
+            "host": host,
+            "port": port,
+            "module": "demo",
+            "status": status,
+            "is_demo": True,
+            **extra,
+        }
+
+    spec = ModuleAuditSpec(
+        module="demo",
+        label="DEMO",
+        default_port=1234,
+        host_stage=host_stage if monolithic else None,
+        detect=None if monolithic else detect,
+        auth=None if monolithic else auth,
+        continue_after_credential_error=True,
+        continue_after_credential_success=True,
+    )
+    credentials = tuple(
+        AuditCredentialRun(username=name, password="x", source="default") for name in ("first", "second", "third")
+    )
+    AuditCommandRunner(args=SimpleNamespace(defcreds=True), spec=spec, emit_line=lambda _line: None).run_plan(
+        AuditCommandPlan(targets_by_port={1234: ("host",)}, credential_runs=credentials)
+    )
+    assert attempted == ["first", "second"]
+
+
 def test_run_plan_outer_finally_closes_registered_lifecycle_state(monkeypatch) -> None:
     closed: list[object] = []
     state = object()

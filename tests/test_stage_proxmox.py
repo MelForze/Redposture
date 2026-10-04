@@ -226,6 +226,8 @@ def _install_proxmox_lifecycle_request_spy(
             return 200, _json_payload({"/": {"Sys.Audit": 1}}), {}, None
         if path == "/nodes":
             return 200, _json_payload([{"node": "pve-a"}]), {}, None
+        if path == "/version":
+            return 200, _json_payload({"version": "9.2.9"}), {}, None
         return 200, _json_payload({}), {}, None
 
     monkeypatch.setattr("redposture_core.modules.proxmox.actions._proxmox_request", fake_request)
@@ -250,6 +252,22 @@ def test_proxmox_lifecycle_direct_credentials_classify_login_and_data_once(
     ]
     assert records[0]["status"] == "token_ok"
     assert records[0]["nodes"] == ["pve-a"]
+
+
+def test_proxmox_lifecycle_enum_cve_uses_authenticated_version_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+    _install_proxmox_lifecycle_request_spy(monkeypatch, valid_password="good", calls=calls)
+
+    records = _run_proxmox_lifecycle(
+        _proxmox_lifecycle_args(username="root@pam", password="good", enum_cve=True),
+        (AuditCredentialRun(username="root@pam", password="good", source="provided"),),
+    )
+
+    assert records[0]["version"] == "9.2.9"
+    assert records[0]["cve_enumeration"]["status"] == "no_matches"
+    assert [(call["path"], call["method"], call["authenticated"]) for call in calls if call["path"] == "/version"] == [
+        ("/version", "GET", True)
+    ]
 
 
 def test_proxmox_lifecycle_anonymous_access_runs_data_once_without_auth_failure(
@@ -368,6 +386,7 @@ def test_proxmox_default_credentials_are_exact() -> None:
         ("root@pam", "Proxmox123"),
         ("root@pam", "root"),
         ("root@pam", "toor"),
+        ("root@pam", "12345678"),
     )
 
 
@@ -388,7 +407,9 @@ def test_proxmox_credential_order_is_token_file_then_defaults(tmp_path) -> None:
         (None, "root@pam", "root", "file"),
         *[
             (None, username, password, "default")
-            for username, password in _PROXMOX_DEFAULT_CREDENTIALS
+            for username, password in sorted(
+                _PROXMOX_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
             if (username, password) != ("root@pam", "root")
         ],
     ]
@@ -2124,7 +2145,9 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None:
         ("root@pam", "proxmox", False, True),
         *[
             (username, password, False, True)
-            for username, password in _PROXMOX_DEFAULT_CREDENTIALS
+            for username, password in sorted(
+                _PROXMOX_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
             if (username, password) != ("root@pam", "proxmox")
         ],
     ]

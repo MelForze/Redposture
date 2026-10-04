@@ -64,6 +64,7 @@ _ETCD_DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
     ("root", "password"),
     ("root", "root"),
     ("root", "rootpass"),
+    ("root", "12345678"),
     ("service", "service"),
     ("user", "password"),
     ("user", "user"),

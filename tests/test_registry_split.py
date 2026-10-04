@@ -67,7 +67,7 @@ def test_harbor_checks_documented_initial_pair_first() -> None:
                 ("dev", "dev"),
                 ("user", "password"),
             },
-            18,
+            19,
         ),
         (
             "harbor",
@@ -86,7 +86,7 @@ def test_harbor_checks_documented_initial_pair_first() -> None:
                 ("harbor", "harbor"),
                 ("harbor", "password"),
             },
-            21,
+            22,
         ),
         (
             "nexus",
@@ -104,7 +104,7 @@ def test_harbor_checks_documented_initial_pair_first() -> None:
                 ("nexus", "password"),
                 ("nexus", "admin"),
             },
-            21,
+            22,
         ),
         (
             "docker-registry",
@@ -123,7 +123,7 @@ def test_harbor_checks_documented_initial_pair_first() -> None:
                 ("docker", "docker"),
                 ("docker", "password"),
             },
-            22,
+            23,
         ),
     ],
 )

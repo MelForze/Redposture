@@ -263,9 +263,12 @@ def _proxmox_version_for_context(
         proxy=_proxmox_proxy(ctx.args),
         auth_headers=auth_headers,
     )
-    if error or status != 200 or not isinstance(payload, dict):
+    if error or status != 200:
         return None
-    data = payload.get("data")
+    parsed = actions._parse_json_payload(payload)
+    if not isinstance(parsed, dict):
+        return None
+    data = parsed.get("data")
     if not isinstance(data, dict):
         return None
     version = str(data.get("version") or "").strip()

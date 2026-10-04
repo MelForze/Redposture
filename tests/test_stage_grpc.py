@@ -823,6 +823,7 @@ def test_auth_attempt_entries_defcreds_appends_default_tokens_and_basics() -> No
         ("admin", "admin"),
         ("admin", "changeme"),
         ("admin", "password"),
+        ("admin", "12345678"),
         ("dev", "dev"),
         ("grpc", "admin"),
         ("grpc", "grpc"),

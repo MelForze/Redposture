@@ -70,7 +70,9 @@ def test_keeper_plan_uses_only_keeper_default_ports_and_keeper_credentials() -> 
 
     assert plan.ports == (9181, 19181, 29181)
     assert keeper_stage._DEFAULT_CREDENTIALS == keeper_stage.KEEPER_DIGEST_DEFAULT_CREDENTIALS
-    assert tuple((item.username, item.password) for item in plan.credential_runs) == keeper_stage._DEFAULT_CREDENTIALS
+    assert tuple((item.username, item.password) for item in plan.credential_runs) == tuple(
+        sorted(keeper_stage._DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower()))
+    )
     assert ("keeper", "keeper") in keeper_stage._DEFAULT_CREDENTIALS
     assert ("clickhouse", "clickhouse") in keeper_stage._DEFAULT_CREDENTIALS
     assert all(item.username not in {"hadoop", "solr", "zookeeper"} for item in plan.credential_runs)

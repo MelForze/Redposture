@@ -323,6 +323,7 @@ def test_kafka_default_credential_runs_are_exact_and_deduplicated() -> None:
         ("admin", "changeme"),
         ("admin", "kafka"),
         ("admin", "password"),
+        ("admin", "12345678"),
         ("broker", "broker"),
         ("broker", "brokerpass"),
         ("client", "client"),
@@ -343,6 +344,7 @@ def test_kafka_default_credential_runs_are_exact_and_deduplicated() -> None:
         ("admin", "changeme"),
         ("admin", "kafka"),
         ("admin", "password"),
+        ("admin", "12345678"),
         ("broker", "broker"),
         ("broker", "brokerpass"),
         ("client", "client"),
@@ -415,7 +417,7 @@ def test_run_kafka_stage_defcreds_keeps_no_auth_result_as_anonymous(monkeypatch:
     plains = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain"]
     assert any("Kafka Broker (auth required:False)" in msg for msg in plains)
     assert not any("[+] anonymous access" in msg for msg in plains)
-    expected_pairs = list(kafka._KAFKA_DEFAULT_CREDENTIALS)
+    expected_pairs = sorted(kafka._KAFKA_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower()))
     for username, password in expected_pairs:
         assert sum(msg.endswith(f"[-] {username}:{password}") for msg in plains) == 1
     assert calls == [
@@ -478,7 +480,12 @@ def test_run_kafka_stage_defcreds_auth_required_renders_failed_attempts(monkeypa
     assert rc == 0
     assert calls == [
         (None, None, False),
-        *((username, password, False) for username, password in kafka._KAFKA_DEFAULT_CREDENTIALS),
+        *(
+            (username, password, False)
+            for username, password in sorted(
+                kafka._KAFKA_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
+        ),
     ]
     plains = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain"]
     for username, password in kafka._KAFKA_DEFAULT_CREDENTIALS:
@@ -1412,7 +1419,12 @@ def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Monk
     assert rc == 0
     assert captured == [
         (None, None, False),
-        *((username, password, True) for username, password in kafka._KAFKA_DEFAULT_CREDENTIALS),
+        *(
+            (username, password, True)
+            for username, password in sorted(
+                kafka._KAFKA_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
+        ),
     ]
     assert retained[0]["provided_username"] == "admin"
     assert retained[0]["provided_password"] == "admin"

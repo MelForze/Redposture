@@ -678,6 +678,7 @@ def _build_credential_candidates(
             ("default", "clickhouse"),
             ("default", "default"),
             ("default", "password"),
+            ("default", "12345678"),
             ("root", "password"),
             ("root", "root"),
             ("user", "password"),

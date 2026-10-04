@@ -5469,6 +5469,7 @@ def test_zookeeper_defcreds_plan_has_exact_stable_catalog_order() -> None:
         ("admin", "kafka"),
         ("admin", "password"),
         ("admin", "zookeeper"),
+        ("admin", "12345678"),
         ("broker", "broker"),
         ("broker", "brokerpass"),
         ("client", "client"),
@@ -5513,8 +5514,10 @@ def test_zookeeper_defcreds_plan_has_exact_stable_catalog_order() -> None:
     plan = lifecycle_stage.build_zookeeper_plan(args)
 
     assert lifecycle_stage._DEFAULT_CREDENTIALS == expected
-    assert tuple((run.username, run.password) for run in plan.credential_runs) == expected
-    assert len(plan.credential_runs) == 34
+    assert tuple((run.username, run.password) for run in plan.credential_runs) == tuple(
+        sorted(expected, key=lambda pair: (pair[0].lower(), pair[1].lower()))
+    )
+    assert len(plan.credential_runs) == 35
     assert {run.source for run in plan.credential_runs} == {"default"}
 
 
@@ -5624,7 +5627,12 @@ def test_zookeeper_credential_file_precedes_defaults_and_is_stably_deduplicated(
 
     assert pairs[:2] == (("custom", "secret"), ("admin", "admin"))
     assert tuple(run.source for run in plan.credential_runs[:2]) == ("file", "file")
-    assert pairs[2:] == tuple(pair for pair in lifecycle_stage._DEFAULT_CREDENTIALS if pair != ("admin", "admin"))
+    assert pairs[2:] == tuple(
+        sorted(
+            (pair for pair in lifecycle_stage._DEFAULT_CREDENTIALS if pair != ("admin", "admin")),
+            key=lambda pair: (pair[0].lower(), pair[1].lower()),
+        )
+    )
     assert pairs.count(("custom", "secret")) == 1
     assert pairs.count(("admin", "admin")) == 1
 
@@ -5820,12 +5828,14 @@ def test_zookeeper_defcreds_full_refusal_tries_every_pair_once(
         accepted_pair=None,
     )
 
-    assert tuple(auth_attempts) == lifecycle_stage._DEFAULT_CREDENTIALS
+    assert tuple(auth_attempts) == tuple(
+        sorted(lifecycle_stage._DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower()))
+    )
     assert data_calls == 0
     assert record["status"] == "auth_required"
     attempted_credentials = record["attempted_credentials"]
     assert isinstance(attempted_credentials, list)
-    assert len(attempted_credentials) == 34
+    assert len(attempted_credentials) == 35
 
 
 def test_zookeeper_defcreds_checks_full_catalog_after_late_digest_success(
@@ -5836,7 +5846,9 @@ def test_zookeeper_defcreds_checks_full_catalog_after_late_digest_success(
         accepted_pair=("zk", "zookeeper"),
     )
 
-    assert tuple(auth_attempts) == lifecycle_stage._DEFAULT_CREDENTIALS
+    assert tuple(auth_attempts) == tuple(
+        sorted(lifecycle_stage._DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower()))
+    )
     assert data_calls == 1
     assert record["status"] == "weak_default_creds"
     assert record["provided_credentials"] is False
@@ -5935,7 +5947,10 @@ def test_zookeeper_explicit_pair_matching_default_is_not_classified_as_weak(
 
     expected = [
         ("zk", "zookeeper"),
-        *(pair for pair in lifecycle_stage._DEFAULT_CREDENTIALS if pair != ("zk", "zookeeper")),
+        *sorted(
+            (pair for pair in lifecycle_stage._DEFAULT_CREDENTIALS if pair != ("zk", "zookeeper")),
+            key=lambda pair: (pair[0].lower(), pair[1].lower()),
+        ),
     ]
     assert auth_attempts == expected
     assert data_calls == 1

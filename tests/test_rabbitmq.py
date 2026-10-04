@@ -337,8 +337,8 @@ def test_cli_plan_default_ports_deduplicates_guest_and_preserves_empty_password(
     args = parse_args(["rabbitmq", "-t", "h", "-u", "guest", "-p", "guest", "--defcreds"])
     plan = stage.build_rabbitmq_plan(args)
     assert plan.ports == (15672, 15671)
-    assert len(plan.credential_runs) == len(actions.DEFAULT_CREDENTIALS) == 16
-    assert len({(run.username, run.password) for run in plan.credential_runs}) == 16
+    assert len(plan.credential_runs) == len(actions.DEFAULT_CREDENTIALS) == 17
+    assert len({(run.username, run.password) for run in plan.credential_runs}) == 17
     assert (plan.credential_runs[0].username, plan.credential_runs[0].password) == ("guest", "guest")
     args = parse_args(["rabbitmq", "-t", "h", "-u", "guest", "-p", ""])
     assert stage.build_rabbitmq_plan(args).credential_runs[0].password == ""
@@ -403,7 +403,7 @@ def test_defcreds_checks_and_renders_admin_for_each_accepted_identity(monkeypatc
     assert [(attempt["username"], attempt["admin"]) for attempt in accepted] == [("admin", False), ("guest", True)]
     assert any("admin:admin (admin:False)" in line for line in lines)
     assert any("guest:guest (admin:True)" in line for line in lines)
-    assert len(record["attempted_credentials"]) == 16
+    assert len(record["attempted_credentials"]) == 17
 
 
 def test_admin_unknown_is_rendered_without_falling_back_to_tag():

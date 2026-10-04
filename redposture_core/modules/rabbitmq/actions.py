@@ -22,6 +22,7 @@ DEFAULT_CREDENTIALS = (
     ("admin", "changeme"),
     ("admin", "password"),
     ("admin", "rabbitmq"),
+    ("admin", "12345678"),
     ("guest", "guest"),
     ("guest", "password"),
     ("rabbitmq", "admin"),

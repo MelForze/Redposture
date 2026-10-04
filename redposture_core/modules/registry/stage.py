@@ -34,6 +34,7 @@ _WEAK_BASIC_PAIRS: tuple[tuple[str, str], ...] = (
     ("admin", "changeme"),
     ("admin", "admin123"),
     ("admin", "123456"),
+    ("admin", "12345678"),
     ("root", "root"),
     ("root", "password"),
     ("root", "admin"),

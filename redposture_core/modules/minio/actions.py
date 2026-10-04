@@ -60,6 +60,7 @@ _MINIO_HEURISTIC_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("minio", "minio123"),
     ("minioadmin", "minio123"),
     ("minioadmin", "password"),
+    ("minioadmin", "12345678"),
     ("admin", "admin"),
     ("admin", "minioadmin"),
     ("admin", "password"),

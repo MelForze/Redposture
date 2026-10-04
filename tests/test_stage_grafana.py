@@ -131,6 +131,7 @@ def test_grafana_helper_parsers_and_auth_helpers() -> None:
         ("admin", "changeme", "default"),
         ("admin", "grafana", "default"),
         ("admin", "password", "default"),
+        ("admin", "12345678", "default"),
         ("grafana", "grafana", "default"),
         ("grafana", "password", "default"),
         ("root", "password", "default"),
@@ -144,6 +145,7 @@ def test_grafana_helper_parsers_and_auth_helpers() -> None:
         ("admin", "changeme", "default"),
         ("admin", "grafana", "default"),
         ("admin", "password", "default"),
+        ("admin", "12345678", "default"),
         ("grafana", "grafana", "default"),
         ("grafana", "password", "default"),
         ("root", "password", "default"),
@@ -454,7 +456,7 @@ def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypat
     )
 
     assert record["status"] == "invalid_credentials_anonymous"
-    assert int(record["attempted_credentials_count"]) == 10
+    assert int(record["attempted_credentials_count"]) == 11
     auth_attempts = record.get("auth_attempts")
     assert isinstance(auth_attempts, list)
     assert [f"{item.get('username')}:{item.get('password')}" for item in auth_attempts] == [
@@ -462,6 +464,7 @@ def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypat
         "admin:changeme",
         "admin:grafana",
         "admin:password",
+        "admin:12345678",
         "grafana:grafana",
         "grafana:password",
         "root:password",
@@ -553,7 +556,7 @@ def test_audit_grafana_classifies_successful_default_credentials_even_if_anonymo
     )
 
     assert record["status"] == "weak_default_creds"
-    assert int(record["attempted_credentials_count"]) == 10
+    assert int(record["attempted_credentials_count"]) == 11
     assert record["credentials_source"] == "default"
     assert record["effective_username"] == "admin"
     assert record["effective_password"] == "password"
@@ -562,6 +565,7 @@ def test_audit_grafana_classifies_successful_default_credentials_even_if_anonymo
         ("admin", "changeme"),
         ("admin", "grafana"),
         ("admin", "password"),
+        ("admin", "12345678"),
         ("grafana", "grafana"),
         ("grafana", "password"),
         ("root", "password"),
@@ -572,11 +576,14 @@ def test_audit_grafana_classifies_successful_default_credentials_even_if_anonymo
     assert datasource_headers[-1] == _auth_header("admin", "password")
     auth_attempts = record.get("auth_attempts")
     assert isinstance(auth_attempts, list)
-    assert len(auth_attempts) == 10
+    assert len(auth_attempts) == 11
     assert bool(auth_attempts[0].get("ok")) is False
     assert "candidate transport failure" in str(auth_attempts[0].get("error"))
-    assert bool(auth_attempts[3].get("ok")) is True
-    assert bool(auth_attempts[4].get("ok")) is True
+    assert sum(bool(item.get("ok")) for item in auth_attempts) == 2
+    assert {(item["username"], item["password"]) for item in auth_attempts if item.get("ok")} == {
+        ("admin", "password"),
+        ("grafana", "grafana"),
+    }
     detail_lines = _format_auth_attempt_detail_records(record, "txt")
     first_success = next(line for line in detail_lines if "[+] admin:password" in line)
     later_success = next(line for line in detail_lines if "[+] grafana:grafana" in line)
@@ -637,13 +644,14 @@ def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> 
     )
 
     assert record["status"] == "invalid_credentials_anonymous"
-    assert int(record["attempted_credentials_count"]) == 11
+    assert int(record["attempted_credentials_count"]) == 12
     assert verify_calls == [
         ("custom-user", "custom-pass"),
         ("admin", "admin"),
         ("admin", "changeme"),
         ("admin", "grafana"),
         ("admin", "password"),
+        ("admin", "12345678"),
         ("grafana", "grafana"),
         ("grafana", "password"),
         ("root", "password"),
@@ -1382,7 +1390,7 @@ def test_grafana_defcreds_falls_back_after_api_token_transport_error(
     assert record["status"] == "weak_default_creds"
     assert record["effective_username"] == "admin"
     assert record["effective_password"] == "password"
-    assert record["attempted_credentials_count"] == 11
+    assert record["attempted_credentials_count"] == 12
     assert record["auth_attempts"][0]["source"] == "apitoken"
     assert record["auth_attempts"][0]["ok"] is None
     assert "token transport failure" in record["auth_attempts"][0]["error"]

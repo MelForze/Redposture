@@ -93,6 +93,7 @@ def test_postgres_defcreds_are_ordered_and_deduplicated() -> None:
         ("postgres", "changeme", True),
         ("postgres", "password", True),
         ("postgres", "postgres", True),
+        ("postgres", "12345678", True),
         ("service", "service", True),
         ("test", "test", True),
         ("user", "password", True),
@@ -141,7 +142,9 @@ def test_postgres_credential_file_precedes_defaults(
         ("postgres", "postgres", "file"),
         *[
             (username, password, "default")
-            for username, password in postgres._POSTGRES_DEFAULT_CREDENTIALS
+            for username, password in sorted(
+                postgres._POSTGRES_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
             if (username, password) != ("postgres", "postgres")
         ],
     ]
@@ -1405,6 +1408,7 @@ def test_postgres_sql_shell_uses_late_winning_default_credential(
         ("pgbouncer", "pgbouncer", False),
         ("pgbouncer_exporter", "pgbouncer_exporter", False),
         ("pgsql", "pgsql", False),
+        ("postgres", "12345678", False),
         ("postgres", "admin", False),
         ("postgres", "changeme", False),
         ("postgres", "password", False),

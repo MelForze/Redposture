@@ -1525,6 +1525,30 @@ def _record_noise_text(record: dict[str, Any]) -> str:
     return " ".join(values).lower()
 
 
+def _credential_attempt_rate_limited(record: AuditRecord) -> bool:
+    """Stop a weak-password sweep when the server limits or locks login attempts."""
+
+    payload = record.to_dict()
+    if str(payload.get("status") or "").lower() in {"rate_limited", "account_locked", "locked_out"}:
+        return True
+    for key in ("http_status", "auth_probe_http_status", "auth_http_status"):
+        if str(payload.get(key) or "") == "429":
+            return True
+    message = " ".join(str(payload.get(key) or "") for key in ("error", "auth_error_detail")).lower()
+    return any(
+        marker in message
+        for marker in (
+            "rate limit",
+            "too many login attempts",
+            "too many requests",
+            "http 429",
+            "status=429",
+            "account locked",
+            "account has been locked",
+        )
+    )
+
+
 def is_pre_detect_network_noise(record: AuditRecord | dict[str, Any]) -> bool:
     """Return true for non-service network/protocol noise before detection.
 
@@ -2817,6 +2841,8 @@ class AuditCommandRunner:
                     auth_records.append((credential, auth_record))
                     if phase_emit is not None:
                         phase_emit(auth_record, False)
+                    if bool(getattr(self.args, "defcreds", False)) and _credential_attempt_rate_limited(auth_record):
+                        break
                     if self.spec.continue_after_credential_error:
                         continue
                     failed_record = self._preserve_detected_deep_failure(detect_record, auth_record)
@@ -2837,6 +2863,8 @@ class AuditCommandRunner:
                 auth_records.append((credential, auth_record))
                 if phase_emit is not None:
                     phase_emit(auth_record, False)
+                if bool(getattr(self.args, "defcreds", False)) and _credential_attempt_rate_limited(auth_record):
+                    break
                 if (
                     self._credential_gate(credential, auth_record)[0]
                     and not self.spec.continue_after_credential_success
@@ -3088,6 +3116,8 @@ class AuditCommandRunner:
             attempts[-1] = (credential, record)
             if phase_emit is not None:
                 phase_emit(record, False)
+            if bool(getattr(self.args, "defcreds", False)) and _credential_attempt_rate_limited(record):
+                break
             if gate[0]:
                 if debug_emit is not None:
                     debug_emit(format_stage2_gate(host, int(port), "run", gate[1]))

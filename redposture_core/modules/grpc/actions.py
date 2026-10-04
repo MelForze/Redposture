@@ -183,6 +183,7 @@ _DEFAULT_BASIC_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("admin", "admin"),
     ("admin", "changeme"),
     ("admin", "password"),
+    ("admin", "12345678"),
     ("dev", "dev"),
     ("grpc", "admin"),
     ("grpc", "grpc"),

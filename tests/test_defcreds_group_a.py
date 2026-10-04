@@ -77,13 +77,17 @@ def test_credential_file_is_followed_by_defaults_once_with_stable_deduplication(
     if module_name == "grpc":
         expected_default_keys = [("token", token, None) for token in grpc._DEFAULT_BEARER_TOKENS] + [
             ("basic", username, password)
-            for username, password in grpc._DEFAULT_BASIC_CREDENTIALS
+            for username, password in sorted(
+                grpc._DEFAULT_BASIC_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
             if (username, password) != ("admin", "admin")
         ]
     else:
         expected_default_keys = [
             ("basic", username, password)
-            for username, password in _basic_defaults(module_name)
+            for username, password in sorted(
+                _basic_defaults(module_name), key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
             if (username, password) != ("admin", "admin")
         ]
     assert [_run_key(run) for run in runs[2:]] == expected_default_keys
@@ -242,6 +246,7 @@ def test_etcd_runtime_passes_file_and_defaults_as_one_source_aware_batch(
         ("admin", "password", "default"),
         ("etcd", "etcd", "default"),
         ("etcd", "password", "default"),
+        ("root", "12345678", "default"),
         ("root", "admin", "default"),
         ("root", "etcd", "default"),
         ("root", "password", "default"),

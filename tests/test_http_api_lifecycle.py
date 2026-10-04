@@ -127,6 +127,7 @@ def test_grafana_defcreds_are_explicit_ordered_runs_not_an_internal_batch(
 
     assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [
         ("operator", "wrong", "provided"),
+        ("admin", "12345678", "default"),
         ("admin", "admin", "default"),
         ("admin", "changeme", "default"),
         ("admin", "grafana", "default"),
@@ -269,7 +270,9 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
     assert record["effective_username"] == "admin"
     assert record["effective_password"] == "password"
     assert len(record["auth_attempts"]) == len(plan.credential_runs)
-    assert record["auth_attempts"][0] == {
+    assert next(
+        item for item in record["auth_attempts"] if (item["username"], item["password"]) == ("admin", "admin")
+    ) == {
         "username": "admin",
         "password": "admin",
         "source": "default",

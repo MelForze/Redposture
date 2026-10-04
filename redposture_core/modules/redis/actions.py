@@ -49,6 +49,7 @@ _REDIS_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("default", "default"),
     ("default", "password"),
     ("default", "redis"),
+    ("default", "12345678"),
     ("dev", "dev"),
     ("redis", "changeme"),
     ("redis", "password"),

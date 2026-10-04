@@ -410,6 +410,7 @@ def test_kafka_small_helpers_and_metadata_success_branches() -> None:
         ("admin", "changeme"),
         ("admin", "kafka"),
         ("admin", "password"),
+        ("admin", "12345678"),
         ("broker", "broker"),
         ("broker", "brokerpass"),
         ("client", "client"),

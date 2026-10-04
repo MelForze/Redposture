@@ -867,9 +867,11 @@ def test_credential_file_and_api_token_keep_defcreds_as_fallbacks(
     assert [(run.username, run.password, run.source) for run in file_runs] == [
         ("alice", "one", "file"),
         ("bob", "two", "file"),
+        ("admin", "12345678", "default"),
         ("admin", "admin", "default"),
         ("admin", "changeme", "default"),
         ("admin", "password", "default"),
+        ("elastic", "12345678", "default"),
         ("elastic", "changeme", "default"),
         ("elastic", "elastic", "default"),
         ("elastic", "password", "default"),
@@ -884,9 +886,11 @@ def test_credential_file_and_api_token_keep_defcreds_as_fallbacks(
     token_runs = captured_plans[1].credential_runs
     assert [(run.token, run.username, run.password, run.source) for run in token_runs] == [
         ("token-secret", None, None, "token"),
+        (None, "admin", "12345678", "default"),
         (None, "admin", "admin", "default"),
         (None, "admin", "changeme", "default"),
         (None, "admin", "password", "default"),
+        (None, "elastic", "12345678", "default"),
         (None, "elastic", "changeme", "default"),
         (None, "elastic", "elastic", "default"),
         (None, "elastic", "password", "default"),

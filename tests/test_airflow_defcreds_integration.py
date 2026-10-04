@@ -336,7 +336,7 @@ def test_airflow2_defcreds_checks_every_pair_and_continues_after_success_and_tra
         result, lines, plan = _run(server)
 
     expected = _plan_pairs(plan)
-    assert len(expected) == 18
+    assert len(expected) == 19
     assert server.basic_dag_requests[: len(expected)] == expected
     assert set(server.basic_dag_requests[: len(expected)]) == set(expected)
     credential_lines = [line for line in lines if "\t [+] " in line or "\t [-] " in line or "\t [!] " in line]
@@ -370,7 +370,7 @@ def test_airflow3_defcreds_deduplicates_provided_pair_uses_bearer_and_redacts_js
         )
 
     expected = _plan_pairs(plan)
-    assert len(expected) == 18
+    assert len(expected) == 19
     assert expected[0] == ("airflow", "airflow")
     assert expected.count(("airflow", "airflow")) == 1
     assert server.token_attempts == expected

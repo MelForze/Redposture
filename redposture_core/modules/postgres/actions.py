@@ -67,6 +67,7 @@ _POSTGRES_DEFAULT_CREDENTIALS = (
     ("postgres", "changeme"),
     ("postgres", "password"),
     ("postgres", "postgres"),
+    ("postgres", "12345678"),
     ("service", "service"),
     ("test", "test"),
     ("user", "password"),

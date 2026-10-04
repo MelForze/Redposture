@@ -5,7 +5,7 @@ from redposture_core.modules.airflow import actions
 
 def test_default_catalog_is_broad_unique_and_leads_with_real_default():
     assert actions._DEFAULT_CREDENTIALS[0] == ("airflow", "airflow")
-    assert len(actions._DEFAULT_CREDENTIALS) == 18
+    assert len(actions._DEFAULT_CREDENTIALS) == 19
     assert len(set(actions._DEFAULT_CREDENTIALS)) == len(actions._DEFAULT_CREDENTIALS)
     assert {
         ("admin", "admin"),

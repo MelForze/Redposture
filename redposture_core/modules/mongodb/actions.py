@@ -50,6 +50,7 @@ _MONGODB_DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
     ("admin", "mongo"),
     ("admin", "mongodb"),
     ("admin", "password"),
+    ("admin", "12345678"),
     ("dev", "dev"),
     ("mongo", "mongo"),
     ("mongo", "password"),

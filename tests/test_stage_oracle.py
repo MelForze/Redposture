@@ -472,7 +472,9 @@ def test_run_oracle_stage_credential_file_debug_and_unreachable_warning(
         ("system", "oracle", "file"),
         *[
             (username, password, "default")
-            for username, password in oracle._ORACLE_DEFAULT_CREDS
+            for username, password in sorted(
+                oracle._ORACLE_DEFAULT_CREDS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
             if (username, password) != ("system", "oracle")
         ],
     ]
@@ -537,6 +539,7 @@ def test_oracle_helpers_parse_credentials_and_targets(tmp_path: Path) -> None:
         ("system", "manager"),
         ("system", "oracle"),
         ("system", "system"),
+        ("system", "12345678"),
         ("test", "test"),
         ("user", "user"),
     )

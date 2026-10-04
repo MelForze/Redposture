@@ -61,6 +61,7 @@ _DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("admin", "password"),
     ("admin", "changeme"),
     ("admin", "airflow123"),
+    ("admin", "12345678"),
     ("root", "root"),
     ("root", "password"),
     ("user", "user"),

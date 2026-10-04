@@ -65,6 +65,7 @@ _ORACLE_DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
     ("system", "manager"),
     ("system", "oracle"),
     ("system", "system"),
+    ("system", "12345678"),
     ("test", "test"),
     ("user", "user"),
 )
