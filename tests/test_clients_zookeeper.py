@@ -13,6 +13,24 @@ import pytest
 import redposture_core.clients.zookeeper as zk
 
 
+def test_sequential_create_returns_server_allocated_path() -> None:
+    requests: list[tuple[int, bytes]] = []
+
+    class Client(zk._ZkClient):
+        def __init__(self) -> None:
+            return
+
+        def _request(self, operation: int, payload: bytes):
+            requests.append((operation, payload))
+            return 0, zk._encode_zk_string("/clickhouse/task_queue/ddl/query-0000000007")
+
+    path, error = Client().create_sequential("/clickhouse/task_queue/ddl/query-", b"entry")
+
+    assert (path, error) == ("/clickhouse/task_queue/ddl/query-0000000007", 0)
+    assert requests[0][0] == zk._ZK_OP_CREATE
+    assert requests[0][1].endswith(struct.pack(">i", 2))
+
+
 @pytest.mark.parametrize(
     ("children", "api_data", "confirmed", "reason"),
     [

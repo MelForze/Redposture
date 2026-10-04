@@ -1074,6 +1074,26 @@ class _ZkClient:
         err, _response_payload = self._request(_ZK_OP_CREATE, payload)
         return int(err)
 
+    def create_sequential(self, path: str, data: bytes) -> tuple[str | None, int]:
+        """Create a persistent sequential znode and return its server-assigned path."""
+
+        payload = (
+            _encode_zk_string(path)
+            + struct.pack(">i", len(data))
+            + data
+            + _encode_acl_world_anyone_all()
+            + struct.pack(">i", 2)
+        )
+        err, response_payload = self._request(_ZK_OP_CREATE, payload)
+        if err != _ZK_ERR_OK:
+            if response_payload:
+                raise ValueError("unexpected ZooKeeper create error payload")
+            return None, int(err)
+        created_path, offset = _decode_zk_string(response_payload)
+        if created_path is None or not created_path.startswith(path) or offset != len(response_payload):
+            raise ValueError("invalid ZooKeeper sequential create response")
+        return created_path, _ZK_ERR_OK
+
     def delete(self, path: str, version: int = -1) -> int:
         payload = _encode_zk_string(path) + struct.pack(">i", int(version))
         err, _response_payload = self._request(_ZK_OP_DELETE, payload)

@@ -1023,6 +1023,9 @@ run_zookeeper_auth_cases() {
 
 run_keeper_cases() {
   run_case keeper keeper_cluster 0 keeper -t 127.0.0.1 --port "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3
+  if is_extended_matrix; then
+    run_case keeper keeper_ddl_topology 0 keeper -t 127.0.0.1 --port 19181 --show-cluster --show-hosts
+  fi
   run_case keeper keeper_tls 0 keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
   run_case keeper keeper_no4lw 0 keeper -t 127.0.0.1 --port 39181 -u lab -p lab --znode /keeper/api_version --dump
   run_case zookeeper keeper_apache_control 0 zookeeper -t 127.0.0.1 --port 12181 --show-znodes 5

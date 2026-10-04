@@ -23,7 +23,7 @@ from ...stage_runtime import (
 from ...zookeeper_defaults import KEEPER_DIGEST_DEFAULT_CREDENTIALS
 from ..zookeeper import actions as protocol_actions
 from ..zookeeper import engine
-from . import actions, policy, render
+from . import actions, ddl, policy, render
 from .types import KeeperFingerprintCache
 
 _DEFAULT_PORT = 9181
@@ -116,6 +116,43 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
         payload = engine.collect_zookeeper_implementation_data(ctx, record, options)
         payload["module"] = "keeper"
         payload["service"] = "keeper"
+        state = ctx.lifecycle_state
+        client = (
+            state.zookeeper_state.anonymous_client
+            if isinstance(state, engine.ZooKeeperImplementationLifecycleState)
+            else None
+        )
+        if getattr(args, "show_cluster", False) or getattr(args, "show_hosts", False):
+            payload["ddl_topology"] = (
+                ddl.read_ddl_topology(client)
+                if client is not None
+                else {"status": "unavailable", "clusters": {}, "reason": "anonymous Keeper session unavailable"}
+            )
+            payload["ddl_topology_requested"] = {
+                "clusters": bool(getattr(args, "show_cluster", False)),
+                "hosts": bool(getattr(args, "show_hosts", False)),
+            }
+        if getattr(args, "create_user", None):
+            payload["ddl_user_creation"] = (
+                ddl.create_user_via_ddl(
+                    client,
+                    str(args.create_user),
+                    str(args.create_userpass),
+                    access=str(record.extra.get("ddl_access") or "Unknown"),
+                    grant_admin=bool(getattr(args, "grant_admin", False)),
+                    clickhouse_host=getattr(args, "clickhouse_host", None),
+                    clickhouse_port=getattr(args, "clickhouse_port", 9000),
+                    clickhouse_cluster=getattr(args, "clickhouse_cluster", None),
+                    timeout=float(getattr(args, "timeout", 5.0) or 5.0),
+                )
+                if client is not None
+                else {
+                    "username": str(args.create_user),
+                    "status": "unavailable",
+                    "admin_status": "not_attempted" if getattr(args, "grant_admin", False) else "not_requested",
+                    "reason": "anonymous Keeper session unavailable",
+                }
+            )
         return AuditRecord.from_mapping(payload, module="keeper", service="keeper")
 
     def _capabilities(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
@@ -129,9 +166,45 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
         if supplied:
             verified = record.extra.get("provided_credentials_ok") is True
             return verified, "credential verified" if verified else "credential not verified"
+        queue_gate = _anonymous_ddl_gate(record)
+        if queue_gate[0]:
+            return queue_gate
         status = str(record.status or "")
         accepted = status in {"open_no_auth", "valid_credentials", "weak_default_creds"}
         return accepted, f"status={status}"
+
+    def _anonymous_ddl_gate(record: AuditRecord) -> tuple[bool, str]:
+        access = str(record.extra.get("ddl_access") or "")
+        if getattr(args, "create_user", None) and access == "Write":
+            return True, "anonymous DDL queue writable"
+        if (getattr(args, "show_cluster", False) or getattr(args, "show_hosts", False)) and access in {
+            "Write",
+            "Read",
+        }:
+            return True, "anonymous DDL queue readable"
+        return False, ""
+
+    def _deep_gate(record: AuditRecord) -> tuple[bool, str]:
+        queue_gate = _anonymous_ddl_gate(record)
+        if queue_gate[0]:
+            return queue_gate
+        status = str(record.status or "unknown")
+        allowed = {
+            "ok",
+            "open",
+            "open_no_auth",
+            "anonymous_access",
+            "detected",
+            "token_ok",
+            "valid_credentials",
+            "auth_valid",
+            "weak_default_creds",
+            "invalid_credentials_anonymous",
+            "valid_token",
+            "token_accepted",
+            "insufficient_privileges",
+        }
+        return status in allowed, f"status={status}"
 
     def _is_detected(record: AuditRecord) -> bool:
         return bool(record.extra.get("is_zookeeper")) and record.extra.get("is_keeper") is True
@@ -152,6 +225,7 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
         keep_anonymous_open_no_auth=True,
         skip_credentials_without_verifier=True,
         credential_gate=_credential_gate,
+        deep_gate=_deep_gate,
         continue_after_credential_success=exhaustive_credentials,
         continue_after_credential_error=exhaustive_credentials,
         fallback_to_anonymous_detect_record=exhaustive_credentials,

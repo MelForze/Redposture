@@ -116,6 +116,12 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
     },
     "keeper": {
         "ca_file": "Keeper and ZooKeeper share TLS validation; custom-CA handling is covered by the shared protocol tests.",
+        "create_user": "account creation is mutating; unit tests and a separate opt-in real Keeper QA stand cover it.",
+        "create_userpass": "account creation is mutating; unit tests and a separate opt-in real Keeper QA stand cover it.",
+        "grant_admin": "admin grants are mutating; unit tests and a separate opt-in real Keeper QA stand cover them.",
+        "clickhouse_host": "worker host override is used only by opt-in account creation and covered by its tests and QA stand.",
+        "clickhouse_port": "worker port override is used only by opt-in account creation and covered by its tests and QA stand.",
+        "clickhouse_cluster": "cluster selection for account creation is covered by unit tests and a separate opt-in QA stand.",
         "debug": "wrong-vendor and unconfirmed Keeper debug rendering is covered by focused unit tests.",
         "defcreds": "Keeper and ZooKeeper share the ordered digest verifier; parity is covered by focused unit tests.",
         "out_targets": "shared target exclusion is covered through ZooKeeper and common target-expansion tests.",

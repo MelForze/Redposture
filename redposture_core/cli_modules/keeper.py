@@ -39,6 +39,32 @@ def configure_keeper_parser(
                 "The Keeper DDL queue is probed by default."
             )
             break
+    ddl = parser.add_argument_group("Keeper DDL user creation")
+    ddl.add_argument(
+        "--create-user", metavar="username", help="Create a ClickHouse user through a writable Keeper DDL queue."
+    )
+    ddl.add_argument(
+        "--create-userpass", metavar="password", help="Password for --create-user (stored in the task as SHA-256 hash)."
+    )
+    ddl.add_argument(
+        "--grant-admin",
+        action="store_true",
+        help="Also queue GRANT ALL ON *.* WITH GRANT OPTION after confirmed creation.",
+    )
+    ddl.add_argument(
+        "--clickhouse-host", metavar="host", help="DDL worker host ID when the queue has no usable existing task."
+    )
+    ddl.add_argument("--clickhouse-port", type=port_type, default=9000, metavar="port", help="DDL worker native port.")
+    ddl.add_argument(
+        "--clickhouse-cluster",
+        metavar="name",
+        help="ClickHouse cluster name when the queue has no usable existing task.",
+    )
+    inventory = parser.add_argument_group("Keeper DDL topology")
+    inventory.add_argument(
+        "--show-cluster", action="store_true", help="List cluster names found in existing DDL tasks (read-only)."
+    )
+    inventory.add_argument("--show-hosts", action="store_true", help="List DDL worker host IDs by cluster (read-only).")
 
 
 __all__ = ["configure_keeper_parser"]

@@ -237,6 +237,30 @@ not execution of SQL; `Read` confirms reading while writing remains unproved.
 configure a different DDL path. This temporary write can trigger Keeper
 watches. The separate `--probe-write` flag still tests create/delete under `/`.
 
+With explicit `--create-user NAME --create-userpass PASSWORD`, Keeper can queue a
+ClickHouse `CREATE USER` task when anonymous DDL access is `Write`. It stores a
+SHA-256 password hash in the task, waits for the DDL worker result, and reports
+creation only after a worker confirms it. `--grant-admin` queues a separate
+`GRANT ALL ON *.* WITH GRANT OPTION` task only after successful creation. Both
+operations change ClickHouse accounts. For example:
+
+```bash
+redposture keeper -t keeper.example:9181 --create-user audituser --create-userpass 'strong-password' --grant-admin
+```
+
+The module reads DDL worker host IDs and the cluster name from existing tasks
+when exactly one cluster is identifiable. If the queue is empty, or the desired
+cluster has no usable task, specify `--clickhouse-host`, `--clickhouse-port`
+(native port, default 9000), and `--clickhouse-cluster`. If tasks from multiple
+clusters are present, `--clickhouse-cluster` selects one; the module never
+guesses a cluster or substitutes Keeper's IP for a ClickHouse worker host.
+`--show-cluster` and `--show-hosts` list names and worker IDs from existing DDL
+tasks (formats 5–8) without changing data. New tasks use the minimal format 5
+entry and do not inherit another task's settings or initiator identity. Replica
+names under `/clickhouse/tables`, session
+entries, optional cluster-discovery paths, and Keeper peer addresses are not
+reliable substitutes for DDL worker IDs; they are not used to enqueue tasks.
+
 ### KubeAPI
 
 ```bash
