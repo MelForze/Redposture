@@ -32,6 +32,13 @@ def configure_keeper_parser(
         port_type=port_type,
         positive_int=positive_int,
     )
+    for action in parser._actions:
+        if action.dest == "probe_write":
+            action.help = (
+                "Also test root-scoped create/delete permissions with a temporary znode. "
+                "The Keeper DDL queue is probed by default."
+            )
+            break
 
 
 __all__ = ["configure_keeper_parser"]

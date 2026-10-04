@@ -23,7 +23,7 @@ from ...stage_runtime import (
 from ...zookeeper_defaults import KEEPER_DIGEST_DEFAULT_CREDENTIALS
 from ..zookeeper import actions as protocol_actions
 from ..zookeeper import engine
-from . import policy, render
+from . import actions, policy, render
 from .types import KeeperFingerprintCache
 
 _DEFAULT_PORT = 9181
@@ -86,6 +86,24 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
         )
         payload["module"] = "keeper"
         payload["service"] = "keeper"
+        if payload.get("is_zookeeper") is True and payload.get("is_keeper") is True:
+            state = ctx.lifecycle_state
+            client = (
+                state.zookeeper_state.anonymous_client
+                if isinstance(state, engine.ZooKeeperImplementationLifecycleState)
+                else None
+            )
+            access, detail = (
+                actions.probe_ddl_access(client) if client is not None else ("Unknown", "no anonymous session")
+            )
+            payload.update(
+                {
+                    "ddl_access": access,
+                    "ddl_access_scope": actions._DDL_QUEUE,
+                    "ddl_access_identity": "anonymous",
+                    "ddl_access_detail": detail,
+                }
+            )
         return AuditRecord.from_mapping(payload, module="keeper", service="keeper")
 
     def _auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:

@@ -93,6 +93,199 @@ def test_keeper_accepts_only_confirmed_keeper(monkeypatch: pytest.MonkeyPatch) -
     assert payload["status"] == "open_no_auth"
 
 
+@pytest.mark.parametrize(
+    ("read_error", "create_error", "expected", "created"),
+    [
+        (0, 0, "Write", True),
+        (0, -102, "Read", True),
+        (-102, 0, "Write", True),
+        (-102, -102, "Denied", True),
+        (-101, None, "Absent", False),
+        (-122, None, "Unknown", False),
+    ],
+)
+def test_keeper_default_ddl_probe_uses_only_non_task_ephemeral_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    read_error: int,
+    create_error: int | None,
+    expected: str,
+    created: bool,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class Client:
+        def get_children2(self, path: str):
+            calls.append(("read", path))
+            return ([], read_error, None)
+
+        def create(self, path: str, data: bytes = b"", flags: int = 1):
+            calls.append(("create", path, data, flags))
+            return create_error
+
+        def delete(self, path: str, version: int = -1):
+            calls.append(("delete", path, version))
+            return 0
+
+    client = Client()
+    args = parse_args(["keeper", "-t", "127.0.0.1:9181", "--retries", "0"])
+    spec = keeper_stage.build_keeper_spec(args)
+    assert spec.lifecycle_state_factory is not None and spec.detect is not None
+    state = spec.lifecycle_state_factory(None)
+
+    def fake_detect(ctx, _options):
+        ctx.lifecycle_state.zookeeper_state.anonymous_client = client
+        return {
+            "host": ctx.host,
+            "port": ctx.port,
+            "service": "keeper",
+            "status": "open_no_auth",
+            "auth_required": False,
+            "is_zookeeper": True,
+            "is_keeper": True,
+            "transport": "plaintext",
+            "version": "v24.8.14.39",
+        }
+
+    monkeypatch.setattr(implementation_engine, "detect_zookeeper_implementation", fake_detect)
+    ctx = AuditHookContext(
+        args=args,
+        logger=None,
+        host="127.0.0.1",
+        port=9181,
+        credential=AuditCredentialRun(source="anonymous"),
+        lifecycle_state=state,
+    )
+    payload = spec.detect(ctx).to_dict()
+
+    assert payload["ddl_access"] == expected
+    assert calls[0] == ("read", "/clickhouse/task_queue/ddl")
+    create_calls = [call for call in calls if call[0] == "create"]
+    assert bool(create_calls) is created
+    if create_error == 0:
+        assert len(create_calls) == 1
+        marker_path = str(create_calls[0][1])
+        assert marker_path.startswith("/clickhouse/task_queue/ddl/redposture-probe-")
+        assert "/query-" not in marker_path
+        assert create_calls[0][2:] == (b"", 1)
+        assert ("delete", marker_path, -1) in calls
+    else:
+        assert not any(call[0] == "delete" for call in calls)
+    rendered = keeper_stage.render._format_detect_record(payload, "txt")
+    assert f"(auth required:False) (ddl access:{expected}) (transport:plaintext)" in rendered
+
+
+def test_keeper_default_ddl_probe_is_not_run_on_foreign_zookeeper(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, record = _detect_record(
+        monkeypatch,
+        ZkImplementationFingerprint("apache-zookeeper", False, "confirmed", version="3.9.5"),
+    )
+    assert spec.is_detected is not None and spec.is_detected(record) is False
+    assert "ddl_access" not in record.to_dict()
+
+
+def test_keeper_ddl_probe_closes_ephemeral_session_if_delete_is_denied() -> None:
+    from redposture_core.modules.keeper import actions as keeper_actions
+
+    calls: list[str] = []
+
+    class Client:
+        def get_children2(self, _path: str):
+            return [], 0, None
+
+        def create(self, path: str, _data: bytes, *, flags: int):
+            calls.append(f"create:{path}:{flags}")
+            return 0
+
+        def delete(self, path: str, _version: int):
+            calls.append(f"delete:{path}")
+            return -102
+
+        def close(self):
+            calls.append("close")
+
+        def connect(self):
+            calls.append("reconnect")
+
+    access, detail = keeper_actions.probe_ddl_access(Client())
+    assert access == "Write"
+    assert "NOAUTH" in str(detail)
+    assert calls[-2:] == ["close", "reconnect"]
+
+
+def test_keeper_ddl_probe_ambiguous_create_closes_session_before_reuse() -> None:
+    from redposture_core.modules.keeper import actions as keeper_actions
+
+    calls: list[str] = []
+
+    class Client:
+        def get_children2(self, _path: str):
+            return [], 0, None
+
+        def create(self, _path: str, _data: bytes, *, flags: int):
+            calls.append(f"create:{flags}")
+            raise TimeoutError("response lost")
+
+        def close(self):
+            calls.append("close")
+
+        def connect(self):
+            calls.append("reconnect")
+
+    access, detail = keeper_actions.probe_ddl_access(Client())
+    assert access == "Read"
+    assert "response lost" in str(detail)
+    assert calls == ["create:1", "close", "reconnect"]
+
+
+def test_keeper_ddl_probe_malformed_read_result_does_not_hide_service() -> None:
+    from redposture_core.modules.keeper import actions as keeper_actions
+
+    class Client:
+        def get_children2(self, _path: str):
+            return [], None, None
+
+    assert keeper_actions.probe_ddl_access(Client())[0] == "Unknown"
+
+
+@pytest.mark.parametrize(
+    ("status", "color"),
+    [
+        ("Write", "red"),
+        ("Read", "orange"),
+        ("Denied", "bright_green"),
+        ("Absent", "bright_green"),
+        ("Unknown", "orange"),
+    ],
+)
+def test_keeper_ddl_access_colors_match_status(status: str, color: str) -> None:
+    class Console:
+        paint_calls: list[tuple[str, str]] = []
+
+        def _paint(self, text: str, selected: str, _stream) -> str:
+            self.paint_calls.append((text, selected))
+            return text
+
+        def plain(self, _text: str, color: str | None = None) -> None:
+            del color
+
+    console = Console()
+    assert keeper_stage.render._render_colored_keeper_line(
+        console,
+        f"KEEPER\t127.0.0.1\t9181\t [*] ClickHouse Keeper (auth required:False) (ddl access:{status})",
+    )
+    assert (f"ddl access:{status}", color) in console.paint_calls
+
+
+def test_keeper_help_explains_default_ddl_write_probe(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["keeper", "--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "DDL queue" in help_text
+    assert "by default" in help_text
+    assert "Without this flag the audit is read-only" not in help_text
+
+
 def test_keeper_rejects_apache_before_auth_or_actions(monkeypatch: pytest.MonkeyPatch) -> None:
     spec, record = _detect_record(
         monkeypatch,

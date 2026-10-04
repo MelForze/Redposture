@@ -3006,8 +3006,11 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
         if implementation_label == "ZooKeeper-compatible"
         else implementation_label
     )
+    ddl_access = str(record.get("ddl_access") or "Unknown")
+    ddl_suffix = f" (ddl access:{ddl_access})" if _record_service(record) == "keeper" else ""
     return (
-        f"{prefix} [*] {service_label} (auth required:{auth_required_text}) (transport:{transport}) (version:{version})"
+        f"{prefix} [*] {service_label} (auth required:{auth_required_text}){ddl_suffix} "
+        f"(transport:{transport}) (version:{version})"
     )
 
 
@@ -3342,11 +3345,23 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str, *,
 
 def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
     for tag in ("ZOOKEEPER", "KEEPER"):
+        literals: tuple[tuple[str, str], ...] = (
+            ("(transport:plaintext)", "yellow"),
+            ("(transport:tls)", "bright_green"),
+        )
+        if tag == "KEEPER":
+            literals += (
+                ("(ddl access:Write)", "red"),
+                ("(ddl access:Read)", "orange"),
+                ("(ddl access:Denied)", "bright_green"),
+                ("(ddl access:Absent)", "bright_green"),
+                ("(ddl access:Unknown)", "orange"),
+            )
         if render_colored_marker_line(
             console,
             line,
             tag=tag,
-            literals=(("(transport:plaintext)", "yellow"), ("(transport:tls)", "bright_green")),
+            literals=literals,
             booleans=(BooleanColorRule("create"), BooleanColorRule("delete")),
             counts=(
                 CountColorRule("znodes", "red", unknown_color="orange", zero_color="bright_green"),

@@ -228,6 +228,15 @@ redposture keeper -t targets.txt --defcreds --znode /app
 redposture keeper -t keeper.example -u auditor -p 'password' --show-znodes 20 --dump 10
 ```
 
+Keeper reports `(ddl access:Write/Read/Denied/Absent/Unknown)` for the anonymous
+session against the default `/clickhouse/task_queue/ddl` path. The check runs
+by default: it reads the queue and attempts to create and delete an empty,
+ephemeral child whose name is not a DDL task. `Write` confirms child creation,
+not execution of SQL; `Read` confirms reading while writing remains unproved.
+`Absent` means this default path was not found, including installations that
+configure a different DDL path. This temporary write can trigger Keeper
+watches. The separate `--probe-write` flag still tests create/delete under `/`.
+
 ### KubeAPI
 
 ```bash
