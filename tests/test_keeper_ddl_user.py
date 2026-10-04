@@ -358,7 +358,7 @@ def test_keeper_data_hook_passes_confirmed_anonymous_queue_to_user_action(
     spec = keeper_stage.build_keeper_spec(args)
     assert spec.lifecycle_state_factory is not None and spec.data is not None
     state = spec.lifecycle_state_factory(None)
-    state.zookeeper_state.anonymous_client = CompletedKeeper()  # type: ignore[assignment]
+    state.zookeeper_state.anonymous_client = CompletedKeeper()
     record = AuditRecord.from_mapping(
         {
             "host": "127.0.0.1",

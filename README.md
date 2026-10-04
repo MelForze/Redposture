@@ -248,18 +248,24 @@ operations change ClickHouse accounts. For example:
 redposture keeper -t keeper.example:9181 --create-user audituser --create-userpass 'strong-password' --grant-admin
 ```
 
-The module reads DDL worker host IDs and the cluster name from existing tasks
-when exactly one cluster is identifiable. If the queue is empty, or the desired
-cluster has no usable task, specify `--clickhouse-host`, `--clickhouse-port`
+The module reads DDL worker host IDs and the cluster name from the newest valid
+task per cluster when exactly one cluster is identifiable. It does not merge
+older host lists, which may include retired workers. If the queue is empty, or
+the desired cluster has no usable task, specify `--clickhouse-host`, `--clickhouse-port`
 (native port, default 9000), and `--clickhouse-cluster`. If tasks from multiple
 clusters are present, `--clickhouse-cluster` selects one; the module never
 guesses a cluster or substitutes Keeper's IP for a ClickHouse worker host.
+Automatic selection stops with a diagnostic if the DDL queue has more than 512
+tasks; explicit host and cluster still work.
 `--show-cluster` and `--show-hosts` list names and worker IDs from existing DDL
 tasks (formats 5–8) without changing data. New tasks use the minimal format 5
 entry and do not inherit another task's settings or initiator identity. Replica
 names under `/clickhouse/tables`, session
 entries, optional cluster-discovery paths, and Keeper peer addresses are not
 reliable substitutes for DDL worker IDs; they are not used to enqueue tasks.
+`{cluster}` works in ClickHouse only when that macro is configured on the server;
+normal `ON CLUSTER '{cluster}'` submission stores the expanded cluster name in
+the DDL queue. Redposture never substitutes a literal `{cluster}` itself.
 
 ### KubeAPI
 

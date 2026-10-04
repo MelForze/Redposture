@@ -17,6 +17,15 @@ _CLUSTER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
 _HOST_ID = re.compile(r"[A-Za-z0-9_.%-]{1,253}:[0-9]{1,5}\Z")
 _TASK_NAME = re.compile(r"query-[0-9]{10,}\Z")
 _MAX_ENTRY_BYTES = 64 * 1024
+_DDL_QUERY = re.compile(
+    r"\s*(?:CREATE|ALTER|DROP|RENAME|TRUNCATE|GRANT|REVOKE|OPTIMIZE|SYSTEM|BACKUP|RESTORE|ATTACH|DETACH|EXCHANGE)\b",
+    re.I,
+)
+_ON_CLUSTER = re.compile(
+    r"ON[ \t]+CLUSTER[ \t]+(?:'([A-Za-z_][A-Za-z0-9_]*)'|([A-Za-z_][A-Za-z0-9_]*))(?![A-Za-z0-9_])",
+    re.I,
+)
+_QUERY_ESCAPES = {"\\": "\\", "'": "'", '"': '"', "`": "`", "n": "\n", "r": "\r", "t": "\t"}
 
 
 def _valid_hosts(raw: str) -> list[str] | None:
@@ -36,6 +45,63 @@ def _valid_hosts(raw: str) -> list[str] | None:
     return hosts if len(hosts) == len(value) and len(set(hosts)) == len(hosts) else None
 
 
+def _cluster_from_query(query: str) -> str | None:
+    """Find an ON CLUSTER clause outside SQL quotes and comments."""
+
+    if not _DDL_QUERY.match(query):
+        return None
+    cursor = 0
+    while cursor < len(query):
+        char = query[cursor]
+        if char in {"'", '"', "`"}:
+            quote = char
+            cursor += 1
+            while cursor < len(query):
+                if query[cursor] == "\\":
+                    cursor += 2
+                elif query[cursor] == quote:
+                    if query[cursor + 1 : cursor + 2] == quote:
+                        cursor += 2
+                    else:
+                        cursor += 1
+                        break
+                else:
+                    cursor += 1
+            continue
+        if query.startswith(("--", "#"), cursor):
+            break
+        if query.startswith("/*", cursor):
+            end = query.find("*/", cursor + 2)
+            if end < 0:
+                break
+            cursor = end + 2
+            continue
+        if (cursor == 0 or not (query[cursor - 1].isalnum() or query[cursor - 1] == "_")) and (
+            match := _ON_CLUSTER.match(query, cursor)
+        ):
+            return match.group(1) or match.group(2)
+        cursor += 1
+    return None
+
+
+def _unescape_ddl_query(query: str) -> str | None:
+    """Decode ClickHouse's escaped query field before tokenizing SQL."""
+
+    result: list[str] = []
+    cursor = 0
+    while cursor < len(query):
+        char = query[cursor]
+        if char != "\\":
+            result.append(char)
+            cursor += 1
+            continue
+        if cursor + 1 >= len(query) or query[cursor + 1] not in _QUERY_ESCAPES:
+            return None
+        result.append(_QUERY_ESCAPES[query[cursor + 1]])
+        cursor += 2
+    return "".join(result)
+
+
 def _parse_template(data: bytes) -> tuple[str, list[str], str] | None:
     if len(data) > _MAX_ENTRY_BYTES:
         return None
@@ -51,15 +117,12 @@ def _parse_template(data: bytes) -> tuple[str, list[str], str] | None:
     id_match = re.search(r"(?m)^initial_query_id: [0-9a-fA-F-]{36}$", text)
     if not query_match or not hosts_match or not id_match:
         return None
-    cluster_match = re.search(
-        r"\bON CLUSTER\s+(?:'([A-Za-z_][A-Za-z0-9_]*)'|([A-Za-z_][A-Za-z0-9_]*))",
-        query_match.group(1),
-        re.I,
-    )
+    query = _unescape_ddl_query(query_match.group(1))
+    cluster = _cluster_from_query(query) if query is not None else None
     hosts = _valid_hosts(hosts_match.group(1))
-    if cluster_match is None or hosts is None:
+    if cluster is None or hosts is None:
         return None
-    return text, hosts, cluster_match.group(1) or cluster_match.group(2)
+    return text, hosts, cluster
 
 
 def _scan_templates(client: Any) -> tuple[dict[str, tuple[str, list[str]]], str | None]:
@@ -68,7 +131,13 @@ def _scan_templates(client: Any) -> tuple[dict[str, tuple[str, list[str]]], str 
         return {}, "DDL queue does not exist"
     if error != _ZK_ERR_OK or children is None:
         return {}, f"DDL queue read: {_zk_error_name(error)}"
-    task_names = sorted((name for name in children if _TASK_NAME.fullmatch(name)), reverse=True)[:512]
+    task_names = sorted(
+        (name for name in children if _TASK_NAME.fullmatch(name)),
+        key=lambda name: (len(name), name),
+        reverse=True,
+    )
+    if len(task_names) > 512:
+        return {}, "DDL task scan limit (512) exceeded; specify --clickhouse-host and --clickhouse-cluster"
     by_cluster: dict[str, tuple[str, list[str]]] = {}
     for name in task_names:
         raw, read_error, _stat = client.get_data(f"{_QUEUE}/{name}")
@@ -79,10 +148,9 @@ def _scan_templates(client: Any) -> tuple[dict[str, tuple[str, list[str]]], str 
             continue
         text, hosts, cluster = parsed
         if cluster not in by_cluster:
+            # Newer DDL tasks describe the current worker list. Combining old
+            # tasks would add retired hosts to a new user-management task.
             by_cluster[cluster] = text, hosts
-        else:
-            template, known_hosts = by_cluster[cluster]
-            by_cluster[cluster] = template, list(dict.fromkeys([*known_hosts, *hosts]))
     return by_cluster, None
 
 
@@ -205,7 +273,21 @@ def create_user_via_ddl(
             result["reason"] = "invalid ClickHouse host or port"
             return result
     try:
-        _template, discovered_hosts, discovered_cluster, reason = _select_template(client, clickhouse_cluster)
+        if clickhouse_host is not None and clickhouse_cluster is not None:
+            children, queue_error, _stat = client.get_children2(_QUEUE)
+            reason = (
+                "DDL queue does not exist"
+                if queue_error == _ZK_ERR_NONODE
+                else f"DDL queue read: {_zk_error_name(queue_error)}"
+                if queue_error != _ZK_ERR_OK
+                else "DDL queue read: empty response"
+                if children is None
+                else None
+            )
+            discovered_hosts = None
+            discovered_cluster = None
+        else:
+            _template, discovered_hosts, discovered_cluster, reason = _select_template(client, clickhouse_cluster)
         if reason:
             result["reason"] = reason
             return result

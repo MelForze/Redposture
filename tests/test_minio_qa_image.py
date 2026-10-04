@@ -6,6 +6,7 @@ import hashlib
 import io
 import subprocess
 from pathlib import Path
+from urllib.request import Request
 
 import pytest
 
@@ -29,9 +30,9 @@ def test_verified_download_rejects_corruption_without_leaving_binary(
     payload = b"official-test-binary"
     checksum = hashlib.sha256(payload).hexdigest()
 
-    def open_url(request: object, timeout: int) -> io.BytesIO:
+    def open_url(request: Request, timeout: int) -> io.BytesIO:
         del timeout
-        url = request.full_url  # type: ignore[attr-defined]
+        url = request.full_url
         return io.BytesIO((checksum + "  release-binary\n").encode() if url.endswith(".sha256sum") else payload)
 
     monkeypatch.setattr(image.urllib.request, "urlopen", open_url)

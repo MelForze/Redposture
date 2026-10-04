@@ -20,8 +20,8 @@ def test_sequential_create_returns_server_allocated_path() -> None:
         def __init__(self) -> None:
             return
 
-        def _request(self, operation: int, payload: bytes):
-            requests.append((operation, payload))
+        def _request(self, opcode: int, payload: bytes = b"") -> tuple[int, bytes]:
+            requests.append((opcode, payload))
             return 0, zk._encode_zk_string("/clickhouse/task_queue/ddl/query-0000000007")
 
     path, error = Client().create_sequential("/clickhouse/task_queue/ddl/query-", b"entry")
