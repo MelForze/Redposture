@@ -611,7 +611,6 @@ def redis_lifecycle_state_factory(ctx: Any) -> RedisAuditLifecycleState:
     target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
     use_tls = bool(
         getattr(ctx.args, "tls", False)
-        or getattr(ctx.args, "insecure", False)
         or getattr(ctx.args, "tls_ca", None)
         or getattr(ctx.args, "tls_cert", None)
         or getattr(ctx.args, "tls_key", None)
@@ -627,7 +626,7 @@ def redis_lifecycle_state_factory(ctx: Any) -> RedisAuditLifecycleState:
         started=time.monotonic(),
         defcreds_enabled=bool(getattr(ctx.args, "defcreds", False)),
         use_tls=use_tls,
-        insecure=bool(getattr(ctx.args, "insecure", False)),
+        insecure=not bool(getattr(ctx.args, "tls_ca", None)),
         tls_ca=str(getattr(ctx.args, "tls_ca", "") or "").strip() or None,
         tls_cert=str(getattr(ctx.args, "tls_cert", "") or "").strip() or None,
         tls_key=str(getattr(ctx.args, "tls_key", "") or "").strip() or None,

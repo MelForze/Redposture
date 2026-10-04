@@ -220,8 +220,8 @@ run_case consul consul_url_hint_http 0 consul -t "http://127.0.0.1:8500/v1/statu
 run_case consul consul_multi_instance_urls 0 consul -t "http://127.0.0.1:8500/v1/status/leader,http://127.0.0.1:8501/v1/status/leader,http://127.0.0.1:8502/v1/status/leader,http://127.0.0.1:8503/v1/status/leader,http://127.0.0.1:8504/v1/status/leader" --dump
 
 run_case kubeapi kubeapi_open 0 kubeapi -t 127.0.0.1 --port 26443 --namespaces --pods
-run_case kubeapi kubeapi_auditor 0 kubeapi -t 127.0.0.1 --port 16443 --insecure --token "${KUBE_AUDITOR_TOKEN}" --namespaces --pods
-run_case kubeapi kubeapi_admin 0 kubeapi -t 127.0.0.1 --port 16443 --insecure --token "${KUBE_ADMIN_TOKEN}" --secrets
+run_case kubeapi kubeapi_auditor 0 kubeapi -t 127.0.0.1 --port 16443 --token "${KUBE_AUDITOR_TOKEN}" --namespaces --pods
+run_case kubeapi kubeapi_admin 0 kubeapi -t 127.0.0.1 --port 16443 --token "${KUBE_ADMIN_TOKEN}" --secrets
 run_case kubeapi kubeapi_url_override_https 0 kubeapi -t "https://127.0.0.1:26443/api?from=matrix" --no-https --namespaces
 run_case kubeapi kubeapi_multi_instance_urls 0 kubeapi -t "https://127.0.0.1:26443/version,https://127.0.0.1:26444/version,https://127.0.0.1:26445/version,https://127.0.0.1:26446/version,https://127.0.0.1:26447/version" --namespaces
 
@@ -271,9 +271,9 @@ DOCKER_CLIENT_KEY="${OUT_DIR}/docker-client-key.pem"
 docker cp redposture-lab-docker-tls:/certs/client/cert.pem "${DOCKER_CLIENT_CERT}" >/dev/null
 docker cp redposture-lab-docker-tls:/certs/client/key.pem "${DOCKER_CLIENT_KEY}" >/dev/null
 run_case docker docker_open 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
-run_case docker docker_tls_requires_client_certificate 1 docker -t 127.0.0.1 --port 2376 --insecure --system
-run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --insecure --tls-cert "${DOCKER_CLIENT_CERT}" --tls-key "${DOCKER_CLIENT_KEY}" --system
-run_case docker docker_multi_ports 0 docker -t 127.0.0.1 --ports "2375,2376,24243,24244,24245" --insecure --tls-cert "${DOCKER_CLIENT_CERT}" --tls-key "${DOCKER_CLIENT_KEY}" --containers
+run_case docker docker_tls_requires_client_certificate 1 docker -t 127.0.0.1 --port 2376 --system
+run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --tls-cert "${DOCKER_CLIENT_CERT}" --tls-key "${DOCKER_CLIENT_KEY}" --system
+run_case docker docker_multi_ports 0 docker -t 127.0.0.1 --ports "2375,2376,24243,24244,24245" --tls-cert "${DOCKER_CLIENT_CERT}" --tls-key "${DOCKER_CLIENT_KEY}" --containers
 run_case docker docker_inventory 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
 run_case docker docker_exec 0 docker -t 127.0.0.1 --port 2375 --container redposture-web --exec-cmd "id"
 run_text_case docker docker_debug_smoke 0 docker -t 127.0.0.1 --port 2375 --debug
@@ -306,8 +306,8 @@ run_case elastic elastic_plugins_edge 0 elastic -t 127.0.0.1 --port 19201 -u ela
 run_case elastic elastic_multi_instance_urls 0 elastic -t "http://127.0.0.1:19200/,http://127.0.0.1:19202/,http://127.0.0.1:19203/,http://127.0.0.1:19204/,http://127.0.0.1:19205/" --endpoints
 
 run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051 --plaintext --analyze
-run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --tls --insecure --token "grpc-lab-token-2026" --analyze
-run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --tls --insecure --defcreds --analyze
+run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --tls --token "grpc-lab-token-2026" --analyze
+run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --tls --defcreds --analyze
 run_case grpc grpc_multi_ports 0 grpc -t 127.0.0.1 --ports "50051,25052,25053,25054,25055" --analyze
 run_text_case grpc grpc_debug_smoke 0 grpc -t 127.0.0.1 --port 50051 --debug
 GRPC_PROTOSET="${OUT_DIR}/grpc_health.protoset"
@@ -321,21 +321,21 @@ run_case grpc grpc_web_detect 0 grpc -t 127.0.0.1 --port 50071 --plaintext
 run_case kafka kafka_open 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
 run_case kafka kafka_auth 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
 run_case kafka kafka_multi_ports 0 kafka -t 127.0.0.1 --ports "9092,39092,39093,39094,39095" --show-topics --dump --max-messages 10
-run_case kafka kafka_tls_defcreds 0 kafka -t 127.0.0.1 --port 29093 --tls --insecure --tls-server-name kafka-tls --defcreds --show-topics --dump --max-messages 5
-run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 --tls --insecure -u admin -p admin --show-topics --dump --max-messages 5
+run_case kafka kafka_tls_defcreds 0 kafka -t 127.0.0.1 --port 29093 --tls --tls-server-name kafka-tls --defcreds --show-topics --dump --max-messages 5
+run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 --tls -u admin -p admin --show-topics --dump --max-messages 5
 
 run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --show-znodes --dump
 run_case zookeeper zookeeper_multi_ports 0 zookeeper -t 127.0.0.1 --ports "2181,22181,22182,22183,22184" --show-znodes --dump
 run_case zookeeper zookeeper_auth_defcreds 0 zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --dump --probe-write
 run_case keeper keeper_cluster 0 keeper -t 127.0.0.1 --port "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3
-run_case keeper keeper_tls 0 keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
+run_case keeper keeper_tls 0 keeper -t 127.0.0.1 --port 19281 --show-znodes 10 --dump 10
 run_case keeper keeper_no4lw 0 keeper -t 127.0.0.1 --port 39181 -u lab -p lab --znode /keeper/api_version --dump
 run_case zookeeper keeper_apache_control 0 zookeeper -t 127.0.0.1 --port 12181 --show-znodes 5
 
-run_case proxmox proxmox_audit 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
-run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover --nodes --users
-run_case proxmox proxmox_url_override_https 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket" --no-https --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
-run_case proxmox proxmox_multi_instance_urls 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket,https://127.0.0.1:18061/api2/json/access/ticket,https://127.0.0.1:18062/api2/json/access/ticket,https://127.0.0.1:18063/api2/json/access/ticket,https://127.0.0.1:18064/api2/json/access/ticket" --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
+run_case proxmox proxmox_audit 0 proxmox -t 127.0.0.1 --port 18006 --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
+run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover --nodes --users
+run_case proxmox proxmox_url_override_https 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket" --no-https --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
+run_case proxmox proxmox_multi_instance_urls 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket,https://127.0.0.1:18061/api2/json/access/ticket,https://127.0.0.1:18062/api2/json/access/ticket,https://127.0.0.1:18063/api2/json/access/ticket,https://127.0.0.1:18064/api2/json/access/ticket" --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
 
 "${PYTHON_BIN}" "${VERIFY_SCRIPT}" --status-file "${STATUS_FILE}" --out-dir "${OUT_DIR}"
 

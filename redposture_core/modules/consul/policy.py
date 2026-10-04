@@ -19,12 +19,8 @@ def validate_args(args: Any, console: Any) -> int | None:
     if bool(getattr(args, "tls_cert", None)) != bool(getattr(args, "tls_key", None)):
         console.error("--tls-cert and --tls-key must be provided together")
         return 2
-    if bool(getattr(args, "insecure", False)) and getattr(args, "tls_ca", None):
-        console.error("--insecure cannot be combined with --tls-ca")
-        return 2
     if bool(getattr(args, "plaintext", False)) and any(
         (
-            bool(getattr(args, "insecure", False)),
             bool(getattr(args, "tls_ca", None)),
             bool(getattr(args, "tls_cert", None)),
         )

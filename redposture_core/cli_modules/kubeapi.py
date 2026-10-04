@@ -47,11 +47,6 @@ def configure_kubeapi_parser(
         help="Use HTTPS for Kubernetes API requests.",
     )
     common.add_argument(
-        "--insecure",
-        action="store_true",
-        help="Skip TLS certificate verification (useful for self-signed clusters).",
-    )
-    common.add_argument(
         "--ca-file",
         dest="ca_file",
         default=None,

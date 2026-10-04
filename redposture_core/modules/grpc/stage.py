@@ -140,7 +140,6 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
     )
     tls_material = any(
         (
-            bool(getattr(args, "insecure", False)),
             bool(getattr(args, "tls_ca", None)),
             bool(getattr(args, "tls_cert", None)),
             bool(getattr(args, "tls_server_name", None)),
@@ -153,7 +152,7 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
     else:
         requested_use_tls = None
     tls_config = GrpcTlsConfig(
-        insecure=bool(getattr(args, "insecure", False)),
+        insecure=not bool(getattr(args, "tls_ca", None)),
         ca_file=str(getattr(args, "tls_ca", "") or "").strip() or None,
         cert_file=str(getattr(args, "tls_cert", "") or "").strip() or None,
         key_file=str(getattr(args, "tls_key", "") or "").strip() or None,

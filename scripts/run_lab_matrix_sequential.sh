@@ -458,19 +458,19 @@ run_negative_cli_cases() {
   run_raw_case nexus fuzz_nexus_missing_targets 2 nexus -ot excluded.invalid --assets
   run_raw_case grafana fuzz_grafana_missing_targets 2 grafana -ot excluded.invalid --defcreds
   run_raw_case gitlab fuzz_gitlab_missing_targets 2 gitlab -ot excluded.invalid
-  run_raw_case consul fuzz_consul_missing_targets 2 consul -ot excluded.invalid --keys --tls --insecure --tls-cert /nonexistent/consul-client.crt --tls-key /nonexistent/consul-client.key
+  run_raw_case consul fuzz_consul_missing_targets 2 consul -ot excluded.invalid --keys --tls --tls-cert /nonexistent/consul-client.crt --tls-key /nonexistent/consul-client.key
   run_raw_case kubeapi fuzz_kubeapi_missing_targets 2 kubeapi -ot excluded.invalid --namespaces
   run_raw_case postgres fuzz_postgres_missing_targets 2 postgres -ot excluded.invalid --show-databases --sslmode verify-full --ssl-ca /nonexistent/postgres-ca.crt --ssl-cert /nonexistent/postgres-client.crt --ssl-key /nonexistent/postgres-client.key --ssl-server-name postgres.internal
-  run_raw_case mongodb fuzz_mongodb_missing_targets 2 mongodb -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/mongodb-ca.crt --tls-cert-key /nonexistent/mongodb-client.pem --tls-insecure
+  run_raw_case mongodb fuzz_mongodb_missing_targets 2 mongodb -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/mongodb-ca.crt --tls-cert-key /nonexistent/mongodb-client.pem
   run_raw_case oracle fuzz_oracle_missing_targets 2 oracle -ot excluded.invalid --service FREEPDB1
   run_raw_case docker fuzz_docker_missing_targets 2 docker -ot excluded.invalid --containers
-  run_raw_case clickhouse fuzz_clickhouse_missing_targets 2 clickhouse -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/clickhouse-ca.crt --tls-cert /nonexistent/clickhouse-client.crt --tls-key /nonexistent/clickhouse-client.key --tls-server-name clickhouse.internal --insecure
-  run_raw_case redis fuzz_redis_missing_targets 2 redis -ot excluded.invalid --show-keys --tls --insecure --tls-ca /nonexistent/redis-ca.crt --tls-cert /nonexistent/redis-client.crt --tls-key /nonexistent/redis-client.key
+  run_raw_case clickhouse fuzz_clickhouse_missing_targets 2 clickhouse -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/clickhouse-ca.crt --tls-cert /nonexistent/clickhouse-client.crt --tls-key /nonexistent/clickhouse-client.key --tls-server-name clickhouse.internal
+  run_raw_case redis fuzz_redis_missing_targets 2 redis -ot excluded.invalid --show-keys --tls --tls-ca /nonexistent/redis-ca.crt --tls-cert /nonexistent/redis-client.crt --tls-key /nonexistent/redis-client.key
   run_raw_case etcd fuzz_etcd_missing_targets 2 etcd -ot excluded.invalid --show-keys
   run_raw_case qdrant fuzz_qdrant_missing_targets 2 qdrant -ot excluded.invalid --collections
   run_raw_case elastic fuzz_elastic_missing_targets 2 elastic -ot excluded.invalid --endpoints
-  run_raw_case grpc fuzz_grpc_missing_targets 2 grpc -ot excluded.invalid --tls --tls-server-name grpc.internal --insecure --tls-ca /nonexistent/grpc-ca.crt --tls-cert /nonexistent/grpc-client.crt --tls-key /nonexistent/grpc-client.key
-  run_raw_case kafka fuzz_kafka_missing_targets 2 kafka -ot excluded.invalid --show-topics --tls --insecure --tls-ca /nonexistent/kafka-ca.crt --tls-cert /nonexistent/kafka-client.crt --tls-key /nonexistent/kafka-client.key
+  run_raw_case grpc fuzz_grpc_missing_targets 2 grpc -ot excluded.invalid --tls --tls-server-name grpc.internal --tls-ca /nonexistent/grpc-ca.crt --tls-cert /nonexistent/grpc-client.crt --tls-key /nonexistent/grpc-client.key
+  run_raw_case kafka fuzz_kafka_missing_targets 2 kafka -ot excluded.invalid --show-topics --tls --tls-ca /nonexistent/kafka-ca.crt --tls-cert /nonexistent/kafka-client.crt --tls-key /nonexistent/kafka-client.key
   run_raw_case zookeeper fuzz_zookeeper_missing_targets 2 zookeeper -ot excluded.invalid --show-znodes
   run_raw_case proxmox fuzz_proxmox_missing_targets 2 proxmox -ot excluded.invalid --pveapitoken "monitor@pve!audit=token" --grant-role Auditor --grant-path / --no-grant-propagate
 
@@ -546,7 +546,6 @@ run_negative_cli_cases() {
   run_raw_case zookeeper fuzz_zookeeper_zero_enum_workers 2 zookeeper -t 127.0.0.1 --enum-workers 0
   run_raw_case zookeeper fuzz_zookeeper_incomplete_mtls 2 zookeeper -t 127.0.0.1 --tls-cert client.pem
   run_raw_case zookeeper fuzz_zookeeper_incomplete_mtls_key 2 zookeeper -t 127.0.0.1 --tls-key client.key
-  run_raw_case zookeeper fuzz_zookeeper_ca_insecure_conflict 2 zookeeper -t 127.0.0.1 --ca-file ca.pem --insecure
 }
 
 run_exporters_cases() {
@@ -699,8 +698,8 @@ run_kubeapi_cases() {
   fi
   run_case kubeapi kubeapi_open 0 kubeapi -t 127.0.0.1 --port 26443 --namespaces --pods
   run_case kubeapi kubeapi_default_pairs_without_basic 0 kubeapi -t 127.0.0.1 --port 26443 --defcreds
-  run_case kubeapi kubeapi_auditor 0 kubeapi -t 127.0.0.1 --port 16443 --insecure --token "${kube_auditor_token}" --namespaces --pods
-  run_case kubeapi kubeapi_admin 0 kubeapi -t 127.0.0.1 --port 16443 --insecure --token "${kube_admin_token}" --secrets
+  run_case kubeapi kubeapi_auditor 0 kubeapi -t 127.0.0.1 --port 16443 --token "${kube_auditor_token}" --namespaces --pods
+  run_case kubeapi kubeapi_admin 0 kubeapi -t 127.0.0.1 --port 16443 --token "${kube_admin_token}" --secrets
   run_case kubeapi kubeapi_url_override_https 0 kubeapi -t "https://127.0.0.1:26443/api?from=matrix" --no-https --namespaces
   run_case kubeapi kubeapi_multi_instance_urls 0 kubeapi -t "https://127.0.0.1:26443/version,https://127.0.0.1:26444/version,https://127.0.0.1:26445/version,https://127.0.0.1:26446/version,https://127.0.0.1:26447/version" --namespaces
   run_text_case kubeapi kubeapi_debug_smoke 0 kubeapi -t 127.0.0.1 --port 26443 --debug
@@ -788,7 +787,7 @@ run_oracle_cases() {
   run_text_case oracle oracle_debug_smoke 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --debug
   run_case oracle oracle_json_smoke 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --show-pdbs
   if is_extended_matrix; then
-    run_case oracle oracle_extended_schema_sensitive_protocol 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --protocol tcp --insecure --service FREEPDB1 -u redposture -p "OracleLab!2026" --schema REDPOSTURE --table ACCOUNTS --show-roles --show-privs --show-schemas --show-tables --dump 2 --sensitive-scan
+    run_case oracle oracle_extended_schema_sensitive_protocol 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --protocol tcp --service FREEPDB1 -u redposture -p "OracleLab!2026" --schema REDPOSTURE --table ACCOUNTS --show-roles --show-privs --show-schemas --show-tables --dump 2 --sensitive-scan
     run_case oracle fuzz_oracle_invalid_port 2 oracle -t 127.0.0.1 --port -1 --service FREEPDB1
     run_case oracle fuzz_oracle_zero_timeout 2 oracle -t 127.0.0.1 --timeout 0 --service FREEPDB1
   fi
@@ -800,9 +799,9 @@ run_docker_cases() {
   docker cp redposture-lab-docker-tls:/certs/client/cert.pem "${docker_client_cert}" >/dev/null
   docker cp redposture-lab-docker-tls:/certs/client/key.pem "${docker_client_key}" >/dev/null
   run_case docker docker_open 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
-  run_case docker docker_tls_requires_client_certificate 1 docker -t 127.0.0.1 --port 2376 --insecure --system
-  run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --insecure --tls-cert "${docker_client_cert}" --tls-key "${docker_client_key}" --system
-  run_case docker docker_multi_ports 0 docker -t 127.0.0.1 --ports "2375,2376,24243,24244,24245" --insecure --tls-cert "${docker_client_cert}" --tls-key "${docker_client_key}" --containers
+  run_case docker docker_tls_requires_client_certificate 1 docker -t 127.0.0.1 --port 2376 --system
+  run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --tls-cert "${docker_client_cert}" --tls-key "${docker_client_key}" --system
+  run_case docker docker_multi_ports 0 docker -t 127.0.0.1 --ports "2375,2376,24243,24244,24245" --tls-cert "${docker_client_cert}" --tls-key "${docker_client_key}" --containers
   run_case docker docker_inventory 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
   run_case docker docker_exec 0 docker -t 127.0.0.1 --port 2375 --container redposture-web --exec-cmd "id"
   run_text_case docker docker_debug_smoke 0 docker -t 127.0.0.1 --port 2375 --debug
@@ -953,8 +952,8 @@ run_opensearch_cases() {
 
 run_grpc_cases() {
   run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051 --plaintext --analyze
-  run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --tls --insecure --token "grpc-lab-token-2026" --analyze
-  run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --tls --insecure --defcreds --analyze
+  run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --tls --token "grpc-lab-token-2026" --analyze
+  run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --tls --defcreds --analyze
   run_case grpc grpc_multi_ports 0 grpc -t 127.0.0.1 --ports "50051,25052,25053,25054,25055" --analyze
   run_text_case grpc grpc_debug_smoke 0 grpc -t 127.0.0.1 --port 50051 --debug
   local grpc_protoset="${OUT_DIR}/grpc_health.protoset"
@@ -966,7 +965,7 @@ run_grpc_cases() {
   run_case grpc grpc_web_detect 0 grpc -t 127.0.0.1 --port 50071 --plaintext
   if is_extended_matrix; then
     run_case grpc grpc_extended_metadata_invoke 0 grpc -t 127.0.0.1 --port 50051 --meta "x-redposture-matrix=extended" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
-    run_case grpc grpc_extended_basic_empty_password 0 grpc -t 127.0.0.1 --port 50061 --tls --insecure -u grpcuser -p "" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
+    run_case grpc grpc_extended_basic_empty_password 0 grpc -t 127.0.0.1 --port 50061 --tls -u grpcuser -p "" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
     run_case grpc fuzz_grpc_invalid_port 2 grpc -t 127.0.0.1 --port -1 --invoke /grpc.health.v1.Health/Check
     run_case grpc fuzz_grpc_zero_workers 2 grpc -t 127.0.0.1 --workers 0
   fi
@@ -982,8 +981,8 @@ run_kafka_cases() {
   # so `--defcreds` must land the `weak_default_creds` status; text output
   # must carry the `(transport:tls)` marker. Regression against the
   # pre-fix crash `invalid Kafka frame size 352518912`.
-  run_case kafka kafka_tls_defcreds 0 kafka -t 127.0.0.1 --port 29093 --tls --insecure --tls-server-name kafka-tls --defcreds --show-topics --dump --max-messages 5
-  run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 --tls --insecure -u admin -p admin --show-topics --dump --max-messages 5
+  run_case kafka kafka_tls_defcreds 0 kafka -t 127.0.0.1 --port 29093 --tls --tls-server-name kafka-tls --defcreds --show-topics --dump --max-messages 5
+  run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 --tls -u admin -p admin --show-topics --dump --max-messages 5
   run_text_case kafka kafka_tls_debug_smoke 0 kafka -t 127.0.0.1 --port 29093 --debug
   if is_extended_matrix; then
     run_case kafka kafka_extended_topic_dump_count 0 kafka -t 127.0.0.1 --port 9092 --topic orders --show-topics --dump 3
@@ -1026,25 +1025,25 @@ run_keeper_cases() {
   if is_extended_matrix; then
     run_case keeper keeper_ddl_topology 0 keeper -t 127.0.0.1 --port 19181 --show-cluster --show-hosts
   fi
-  run_case keeper keeper_tls 0 keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
+  run_case keeper keeper_tls 0 keeper -t 127.0.0.1 --port 19281 --show-znodes 10 --dump 10
   run_case keeper keeper_no4lw 0 keeper -t 127.0.0.1 --port 39181 -u lab -p lab --znode /keeper/api_version --dump
   run_case zookeeper keeper_apache_control 0 zookeeper -t 127.0.0.1 --port 12181 --show-znodes 5
 }
 
 run_proxmox_cases() {
-  run_case proxmox proxmox_audit 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
-  run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover --nodes --users
-  run_case proxmox proxmox_url_override_https 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket" --no-https --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
-  run_case proxmox proxmox_multi_instance_urls 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket,https://127.0.0.1:18061/api2/json/access/ticket,https://127.0.0.1:18062/api2/json/access/ticket,https://127.0.0.1:18063/api2/json/access/ticket,https://127.0.0.1:18064/api2/json/access/ticket" --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
-  run_text_case proxmox proxmox_debug_smoke 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --debug
+  run_case proxmox proxmox_audit 0 proxmox -t 127.0.0.1 --port 18006 --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
+  run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover --nodes --users
+  run_case proxmox proxmox_url_override_https 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket" --no-https --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
+  run_case proxmox proxmox_multi_instance_urls 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket,https://127.0.0.1:18061/api2/json/access/ticket,https://127.0.0.1:18062/api2/json/access/ticket,https://127.0.0.1:18063/api2/json/access/ticket,https://127.0.0.1:18064/api2/json/access/ticket" --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
+  run_text_case proxmox proxmox_debug_smoke 0 proxmox -t 127.0.0.1 --port 18006 --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --debug
   if is_extended_matrix; then
-    run_case proxmox proxmox_discover_budget 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover --discover-time 10 --discover-max-bytes 52428800
-    run_case proxmox proxmox_extended_ports_flag 0 proxmox -t 127.0.0.1 --ports 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
-    run_case proxmox proxmox_extended_defcreds 0 proxmox -t 127.0.0.1 --port 18006 --insecure --defcreds --nodes
-    run_case proxmox proxmox_extended_defcreds_empty_password 0 proxmox -t 127.0.0.1 --port 18006 --insecure -u root@pam -p "" --nodes --users
-    run_case proxmox proxmox_extended_add_user_mock 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --add-user rp-matrix@pve --users
-    run_case proxmox fuzz_proxmox_negative_workers 2 proxmox -t 127.0.0.1 --workers -1 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
-    run_case proxmox fuzz_proxmox_invalid_port 2 proxmox -t 127.0.0.1 --port -1 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
+    run_case proxmox proxmox_discover_budget 0 proxmox -t 127.0.0.1 --port 18006 --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover --discover-time 10 --discover-max-bytes 52428800
+    run_case proxmox proxmox_extended_ports_flag 0 proxmox -t 127.0.0.1 --ports 18006 --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
+    run_case proxmox proxmox_extended_defcreds 0 proxmox -t 127.0.0.1 --port 18006 --defcreds --nodes
+    run_case proxmox proxmox_extended_defcreds_empty_password 0 proxmox -t 127.0.0.1 --port 18006 -u root@pam -p "" --nodes --users
+    run_case proxmox proxmox_extended_add_user_mock 0 proxmox -t 127.0.0.1 --port 18006 --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --add-user rp-matrix@pve --users
+    run_case proxmox fuzz_proxmox_negative_workers 2 proxmox -t 127.0.0.1 --workers -1 --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
+    run_case proxmox fuzz_proxmox_invalid_port 2 proxmox -t 127.0.0.1 --port -1 --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
   fi
 }
 

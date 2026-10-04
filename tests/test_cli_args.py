@@ -511,7 +511,6 @@ def test_docker_help_sections_and_parse_flags() -> None:
             "127.0.0.1",
             "--port",
             "2376",
-            "--insecure",
             "--tls-ca",
             "ca.pem",
             "--tls-cert",
@@ -531,7 +530,6 @@ def test_docker_help_sections_and_parse_flags() -> None:
     )
     assert args.command == COMMAND_DOCKER
     assert args.port == 2376
-    assert args.insecure is True
     assert args.tls_ca == "ca.pem"
     assert args.tls_cert == "cert.pem"
     assert args.tls_key == "key.pem"
@@ -795,10 +793,10 @@ def test_exporter_actions_accept_singular_port_alias(action: str) -> None:
 def test_exporter_tls_skips_server_verification_by_default(action: str) -> None:
     argv = ["exporters", action, "-t", "127.0.0.1"]
     assert parse_args(argv).insecure is True
-    assert parse_args(argv + ["--no-insecure"]).insecure is False
-    with pytest.raises(SystemExit) as exc:
-        parse_args(argv + ["--insecure"])
-    assert exc.value.code == 2
+    for removed_flag in ("--insecure", "--no-insecure"):
+        with pytest.raises(SystemExit) as exc:
+            parse_args(argv + [removed_flag])
+        assert exc.value.code == 2
 
 
 def test_exporter_ca_enables_verification_even_with_insecure_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1378,7 +1376,6 @@ def test_kubeapi_flags_are_parsed() -> None:
             "--ports",
             "6443,8443",
             "--https",
-            "--insecure",
             "--ca-file",
             "./ca.crt",
             "--token",
@@ -1412,7 +1409,6 @@ def test_kubeapi_flags_are_parsed() -> None:
     assert args.port == 6443
     assert args.ports == "6443,8443"
     assert args.https is True
-    assert args.insecure is True
     assert args.ca_file == "./ca.crt"
     assert args.token == "k8s-token"
     assert args.username == "ignored"
@@ -1776,7 +1772,6 @@ def test_proxmox_flags_are_parsed() -> None:
             "--ports",
             "8006,18006",
             "--https",
-            "--insecure",
             "--pveapitoken",
             "monitor@pve!audit=super-secret-token",
             "--proxy",
@@ -1800,7 +1795,6 @@ def test_proxmox_flags_are_parsed() -> None:
     assert args.port == 18006
     assert args.ports == "8006,18006"
     assert args.https is True
-    assert args.insecure is True
     assert args.pve_api_token == "monitor@pve!audit=super-secret-token"
     assert args.proxy == "socks5h://audit:token@127.0.0.1:1080"
     assert args.discover is True
@@ -2040,7 +2034,6 @@ def test_zookeeper_flags_are_parsed() -> None:
             "500",
             "--enum-workers",
             "7",
-            "--insecure",
             "--tls-cert",
             "client.pem",
             "--tls-key",
@@ -2066,7 +2059,6 @@ def test_zookeeper_flags_are_parsed() -> None:
     assert args.znode == "/brokers/ids/1"
     assert args.max_znodes == 500
     assert args.enum_workers == 7
-    assert args.insecure is True
     assert args.tls_cert == "client.pem"
     assert args.tls_key == "client.key"
     assert args.output_format == "json"
@@ -2100,7 +2092,6 @@ def test_keeper_command_has_full_zookeeper_protocol_flag_parity() -> None:
             "--znode",
             "/clickhouse/tables",
             "--probe-write",
-            "--insecure",
         ]
     )
     assert args.command == "keeper"
@@ -2110,7 +2101,6 @@ def test_keeper_command_has_full_zookeeper_protocol_flag_parity() -> None:
     assert args.dump == 10
     assert args.znode == "/clickhouse/tables"
     assert args.probe_write is True
-    assert args.insecure is True
 
     help_text = _command_help("keeper")
     for flag in ("--defcreds", "--show-znodes", "--dump", "--znode", "--probe-write", "--ca-file"):
@@ -2145,7 +2135,7 @@ def test_zookeeper_transport_is_auto_detected_without_manual_mode_flags(removed_
     assert re.search(r"(?m)^  --tls\s", help_text) is None
     assert re.search(r"(?m)^  --no-tls\s", help_text) is None
     assert "--ca-file file" in help_text
-    assert "--insecure" in help_text
+    assert "--insecure" not in help_text
     assert "--tls-cert file" in help_text
     assert "--tls-key file" in help_text
 

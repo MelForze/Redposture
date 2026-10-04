@@ -1952,7 +1952,9 @@ def test_audit_proxmox_unexpected_http_marks_not_detected(monkeypatch) -> None:
 
 
 def test_proxmox_error_helpers_cover_tls_and_transport_cases() -> None:
-    assert _friendly_error_text("certificate verify failed") == "tls verification failed (try --insecure)"
+    assert (
+        _friendly_error_text("certificate verify failed") == "tls verification failed (check server TLS configuration)"
+    )
     assert _friendly_error_text("wrong version number") == "tls/http protocol mismatch"
     assert _friendly_error_text("[Errno 111] Connection refused").startswith("connection refused")
     assert _friendly_error_text("[Errno 110] timed out") == "connection timeout"

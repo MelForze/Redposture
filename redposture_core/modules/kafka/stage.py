@@ -108,7 +108,6 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
         tls_material = any(
             (
-                bool(getattr(args, "insecure", False)),
                 bool(getattr(args, "tls_ca", None)),
                 bool(getattr(args, "tls_cert", None)),
                 bool(getattr(args, "tls_server_name", None)),
@@ -131,7 +130,7 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         else:
             requested_use_tls = None
         tls_config = KafkaTlsConfig(
-            insecure=bool(getattr(args, "insecure", False)) or requested_use_tls is None,
+            insecure=not bool(getattr(args, "tls_ca", None)),
             ca_file=getattr(args, "tls_ca", None),
             cert_file=getattr(args, "tls_cert", None),
             key_file=getattr(args, "tls_key", None),

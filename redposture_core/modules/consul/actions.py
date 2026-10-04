@@ -123,13 +123,13 @@ def _get_thread_debug_emitter() -> Callable[[str], None] | None:
 def _friendly_error_text(value: str) -> str:
     from ...utils import friendly_error_text
 
-    return friendly_error_text(value, tls_hint="try --insecure or trusted cert")
+    return friendly_error_text(value, tls_hint="check --tls-ca")
 
 
 def _friendly_error_from_exception(exc: BaseException) -> str:
     from ...utils import friendly_error_from_exception
 
-    return friendly_error_from_exception(exc, tls_hint="try --insecure or trusted cert")
+    return friendly_error_from_exception(exc, tls_hint="check --tls-ca")
 
 
 def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:

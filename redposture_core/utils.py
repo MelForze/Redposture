@@ -97,7 +97,7 @@ def friendly_error_text(value: str, *, tls_hint: str | None = None) -> str:
 
     Shared by audit modules and protocol clients (previously copy-pasted into
     several drifted variants). Pass `tls_hint` to opt into TLS-specific messages
-    with a module-appropriate remediation hint (e.g. ``"try --insecure"``).
+    with a module-appropriate remediation hint (e.g. ``"check --ca-file"``).
     """
 
     text = (value or "").strip()

@@ -547,7 +547,7 @@ def test_gitlab_public_clone_resolves_filters_and_records_lookup_failure(
     }
 
 
-def test_kubeapi_detect_retries_with_insecure_tls_after_verify_failure(
+def test_kubeapi_detect_preserves_explicit_ca_after_verify_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, bool]] = []
@@ -569,12 +569,10 @@ def test_kubeapi_detect_retries_with_insecure_tls_after_verify_failure(
         _kube_options(show_namespaces=True),
     )
 
-    assert calls == [("/version", False), ("/version", True)]
-    assert record["status"] == "anonymous_limited"
-    assert record["anonymous_access"] == "limited"
-    assert record["version"] == "v1.31.0"
-    assert record["tls_auto_insecure"] is True
-    assert record["insecure_effective"] is True
+    assert calls == [("/version", False), ("/api", False)]
+    assert record["is_kubeapi"] is False
+    assert record["tls_auto_insecure"] is False
+    assert record["insecure_effective"] is False
     assert state.ca_file == "/tmp/ca.pem"
 
 

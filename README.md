@@ -68,8 +68,9 @@ HTTP discovery follows redirects across scheme, host and port, including supplie
 credentials, by design for operator-controlled audits. A URL scheme selects the first
 attempt; the canonical HTTP 400 `Client sent an HTTP request to an HTTPS server` can
 switch GET/HEAD discovery to HTTPS. Later checks reuse the resolved origin; changing
-requests are not replayed to select a scheme. Automatic TLS detection can accept untrusted
-server certificates. mTLS still needs a client certificate; `--insecure` does not supply one.
+requests are not replayed to select a scheme. Audit modules accept untrusted or self-signed
+target server certificates by default. Where supported, a supplied CA file enables certificate
+and hostname verification; mTLS still requires a separate client certificate and key.
 For an HTTP service behind a reverse proxy, supply its mounted URL (for example
 `https://host/airflow/api/v1/version`); known API suffixes are removed from the
 base path and later checks retain `/airflow`. Use the DNS name required by an nginx
@@ -404,8 +405,8 @@ SNMP and IPMI exporters. Select a type with `-e mysql`, `-e json`, `-e elasticse
 All nine matching listener types are enabled by default; `-e` narrows the
 exporters and their listeners, while `-s` selects listeners explicitly.
 Exporter scan, collect and trigger skip HTTPS certificate and hostname verification
-by default; use `--no-insecure` to verify against system roots or `--tls-ca file`
-to verify against a supplied CA. In trigger, `--no-postgres-tls` disables the
+by default; use `--tls-ca file` to verify against a supplied CA. In trigger,
+`--no-postgres-tls` disables the
 Postgres callback listener's default TLS, and `--no-with-listen` skips listeners.
 SNMP and IPMI callbacks use UDP. An accepted exporter request alone is inconclusive;
 the listener must observe the outbound request. Percona MongoDB exporter is excluded:

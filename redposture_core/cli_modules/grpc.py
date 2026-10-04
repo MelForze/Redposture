@@ -58,11 +58,6 @@ def configure_grpc_parser(
         help="Require plaintext and disable automatic TLS probing.",
     )
     tls.add_argument(
-        "--insecure",
-        action="store_true",
-        help="Disable gRPC TLS certificate and hostname verification.",
-    )
-    tls.add_argument(
         "--tls-ca",
         dest="tls_ca",
         default=None,

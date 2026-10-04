@@ -78,7 +78,7 @@ def main() -> int:
         ("observer", 16380, ["-u", "observer", "-p", "V13w-Only!2026"], True, True),
         ("no-info", 16380, ["-u", "noinfo", "-p", "N0-Info!2026"], False, True),
         ("defcreds", 16380, ["--defcreds"], False, None),
-        ("tls-insecure", 16381, ["--tls", "--insecure", "-u", "default", "-p", "ValkeyAdmin!2026"], True, True),
+        ("tls-default-trust", 16381, ["--tls", "-u", "default", "-p", "ValkeyAdmin!2026"], True, True),
         (
             "tls-ca",
             16381,

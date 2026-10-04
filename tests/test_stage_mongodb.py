@@ -732,13 +732,11 @@ def test_mongodb_cli_parses_tls_transport_and_proxy_fails_closed() -> None:
             "ca.pem",
             "--tls-cert-key",
             "client.pem",
-            "--tls-insecure",
         ]
     )
     assert args.tls is True
     assert args.tls_ca == "ca.pem"
     assert args.tls_cert_key == "client.pem"
-    assert args.tls_insecure is True
 
     proxied = parse_args(["mongodb", "-t", "mongo.local", "--proxy", "socks5://127.0.0.1:1080"])
     console = _ValidationConsole()

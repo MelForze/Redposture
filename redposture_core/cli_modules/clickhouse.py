@@ -89,7 +89,6 @@ def configure_clickhouse_parser(
         metavar="name",
         help="TLS SNI/certificate hostname override.",
     )
-    common.add_argument("--insecure", action="store_true", help="Use TLS without server certificate verification.")
     common.add_argument(
         "-d",
         "--database",

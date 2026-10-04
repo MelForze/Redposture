@@ -42,7 +42,6 @@ def configure_docker_parser(
     add_output_flags(common, short=False)
 
     tls = parser.add_argument_group("TLS")
-    tls.add_argument("--insecure", action="store_true", help="Disable Docker API TLS certificate verification.")
     tls.add_argument("--tls-ca", dest="tls_ca", default=None, metavar="file", help="CA certificate for Docker TLS API.")
     tls.add_argument(
         "--tls-cert", dest="tls_cert", default=None, metavar="file", help="Client certificate for Docker TLS API."

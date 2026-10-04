@@ -44,12 +44,6 @@ def configure_proxmox_parser(
         default=True,
         help="Use HTTPS for Proxmox API requests.",
     )
-    common.add_argument(
-        "--insecure",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Skip TLS certificate verification (recommended for self-signed Proxmox certs).",
-    )
     auth.add_argument(
         "--pveapitoken",
         dest="pve_api_token",

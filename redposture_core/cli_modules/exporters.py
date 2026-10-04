@@ -43,13 +43,7 @@ def _add_exporter_tls_flags(group: Any) -> None:
         metavar="file",
         help="Client private key for mTLS exporter targets (requires --tls-cert).",
     )
-    group.add_argument(
-        "--no-insecure",
-        dest="insecure",
-        action="store_false",
-        default=True,
-        help="Verify HTTPS certificate and hostname (disabled by default).",
-    )
+    group.set_defaults(insecure=True)
 
 
 def configure_listen_parser(

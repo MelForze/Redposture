@@ -157,13 +157,13 @@ def _retry_delay(attempt_index: int) -> float:
 def _friendly_error_text(value: str) -> str:
     from ...utils import friendly_error_text
 
-    return friendly_error_text(value, tls_hint="try --insecure")
+    return friendly_error_text(value, tls_hint="check server TLS configuration")
 
 
 def _friendly_error_from_exception(exc: BaseException) -> str:
     from ...utils import friendly_error_from_exception
 
-    return friendly_error_from_exception(exc, tls_hint="try --insecure")
+    return friendly_error_from_exception(exc, tls_hint="check server TLS configuration")
 
 
 def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:

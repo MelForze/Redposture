@@ -73,9 +73,6 @@ def configure_oracle_parser(
         help="Expected server certificate DN for TCPS.",
     )
     connect.add_argument(
-        "--insecure", action="store_true", help="Disable TCPS server DN/certificate matching where supported."
-    )
-    connect.add_argument(
         "--listener-dump",
         action="store_true",
         help="Dump Oracle TNS listener STATUS/SERVICES-style metadata where accessible.",

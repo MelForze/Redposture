@@ -58,7 +58,7 @@ def _build_keeper_lifecycle_options(args: Any) -> dict[str, Any]:
         "enum_workers": int(getattr(args, "enum_workers", 3) or 3),
         "dump_limit": dump_flag_limit(getattr(args, "dump", False)),
         "fingerprint_cache": getattr(args, "keeper_fingerprint_cache", None) or KeeperFingerprintCache(),
-        "insecure": bool(getattr(args, "insecure", False)),
+        "insecure": not bool(getattr(args, "ca_file", None)),
         "ca_file": getattr(args, "ca_file", None),
         "tls_cert": getattr(args, "tls_cert", None),
         "tls_key": getattr(args, "tls_key", None),

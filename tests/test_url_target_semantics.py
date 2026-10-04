@@ -385,7 +385,6 @@ def test_proxmox_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPat
             "-t",
             "https://127.0.0.1:18006/api2/json/access/ticket",
             "--no-https",
-            "--insecure",
             "--pveapitoken",
             "audit@pve!redposture=pve-redposture-token-2026",
         ]

@@ -180,7 +180,7 @@ def _ch_transport_kwargs(
         or tls_config.cert_file
         or tls_config.key_file
         or tls_config.server_name
-        or not tls_config.verify
+        or tls_config.proxy_path
     ):
         kwargs["tls_config"] = tls_config
     if proxy is not None and str(getattr(proxy, "raw_url", proxy) or "").strip():
@@ -192,7 +192,7 @@ def _ch_transport_from_context(ctx: Any) -> tuple[_ChTlsConfig | None, Any | Non
     args = ctx.args
     tls = _ChTlsConfig(
         enabled=bool(getattr(args, "tls", False)),
-        verify=not bool(getattr(args, "insecure", False)),
+        verify=bool(getattr(args, "tls_ca", None)),
         ca_file=getattr(args, "tls_ca", None),
         cert_file=getattr(args, "tls_cert", None),
         key_file=getattr(args, "tls_key", None),

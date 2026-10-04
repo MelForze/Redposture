@@ -429,15 +429,15 @@ def test_auto_transport_request_budget_and_security_downgrade_guards(monkeypatch
     )
     mismatch_attempts: list[str] = []
 
-    def mismatch_then_plaintext(mode: str) -> None:
+    def mismatch_then_tls(mode: str) -> None:
         mismatch_attempts.append(mode)
-        if mode == "tls":
-            raise ssl.SSLError(1, "wrong version number")
+        if mode == "plaintext":
+            raise ConnectionError("unexpected EOF")
 
-    monkeypatch.setattr(mismatch, "_connect_once", mismatch_then_plaintext)
+    monkeypatch.setattr(mismatch, "_connect_once", mismatch_then_tls)
     mismatch.connect()
-    assert mismatch_attempts == ["tls", "plaintext"]
-    assert mismatch.selected_transport == "plaintext"
+    assert mismatch_attempts == ["plaintext", "tls"]
+    assert mismatch.selected_transport == "tls"
 
     unreachable = zk._ZkClient("keeper", 9181, 1.0, transport_config=zk.ZkTransportConfig(mode="auto"))
     unreachable_attempts: list[str] = []
@@ -482,7 +482,7 @@ def test_auto_transport_uses_one_fallback_after_tls_protocol_payload_mismatch(
         "keeper",
         9181,
         1.0,
-        transport_config=zk.ZkTransportConfig(mode="auto", insecure=True),
+        transport_config=zk.ZkTransportConfig(mode="auto", insecure=True, cert_file="client.pem"),
     )
 
     with pytest.raises(ConnectionError, match="transport auto-detection failed"):

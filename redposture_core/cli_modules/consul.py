@@ -72,11 +72,6 @@ def configure_consul_parser(
         action="store_true",
         help="Require HTTP; do not retry HTTPS.",
     )
-    transport.add_argument(
-        "--insecure",
-        action="store_true",
-        help="Disable Consul TLS certificate and hostname verification.",
-    )
     transport.add_argument("--tls-ca", default=None, metavar="path", help="CA bundle for Consul TLS verification.")
     transport.add_argument("--tls-cert", default=None, metavar="path", help="Client certificate for Consul mTLS.")
     transport.add_argument("--tls-key", default=None, metavar="path", help="Client private key for Consul mTLS.")

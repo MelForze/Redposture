@@ -71,7 +71,7 @@ class ZkTransportConfig:
 
     @property
     def has_tls_options(self) -> bool:
-        return bool(self.insecure or self.ca_file or self.cert_file or self.key_file)
+        return bool(self.ca_file or self.cert_file or self.key_file)
 
 
 @dataclass(frozen=True)

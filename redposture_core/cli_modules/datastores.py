@@ -45,11 +45,6 @@ def configure_redis_parser(
     add_multi_ports_flag(common)
     transport.add_argument("--tls", action="store_true", help="Use TLS for Redis connections.")
     transport.add_argument(
-        "--insecure",
-        action="store_true",
-        help="Disable Redis TLS certificate and hostname verification.",
-    )
-    transport.add_argument(
         "--tls-ca",
         dest="tls_ca",
         default=None,
@@ -297,11 +292,6 @@ def configure_kafka_parser(
         "--plaintext",
         action="store_true",
         help="Require plaintext Kafka and disable automatic TLS retry.",
-    )
-    transport.add_argument(
-        "--insecure",
-        action="store_true",
-        help="Disable Kafka TLS certificate and hostname verification.",
     )
     transport.add_argument("--tls-ca", default=None, metavar="path", help="CA bundle for Kafka TLS verification.")
     transport.add_argument("--tls-cert", default=None, metavar="path", help="Client certificate for Kafka mTLS.")

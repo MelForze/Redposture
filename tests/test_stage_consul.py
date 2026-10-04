@@ -261,7 +261,7 @@ def test_bool_text() -> None:
 
 def test_consul_helper_decoders_and_flags() -> None:
     assert consul._friendly_error_text("<urlopen error certificate verify failed>") == (
-        "tls verification failed (try --insecure or trusted cert)"
+        "tls verification failed (check --tls-ca)"
     )
     assert consul._friendly_error_text("[Errno 61] Connection refused") == (
         "connection refused (service is not listening on target port)"
@@ -290,7 +290,7 @@ def test_consul_helper_decoders_and_flags() -> None:
 def test_request_with_tls_fallback_probe_and_put_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     responses = iter(
         [
-            (0, b"", {}, "tls verification failed (try --insecure or trusted cert)"),
+            (0, b"", {}, "tls verification failed (check --tls-ca)"),
             (200, b'{"ok":true}', {}, None),
         ]
     )

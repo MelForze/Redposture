@@ -32,7 +32,6 @@ class _Console:
         ({"max_messages": 0}, "--max-messages"),
         ({"tls_cert": "client.pem"}, "--tls-cert and --tls-key"),
         ({"tls_key": "client.key"}, "--tls-cert and --tls-key"),
-        ({"insecure": True, "tls_ca": "ca.pem"}, "--insecure cannot"),
         ({"plaintext": True, "tls_ca": "ca.pem"}, "--plaintext cannot"),
         ({"plaintext": True, "tls_cert": "client.pem", "tls_key": "client.key"}, "--plaintext cannot"),
         ({"plaintext": True, "tls_server_name": "broker.example"}, "--plaintext cannot"),

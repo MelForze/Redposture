@@ -579,7 +579,7 @@ def test_audit_kubeapi_host_open_no_auth_with_tls_fallback_and_exec(monkeypatch:
     )
 
     assert record["status"] == "open_no_auth"
-    assert record["tls_auto_insecure"] is True
+    assert record["tls_auto_insecure"] is False
     assert record["insecure_effective"] is True
     assert record["namespaces"] == ["default"]
     assert record["pods"][0]["name"] == "hello-demo"

@@ -5527,7 +5527,7 @@ def test_zookeeper_canonical_plan_scans_only_apache_default_ports() -> None:
     assert lifecycle_stage.build_zookeeper_plan(args).ports == (2181, 12181, 22181)
 
 
-def test_zookeeper_canonical_tls_policy_rejects_conflicting_or_incomplete_trust_options() -> None:
+def test_zookeeper_canonical_tls_policy_accepts_ca_and_rejects_incomplete_client_identity() -> None:
     class Console:
         def __init__(self) -> None:
             self.errors: list[str] = []
@@ -5535,10 +5535,10 @@ def test_zookeeper_canonical_tls_policy_rejects_conflicting_or_incomplete_trust_
         def error(self, message: str) -> None:
             self.errors.append(message)
 
-    conflicting = parse_args(["zookeeper", "-t", "127.0.0.1", "--ca-file", "ca.pem", "--insecure"])
+    trusted = parse_args(["zookeeper", "-t", "127.0.0.1", "--ca-file", "ca.pem"])
     console = Console()
-    assert lifecycle_stage.policy.validate_args(conflicting, console) == 2
-    assert console.errors == ["--ca-file cannot be combined with --insecure"]
+    assert lifecycle_stage.policy.validate_args(trusted, console) is None
+    assert console.errors == []
 
     incomplete = parse_args(["zookeeper", "-t", "127.0.0.1", "--tls-cert", "client.pem"])
     console = Console()
@@ -5549,7 +5549,7 @@ def test_zookeeper_canonical_tls_policy_rejects_conflicting_or_incomplete_trust_
 def test_zookeeper_canonical_spec_auto_classifies_apache_without_rejecting_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    args = parse_args(["zookeeper", "-t", "127.0.0.1", "--insecure"])
+    args = parse_args(["zookeeper", "-t", "127.0.0.1"])
     args.zookeeper_fingerprint_cache = ZooKeeperFingerprintCache()
     spec = lifecycle_stage.build_zookeeper_spec(args)
     assert spec.lifecycle_state_factory is not None

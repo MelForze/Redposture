@@ -97,7 +97,6 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
         target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
         tls_material = any(
             (
-                bool(getattr(args, "insecure", False)),
                 bool(getattr(args, "tls_ca", None)),
                 bool(getattr(args, "tls_cert", None)),
             )
@@ -115,7 +114,7 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
             preferred_scheme = None
             strict_scheme = False
         return actions.ConsulLifecycleState(
-            insecure=bool(getattr(args, "insecure", False)),
+            insecure=not bool(getattr(args, "tls_ca", None)),
             ca_file=getattr(args, "tls_ca", None),
             client_cert=getattr(args, "tls_cert", None),
             client_key=getattr(args, "tls_key", None),
@@ -129,7 +128,7 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
             ),
             http=HttpSessionPool(
                 timeout=float(getattr(args, "timeout", 1.0)),
-                insecure=bool(getattr(args, "insecure", False)),
+                insecure=not bool(getattr(args, "tls_ca", None)),
                 ca_file=getattr(args, "tls_ca", None),
                 cert_file=getattr(args, "tls_cert", None),
                 key_file=getattr(args, "tls_key", None),

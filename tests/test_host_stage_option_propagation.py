@@ -184,7 +184,6 @@ def test_kubeapi_real_stage_propagates_selectors_exec_and_transport(
             "-t",
             "http://127.0.0.1:8080",
             "--no-https",
-            "--insecure",
             "--ca-file",
             "cluster-ca.pem",
             "--namespaces",
@@ -204,7 +203,7 @@ def test_kubeapi_real_stage_propagates_selectors_exec_and_transport(
     assert _deep_calls(calls)
     for call in calls:
         assert call["use_https"] is False
-        assert call["insecure"] is True
+        assert call["insecure"] is False
         assert call["ca_file"] == "cluster-ca.pem"
         assert call["show_namespaces"] is True
         assert call["show_pods"] is True
@@ -574,7 +573,6 @@ def test_proxmox_real_stage_propagates_actions_and_url_scheme_priority(
             "--pveapitoken",
             "root@pam!audit=secret",
             "--https",
-            "--insecure",
             "--discover",
             "--nodes",
             "--users",

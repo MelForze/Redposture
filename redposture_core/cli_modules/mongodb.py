@@ -103,11 +103,6 @@ def configure_mongodb_parser(
         metavar="pem",
         help="Client certificate and private key PEM for MongoDB mTLS (implies --tls).",
     )
-    transport.add_argument(
-        "--tls-insecure",
-        action="store_true",
-        help="Use TLS without certificate or hostname verification.",
-    )
 
     discovery.add_argument(
         "--show-databases",

@@ -216,13 +216,13 @@ def _get_thread_debug_emitter() -> Callable[[str], None] | None:
 def _friendly_error_text(value: str) -> str:
     from ...utils import friendly_error_text
 
-    return friendly_error_text(value, tls_hint="try --insecure or --ca-file")
+    return friendly_error_text(value, tls_hint="check --ca-file")
 
 
 def _friendly_error_from_exception(exc: BaseException) -> str:
     from ...utils import friendly_error_from_exception
 
-    return friendly_error_from_exception(exc, tls_hint="try --insecure or --ca-file")
+    return friendly_error_from_exception(exc, tls_hint="check --ca-file")
 
 
 def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
@@ -1646,6 +1646,7 @@ def _deprecated_monolithic_audit_kubeapi_host(
             if (
                 use_https
                 and not effective_insecure
+                and not ca_file
                 and (_is_tls_verify_error(version_error) or _is_tls_verify_error(api_error))
             ):
                 effective_insecure = True
@@ -2648,11 +2649,13 @@ def _lifecycle_get_json_with_retries(
         )
         _adopt_kubeapi_origin(state, last_result[2])
         error = last_result[3]
-        if error and state.use_https and not state.insecure and _is_tls_verify_error(error):
+        if error and state.use_https and not state.insecure and not state.ca_file and _is_tls_verify_error(error):
             state.switch_to_insecure()
             # TLS fallback retries this endpoint immediately and does not
             # consume the caller's network retry budget.
             continue
+        if error and state.ca_file and _is_tls_verify_error(error):
+            return last_result
         if error and not scheme_fallback_attempted and not state.origin_resolved:
             scheme_fallback_attempted = True
             state.switch_scheme()
@@ -2709,9 +2712,17 @@ def _lifecycle_request_json_with_retries(
             json_body=json_body,
         )
         _adopt_kubeapi_origin(state, result[2])
-        if result[3] and state.use_https and not state.insecure and _is_tls_verify_error(result[3]):
+        if (
+            result[3]
+            and state.use_https
+            and not state.insecure
+            and not state.ca_file
+            and _is_tls_verify_error(result[3])
+        ):
             state.switch_to_insecure()
             continue
+        if result[3] and state.ca_file and _is_tls_verify_error(result[3]):
+            return result
         if not _is_retryable_request_error(result[3]):
             return result
         attempt += 1
@@ -2733,8 +2744,8 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     state.use_https = (
         target_scheme == "https" if target_scheme in {"http", "https"} else bool(getattr(ctx.args, "https", True))
     )
-    state.insecure = bool(getattr(ctx.args, "insecure", False))
     state.ca_file = getattr(ctx.args, "ca_file", None) or getattr(ctx.args, "tls_ca", None)
+    state.insecure = not bool(state.ca_file)
     state.proxy = getattr(ctx.args, "_proxy_config", None)
     state.configure_transport(str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)))
     version_status, version_payload, _headers, version_error = _lifecycle_get_json_with_retries(

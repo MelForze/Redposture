@@ -132,7 +132,9 @@ def _run_mongodb_nosql_shell(args: Any, plan: AuditCommandPlan, console: Any) ->
         tls=bool(getattr(args, "tls", False)),
         tls_ca=getattr(args, "tls_ca", None),
         tls_cert_key=getattr(args, "tls_cert_key", None),
-        tls_insecure=bool(getattr(args, "tls_insecure", False)),
+        tls_insecure=bool(
+            (getattr(args, "tls", False) or getattr(args, "tls_cert_key", None)) and not getattr(args, "tls_ca", None)
+        ),
     )
 
 

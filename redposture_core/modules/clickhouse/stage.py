@@ -262,7 +262,7 @@ def _raw_protocol(args: Any) -> str:
 def _clickhouse_transport_kwargs(args: Any) -> dict[str, Any]:
     tls = actions._ChTlsConfig(
         enabled=bool(getattr(args, "tls", False)),
-        verify=not bool(getattr(args, "insecure", False)),
+        verify=bool(getattr(args, "tls_ca", None)),
         ca_file=getattr(args, "tls_ca", None),
         cert_file=getattr(args, "tls_cert", None),
         key_file=getattr(args, "tls_key", None),

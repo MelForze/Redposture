@@ -63,7 +63,7 @@ def _proxmox_lifecycle_state_factory(ctx: AuditHookContext) -> _ProxmoxLifecycle
     return _ProxmoxLifecycleState(
         http=HttpSessionPool(
             timeout=float(getattr(ctx.args, "timeout", 1.0)),
-            insecure=bool(getattr(ctx.args, "insecure", False)),
+            insecure=True,
             proxy=_proxmox_proxy(ctx.args),
         ),
         scheme=(
@@ -165,7 +165,7 @@ def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
                 retries=cfg.retries,
                 pve_api_token="",
                 use_https=use_https,
-                insecure=bool(getattr(ctx.args, "insecure", False)),
+                insecure=True,
                 proxy=_proxmox_proxy(ctx.args),
                 username=None,
                 password=None,
@@ -195,7 +195,7 @@ def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
         cfg.retries,
         pve_api_token="",
         use_https=use_https,
-        insecure=bool(getattr(ctx.args, "insecure", False)),
+        insecure=True,
         proxy=_proxmox_proxy(ctx.args),
         auth_headers={},
     )
@@ -259,7 +259,7 @@ def _proxmox_version_for_context(
         cfg.retries,
         pve_api_token="",
         use_https=_proxmox_use_https(ctx),
-        insecure=bool(getattr(ctx.args, "insecure", False)),
+        insecure=True,
         proxy=_proxmox_proxy(ctx.args),
         auth_headers=auth_headers,
     )
@@ -314,7 +314,7 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
                     retries=cfg.retries,
                     pve_api_token=token,
                     use_https=use_https,
-                    insecure=bool(getattr(ctx.args, "insecure", False)),
+                    insecure=True,
                     proxy=_proxmox_proxy(ctx.args),
                     username=credential.username,
                     password=credential.password,
@@ -387,7 +387,7 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
             cfg.retries,
             pve_api_token="",
             use_https=use_https,
-            insecure=bool(getattr(ctx.args, "insecure", False)),
+            insecure=True,
             proxy=_proxmox_proxy(ctx.args),
             auth_headers=auth_headers,
         )
@@ -451,7 +451,7 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
         username=username,
         password=password,
         use_https=use_https,
-        insecure=bool(getattr(ctx.args, "insecure", False)),
+        insecure=True,
         proxy=_proxmox_proxy(ctx.args),
     )
     payload["use_https"] = _proxmox_use_https(ctx)
@@ -527,7 +527,7 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
             retries=cfg.retries,
             pve_api_token=str(ctx.credential.token or ""),
             use_https=_proxmox_use_https(ctx),
-            insecure=bool(getattr(ctx.args, "insecure", False)),
+            insecure=True,
             proxy=_proxmox_proxy(ctx.args),
             username=ctx.credential.username,
             password=ctx.credential.password,
@@ -560,7 +560,7 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         cfg.retries,
         str(ctx.credential.token or ""),
         _proxmox_use_https(ctx),
-        bool(getattr(ctx.args, "insecure", False)),
+        True,
         _proxmox_proxy(ctx.args),
         username=ctx.credential.username,
         password=ctx.credential.password,

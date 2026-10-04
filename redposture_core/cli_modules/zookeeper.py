@@ -64,11 +64,6 @@ def _configure_zookeeper_protocol_parser(
         help=f"CA certificate for {service_name} TLS verification.",
     )
     transport.add_argument(
-        "--insecure",
-        action="store_true",
-        help=f"Allow an untrusted or self-signed {service_name} TLS certificate.",
-    )
-    transport.add_argument(
         "--tls-cert",
         dest="tls_cert",
         default=None,

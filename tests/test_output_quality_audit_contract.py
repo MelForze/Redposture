@@ -140,7 +140,7 @@ def test_report_writer_accepts_explicit_docker_reproduction_details(tmp_path: Pa
                 "module": "docker",
                 "message": "TLS service was not detected",
                 "details": "status=fail error=docker API HTTP 400: Bad Request",
-                "reproduce": "redposture docker -t 127.0.0.1 --port 2376 --insecure --system",
+                "reproduce": "redposture docker -t 127.0.0.1 --port 2376 --system",
                 "actual_and_expected": "actual: status=fail; expected: confirmed Docker TLS service",
             }
         ],

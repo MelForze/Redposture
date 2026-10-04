@@ -19,7 +19,6 @@ from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_mo
     ("overrides", "expected_error"),
     [
         ({"tls_cert": "client.pem", "tls_key": None}, "--tls-cert and --tls-key must be used together"),
-        ({"tls_cert": None, "tls_key": None, "tls_ca": "ca.pem", "insecure": True}, "--tls-ca cannot be combined"),
     ],
 )
 def test_redis_policy_rejects_invalid_tls_options(
@@ -2078,8 +2077,8 @@ def test_redis_tls_loads_ca_and_client_identity(monkeypatch: pytest.MonkeyPatch)
     assert calls["server_hostname"] == "redis.internal"
 
 
-def test_redis_insecure_flag_selects_tls_transport() -> None:
-    args = parse_args(["redis", "-t", "redis.internal", "--insecure"])
+def test_redis_tls_flag_selects_tls_transport_with_default_trust() -> None:
+    args = parse_args(["redis", "-t", "redis.internal", "--tls"])
     ctx = SimpleNamespace(
         args=args,
         target=SimpleNamespace(scheme=None),

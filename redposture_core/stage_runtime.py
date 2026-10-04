@@ -1652,8 +1652,14 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
             return args._proxy_config
         return getattr(args, "proxy", None)
     if name == "insecure":
-        return bool(getattr(args, "insecure", False))
-    if name in {"tls", "tls_insecure"}:
+        return not any(
+            getattr(args, field, None) for field in ("ca_file", "tls_ca", "ssl_ca", "ssl_server_dn", "wallet")
+        )
+    if name == "tls_insecure":
+        return bool(
+            (getattr(args, "tls", False) or getattr(args, "tls_cert_key", None)) and not getattr(args, "tls_ca", None)
+        )
+    if name == "tls":
         return bool(getattr(args, name, False))
     if name == "sslmode":
         return str(getattr(args, "sslmode", "disable") or "disable")

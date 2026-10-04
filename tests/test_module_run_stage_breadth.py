@@ -25,7 +25,7 @@ RUN_CASES = {
     "docker-registry": ["docker-registry", "-t", "127.0.0.1"],
     "harbor": ["harbor", "-t", "127.0.0.1"],
     "nexus": ["nexus", "-t", "127.0.0.1"],
-    "proxmox": ["proxmox", "-t", "127.0.0.1", "--insecure", "--defcreds"],
+    "proxmox": ["proxmox", "-t", "127.0.0.1", "--defcreds"],
     "etcd": ["etcd", "-t", "127.0.0.1"],
     "mongodb": ["mongodb", "-t", "127.0.0.1"],
     "docker": ["docker", "-t", "127.0.0.1"],

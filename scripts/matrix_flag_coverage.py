@@ -110,9 +110,12 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "ca_file": "custom CA bundle loading is unit-tested; lab uses HTTP/basic-auth paths.",
     },
     "kubeapi": {
-        "ca_file": "CA bundle loading is unit-tested; live lab uses --insecure/self-signed shortcuts.",
+        "ca_file": "CA bundle loading is unit-tested; live lab uses self-signed certificates with default trust.",
         "exec_command": "pod exec is excluded from sequential matrix to avoid pod-name drift; resource visibility is covered.",
         "pod": "pod selector is only used by exec; selection is covered by the Kubernetes action tests.",
+    },
+    "zookeeper": {
+        "ca_file": "custom CA verification is covered by shared ZooKeeper TLS tests; the matrix uses default trust.",
     },
     "keeper": {
         "ca_file": "Keeper and ZooKeeper share TLS validation; custom-CA handling is covered by the shared protocol tests.",

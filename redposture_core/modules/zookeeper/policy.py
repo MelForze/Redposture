@@ -14,9 +14,6 @@ def validate_zookeeper_protocol_args(args: Any, console: Any, *, module: str) ->
     if bool(getattr(args, "tls_cert", None)) != bool(getattr(args, "tls_key", None)):
         console.error("--tls-cert and --tls-key must be used together")
         return 2
-    if bool(getattr(args, "ca_file", None)) and bool(getattr(args, "insecure", False)):
-        console.error("--ca-file cannot be combined with --insecure")
-        return 2
     max_znodes = getattr(args, "max_znodes", None)
     if max_znodes is not None and int(max_znodes) <= 0:
         console.error("--max-znodes must be > 0")
