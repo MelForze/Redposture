@@ -308,6 +308,18 @@ def test_keeper_cli_accepts_read_only_topology_flags() -> None:
     assert args.show_hosts is True
 
 
+def test_keeper_help_groups_topology_flags_first_and_cluster_before_host(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        parse_args(["keeper", "--help"])
+    assert exit_info.value.code == 0
+    help_text = capsys.readouterr().out
+    ddl_section = help_text.split("Keeper DDL user creation:", 1)[1]
+    flags = ("--show-cluster", "--show-hosts", "--create-user", "--clickhouse-cluster", "--clickhouse-host")
+    positions = [ddl_section.index(flag) for flag in flags]
+    assert positions == sorted(positions)
+    assert "Keeper DDL topology:" not in help_text
+
+
 @pytest.mark.parametrize(
     "extra",
     [

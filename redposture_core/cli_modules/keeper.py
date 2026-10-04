@@ -41,6 +41,10 @@ def configure_keeper_parser(
             break
     ddl = parser.add_argument_group("Keeper DDL user creation")
     ddl.add_argument(
+        "--show-cluster", action="store_true", help="List cluster names found in existing DDL tasks (read-only)."
+    )
+    ddl.add_argument("--show-hosts", action="store_true", help="List DDL worker host IDs by cluster (read-only).")
+    ddl.add_argument(
         "--create-user", metavar="username", help="Create a ClickHouse user through a writable Keeper DDL queue."
     )
     ddl.add_argument(
@@ -57,19 +61,14 @@ def configure_keeper_parser(
         help="Skip interactive topology selection and both confirmations; intended for automation.",
     )
     ddl.add_argument(
-        "--clickhouse-host", metavar="host", help="DDL worker host ID when the queue has no usable existing task."
-    )
-    ddl.add_argument("--clickhouse-port", type=port_type, default=9000, metavar="port", help="DDL worker native port.")
-    ddl.add_argument(
         "--clickhouse-cluster",
         metavar="name",
         help="ClickHouse cluster name when the queue has no usable existing task.",
     )
-    inventory = parser.add_argument_group("Keeper DDL topology")
-    inventory.add_argument(
-        "--show-cluster", action="store_true", help="List cluster names found in existing DDL tasks (read-only)."
+    ddl.add_argument(
+        "--clickhouse-host", metavar="host", help="DDL worker host ID when the queue has no usable existing task."
     )
-    inventory.add_argument("--show-hosts", action="store_true", help="List DDL worker host IDs by cluster (read-only).")
+    ddl.add_argument("--clickhouse-port", type=port_type, default=9000, metavar="port", help="DDL worker native port.")
 
 
 __all__ = ["configure_keeper_parser"]
