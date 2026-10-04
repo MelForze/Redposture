@@ -32,53 +32,45 @@ redposture --version
 
 ## Usage
 
-- `-t` accepts a host, URL, CIDR, IPv4 range, comma-separated list, or target file.
-  `--port` selects a port or port list/range.
-- `-ot, --out-target` accepts the same host exclusions or a file:
+- `-t`: host, URL, CIDR, IPv4 range, comma-separated list or target file; `--port`:
+  port, list or range. `-ot, --out-target` accepts exclusions in the same formats:
   `--out-target exclusions.txt` removes matching hosts before ports are expanded.
-- `-u` / `-p` supply credentials; token/API-key flags depend on the module.
-  `--defcreds` checks the built-in pairs below. It performs real login attempts.
-- `-o results.txt` saves TXT; `-f json` saves structured results. `--debug` includes diagnostics.
-  Full options: `redposture <module> -h`.
+- `-u/-p`, module-specific token flags or `--defcreds` perform real login checks.
+  `-o results.txt` writes TXT, `-f json` writes structured results, and `--debug`
+  shows diagnostics. See `redposture <module> -h` for all flags.
 
-Normal TXT shows confirmed services, credentials and findings. Unconfirmed services
-and pre-detection failures stay in debug/JSON; a scan with no confirmed service prints
-one `No MODULE service detected` summary. If some targets could not be checked,
-the same line includes their count, uses `[!]`, and the command exits nonzero.
-Errors after service confirmation remain visible. SSO is shown as `auth required:sso`.
-The HTTP-facing audit modules require a product-specific API or protocol fingerprint:
-generic login/SSO pages, status codes and a lone `version` field do not start credential,
-discovery or CVE checks. JSON includes `detection_status` (`confirmed`, `probable`,
-`not_service`, `transport_failure`) and `detection_signals`; an older module-specific
-status, when present, is retained as `detection_detail_status`.
+TXT shows confirmed services only. Generic login/SSO pages, HTTP status codes and
+an isolated `version` field do not confirm a product or start auth, discovery or CVE
+checks. Unconfirmed results and pre-detection errors remain in debug/JSON. JSON
+includes `detection_status` (`confirmed`, `probable`, `not_service`,
+`transport_failure`), `detection_signals` and any older `detection_detail_status`.
+With no confirmed service, one `No MODULE service detected` line includes the
+unreachable count; if nonzero it uses `[!]` and exits nonzero. Post-detection
+errors stay visible.
+SSO appears as `auth required:sso`; verified/rejected credentials use `[+]`/`[-]`.
+Inconclusive pairs appear only in debug/JSON.
 
-Main workers default to 64 below 1000 expanded `host:port` tasks, otherwise 128;
-`-w` overrides this. The shared nested pool uses 32/64, capped by `-w`.
-Per-target discovery limits: MinIO/Elastic/Proxmox 8, ClickHouse 4; each ClickHouse
-query uses server-side `max_threads=1`. Exporters use separate schedulers.
+Main workers: 64 for fewer than 1000 expanded `host:port` tasks, otherwise 128
+(`-w` overrides). Shared nested workers: 32/64, capped by `-w`; per-target discovery
+limits are MinIO/Elastic/Proxmox 8 and ClickHouse 4 (`max_threads=1` per query).
+Exporters use separate schedulers.
 
-`--discover` is available in Airflow, MinIO, Elastic/OpenSearch, ClickHouse and Proxmox.
-The content budget defaults to 50 MiB per target. Only Elastic/OpenSearch has a default
-time limit (300 s); the others have no default time or item-count cap.
-Use `--discover-max-bytes` and `--discover-time` to change the budgets.
-Findings stream during scanning; interrupted or permission-limited scans are marked partial.
-ClickHouse supports `--checkpoint` and `--resume`.
+`--discover` covers Airflow, MinIO, Elastic/OpenSearch, ClickHouse and Proxmox.
+The default budget is 50 MiB per target. Only Elastic/OpenSearch has a default
+deadline (300 s); other modules have no default time or item cap. Use
+`--discover-max-bytes`/`--discover-time` to override.
+Findings stream live; incomplete scans are marked partial. ClickHouse supports
+`--checkpoint`/`--resume`.
 
-HTTP discovery follows redirects across scheme, host and port, including supplied
-credentials, by design for operator-controlled audits. A URL scheme selects the first
-attempt; the canonical HTTP 400 `Client sent an HTTP request to an HTTPS server` can
-switch GET/HEAD discovery to HTTPS. Later checks reuse the resolved origin; changing
-requests are not replayed to select a scheme. Audit modules accept untrusted or self-signed
-target server certificates by default. Where supported, a supplied CA file enables certificate
-and hostname verification; mTLS still requires a separate client certificate and key.
-For an HTTP service behind a reverse proxy, supply its mounted URL (for example
-`https://host/airflow/api/v1/version`); known API suffixes are removed from the
-base path and later checks retain `/airflow`. Use the DNS name required by an nginx
-virtual host so Host and SNI select the intended site; an IP alone cannot identify it.
-A verified credential prints `[+]` and a definitive rejection prints `[-]`.
-Inconclusive per-pair checks never appear as rejected pairs in ordinary TXT.
-JSON preserves the aggregate verification state without disclosing attempted
-secrets.
+HTTP checks may follow redirects across scheme, host and port with supplied
+credentials. The URL scheme selects the first attempt; a canonical HTTP 400
+requiring HTTPS retries safe GET/HEAD discovery. Later checks reuse the resolved
+origin, while changing requests are not replayed
+to select a scheme. Target TLS accepts self-signed certificates by default;
+where supported, a CA file enables certificate and hostname verification. mTLS
+needs a client certificate and key. For a reverse proxy, supply its mounted URL (for example
+`https://host/airflow/api/v1/version`) and the DNS name required for Host/SNI;
+the module retains the URL prefix after removing a known API suffix.
 
 ## Default credentials checked by `--defcreds`
 
@@ -106,25 +98,21 @@ secrets.
 | KubeAPI | `admin:admin`, `admin:password`, `root:root`, `root:password`, `kubeadmin:kubeadmin`, `kubernetes:kubernetes`, `user:user`, `test:test`, `admin:12345678` |
 | RabbitMQ | `admin:admin`, `admin:changeme`, `admin:password`, `admin:rabbitmq`, `guest:guest`, `guest:password`, `rabbitmq:admin`, `rabbitmq:password`, `rabbitmq:rabbitmq`, `root:password`, `root:root`, `service:password`, `service:service`, `test:test`, `user:password`, `user:user`, `admin:12345678` |
 
-These are weak-password candidates, not claims about factory passwords. [Harbor](https://goharbor.io/docs/edge/install-config/run-installer-script/)
-documents `admin:Harbor12345` for its initial setup; [GitLab](https://docs.gitlab.com/install/next_steps/)
-and [Nexus](https://help.sonatype.com/en/install-nexus-repository.html) generate per-installation
-initial passwords. [Kubernetes](https://kubernetes.io/docs/reference/access-authn-authz/authentication/)
-has no universal Basic pair. KubeAPI checks these pairs
-only when the confirmed API advertises Basic authentication. A public `/v2/` or HTTP 200
-alone does not prove a registry credential; inconclusive checks stay in debug/JSON.
-The eight-character numeric candidate is a common weak password, not a product default.
-If a login endpoint reports HTTP 429, rate limiting or an account lock, the credential sweep
-stops for that target; a blocked attempt is not proof that a pair is invalid.
+These are weak-password candidates, not universal factory passwords: [Harbor](https://goharbor.io/docs/edge/install-config/run-installer-script/)
+documents `admin:Harbor12345`, while [GitLab](https://docs.gitlab.com/install/next_steps/)
+and [Nexus](https://help.sonatype.com/en/install-nexus-repository.html) generate installation-specific
+passwords. [Kubernetes](https://kubernetes.io/docs/reference/access-authn-authz/authentication/)
+has no universal Basic pair; KubeAPI tries candidates only when Basic is advertised.
+Neither public `/v2/` nor HTTP 200 proves registry authentication. Inconclusive
+checks stay in debug/JSON; rate limiting or account lock stops the credential sweep.
+The eight-digit numeric candidate is a weak password, not a product default.
 
 ## Module Examples
 
-Each block has three independent workflows. Replace hosts, credentials and token
-variables with your own; `targets.txt` contains one target per line.
-Most blocks start with detection/CVEs, then default credentials, then inventory/data.
-Keeper/ZooKeeper default checks need an ACL-protected verifier znode (`--znode /app`).
-Enumeration/discovery reads service data; explicit write/exec/SSRF actions are omitted here.
-Exporter trigger is a separate callback workflow.
+Each block has three independent commands. Replace hosts and credentials;
+`targets.txt` has one target per line. Keeper/ZooKeeper credential checks need an
+ACL-protected verifier znode (`--znode /app`). Explicit write/exec/SSRF actions
+are omitted.
 
 ### Airflow
 
@@ -134,7 +122,8 @@ redposture airflow -t targets.txt --defcreds
 redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --show-keys --show-connections --discover
 ```
 
-In the first Airflow line, `Dags/Keys/Connections allowed` describe anonymous read access; the credential line reports access after login. With `--enum-cve --show-keys --show-connections --discover`, live TXT follows service → credentials → CVE → keys → connections → discovery.
+Airflow reports anonymous `Dags/Keys/Connections allowed` separately from access
+after login; live output follows service → credentials → CVE → keys → connections → discovery.
 
 ### ClickHouse
 
@@ -184,18 +173,13 @@ redposture gitlab -t https://gitlab.example --defcreds
 redposture gitlab -t https://gitlab.example --token "$GITLAB_TOKEN" --registry-token "$REGISTRY_TOKEN" --images
 ```
 
-GitLab detects the web/API, Container Registry, or both. `--token` belongs to the
-web/API; `--registry-token` belongs to the Container Registry. OCI inventory appears
-in the nested `container_registry` JSON object. Web login pairs use an isolated
-CSRF session per attempt and stop at SSO, CAPTCHA or rate limiting.
-GitLab, Harbor, Nexus and Docker Registry share the Airflow-style TXT layout:
-one product line, then verified credentials and requested inventory sections
-with item counts. Terminal colors distinguish access and nonzero counts; `-o`
-keeps four tab-separated fields without ANSI escapes. JSON fields are unchanged.
-Inventory values are orange in the terminal. The product version stays on the
-service line; `version:unknown` means the endpoint did not disclose a server
-version. In particular, the OCI `registry/2.0` header identifies the API
-protocol, not the Docker Registry server release.
+GitLab detects web/API and Container Registry separately: `--token` is for web/API,
+`--registry-token` for OCI; JSON nests OCI data in `container_registry`. Web login
+uses a fresh CSRF session per pair and stops at SSO, CAPTCHA or rate limiting.
+GitLab, Harbor, Nexus and Docker Registry show one product line followed by
+credentials and requested inventory. Output files contain four tab-separated
+fields without ANSI. `version:unknown` means no server version was disclosed;
+the OCI `registry/2.0` header is a protocol version, not a server release.
 
 ### Grafana
 
@@ -229,59 +213,36 @@ redposture keeper -t targets.txt --defcreds --znode /app
 redposture keeper -t keeper.example -u auditor -p 'password' --show-znodes 20 --dump 10
 ```
 
-Keeper reports `(ddl access:Write/Read/Denied/Absent/Unknown)` for the anonymous
-session against the default `/clickhouse/task_queue/ddl` path. The check runs
-by default: it reads the queue and attempts to create and delete an empty,
-ephemeral child whose name is not a DDL task. `Write` confirms child creation,
-not execution of SQL; `Read` confirms reading while writing remains unproved.
-`Absent` means this default path was not found, including installations that
-configure a different DDL path. This temporary write can trigger Keeper
-watches. The separate `--probe-write` flag still tests create/delete under `/`.
+Keeper reports `(ddl access:Write/Read/Denied/Absent/Unknown)` for anonymous access
+to `/clickhouse/task_queue/ddl`. By default it reads the path and creates/deletes
+an empty ephemeral child that is **not** a DDL task. `Write` proves a znode write,
+not SQL execution; `Read` leaves write access unproved; `Absent` can also mean a
+custom DDL path. The probe can trigger Keeper watches. `--probe-write` separately
+tests create/delete under `/`.
 
-With explicit `--create-user NAME --create-userpass PASSWORD`, Keeper can queue a
-ClickHouse `CREATE USER` task when anonymous DDL access is `Write`. It stores a
-SHA-256 password hash in the task, waits for the DDL worker result, and reports
-creation only after a worker confirms it. `--grant-admin` queues a separate
-`GRANT ALL ON *.* WITH GRANT OPTION` task only after successful creation. Both
-operations change ClickHouse accounts. On one target in a terminal, the command
-shows detected clusters and DDL worker host IDs. Choose numbered items or `a`
-for all, then confirm user creation with `y`. When `--grant-admin` is present,
-each successfully created cluster gets a separate grant confirmation. A blank
-answer, `n`, EOF, or Ctrl-C declines the pending write. Selecting only some
-workers creates the account only on those workers and is warned about before
-confirmation. The password is never printed in the prompt. Results use `[+]`
-for confirmed creation/grants and `[-]` for declined, failed, partial, or
-unverified operations; each line names the cluster and worker hosts. For example:
+`--show-cluster` and `--show-hosts` read existing DDL tasks (formats 5–8). For
+`--create-user NAME --create-userpass PASSWORD`, Keeper uses worker IDs and a
+cluster from the newest valid task, queues a SHA-256-hashed `CREATE USER`, and
+reports success only after a worker confirms it. New tasks use minimal format 5
+without inheriting settings or initiator identity. `--grant-admin` then queues a
+separate `GRANT ALL ON *.* WITH GRANT OPTION` after successful creation.
+These operations change ClickHouse accounts:
 
 ```bash
 redposture keeper -t keeper.example:9181 --create-user audituser --create-userpass 'strong-password' --grant-admin
 ```
 
-Interactive creation requires exactly one Keeper target and a terminal. For
-automation, add `--yes` to skip menus and both prompts; with multiple clusters,
-also specify `--clickhouse-cluster`. Without a usable DDL task, provide both
-`--clickhouse-host` and `--clickhouse-cluster` as before. `--yes` can affect
-multiple targets, so use an explicit target list you control.
-
-The module reads DDL worker host IDs and cluster names from the newest valid
-task per cluster. It does not merge
-older host lists, which may include retired workers. If the queue is empty, or
-the desired cluster has no usable task, specify `--clickhouse-host`, `--clickhouse-port`
-(native port, default 9000), and `--clickhouse-cluster`. If tasks from multiple
-clusters are present, interactive mode offers a choice; `--clickhouse-cluster`
-selects one without a menu. The module never
-guesses a cluster or substitutes Keeper's IP for a ClickHouse worker host.
-Automatic selection stops with a diagnostic if the DDL queue has more than 512
-tasks; explicit host and cluster still work.
-`--show-cluster` and `--show-hosts` list names and worker IDs from existing DDL
-tasks (formats 5–8) without changing data. New tasks use the minimal format 5
-entry and do not inherit another task's settings or initiator identity. Replica
-names under `/clickhouse/tables`, session
-entries, optional cluster-discovery paths, and Keeper peer addresses are not
-reliable substitutes for DDL worker IDs; they are not used to enqueue tasks.
-`{cluster}` works in ClickHouse only when that macro is configured on the server;
-normal `ON CLUSTER '{cluster}'` submission stores the expanded cluster name in
-the DDL queue. Redposture never substitutes a literal `{cluster}` itself.
+Interactive mode requires one target and a terminal: choose clusters/workers by
+number or `a` for all, then confirm creation and each grant with `y`. Blank,
+`n`, EOF or Ctrl-C declines; selecting only some workers warns and affects only
+them.
+The password is not printed. `--yes` skips menus/prompts and can affect multiple
+targets; with multiple clusters, specify `--clickhouse-cluster`. If no usable DDL
+task exists, set `--clickhouse-host` and `--clickhouse-cluster` (optional
+`--clickhouse-port`, default 9000). A queue over 512 tasks also requires explicit
+host/cluster. Keeper never guesses ClickHouse hosts from its own IP, replica names,
+sessions, discovery paths or peers. `{cluster}` expands only when configured in
+ClickHouse; Redposture does not substitute it in DDL tasks.
 
 ### KubeAPI
 
@@ -400,55 +361,42 @@ redposture exporters trigger -t targets.txt --callback-dns callback.example
 ```
 
 Trigger supports Redis, Postgres, Blackbox, Proxmox, MySQL, JSON, Elasticsearch,
-SNMP and IPMI exporters. Select a type with `-e mysql`, `-e json`, `-e elasticsearch`,
-`-e snmp` or `-e ipmi`; matching callback listeners start automatically.
-All nine matching listener types are enabled by default; `-e` narrows the
-exporters and their listeners, while `-s` selects listeners explicitly.
-Exporter scan, collect and trigger skip HTTPS certificate and hostname verification
-by default; use `--tls-ca file` to verify against a supplied CA. In trigger,
-`--no-postgres-tls` disables the
-Postgres callback listener's default TLS, and `--no-with-listen` skips listeners.
-SNMP and IPMI callbacks use UDP. An accepted exporter request alone is inconclusive;
-the listener must observe the outbound request. Percona MongoDB exporter is excluded:
-its `/scrape?target=` only selects hosts already configured in `--mongodb.uri`.
+SNMP and IPMI exporters. All nine callback listeners start by default; `-e` selects
+exporter types and matching listeners, while `-s` selects listeners explicitly.
+Exporter HTTPS accepts self-signed certificates unless `--tls-ca file` is supplied.
+`--no-postgres-tls` disables Postgres callback TLS; `--no-with-listen` skips
+listeners. SNMP/IPMI use UDP. A trigger is confirmed only when its listener
+observes a callback. Percona MongoDB exporter is excluded: its `/scrape?target=`
+selects only preconfigured `--mongodb.uri` hosts.
 
-After detecting an exporter, trigger tries its default probe and a bounded list of
-common named profiles (`auth_module`, `module`, or SNMP `auth`) serially. It keeps
-testing after a callback because another profile may forward credentials. Guessed
-profiles are paced, not retried, and stop after repeated exporter failures. The
-`CRED!` marker requires credential material actually received by the callback;
-an HTTP callback can capture Basic, Bearer, API-key or `X-API-Key` authentication.
-For MySQL `mysql_native_password`, the callback records the username, random
-challenge (`auth_salt`) and 20-byte `auth_response`, **not the plaintext password**.
-The response is bound to that challenge. Custom profile names can be provided
-through `--profiles-file` or each exporter's
-explicit profile flag (for example `--mysql-auth-module`, `--elastic-auth-module`,
-`--postgres-auth-module`, `--blackbox-module` or `--snmp-auth`). These flags use
-the exporter's own query parameter, rather than a shared `auth_mode`; Redis has
-no named probe profile. Use `-check` to verify captured Redis/Postgres credentials.
-SNMPv1/v2c callbacks additionally show the community string. SNMPv3 and IPMI
-callbacks confirm SSRF without claiming a captured password.
+Trigger tries a default probe and a paced, bounded list of named profiles
+(`auth_module`, `module`, or SNMP `auth`) serially, continuing after callbacks
+because another profile may carry credentials. Repeated exporter errors stop the
+sweep. Use `--profiles-file` or exporter-specific flags such as
+`--mysql-auth-module`, `--elastic-auth-module` and `--snmp-auth` for custom
+profiles; Redis has no named profile. `CRED!` requires credential material
+actually received, not just SSRF. HTTP callbacks may carry Basic/Bearer/API keys;
+MySQL `mysql_native_password` yields a challenge-bound username, `auth_salt` and
+`auth_response` challenge response, never the plaintext password. SNMPv1/v2c
+yields a community;
+SNMPv3/IPMI confirm SSRF without claiming a password. `-check` can verify captured
+Redis/Postgres credentials.
 
 ## Offline CVE enumeration
 
-`--enum-cve` matches a confirmed product and exact version against the bundled catalog.
-No external lookup or exploitation is performed. Matches are **potentially affected**,
-not proof of exploitation; vendor backports and deployment settings may change applicability.
+`--enum-cve` compares confirmed products and exact versions with a bundled offline
+catalog; it makes no external requests or exploit attempts. Findings mean
+**potentially affected**, not proof of exploitability: backports and deployment settings matter.
+The catalog mainly covers High/Critical network CVEs with reliable version ranges
+for code execution, auth bypass, takeover, data/file access or SSRF, excluding
+pure DoS. `PR:L` normally needs anonymous access or verified **explicit** credentials;
+invalid credentials and `--defcreds` alone do not qualify. Selected Nexus
+script/licensing entries need elevated permissions, and Grafana Image Renderer
+needs a detected plugin and reachable renderer; other title prerequisites such as
+Enterprise SCIM or a write-enabled MinIO key are not proven by version matching.
 
-The catalog primarily covers High/Critical network CVEs with a reliable version range:
-code execution, auth bypass, account takeover, data disclosure, arbitrary file access,
-or SSRF. Pure DoS is excluded. `PR:L` normally appears only with anonymous access or
-verified **explicit** credentials/token/API key; invalid credentials and `--defcreds`
-alone do not enable it. A few selected entries are version-only exceptions: the
-Nexus script/licensing CVEs require the elevated permissions named in their titles;
-Grafana Image Renderer requires the separately detected plugin version and a reachable
-renderer with a known/default token. Other prerequisites in titles, such as Enterprise
-SCIM configuration or a write-enabled MinIO access key, are not verified by version
-matching. These findings remain `potentially affected`, not confirmed exploitation.
-
-Credential checks precede CVEs. Findings sort newest first. The `CVE's Enumeration`
-header appears only with matches. Unknown versions, no matches and unsupported products
-are quiet in normal TXT; JSON/debug retain the status and evidence.
+Credential checks precede newest-first CVE findings. `CVE's Enumeration` appears
+only with matches; unknown/no-match/unsupported details remain in debug/JSON.
 
 ```text
 GRAFANA         10.0.0.1        3000  [*] Grafana Service (auth required:False) (version:8.2.6)
@@ -474,12 +422,11 @@ The bundled `2026-10-03` catalog contains 197 reviewed product/CVE records:
 | etcd | 1 | Kubernetes | 1 |
 | **Total** | **197** | | |
 
-Products are matched separately: Elasticsearch/OpenSearch, Redis/Valkey and
-ZooKeeper/Keeper do not share findings. Harbor, Nexus and GitLab match only their
-confirmed product. Plain Docker Registry and gRPC are unsupported; Kafka cannot determine
-an exact broker release. Keeper currently has no catalog matches. Version access may
-require authentication; Oracle needs the exact Database version, not the listener version.
-With `-f json`, `cve_enumeration` includes ranges, fixed versions, CVSS and source references.
+Elasticsearch/OpenSearch, Redis/Valkey, ZooKeeper/Keeper and Registry vendors are
+matched separately. Plain Docker Registry and gRPC are unsupported; Kafka lacks
+an exact broker version, and Keeper has no catalog matches. Version access may
+require auth; Oracle needs the Database version, not the listener version.
+`-f json` includes ranges, fixes, CVSS and references in `cve_enumeration`.
 
 ## Development and checks
 
@@ -493,12 +440,11 @@ pytest
 ./scripts/check_ci_matrix.sh --worktree
 ```
 
-CI locks are in `requirements/`; update with `scripts/update_ci_locks.sh`.
-Heavy QA stays local: `./scripts/run_qa_handoff.sh full` or `versions` on a checkout
-with the local lab. Run them sequentially and use fresh artifact directories.
-Focused HTTP detection QA: `./scripts/run_http_detection_qa.sh` writes a report under
-`.redposture/qa/` and uses the real Docker service matrix when Docker is available.
-`lab/`, `lab_tests/`, `qa_tests/` and `.redposture/` are excluded from Git.
+CI locks are in `requirements/` (`scripts/update_ci_locks.sh`). Run local
+`./scripts/run_qa_handoff.sh full` and `versions` sequentially with fresh output
+directories. `./scripts/run_http_detection_qa.sh` writes a focused report under
+`.redposture/qa/`. `lab/`, `lab_tests/`, `qa_tests/` and `.redposture/` are
+excluded from Git.
 
 ## License
 
