@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 from typing import Any
 
@@ -23,7 +24,7 @@ from ...stage_runtime import (
 from ...zookeeper_defaults import KEEPER_DIGEST_DEFAULT_CREDENTIALS
 from ..zookeeper import actions as protocol_actions
 from ..zookeeper import engine
-from . import actions, ddl, policy, render
+from . import actions, ddl, interactive, policy, render
 from .types import KeeperFingerprintCache
 
 _DEFAULT_PORT = 9181
@@ -133,17 +134,45 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
                 "hosts": bool(getattr(args, "show_hosts", False)),
             }
         if getattr(args, "create_user", None):
+
+            def _refresh_ddl_session() -> tuple[bool, str | None]:
+                reset_error = actions._reset_probe_session(client)
+                if reset_error:
+                    return False, reset_error
+                current_access, detail = actions.probe_ddl_access(client)
+                if current_access != "Write":
+                    return False, f"DDL access changed to {current_access}" + (f": {detail}" if detail else "")
+                return True, None
+
             payload["ddl_user_creation"] = (
-                ddl.create_user_via_ddl(
-                    client,
-                    str(args.create_user),
-                    str(args.create_userpass),
-                    access=str(record.extra.get("ddl_access") or "Unknown"),
-                    grant_admin=bool(getattr(args, "grant_admin", False)),
-                    clickhouse_host=getattr(args, "clickhouse_host", None),
-                    clickhouse_port=getattr(args, "clickhouse_port", 9000),
-                    clickhouse_cluster=getattr(args, "clickhouse_cluster", None),
-                    timeout=float(getattr(args, "timeout", 5.0) or 5.0),
+                (
+                    interactive.run_user_creation(
+                        client,
+                        str(args.create_user),
+                        str(args.create_userpass),
+                        access=str(record.extra.get("ddl_access") or "Unknown"),
+                        grant_admin=bool(getattr(args, "grant_admin", False)),
+                        clickhouse_host=getattr(args, "clickhouse_host", None),
+                        clickhouse_port=getattr(args, "clickhouse_port", 9000),
+                        clickhouse_cluster=getattr(args, "clickhouse_cluster", None),
+                        timeout=float(getattr(args, "timeout", 5.0) or 5.0),
+                        keeper_target=f"{ctx.host}:{ctx.port}",
+                        input_stream=args._keeper_input_stream,
+                        output_stream=args._keeper_output_stream,
+                        refresh_session=_refresh_ddl_session,
+                    )
+                    if getattr(args, "_keeper_interactive_create", False)
+                    else ddl.create_user_via_ddl(
+                        client,
+                        str(args.create_user),
+                        str(args.create_userpass),
+                        access=str(record.extra.get("ddl_access") or "Unknown"),
+                        grant_admin=bool(getattr(args, "grant_admin", False)),
+                        clickhouse_host=getattr(args, "clickhouse_host", None),
+                        clickhouse_port=getattr(args, "clickhouse_port", 9000),
+                        clickhouse_cluster=getattr(args, "clickhouse_cluster", None),
+                        timeout=float(getattr(args, "timeout", 5.0) or 5.0),
+                    )
                 )
                 if client is not None
                 else {
@@ -222,6 +251,7 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
         render_module=render,
         colorize=render._render_colored_keeper_line,
         is_detected=_is_detected,
+        live_phase_output=bool(getattr(args, "_keeper_interactive_create", False)),
         keep_anonymous_open_no_auth=True,
         skip_credentials_without_verifier=True,
         credential_gate=_credential_gate,
@@ -254,6 +284,19 @@ def run_keeper_stage(args: Any, logger: Any) -> int:
     except ValueError as exc:
         console.error(str(exc))
         return 2
+    if getattr(args, "create_user", None) and not getattr(args, "yes", False):
+        if plan.target_count != 1:
+            console.error("interactive --create-user requires one target; use --yes for automation")
+            return 2
+        if not sys.stdin.isatty():
+            console.error("interactive --create-user requires a terminal; use --yes for automation")
+            return 2
+        args._keeper_interactive_create = True
+        args._keeper_input_stream = sys.stdin
+        args._keeper_output_stream = sys.stderr
+        plan = replace(plan, workers=1)
+    else:
+        args._keeper_interactive_create = False
     args.keeper_fingerprint_cache = KeeperFingerprintCache()
     if cfg.debug and not getattr(args, "debug_emit", None):
         args.debug_emit = console.info

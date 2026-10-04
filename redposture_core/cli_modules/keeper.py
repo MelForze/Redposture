@@ -52,6 +52,11 @@ def configure_keeper_parser(
         help="Also queue GRANT ALL ON *.* WITH GRANT OPTION after confirmed creation.",
     )
     ddl.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip interactive topology selection and both confirmations; intended for automation.",
+    )
+    ddl.add_argument(
         "--clickhouse-host", metavar="host", help="DDL worker host ID when the queue has no usable existing task."
     )
     ddl.add_argument("--clickhouse-port", type=port_type, default=9000, metavar="port", help="DDL worker native port.")

@@ -236,6 +236,29 @@ def _wait_for_hosts(client: Any, path: str, hosts: list[str], timeout: float) ->
     return "unverified", results
 
 
+def grant_admin_via_ddl(client: Any, username: str, cluster: str, hosts: list[str], timeout: float) -> dict[str, Any]:
+    """Queue a grant only for a user and worker set confirmed by the caller."""
+
+    result: dict[str, Any] = {"admin_status": "failed", "grant_task_path": None, "grant_results": {}, "reason": None}
+    if not _USERNAME.fullmatch(username) or not _CLUSTER.fullmatch(cluster) or _valid_hosts(repr(hosts)) != hosts:
+        result["reason"] = "invalid user, cluster or DDL worker host"
+        return result
+    try:
+        query = f"GRANT ON CLUSTER {cluster} ALL ON *.* TO {username} WITH GRANT OPTION"
+        path, error = client.create_sequential(f"{_QUEUE}/query-", _build_entry(query, hosts))
+        if error != _ZK_ERR_OK or not path:
+            result["reason"] = f"grant enqueue: {_zk_error_name(error)}"
+            return result
+        result["grant_task_path"] = path
+        status, host_results = _wait_for_hosts(client, path, hosts, timeout)
+        result["admin_status"] = "granted" if status == "created" else status
+        result["grant_results"] = host_results
+    except (TimeoutError, ConnectionError, OSError, ValueError, TypeError, AttributeError) as exc:
+        result["admin_status"] = "unverified" if result["grant_task_path"] else "failed"
+        result["reason"] = exc.__class__.__name__
+    return result
+
+
 def create_user_via_ddl(
     client: Any,
     username: str,
@@ -246,6 +269,7 @@ def create_user_via_ddl(
     clickhouse_host: str | None,
     clickhouse_port: int | None,
     clickhouse_cluster: str | None = None,
+    selected_hosts: list[str] | None = None,
     timeout: float,
 ) -> dict[str, Any]:
     """Enqueue one user task and an optional grant, reporting worker evidence."""
@@ -272,8 +296,13 @@ def create_user_via_ddl(
         if not _HOST_ID.fullmatch(host_id) or not 1 <= port <= 65535:
             result["reason"] = "invalid ClickHouse host or port"
             return result
+    if selected_hosts is not None and (
+        clickhouse_host is not None or _valid_hosts(repr(selected_hosts)) != selected_hosts
+    ):
+        result["reason"] = "invalid selected DDL worker hosts"
+        return result
     try:
-        if clickhouse_host is not None and clickhouse_cluster is not None:
+        if (clickhouse_host is not None or selected_hosts is not None) and clickhouse_cluster is not None:
             children, queue_error, _stat = client.get_children2(_QUEUE)
             reason = (
                 "DDL queue does not exist"
@@ -291,7 +320,11 @@ def create_user_via_ddl(
         if reason:
             result["reason"] = reason
             return result
-        hosts = [f"{clickhouse_host}:{clickhouse_port or 9000}"] if clickhouse_host else discovered_hosts
+        hosts = (
+            selected_hosts
+            if selected_hosts is not None
+            else ([f"{clickhouse_host}:{clickhouse_port or 9000}"] if clickhouse_host else discovered_hosts)
+        )
         cluster = clickhouse_cluster or discovered_cluster
         if not hosts or not cluster or not _CLUSTER.fullmatch(cluster):
             result["reason"] = "ClickHouse host and cluster are required when the queue has no usable task"
@@ -310,16 +343,7 @@ def create_user_via_ddl(
         result["results"] = host_results
         if status != "created" or not grant_admin:
             return result
-        grant_query = f"GRANT ON CLUSTER {cluster} ALL ON *.* TO {username} WITH GRANT OPTION"
-        grant_path, grant_error = client.create_sequential(f"{_QUEUE}/query-", _build_entry(grant_query, hosts))
-        if grant_error != _ZK_ERR_OK or not grant_path:
-            result["admin_status"] = "failed"
-            result["reason"] = f"grant enqueue: {_zk_error_name(grant_error)}"
-            return result
-        result["grant_task_path"] = grant_path
-        grant_status, grant_results = _wait_for_hosts(client, grant_path, hosts, timeout)
-        result["admin_status"] = "granted" if grant_status == "created" else grant_status
-        result["grant_results"] = grant_results
+        result.update(grant_admin_via_ddl(client, username, cluster, hosts, timeout))
         return result
     except (TimeoutError, ConnectionError, OSError, ValueError, TypeError, AttributeError) as exc:
         result["status"] = "unverified" if result["task_path"] else "unavailable"

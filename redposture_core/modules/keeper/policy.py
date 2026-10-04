@@ -19,6 +19,9 @@ def validate_args(args: Any, console: Any) -> int | None:
     if create_user is not None and not password:
         console.error("--create-user requires a non-empty --create-userpass")
         return 2
+    if bool(getattr(args, "yes", False)) and create_user is None:
+        console.error("--yes requires --create-user")
+        return 2
     return None
 
 

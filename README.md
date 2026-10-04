@@ -242,11 +242,23 @@ ClickHouse `CREATE USER` task when anonymous DDL access is `Write`. It stores a
 SHA-256 password hash in the task, waits for the DDL worker result, and reports
 creation only after a worker confirms it. `--grant-admin` queues a separate
 `GRANT ALL ON *.* WITH GRANT OPTION` task only after successful creation. Both
-operations change ClickHouse accounts. For example:
+operations change ClickHouse accounts. On one target in a terminal, the command
+shows detected clusters and DDL worker host IDs. Choose numbered items or `a`
+for all, then confirm user creation with `y`. When `--grant-admin` is present,
+each successfully created cluster gets a separate grant confirmation. A blank
+answer, `n`, EOF, or Ctrl-C declines the pending write. Selecting only some
+workers creates the account only on those workers and is warned about before
+confirmation. The password is never printed in the prompt. For example:
 
 ```bash
 redposture keeper -t keeper.example:9181 --create-user audituser --create-userpass 'strong-password' --grant-admin
 ```
+
+Interactive creation requires exactly one Keeper target and a terminal. For
+automation, add `--yes` to skip menus and both prompts; with multiple clusters,
+also specify `--clickhouse-cluster`. Without a usable DDL task, provide both
+`--clickhouse-host` and `--clickhouse-cluster` as before. `--yes` can affect
+multiple targets, so use an explicit target list you control.
 
 The module reads DDL worker host IDs and the cluster name from the newest valid
 task per cluster when exactly one cluster is identifiable. It does not merge

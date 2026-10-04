@@ -495,6 +495,10 @@ class ModuleAuditSpec:
     colorize: Callable[[Any, str], bool] | None = None
     is_detected: Callable[[AuditRecord], bool] | None = None
     deep_gate: Callable[[AuditRecord], tuple[bool, str]] | None = None
+    # Opt in when a data hook needs the confirmed service line visible before
+    # it blocks for operator input. The shared phase emitter deduplicates the
+    # final record and keeps the text file in the same order as the terminal.
+    live_phase_output: bool = False
     # E3 opt-in: when True + `--defcreds` + detect status==open_no_auth, the
     # runner returns the detect record instead of re-running the host_stage
     # against every default credential. Kafka hardcodes this behavior in
@@ -2542,7 +2546,11 @@ class AuditCommandRunner:
         phase_emitted_lines = 0
         live_emit = getattr(self, "_live_emit", None)
         if (
-            (bool(getattr(self.args, "discover", False)) or bool(getattr(self.args, "enum_cve", False)))
+            (
+                bool(getattr(self.args, "discover", False))
+                or bool(getattr(self.args, "enum_cve", False))
+                or self.spec.live_phase_output
+            )
             and callable(live_emit)
             and (self.spec.render is not None or self.spec.render_module is not None)
         ):

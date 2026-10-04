@@ -93,6 +93,8 @@ def _render_colored_keeper_line(console: Any, line: str) -> bool:
             " [*] Cluster=",
             " [!] ClickHouse user ",
             " [!] admin grant:",
+            " [*] ClickHouse user ",
+            " [*] admin grant:",
             " [-] DDL topology ",
         )
     ):
@@ -112,9 +114,12 @@ def _render_colored_keeper_line(console: Any, line: str) -> bool:
                 RegexColorRule(r"(?<=creation:)(?:created|partial)\b", "true_red"),
                 RegexColorRule(r"(?<=creation:)failed\b", "bright_green"),
                 RegexColorRule(r"(?<=creation:)(?:unverified|unavailable)\b", "orange"),
+                RegexColorRule(r"(?<=creation:)declined\b", "bright_green"),
                 RegexColorRule(r"(?<=admin grant:)(?:granted|partial)\b", "true_red"),
                 RegexColorRule(r"(?<=admin grant:)failed\b", "bright_green"),
+                RegexColorRule(r"(?<=admin grant:)declined\b", "bright_green"),
                 RegexColorRule(r"(?<=admin grant:)(?:unverified|not_attempted)\b", "orange"),
+                RegexColorRule(r"(?<=cluster:)[A-Za-z_][A-Za-z0-9_]*", "orange"),
                 RegexColorRule(r"(?<=DDL topology )unavailable\b", "orange"),
             ),
         )

@@ -71,6 +71,41 @@ class _ConsoleRecorder:
         self.errors.append(message)
 
 
+def test_opt_in_live_phase_output_shows_service_before_interactive_data(tmp_path: Path) -> None:
+    emitted: list[str] = []
+    output_path = tmp_path / "keeper-like.txt"
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(host=ctx.host, port=ctx.port, module="demo", service="demo", status="open_no_auth")
+
+    def data(_ctx, record: AuditRecord) -> AuditRecord:
+        assert emitted == ["DEMO host service"]
+        assert output_path.read_text(encoding="utf-8").splitlines() == emitted
+        return AuditRecord.from_mapping({**record.to_dict(), "created": True}, module="demo", service="demo")
+
+    spec = ModuleAuditSpec(
+        module="demo",
+        label="DEMO",
+        default_port=1234,
+        detect=detect,
+        data=data,
+        render=lambda record: ["DEMO host service", *(["DEMO host created"] if record.extra.get("created") else [])],
+        is_detected=lambda _record: True,
+        live_phase_output=True,
+    )
+    runner = AuditCommandRunner(args=SimpleNamespace(debug=False), spec=spec, emit_line=emitted.append)
+    runner.run_plan(
+        AuditCommandPlan(
+            targets_by_port={1234: ("host",)},
+            output_path=str(output_path),
+            output_format="txt",
+            workers=1,
+        )
+    )
+    assert emitted == ["DEMO host service", "DEMO host created"]
+    assert output_path.read_text(encoding="utf-8").splitlines() == emitted
+
+
 def test_discover_streams_detection_and_auth_before_data_and_avoids_final_duplicates(tmp_path: Path) -> None:
     emitted: list[str] = []
     output_path = tmp_path / "discover.txt"
