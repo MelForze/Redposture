@@ -66,10 +66,11 @@ def test_keeper_user_create_and_admin_grant_are_separate_confirmed_tasks() -> No
     assert result["status"] == "created"
     assert result["admin_status"] == "granted"
     assert result["hosts"] == ["clickhouse:9000"]
+    assert result["cluster"] == "qa"
     assert len(client.created) == 2
     assert b"NotInTask-123" not in b"".join(client.created)
     expected_hash = hashlib.sha256(b"NotInTask-123").hexdigest().encode()
-    assert b"sha256_hash BY '" + expected_hash + b"'" in client.created[0]
+    assert b"sha256_hash BY \\'" + expected_hash + b"\\'" in client.created[0]
     assert b"CREATE USER audituser ON CLUSTER qa" in client.created[0]
     assert b"GRANT ON CLUSTER qa ALL ON *.* TO audituser WITH GRANT OPTION" in client.created[1]
 
@@ -121,6 +122,7 @@ def test_keeper_empty_queue_uses_explicit_clickhouse_host_and_cluster() -> None:
     )
     assert result["status"] == "created"
     assert result["hosts"] == ["clickhouse:9000"]
+    assert result["cluster"] == "qa"
     assert len(client.created) == 1
 
 
@@ -153,18 +155,20 @@ def test_keeper_ddl_result_renders_without_secret() -> None:
             "host": "127.0.0.1",
             "port": 9181,
             "service": "keeper",
+            "module": "keeper",
             "ddl_user_creation": {
                 "username": "audituser",
                 "status": "created",
                 "admin_status": "granted",
+                "cluster": "qa",
                 "hosts": ["clickhouse:9000"],
                 "task_path": f"{_QUEUE}/query-0000000001",
             },
         },
         "txt",
     )
-    assert any("audituser" in line and "created" in line for line in lines)
-    assert any("admin" in line and "granted" in line for line in lines)
+    assert lines[0].endswith('[+] ClickHouse user "audituser" created (cluster:qa) (hosts:1:clickhouse:9000)')
+    assert lines[1].endswith("[+] Administration rights granted (cluster:qa) (hosts:1:clickhouse:9000)")
     assert "password" not in "\n".join(lines)
 
 

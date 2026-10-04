@@ -196,12 +196,14 @@ def _build_entry(query: str, hosts: list[str]) -> bytes:
     if "\n" in query or "\r" in query or ";" in query:
         raise ValueError("DDL task must contain exactly one statement")
     task_id = str(uuid.uuid4())
+    escaped_query = query.replace("\\", "\\\\").replace("'", "\\'")
+    serialized_hosts = "[" + ",".join(repr(host) for host in hosts) + "]"
     # Emit a minimal v5 entry rather than copying settings, backup flags or
     # initiator identity/roles from an unrelated task (v6-v8 may contain them).
     text = (
         "version: 5\n"
-        f"query: {query}\n"
-        f"hosts: {hosts!r}\n"
+        f"query: {escaped_query}\n"
+        f"hosts: {serialized_hosts}\n"
         f"initiator: {hosts[0]}\n"
         "tracing: 00000000-0000-0000-0000-000000000000\n"
         "0\n\n0\n"
@@ -278,6 +280,7 @@ def create_user_via_ddl(
         "username": username,
         "status": "unavailable",
         "admin_status": "not_attempted" if grant_admin else "not_requested",
+        "cluster": clickhouse_cluster,
         "hosts": [],
         "task_path": None,
         "grant_task_path": None,
@@ -329,6 +332,7 @@ def create_user_via_ddl(
         if not hosts or not cluster or not _CLUSTER.fullmatch(cluster):
             result["reason"] = "ClickHouse host and cluster are required when the queue has no usable task"
             return result
+        result["cluster"] = cluster
         result["hosts"] = hosts
         password_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
         query = f"CREATE USER {username} ON CLUSTER {cluster} IDENTIFIED WITH sha256_hash BY '{password_hash}'"

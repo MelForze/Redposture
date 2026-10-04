@@ -89,7 +89,6 @@ def _run(
         clickhouse_port=9000,
         clickhouse_cluster=kwargs.get("clickhouse_cluster"),
         timeout=0.1,
-        keeper_target="127.0.0.1:9181",
         input_stream=StringIO(replies),
         output_stream=output,
         refresh_session=refresh_session,
@@ -103,9 +102,13 @@ def test_keeper_interactive_confirms_creation_then_admin_grant() -> None:
     assert result["status"] == "created"
     assert result["admin_status"] == "granted"
     assert len(client.created) == 2
-    assert b"hosts: ['ch-a:9000', 'ch-b:9000']" in client.created[0]
+    assert b"hosts: ['ch-a:9000','ch-b:9000']" in client.created[0]
     assert b"GRANT ON CLUSTER qa ALL ON *.* TO audituser WITH GRANT OPTION" in client.created[1]
-    assert "127.0.0.1:9181" in transcript
+    assert "ClickHouse clusters:" in transcript
+    assert "qa (2 workers: ch-a:9000, ch-b:9000)" in transcript
+    assert "DDL workers for qa:" in transcript
+    assert "Keeper: " not in transcript
+    assert "DDL access: " not in transcript
     assert "not-shown-password" not in transcript
     assert "GRANT ALL ON *.*" in transcript
 
@@ -123,6 +126,7 @@ def test_keeper_interactive_selects_one_cluster_and_host_and_declines_grant() ->
     assert len(client.created) == 1
     assert b"ON CLUSTER qa" in client.created[0]
     assert b"hosts: ['ch-a:9000']" in client.created[0]
+    assert "prod (1 worker: ch-c:9000)" in transcript
     assert "only on selected workers" in transcript
 
 
@@ -154,8 +158,23 @@ def test_keeper_interactive_empty_queue_requires_explicit_host_and_cluster() -> 
     client = KeeperQueue({})
     result, transcript = _run(client, "y\n")
     assert result["status"] == "unavailable"
-    assert "--clickhouse-host" in transcript
+    assert "--clickhouse-host" in result["reason"]
+    assert "Keeper: " not in transcript
+    assert "DDL access: " not in transcript
+    assert "Unavailable: " not in transcript
     assert not client.created
+
+
+def test_keeper_empty_topology_explains_failure_in_module_result_line() -> None:
+    client = KeeperQueue({})
+    result, _transcript = _run(client, "")
+    lines = keeper_render._format_ddl_user_creation_records(
+        {"host": "127.0.0.1", "port": 9181, "module": "keeper", "ddl_user_creation": result}, "txt"
+    )
+    assert len(lines) == 1
+    assert lines[0].startswith("KEEPER")
+    assert '[-] ClickHouse user "audituser" not created' in lines[0]
+    assert "--clickhouse-host and --clickhouse-cluster" in lines[0]
 
 
 def test_keeper_interactive_explicit_topology_skips_menus_but_requires_confirmation() -> None:
@@ -206,7 +225,6 @@ def test_keeper_interactive_refreshes_expired_session_after_each_approval() -> N
         clickhouse_port=None,
         clickhouse_cluster=None,
         timeout=0.1,
-        keeper_target="127.0.0.1:9181",
         input_stream=cast(TextIO, ExpiringInput("a\na\ny\ny\n")),
         output_stream=output,
         refresh_session=refresh,
@@ -226,11 +244,16 @@ def test_keeper_interactive_recheck_denial_blocks_grant_after_user_creation() ->
         checks += 1
         return (True, None) if checks == 1 else (False, "DDL access changed to Read")
 
-    result, transcript = _run(client, "a\na\ny\ny\n", refresh_session=refresh)
+    result, _transcript = _run(client, "a\na\ny\ny\n", refresh_session=refresh)
     assert result["status"] == "created"
     assert result["admin_status"] == "unavailable"
     assert len(client.created) == 1
-    assert "DDL access changed to Read" in transcript
+    assert result["clusters"][0]["reason"] == "DDL access changed to Read"
+    lines = keeper_render._format_ddl_user_creation_records(
+        {"host": "127.0.0.1", "port": 9181, "module": "keeper", "ddl_user_creation": result}, "txt"
+    )
+    assert "[-] Administration rights not granted" in lines[1]
+    assert "(reason:DDL access changed to Read)" in lines[1]
 
 
 def test_keeper_cli_yes_flag_is_explicit_noninteractive_opt_in() -> None:
@@ -311,7 +334,12 @@ def test_keeper_interactive_result_renders_each_cluster_and_grant() -> None:
                 "status": "created",
                 "admin_status": "partial",
                 "clusters": [
-                    {"cluster": "prod", "hosts": ["ch-c:9000"], "status": "created", "admin_status": "granted"},
+                    {
+                        "cluster": "prod",
+                        "hosts": ["ch-c:9000", "ch-d:9000"],
+                        "status": "created",
+                        "admin_status": "granted",
+                    },
                     {"cluster": "qa", "hosts": ["ch-a:9000"], "status": "created", "admin_status": "declined"},
                 ],
             },
@@ -319,10 +347,10 @@ def test_keeper_interactive_result_renders_each_cluster_and_grant() -> None:
         "txt",
     )
     assert len(lines) == 4
-    assert "creation:created (cluster:prod) (hosts:1)" in lines[0]
-    assert "admin grant:granted (cluster:prod)" in lines[1]
-    assert "creation:created (cluster:qa) (hosts:1)" in lines[2]
-    assert "admin grant:declined (cluster:qa)" in lines[3]
+    assert lines[0].endswith('[+] ClickHouse user "audituser" created (cluster:prod) (hosts:2:ch-c:9000,ch-d:9000)')
+    assert lines[1].endswith("[+] Administration rights granted (cluster:prod) (hosts:2:ch-c:9000,ch-d:9000)")
+    assert lines[2].endswith('[+] ClickHouse user "audituser" created (cluster:qa) (hosts:1:ch-a:9000)')
+    assert lines[3].endswith("[-] Administration rights not granted (cluster:qa) (hosts:1:ch-a:9000)")
 
 
 def test_keeper_interactive_decline_renders_no_unattempted_grant() -> None:
@@ -342,4 +370,36 @@ def test_keeper_interactive_decline_renders_no_unattempted_grant() -> None:
         "txt",
     )
     assert len(lines) == 1
-    assert "creation:declined" in lines[0]
+    assert lines[0].endswith('[-] ClickHouse user "audituser" not created (cluster:-) (hosts:0:-)')
+
+
+@pytest.mark.parametrize(
+    ("status", "admin_status", "creation_text", "grant_text"),
+    [
+        ("failed", "failed", "not created", "not granted"),
+        ("partial", "partial", "partially created", "partially granted"),
+        ("unverified", "unverified", "creation unverified", "grant unverified"),
+    ],
+)
+def test_keeper_ddl_result_does_not_overstate_partial_or_unverified_work(
+    status: str, admin_status: str, creation_text: str, grant_text: str
+) -> None:
+    lines = keeper_render._format_ddl_user_creation_records(
+        {
+            "host": "127.0.0.1",
+            "port": 9181,
+            "service": "keeper",
+            "ddl_user_creation": {
+                "username": "audituser",
+                "status": status,
+                "admin_status": admin_status,
+                "cluster": "qa",
+                "hosts": ["ch-a:9000", "ch-b:9000"],
+            },
+        },
+        "txt",
+    )
+    assert lines[0].endswith(
+        f'[-] ClickHouse user "audituser" {creation_text} (cluster:qa) (hosts:2:ch-a:9000,ch-b:9000)'
+    )
+    assert lines[1].endswith(f"[-] Administration rights {grant_text} (cluster:qa) (hosts:2:ch-a:9000,ch-b:9000)")

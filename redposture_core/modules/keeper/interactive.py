@@ -74,7 +74,6 @@ def run_user_creation(
     clickhouse_port: int | None,
     clickhouse_cluster: str | None,
     timeout: float,
-    keeper_target: str,
     input_stream: TextIO,
     output_stream: TextIO,
     refresh_session: Callable[[], tuple[bool, str | None]] | None = None,
@@ -94,7 +93,6 @@ def run_user_creation(
     topology = ddl.read_ddl_topology(client)
     discovered = topology.get("clusters") if topology.get("status") == "ok" else None
     clusters = discovered if isinstance(discovered, dict) else {}
-    _write(output_stream, f"Keeper: {keeper_target}\nDDL access: {access}\n")
     selected_clusters: list[str] | None
     if clickhouse_cluster:
         selected_clusters = [clickhouse_cluster]
@@ -103,21 +101,23 @@ def run_user_creation(
         selected_clusters = _choose(
             "ClickHouse clusters",
             names,
-            [f"{name} ({len(clusters[name])} workers)" for name in names],
+            [
+                f"{name} ({len(clusters[name])} {'worker' if len(clusters[name]) == 1 else 'workers'}: "
+                f"{_summarize(clusters[name])})"
+                for name in names
+            ],
             input_stream,
             output_stream,
         )
     else:
         selected_clusters = None
         result["reason"] = "--clickhouse-host and --clickhouse-cluster are required without usable DDL tasks"
-        _write(output_stream, f"Unavailable: {result['reason']}\n")
         return result
     if not selected_clusters:
         result["status"] = "declined"
         return result
     if clickhouse_host and len(selected_clusters) > 1:
         result["reason"] = "one explicit ClickHouse host cannot select multiple clusters"
-        _write(output_stream, f"Unavailable: {result['reason']}\n")
         return result
 
     plans: list[tuple[str, list[str]]] = []
@@ -135,7 +135,6 @@ def run_user_creation(
                 _write(output_stream, "Warning: user will exist only on selected workers.\n")
         else:
             result["reason"] = f"no DDL workers for {cluster}; specify --clickhouse-host"
-            _write(output_stream, f"Unavailable: {result['reason']}\n")
             return result
         plans.append((cluster, hosts))
 
@@ -159,7 +158,6 @@ def run_user_creation(
                     "reason": reason or "DDL session could not be refreshed",
                 }
                 result["clusters"].append(creation)
-                _write(output_stream, f"Creation on {cluster}: unavailable ({creation['reason']})\n")
                 continue
         creation = ddl.create_user_via_ddl(
             client,
@@ -176,12 +174,6 @@ def run_user_creation(
         creation["cluster"] = cluster
         creation["admin_status"] = "not_attempted" if grant_admin else "not_requested"
         result["clusters"].append(creation)
-        host_results = creation.get("results")
-        confirmed = sum(value == "ok" for value in host_results.values()) if isinstance(host_results, dict) else 0
-        reason = f"; {creation['reason']}" if creation.get("reason") else ""
-        _write(
-            output_stream, f"Creation on {cluster}: {creation['status']} ({confirmed}/{len(hosts)} workers{reason})\n"
-        )
 
     successful = [item for item in result["clusters"] if item["status"] == "created"]
     result["status"] = "created" if len(successful) == len(plans) else "partial" if successful else "failed"
@@ -196,19 +188,15 @@ def run_user_creation(
             )
             if not _confirm(input_stream, output_stream, "Grant admin rights? [y/N]: "):
                 item["admin_status"] = "declined"
-                _write(output_stream, f"Admin grant on {cluster}: declined\n")
                 continue
             if refresh_session is not None:
                 ready, reason = refresh_session()
                 if not ready:
                     item["admin_status"] = "unavailable"
                     item["reason"] = reason or "DDL session could not be refreshed"
-                    _write(output_stream, f"Admin grant on {cluster}: unavailable ({item['reason']})\n")
                     continue
             grant = ddl.grant_admin_via_ddl(client, username, cluster, hosts, timeout)
             item.update(grant)
-            reason = f" ({item['reason']})" if item.get("reason") else ""
-            _write(output_stream, f"Admin grant on {cluster}: {item['admin_status']}{reason}\n")
         statuses = [item["admin_status"] for item in result["clusters"]]
         result["admin_status"] = statuses[0] if len(set(statuses)) == 1 else "partial"
     return result

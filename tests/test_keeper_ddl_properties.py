@@ -545,6 +545,23 @@ def test_keeper_entry_builder_rejects_multiple_statements(query: str) -> None:
         ddl._build_entry(query, ["clickhouse:9000"])
 
 
+def test_keeper_entry_builder_escapes_query_quotes_like_clickhouse() -> None:
+    query = "CREATE USER audituser ON CLUSTER qa IDENTIFIED WITH sha256_hash BY 'abcdef'"
+    entry = ddl._build_entry(query, ["clickhouse:9000"])
+    assert b"query: CREATE USER audituser ON CLUSTER qa IDENTIFIED WITH sha256_hash BY \\'abcdef\\'\n" in entry
+    parsed = ddl._parse_template(entry)
+    assert parsed is not None
+    assert parsed[2] == "qa"
+
+
+def test_keeper_entry_builder_serializes_multiple_workers_without_spaces() -> None:
+    entry = ddl._build_entry("CREATE DATABASE qa ON CLUSTER qa", ["ch-a:9000", "ch-b:9000"])
+    assert b"hosts: ['ch-a:9000','ch-b:9000']\n" in entry
+    parsed = ddl._parse_template(entry)
+    assert parsed is not None
+    assert parsed[1] == ["ch-a:9000", "ch-b:9000"]
+
+
 def test_keeper_parser_rejects_oversized_and_invalid_escapes() -> None:
     assert ddl._parse_template(b"a" * (64 * 1024 + 1)) is None
     assert ddl._parse_template(_entry("qa", ["clickhouse:9000"], query=r"CREATE DATABASE qa \q ON CLUSTER qa")) is None

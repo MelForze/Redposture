@@ -248,7 +248,9 @@ for all, then confirm user creation with `y`. When `--grant-admin` is present,
 each successfully created cluster gets a separate grant confirmation. A blank
 answer, `n`, EOF, or Ctrl-C declines the pending write. Selecting only some
 workers creates the account only on those workers and is warned about before
-confirmation. The password is never printed in the prompt. For example:
+confirmation. The password is never printed in the prompt. Results use `[+]`
+for confirmed creation/grants and `[-]` for declined, failed, partial, or
+unverified operations; each line names the cluster and worker hosts. For example:
 
 ```bash
 redposture keeper -t keeper.example:9181 --create-user audituser --create-userpass 'strong-password' --grant-admin
@@ -260,12 +262,13 @@ also specify `--clickhouse-cluster`. Without a usable DDL task, provide both
 `--clickhouse-host` and `--clickhouse-cluster` as before. `--yes` can affect
 multiple targets, so use an explicit target list you control.
 
-The module reads DDL worker host IDs and the cluster name from the newest valid
-task per cluster when exactly one cluster is identifiable. It does not merge
+The module reads DDL worker host IDs and cluster names from the newest valid
+task per cluster. It does not merge
 older host lists, which may include retired workers. If the queue is empty, or
 the desired cluster has no usable task, specify `--clickhouse-host`, `--clickhouse-port`
 (native port, default 9000), and `--clickhouse-cluster`. If tasks from multiple
-clusters are present, `--clickhouse-cluster` selects one; the module never
+clusters are present, interactive mode offers a choice; `--clickhouse-cluster`
+selects one without a menu. The module never
 guesses a cluster or substitutes Keeper's IP for a ClickHouse worker host.
 Automatic selection stops with a diagnostic if the DDL queue has more than 512
 tasks; explicit host and cluster still work.

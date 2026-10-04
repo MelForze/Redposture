@@ -17,6 +17,45 @@ from .actions import (
 )
 
 
+def _ddl_target_context(result: dict[str, Any]) -> str:
+    cluster = str(result.get("cluster") or "-")
+    raw_hosts = result.get("hosts")
+    hosts = [str(host) for host in raw_hosts] if isinstance(raw_hosts, list) else []
+    return f"(cluster:{cluster}) (hosts:{len(hosts)}:{','.join(hosts) if hosts else '-'})"
+
+
+def _ddl_creation_line(prefix: str, username: str, result: dict[str, Any]) -> str:
+    status = str(result.get("status") or "unavailable")
+    wording = {
+        "created": "created",
+        "partial": "partially created",
+        "unverified": "creation unverified",
+    }.get(status, "not created")
+    marker = "[+]" if status == "created" else "[-]"
+    line = f'{prefix} {marker} ClickHouse user "{username}" {wording} {_ddl_target_context(result)}'
+    reason = result.get("reason")
+    if reason and status in {"failed", "unavailable"}:
+        line += f" (reason:{reason})"
+    return line
+
+
+def _ddl_grant_line(prefix: str, result: dict[str, Any]) -> str | None:
+    status = str(result.get("admin_status") or "not_requested")
+    if status in {"not_requested", "not_attempted"}:
+        return None
+    wording = {
+        "granted": "granted",
+        "partial": "partially granted",
+        "unverified": "grant unverified",
+    }.get(status, "not granted")
+    marker = "[+]" if status == "granted" else "[-]"
+    line = f"{prefix} {marker} Administration rights {wording} {_ddl_target_context(result)}"
+    reason = result.get("reason")
+    if reason and status in {"failed", "unavailable"}:
+        line += f" (reason:{reason})"
+    return line
+
+
 def _format_ddl_user_creation_records(record: dict[str, Any], output_format: str) -> list[str]:
     if output_format == "json":
         return []
@@ -31,26 +70,15 @@ def _format_ddl_user_creation_records(record: dict[str, Any], output_format: str
         for item in cluster_results:
             if not isinstance(item, dict):
                 continue
-            cluster = str(item.get("cluster") or "-")
-            hosts = item.get("hosts")
-            host_count = len(hosts) if isinstance(hosts, list) else 0
-            status = str(item.get("status") or "unavailable")
-            marker = "[!]" if status in {"created", "partial"} else "[*]"
-            lines.append(
-                f'{prefix} {marker} ClickHouse user "{username}" creation:{status} '
-                f"(cluster:{cluster}) (hosts:{host_count})"
-            )
-            admin_status = str(item.get("admin_status") or "not_requested")
-            if admin_status != "not_requested":
-                marker = "[!]" if admin_status in {"granted", "partial"} else "[*]"
-                lines.append(f"{prefix} {marker} admin grant:{admin_status} (cluster:{cluster})")
+            lines.append(_ddl_creation_line(prefix, username, item))
+            grant_line = _ddl_grant_line(prefix, item)
+            if grant_line is not None:
+                lines.append(grant_line)
         return lines
-    status = str(result.get("status") or "unavailable")
-    marker = "[!]" if status in {"created", "partial"} else "[*]"
-    lines = [f'{prefix} {marker} ClickHouse user "{username}" creation:{status}']
-    admin_status = str(result.get("admin_status") or "not_requested")
-    if admin_status != "not_requested" and not (isinstance(cluster_results, list) and status == "declined"):
-        lines.append(f"{prefix} [!] admin grant:{admin_status}")
+    lines = [_ddl_creation_line(prefix, username, result)]
+    grant_line = _ddl_grant_line(prefix, result)
+    if grant_line is not None:
+        lines.append(grant_line)
     return lines
 
 
@@ -87,8 +115,8 @@ __all__ = [
     "_emit_line",
     "_format_credential_attempts_records",
     "_format_credential_verification_records",
-    "_format_ddl_user_creation_records",
     "_format_ddl_topology_records",
+    "_format_ddl_user_creation_records",
     "_format_detect_record",
     "_format_record",
     "_format_znode_capability_records",

@@ -156,7 +156,6 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
                         clickhouse_port=getattr(args, "clickhouse_port", 9000),
                         clickhouse_cluster=getattr(args, "clickhouse_cluster", None),
                         timeout=float(getattr(args, "timeout", 5.0) or 5.0),
-                        keeper_target=f"{ctx.host}:{ctx.port}",
                         input_stream=args._keeper_input_stream,
                         output_stream=args._keeper_output_stream,
                         refresh_session=_refresh_ddl_session,

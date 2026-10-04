@@ -287,17 +287,25 @@ def test_keeper_ddl_access_colors_match_status(status: str, color: str) -> None:
         ("[*] DDL Worker Hosts (hosts:0)", "hosts:0", "bright_green"),
         ('[*] Cluster="qa"', '"qa"', "orange"),
         ('[*] Cluster="qa" Host="clickhouse:9000"', '"clickhouse:9000"', "orange"),
-        ('[!] ClickHouse user "audituser" creation:created', '"audituser"', "orange"),
-        ('[!] ClickHouse user "audituser" creation:created', "created", "true_red"),
-        ('[!] ClickHouse user "audituser" creation:partial', "partial", "true_red"),
-        ('[!] ClickHouse user "audituser" creation:failed', "failed", "bright_green"),
-        ('[!] ClickHouse user "audituser" creation:unverified', "unverified", "orange"),
-        ('[!] ClickHouse user "audituser" creation:unavailable', "unavailable", "orange"),
-        ("[!] admin grant:granted", "granted", "true_red"),
-        ("[!] admin grant:partial", "partial", "true_red"),
-        ("[!] admin grant:failed", "failed", "bright_green"),
-        ("[!] admin grant:unverified", "unverified", "orange"),
-        ("[!] admin grant:not_attempted", "not_attempted", "orange"),
+        ('[+] ClickHouse user "audituser" created (cluster:qa) (hosts:1:ch-a:9000)', '"audituser"', "orange"),
+        ('[+] ClickHouse user "audituser" created (cluster:qa) (hosts:1:ch-a:9000)', "created", "true_red"),
+        (
+            '[-] ClickHouse user "audituser" partially created (cluster:qa) (hosts:1:ch-a:9000)',
+            "partially created",
+            "orange",
+        ),
+        ('[-] ClickHouse user "audituser" not created (cluster:qa) (hosts:1:ch-a:9000)', "not created", "bright_green"),
+        (
+            '[-] ClickHouse user "audituser" creation unverified (cluster:qa) (hosts:1:ch-a:9000)',
+            "creation unverified",
+            "orange",
+        ),
+        ("[+] Administration rights granted (cluster:qa) (hosts:1:ch-a:9000)", "granted", "true_red"),
+        ("[-] Administration rights partially granted (cluster:qa) (hosts:1:ch-a:9000)", "partially granted", "orange"),
+        ("[-] Administration rights not granted (cluster:qa) (hosts:1:ch-a:9000)", "not granted", "bright_green"),
+        ("[-] Administration rights grant unverified (cluster:qa) (hosts:1:ch-a:9000)", "grant unverified", "orange"),
+        ('[+] ClickHouse user "audituser" created (cluster:qa) (hosts:1:ch-a:9000)', "qa", "orange"),
+        ('[+] ClickHouse user "audituser" created (cluster:qa) (hosts:1:ch-a:9000)', "ch-a:9000", "orange"),
         ("[-] DDL topology unavailable", "unavailable", "orange"),
     ],
 )
@@ -378,6 +386,29 @@ def test_keeper_ddl_topology_render_skips_invalid_host_collections() -> None:
     rendered = keeper_stage.render._format_ddl_topology_records(record, "txt")
     assert len(rendered) == 1
     assert rendered[0].endswith("[*] DDL Worker Hosts (hosts:0)")
+
+
+def test_keeper_report_lists_topology_before_ddl_creation_result() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 9181,
+        "module": "keeper",
+        "service": "keeper",
+        "ddl_topology_requested": {"clusters": True, "hosts": True},
+        "ddl_topology": {"status": "ok", "clusters": {"qa": ["clickhouse:9000"]}},
+        "ddl_user_creation": {
+            "username": "audituser",
+            "status": "created",
+            "admin_status": "not_requested",
+            "cluster": "qa",
+            "hosts": ["clickhouse:9000"],
+        },
+    }
+    plan = stage_runtime.build_render_plan(keeper_stage.render)
+    lines = stage_runtime.render_with_plan(plan, record, "txt")
+    topology_index = next(index for index, line in enumerate(lines) if "DDL Clusters" in line)
+    creation_index = next(index for index, line in enumerate(lines) if 'ClickHouse user "audituser"' in line)
+    assert topology_index < creation_index
 
 
 def test_keeper_help_explains_default_ddl_write_probe(capsys: pytest.CaptureFixture[str]) -> None:

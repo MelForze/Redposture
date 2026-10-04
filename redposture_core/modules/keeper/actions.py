@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 from typing import Any
 
@@ -27,6 +28,16 @@ from ..zookeeper.actions import (
 from ..zookeeper.actions import host_stage as _zookeeper_protocol_host_stage
 
 _DDL_QUEUE = "/clickhouse/task_queue/ddl"
+
+
+def _ddl_host_spans(_marker: str, text: str) -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
+    for match in re.finditer(r"\(hosts:(\d+):([^)]*)\)", text):
+        count = int(match.group(1))
+        spans.append((match.start(1), match.end(1), "true_red" if count else "bright_green"))
+        if match.group(2) != "-":
+            spans.append((match.start(2), match.end(2), "orange"))
+    return spans
 
 
 def _reset_probe_session(client: Any) -> str | None:
@@ -91,10 +102,10 @@ def _render_colored_keeper_line(console: Any, line: str) -> bool:
             " [*] DDL Clusters ",
             " [*] DDL Worker Hosts ",
             " [*] Cluster=",
-            " [!] ClickHouse user ",
-            " [!] admin grant:",
-            " [*] ClickHouse user ",
-            " [*] admin grant:",
+            " [+] ClickHouse user ",
+            " [-] ClickHouse user ",
+            " [+] Administration rights ",
+            " [-] Administration rights ",
             " [-] DDL topology ",
         )
     ):
@@ -111,17 +122,19 @@ def _render_colored_keeper_line(console: Any, line: str) -> bool:
                 RegexColorRule(r'(?<=Cluster=)"[^"]*"', "orange"),
                 RegexColorRule(r'(?<=Host=)"[^"]*"', "orange"),
                 RegexColorRule(r'(?<=ClickHouse user )"[^"]*"', "orange"),
-                RegexColorRule(r"(?<=creation:)(?:created|partial)\b", "true_red"),
-                RegexColorRule(r"(?<=creation:)failed\b", "bright_green"),
-                RegexColorRule(r"(?<=creation:)(?:unverified|unavailable)\b", "orange"),
-                RegexColorRule(r"(?<=creation:)declined\b", "bright_green"),
-                RegexColorRule(r"(?<=admin grant:)(?:granted|partial)\b", "true_red"),
-                RegexColorRule(r"(?<=admin grant:)failed\b", "bright_green"),
-                RegexColorRule(r"(?<=admin grant:)declined\b", "bright_green"),
-                RegexColorRule(r"(?<=admin grant:)(?:unverified|not_attempted)\b", "orange"),
-                RegexColorRule(r"(?<=cluster:)[A-Za-z_][A-Za-z0-9_]*", "orange"),
+                RegexColorRule(r'(?<=" )created\b', "true_red"),
+                RegexColorRule(r'(?<=" )partially created\b', "orange"),
+                RegexColorRule(r'(?<=" )not created\b', "bright_green"),
+                RegexColorRule(r'(?<=" )creation unverified\b', "orange"),
+                RegexColorRule(r"(?<=Administration rights )granted\b", "true_red"),
+                RegexColorRule(r"(?<=Administration rights )partially granted\b", "orange"),
+                RegexColorRule(r"(?<=Administration rights )not granted\b", "bright_green"),
+                RegexColorRule(r"(?<=Administration rights )grant unverified\b", "orange"),
+                RegexColorRule(r"(?<=cluster:)[^)]+", "orange"),
+                RegexColorRule(r"(?<=reason:)[^)]+", "orange"),
                 RegexColorRule(r"(?<=DDL topology )unavailable\b", "orange"),
             ),
+            extra_spans=_ddl_host_spans,
         )
     return _render_colored_zookeeper_line(console, line)
 
