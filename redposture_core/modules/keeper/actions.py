@@ -13,6 +13,7 @@ from ...clients.zookeeper import (
     _ZK_ERR_OK,
     _zk_error_name,
 )
+from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line
 from ..zookeeper.actions import (
     _format_credential_attempts_records,
     _format_credential_verification_records,
@@ -84,6 +85,39 @@ def probe_ddl_access(client: Any) -> tuple[str, str | None]:
 
 
 def _render_colored_keeper_line(console: Any, line: str) -> bool:
+    if any(
+        marker in line
+        for marker in (
+            " [*] DDL Clusters ",
+            " [*] DDL Worker Hosts ",
+            " [*] Cluster=",
+            " [!] ClickHouse user ",
+            " [!] admin grant:",
+            " [-] DDL topology ",
+        )
+    ):
+        return render_colored_marker_line(
+            console,
+            line,
+            tag="KEEPER",
+            include_auth_required=False,
+            counts=(
+                CountColorRule("clusters", "true_red", zero_color="bright_green"),
+                CountColorRule("hosts", "true_red", zero_color="bright_green"),
+            ),
+            regexes=(
+                RegexColorRule(r'(?<=Cluster=)"[^"]*"', "orange"),
+                RegexColorRule(r'(?<=Host=)"[^"]*"', "orange"),
+                RegexColorRule(r'(?<=ClickHouse user )"[^"]*"', "orange"),
+                RegexColorRule(r"(?<=creation:)(?:created|partial)\b", "true_red"),
+                RegexColorRule(r"(?<=creation:)failed\b", "bright_green"),
+                RegexColorRule(r"(?<=creation:)(?:unverified|unavailable)\b", "orange"),
+                RegexColorRule(r"(?<=admin grant:)(?:granted|partial)\b", "true_red"),
+                RegexColorRule(r"(?<=admin grant:)failed\b", "bright_green"),
+                RegexColorRule(r"(?<=admin grant:)(?:unverified|not_attempted)\b", "orange"),
+                RegexColorRule(r"(?<=DDL topology )unavailable\b", "orange"),
+            ),
+        )
     return _render_colored_zookeeper_line(console, line)
 
 

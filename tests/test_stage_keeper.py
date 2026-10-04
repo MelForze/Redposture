@@ -276,6 +276,110 @@ def test_keeper_ddl_access_colors_match_status(status: str, color: str) -> None:
     assert (f"ddl access:{status}", color) in console.paint_calls
 
 
+@pytest.mark.parametrize(
+    ("payload", "fragment", "color"),
+    [
+        ("[*] DDL Clusters (clusters:2)", "DDL Clusters (", "white"),
+        ("[*] DDL Clusters (clusters:2)", "clusters:2", "true_red"),
+        ("[*] DDL Clusters (clusters:0)", "clusters:0", "bright_green"),
+        ("[*] DDL Worker Hosts (hosts:3)", "DDL Worker Hosts (", "white"),
+        ("[*] DDL Worker Hosts (hosts:3)", "hosts:3", "true_red"),
+        ("[*] DDL Worker Hosts (hosts:0)", "hosts:0", "bright_green"),
+        ('[*] Cluster="qa"', '"qa"', "orange"),
+        ('[*] Cluster="qa" Host="clickhouse:9000"', '"clickhouse:9000"', "orange"),
+        ('[!] ClickHouse user "audituser" creation:created', '"audituser"', "orange"),
+        ('[!] ClickHouse user "audituser" creation:created', "created", "true_red"),
+        ('[!] ClickHouse user "audituser" creation:partial', "partial", "true_red"),
+        ('[!] ClickHouse user "audituser" creation:failed', "failed", "bright_green"),
+        ('[!] ClickHouse user "audituser" creation:unverified', "unverified", "orange"),
+        ('[!] ClickHouse user "audituser" creation:unavailable', "unavailable", "orange"),
+        ("[!] admin grant:granted", "granted", "true_red"),
+        ("[!] admin grant:partial", "partial", "true_red"),
+        ("[!] admin grant:failed", "failed", "bright_green"),
+        ("[!] admin grant:unverified", "unverified", "orange"),
+        ("[!] admin grant:not_attempted", "not_attempted", "orange"),
+        ("[-] DDL topology unavailable", "unavailable", "orange"),
+    ],
+)
+def test_keeper_ddl_output_uses_airflow_color_semantics(payload: str, fragment: str, color: str) -> None:
+    class Console:
+        def __init__(self) -> None:
+            self.paint_calls: list[tuple[str, str]] = []
+
+        def _paint(self, text: str, selected: str, _stream: object) -> str:
+            self.paint_calls.append((text, selected))
+            return text
+
+        def plain(self, _text: str, color: str | None = None) -> None:
+            del color
+
+    console = Console()
+    assert keeper_stage.render._render_colored_keeper_line(console, f"KEEPER\t127.0.0.1\t9181\t {payload}")
+    assert (fragment, color) in console.paint_calls
+
+
+def test_keeper_ddl_output_respects_no_color(capsys: pytest.CaptureFixture[str]) -> None:
+    from redposture_core.console import Console
+
+    payload = 'KEEPER\t127.0.0.1\t9181\t [*] Cluster="qa" Host="clickhouse:9000"'
+    assert keeper_stage.render._render_colored_keeper_line(Console(no_color=True), payload)
+    assert capsys.readouterr().out == f"{payload}\n"
+
+
+def test_keeper_ddl_topology_render_keeps_plain_text_and_json_contract() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 9181,
+        "service": "keeper",
+        "ddl_topology_requested": {"clusters": True, "hosts": True},
+        "ddl_topology": {
+            "status": "ok",
+            "clusters": {
+                "zeta": ["worker-b:9000"],
+                "alpha": ["worker-a:9000", "worker-c:9000"],
+            },
+        },
+    }
+    rendered = keeper_stage.render._format_ddl_topology_records(record, "txt")
+    assert [line.split("\t", 3)[-1].strip() for line in rendered] == [
+        "[*] DDL Clusters (clusters:2)",
+        '[*] Cluster="alpha"',
+        '[*] Cluster="zeta"',
+        "[*] DDL Worker Hosts (hosts:3)",
+        '[*] Cluster="alpha" Host="worker-a:9000"',
+        '[*] Cluster="alpha" Host="worker-c:9000"',
+        '[*] Cluster="zeta" Host="worker-b:9000"',
+    ]
+    assert keeper_stage.render._format_ddl_topology_records(record, "json") == []
+
+
+def test_keeper_ddl_topology_render_handles_absent_and_unavailable() -> None:
+    base = {"host": "127.0.0.1", "port": 9181, "service": "keeper"}
+    assert keeper_stage.render._format_ddl_topology_records(base, "txt") == []
+    record = {
+        **base,
+        "ddl_topology_requested": {"clusters": True, "hosts": True},
+        "ddl_topology": {"status": "unavailable", "reason": "read denied"},
+    }
+    assert keeper_stage.render._format_ddl_topology_records(record, "txt")[0].endswith("[-] DDL topology unavailable")
+    assert keeper_stage.render._format_ddl_topology_records(record, "txt", debug=True)[0].endswith(
+        "[-] DDL topology read denied"
+    )
+
+
+def test_keeper_ddl_topology_render_skips_invalid_host_collections() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 9181,
+        "service": "keeper",
+        "ddl_topology_requested": {"clusters": False, "hosts": True},
+        "ddl_topology": {"status": "ok", "clusters": {"broken": None, "empty": []}},
+    }
+    rendered = keeper_stage.render._format_ddl_topology_records(record, "txt")
+    assert len(rendered) == 1
+    assert rendered[0].endswith("[*] DDL Worker Hosts (hosts:0)")
+
+
 def test_keeper_help_explains_default_ddl_write_probe(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args(["keeper", "--help"])
