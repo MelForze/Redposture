@@ -11,10 +11,9 @@ from redposture_core.module_registry import AUDIT_MODULE_NAMES
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_FILES = (
-    "requirements/ci-py310.txt",
-    "requirements/ci-py311.txt",
     "requirements/ci-py312.txt",
     "requirements/ci-py313.txt",
+    "requirements/ci-py314.txt",
     "requirements/release-py312.txt",
 )
 PINNED_REQUIREMENT = re.compile(r"^[A-Za-z0-9_.-]+==[^\s]+$")
@@ -37,10 +36,10 @@ def test_ci_lock_files_contain_only_exact_versions() -> None:
         locked_names = {canonicalize_name(line.partition("==")[0]) for line in lines}
         assert runtime_dependencies <= locked_names, relative_path
 
-    for relative_path in LOCK_FILES[:4]:
+    for relative_path in LOCK_FILES[:3]:
         lines = (ROOT / relative_path).read_text(encoding="utf-8").splitlines()
         assert "pytest-socket==0.8.1" in lines
-        assert "editables==0.5" in lines
+        assert any(line.startswith("editables==") for line in lines)
         assert any(line.startswith("hatchling==") for line in lines)
         assert any(line.startswith("tox==") for line in lines)
 
@@ -58,6 +57,23 @@ def test_local_tox_and_github_ci_delegate_to_shared_runner() -> None:
     assert "bash scripts/run_ci_job.sh test" in workflow
     assert "run_mutation_smoke.py" not in workflow
     assert "run_mutation_smoke.py" in (ROOT / "scripts/run_output_quality_audit.py").read_text(encoding="utf-8")
+
+
+def test_supported_python_versions_match_metadata_and_ci() -> None:
+    project = tomlkit.parse((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    tox = (ROOT / "tox.ini").read_text(encoding="utf-8")
+    local_ci = (ROOT / "scripts/check_ci_matrix.sh").read_text(encoding="utf-8")
+
+    assert project["requires-python"] == ">=3.12"
+    for minor in (12, 13, 14):
+        assert f"Programming Language :: Python :: 3.{minor}" in project["classifiers"]
+        assert f'python-version: "3.{minor}"' in workflow
+        assert f"py3{minor}" in tox
+        assert f"python3.{minor}" in local_ci
+    for minor in (10, 11):
+        assert f'python-version: "3.{minor}"' not in workflow
+        assert f"py3{minor}" not in tox
 
 
 def test_github_actions_and_runner_are_pinned() -> None:

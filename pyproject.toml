@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "5.21.32"
+version = "5.21.33"
 description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/MongoDB/Docker/Oracle/ClickHouse/etcd/Docker Registry/Harbor/Nexus/Grafana/GitLab/Kafka/ZooKeeper/Keeper/Elasticsearch/gRPC/MinIO auditing"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [
   { name = "RedPosture contributors" },
@@ -19,10 +19,9 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Operating System :: OS Independent",
   "Topic :: Security",
   "Topic :: System :: Networking",
@@ -87,7 +86,7 @@ markers = [
 ]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 files = ["redposture_core", "redposture.py", "tests"]
 explicit_package_bases = true
 namespace_packages = true
@@ -144,12 +143,14 @@ ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py312"
 extend-exclude = ["redposture_core/proto/*_pb2.py", "docs/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
-ignore = ["E501"]
+# Keep existing valid annotations and UTC expressions without a broad style-only
+# rewrite when the minimum supported interpreter changes.
+ignore = ["E501", "UP017", "UP040", "UP046", "UP047"]
 per-file-ignores = { "redposture_core/proto/*_pb2.py" = ["I001", "UP009"] }
 
 [tool.ruff.format]

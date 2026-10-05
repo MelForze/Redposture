@@ -12,7 +12,7 @@
     <img src="https://img.shields.io/github/v/tag/MelForze/Redposture?style=flat-square&label=version" alt="Latest version">
   </a>
   <img src="https://img.shields.io/badge/modules-24-2b2f36?style=flat-square" alt="Modules">
-  <img src="https://img.shields.io/badge/Python-3.10%2B-2b2f36?style=flat-square" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/Python-3.12%2B-2b2f36?style=flat-square" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/install-pipx-2b2f36?style=flat-square" alt="Install with pipx">
 </p>
 
@@ -21,7 +21,7 @@
 
 CLI for authorized audits of exposed services: identify the product, verify access,
 enumerate data, find secrets, and match versions against an offline CVE catalog.
-Python 3.10+; 24 audit modules plus exporter scan/collect/trigger workflows.
+Python 3.12+; 24 audit modules plus exporter scan/collect/trigger workflows.
 
 ## Install
 
@@ -450,9 +450,18 @@ pytest
 ./scripts/check_ci_matrix.sh --worktree
 ```
 
-CI locks are in `requirements/` (`scripts/update_ci_locks.sh`). Run local
-`./scripts/run_qa_handoff.sh full` and `versions` sequentially with fresh output
-directories. `./scripts/run_http_detection_qa.sh` writes a focused report under
+CI locks are in `requirements/` (`scripts/update_ci_locks.sh`). Full QA and
+selected sections use the same local runner:
+
+```bash
+./scripts/run_full_local_qa.sh --list
+./scripts/run_full_local_qa.sh /tmp/redposture_qa_fuzz --section cli-fuzz,hypothesis
+./scripts/run_full_local_qa.sh /tmp/redposture_qa_full
+```
+
+Each section writes its own log and summary; Docker is required only for Docker
+sections. `./scripts/run_qa_handoff.sh versions` runs the separate version
+matrix. `./scripts/run_http_detection_qa.sh` writes a focused report under
 `.redposture/qa/`. `lab/`, `lab_tests/`, `qa_tests/` and `.redposture/` are
 excluded from Git.
 

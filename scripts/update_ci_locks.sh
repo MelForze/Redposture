@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCK_DIR="$ROOT_DIR/requirements"
-PYTHONS=(python3.10 python3.11 python3.12 python3.13)
+PYTHONS=(python3.12 python3.13 python3.14)
 PIP_VERSION="26.2.1"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/redposture-locks.XXXXXX")"
 

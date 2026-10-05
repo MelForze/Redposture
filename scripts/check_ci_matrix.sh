@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-PYTHONS=(python3.10 python3.11 python3.12 python3.13)
+PYTHONS=(python3.12 python3.13 python3.14)
 VENV_ROOT="${REDPOSTURE_CI_VENV_ROOT:-$ROOT_DIR/.ci-venvs}"
 ALLOW_MISSING=0
 SKIP_INSTALL=0
@@ -27,7 +27,7 @@ Runs the local pre-push CI gate:
   - install exact locked project + dev deps into per-version venvs
   - by default, test a clean tracked HEAD archive, matching GitHub checkout
   - run the same blocking lint job as GitHub on Python 3.12
-  - run the same syntax, pytest/coverage, per-file floor and CLI smoke on Python 3.10-3.13
+  - run the same syntax, pytest/coverage, per-file floor and CLI smoke on Python 3.12-3.14
 
 Options:
   --allow-missing   Skip missing Python interpreters instead of failing.

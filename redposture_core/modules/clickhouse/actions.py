@@ -2242,60 +2242,53 @@ def collect_clickhouse_data(
         )
         if str(value or "").strip()
     ]
-    payload.update(
-        {
-            "protocol": session.protocol,
-            "requested_database": desired_database,
-            "effective_database": session.database,
-            "database_fallback": session.database != desired_database,
-            "partial": bool(session.database != desired_database),
-            "partial_reasons": list(
-                dict.fromkeys(
-                    (
-                        [f"database fallback: {desired_database} -> {session.database}"]
-                        if session.database != desired_database
-                        else []
-                    )
-                    + list(action_result["partial_reasons"])
-                )
-            ),
-            "action_statuses": action_result["action_statuses"],
-            "requested_operation_failure": bool(action_result["requested_operation_failure"]),
-            "database_names": database_names,
-            "database_count": action_result["database_count"],
-            "table_names": table_names,
-            "table_access": action_result["table_access"],
-            "table_targets": action_result["table_targets"],
-            "table_columns_info": action_result["table_columns_info"],
-            "table_dumps": action_result["table_dumps"],
-            "sql_attempted": action_result["sql_attempted"],
-            "sql_ok": action_result["sql_ok"],
-            "sql_output": action_result["sql_output"],
-            "sql_error": action_result["sql_error"],
-            "execute_attempted": action_result["execute_attempted"],
-            "execute_ok": action_result["execute_ok"],
-            "execute_output": action_result["execute_output"],
-            "execute_error": action_result["execute_error"],
-            **{
-                key: action_result[key]
-                for key in (
-                    "execute_exit_code",
-                    "execute_truncated",
-                    "execute_stdout_base64",
-                    "execute_stderr_base64",
-                )
-                if key in action_result
-            },
-            "read_capability": action_result["read_capability"],
-            "execute_capability": action_result["execute_capability"],
-            "admin_capability": action_result["admin_capability"],
-            "elapsed_ms": int((time.monotonic() - started) * 1000),
-            "error": "; ".join(dict.fromkeys(errors)) if errors else None,
-            "discover_requested": bool(options.get("discover")),
-            "discover_report": discover_report,
-            "_discover_findings_streamed": bool(options.get("discover") and getattr(ctx, "live_emit", None)),
-        }
-    )
+    combined_partial_reasons: list[str] = (
+        [f"database fallback: {desired_database} -> {session.database}"] if session.database != desired_database else []
+    ) + list(action_result["partial_reasons"])
+    payload_update: dict[str, Any] = {
+        "protocol": session.protocol,
+        "requested_database": desired_database,
+        "effective_database": session.database,
+        "database_fallback": session.database != desired_database,
+        "partial": bool(session.database != desired_database),
+        "partial_reasons": list(dict.fromkeys(combined_partial_reasons)),
+        "action_statuses": action_result["action_statuses"],
+        "requested_operation_failure": bool(action_result["requested_operation_failure"]),
+        "database_names": database_names,
+        "database_count": action_result["database_count"],
+        "table_names": table_names,
+        "table_access": action_result["table_access"],
+        "table_targets": action_result["table_targets"],
+        "table_columns_info": action_result["table_columns_info"],
+        "table_dumps": action_result["table_dumps"],
+        "sql_attempted": action_result["sql_attempted"],
+        "sql_ok": action_result["sql_ok"],
+        "sql_output": action_result["sql_output"],
+        "sql_error": action_result["sql_error"],
+        "execute_attempted": action_result["execute_attempted"],
+        "execute_ok": action_result["execute_ok"],
+        "execute_output": action_result["execute_output"],
+        "execute_error": action_result["execute_error"],
+        **{
+            key: action_result[key]
+            for key in (
+                "execute_exit_code",
+                "execute_truncated",
+                "execute_stdout_base64",
+                "execute_stderr_base64",
+            )
+            if key in action_result
+        },
+        "read_capability": action_result["read_capability"],
+        "execute_capability": action_result["execute_capability"],
+        "admin_capability": action_result["admin_capability"],
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "error": "; ".join(dict.fromkeys(errors)) if errors else None,
+        "discover_requested": bool(options.get("discover")),
+        "discover_report": discover_report,
+        "_discover_findings_streamed": bool(options.get("discover") and getattr(ctx, "live_emit", None)),
+    }
+    payload.update(payload_update)
     payload["partial"] = bool(payload["partial_reasons"])
     return _normalize_clickhouse_record_schema(payload)
 
