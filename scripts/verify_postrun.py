@@ -976,9 +976,11 @@ _OPENSEARCH_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("admin", "admin"),
     ("admin", "changeme"),
     ("admin", "password"),
+    ("admin", "12345678"),
     ("elastic", "changeme"),
     ("elastic", "elastic"),
     ("elastic", "password"),
+    ("elastic", "12345678"),
     ("kibana", "changeme"),
     ("kibana", "kibana"),
     ("logstash", "logstash"),
@@ -1018,7 +1020,7 @@ def _validate_opensearch_defcreds_contract(rows: list[dict[str, str]]) -> None:
         ] or any(password != "<redacted>" for _username, password in pairs):
             raise SystemExit(f"OpenSearch defcreds order or redaction mismatch: {pairs!r}")
         for index, attempt in enumerate(attempts):
-            is_winner = index == 8
+            is_winner = index == _OPENSEARCH_DEFAULT_CREDENTIALS.index(("logstash", "logstash"))
             expected_status = "weak_default_creds" if is_winner else "auth_required"
             expected_probe = "verified" if is_winner else "rejected"
             expected_http = 200 if is_winner else 401

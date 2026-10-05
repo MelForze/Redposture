@@ -68,6 +68,15 @@
         "credential_verification": "rejected",
         "credential_verified": false,
         "error": "password authentication failed for user \"postgres\"",
+        "password": "12345678",
+        "source": "default",
+        "status": "auth_required",
+        "username": "postgres"
+      },
+      {
+        "credential_verification": "rejected",
+        "credential_verified": false,
+        "error": "password authentication failed for user \"postgres\"",
         "password": "admin",
         "source": "default",
         "status": "auth_required",

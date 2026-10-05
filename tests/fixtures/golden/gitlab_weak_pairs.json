@@ -48,6 +48,13 @@
         "password": "<redacted>",
         "source": "default",
         "status": "invalid_credentials",
+        "username": "root"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "invalid_credentials",
         "username": "admin"
       },
       {

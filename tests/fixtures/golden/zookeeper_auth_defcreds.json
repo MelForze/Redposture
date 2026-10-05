@@ -8,6 +8,15 @@
       {
         "credential_verdict": "rejected",
         "error": "authentication failed",
+        "password": "12345678",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
         "password": "admin",
         "provided_credentials_ok": false,
         "source": "default",

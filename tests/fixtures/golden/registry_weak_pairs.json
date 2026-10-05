@@ -91,6 +91,13 @@
         "password": "<redacted>",
         "source": "default",
         "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "error": "authentication rejected",
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
         "username": "root"
       },
       {

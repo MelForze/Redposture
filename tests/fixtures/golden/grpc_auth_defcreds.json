@@ -53,6 +53,14 @@
       },
       {
         "error": null,
+        "password": "12345678",
+        "provided_credential_type": "basic",
+        "source": "default",
+        "status": "invalid_credentials",
+        "username": "admin"
+      },
+      {
+        "error": null,
         "password": "admin",
         "provided_credential_type": "basic",
         "source": "default",

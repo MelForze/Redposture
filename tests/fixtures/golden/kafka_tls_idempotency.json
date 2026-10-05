@@ -2,6 +2,13 @@
   {
     "attempted_credentials": [
       {
+        "error": "SASL auth failed: Authentication failed: Invalid username or password",
+        "password": "12345678",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
         "error": null,
         "password": "admin",
         "source": "default",

@@ -3,6 +3,13 @@
     "attempted_credentials": [
       {
         "error": null,
+        "password": "12345678",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
         "password": "admin",
         "source": "default",
         "status": "weak_default_creds",
@@ -72,8 +79,15 @@
         "username": "user"
       }
     ],
-    "attempted_credentials_count": 10,
+    "attempted_credentials_count": 11,
     "auth_attempts": [
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "12345678",
+        "source": "default",
+        "username": "admin"
+      },
       {
         "error": "",
         "ok": true,
@@ -150,6 +164,13 @@
     "check_results": [],
     "check_urls": [],
     "credential_attempts": [
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "12345678",
+        "token": null,
+        "username": "admin"
+      },
       {
         "error": null,
         "ok": true,
@@ -336,6 +357,13 @@
     "attempted_credentials": [
       {
         "error": null,
+        "password": "12345678",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
         "password": "admin",
         "source": "default",
         "status": "weak_default_creds",
@@ -405,8 +433,15 @@
         "username": "user"
       }
     ],
-    "attempted_credentials_count": 10,
+    "attempted_credentials_count": 11,
     "auth_attempts": [
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "12345678",
+        "source": "default",
+        "username": "admin"
+      },
       {
         "error": "",
         "ok": true,
@@ -483,6 +518,13 @@
     "check_results": [],
     "check_urls": [],
     "credential_attempts": [
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "12345678",
+        "token": null,
+        "username": "admin"
+      },
       {
         "error": null,
         "ok": true,
@@ -669,6 +711,13 @@
     "attempted_credentials": [
       {
         "error": null,
+        "password": "12345678",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
         "password": "admin",
         "source": "default",
         "status": "weak_default_creds",
@@ -738,8 +787,15 @@
         "username": "user"
       }
     ],
-    "attempted_credentials_count": 10,
+    "attempted_credentials_count": 11,
     "auth_attempts": [
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "12345678",
+        "source": "default",
+        "username": "admin"
+      },
       {
         "error": "",
         "ok": true,
@@ -816,6 +872,13 @@
     "check_results": [],
     "check_urls": [],
     "credential_attempts": [
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "12345678",
+        "token": null,
+        "username": "admin"
+      },
       {
         "error": null,
         "ok": true,
@@ -1002,6 +1065,13 @@
     "attempted_credentials": [
       {
         "error": null,
+        "password": "12345678",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
         "password": "admin",
         "source": "default",
         "status": "weak_default_creds",
@@ -1071,8 +1141,15 @@
         "username": "user"
       }
     ],
-    "attempted_credentials_count": 10,
+    "attempted_credentials_count": 11,
     "auth_attempts": [
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "12345678",
+        "source": "default",
+        "username": "admin"
+      },
       {
         "error": "",
         "ok": true,
@@ -1149,6 +1226,13 @@
     "check_results": [],
     "check_urls": [],
     "credential_attempts": [
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "12345678",
+        "token": null,
+        "username": "admin"
+      },
       {
         "error": null,
         "ok": true,
@@ -1335,6 +1419,13 @@
     "attempted_credentials": [
       {
         "error": null,
+        "password": "12345678",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "error": null,
         "password": "admin",
         "source": "default",
         "status": "weak_default_creds",
@@ -1404,8 +1495,15 @@
         "username": "user"
       }
     ],
-    "attempted_credentials_count": 10,
+    "attempted_credentials_count": 11,
     "auth_attempts": [
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "12345678",
+        "source": "default",
+        "username": "admin"
+      },
       {
         "error": "",
         "ok": true,
@@ -1482,6 +1580,13 @@
     "check_results": [],
     "check_urls": [],
     "credential_attempts": [
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "12345678",
+        "token": null,
+        "username": "admin"
+      },
       {
         "error": null,
         "ok": true,

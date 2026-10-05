@@ -21,6 +21,13 @@
         "password": "<redacted>",
         "source": "default",
         "status": "auth_unverified",
+        "username": "admin"
+      },
+      {
+        "error": null,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_unverified",
         "username": "root"
       },
       {
@@ -127,7 +134,7 @@
       }
     ],
     "status": "auth_unverified",
-    "tls_auto_insecure": true,
+    "tls_auto_insecure": false,
     "version": "v1.31.6+k3s1"
   }
 ]

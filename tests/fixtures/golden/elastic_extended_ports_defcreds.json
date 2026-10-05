@@ -75,6 +75,52 @@
         "verification_capability": "identity_endpoint_supported"
       },
       {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [admin] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [admin] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate user [elastic] for REST request [/_security/_authenticate]",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate user [elastic] for REST request [/_security/_authenticate]",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "elastic",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
         "auth_error_detail": null,
         "auth_probe_endpoint": "/_security/_authenticate",
         "auth_probe_http_status": 200,

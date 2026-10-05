@@ -33,6 +33,14 @@
       },
       {
         "auth_method": "password",
+        "error": "permission denied",
+        "password": "12345678",
+        "source": "default",
+        "status": "auth_failed",
+        "username": "root@pam"
+      },
+      {
+        "auth_method": "password",
         "error": null,
         "password": "admin",
         "source": "default",
@@ -106,6 +114,12 @@
         "password": "password",
         "source": "defcreds",
         "username": "admin@pve"
+      },
+      {
+        "ok": "False",
+        "password": "12345678",
+        "source": "defcreds",
+        "username": "root@pam"
       },
       {
         "ok": "True",

@@ -96,7 +96,7 @@
       }
     ],
     "status": "open_no_auth",
-    "tls_auto_insecure": true,
+    "tls_auto_insecure": false,
     "version": "v1.31.6+k3s1"
   }
 ]

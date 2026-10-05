@@ -56,6 +56,13 @@
       },
       {
         "error": null,
+        "password": "12345678",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "default"
+      },
+      {
+        "error": null,
         "password": "changeme",
         "source": "default",
         "status": "invalid_credentials_anonymous",
@@ -114,7 +121,7 @@
     "auth_required": false,
     "auth_status": "rejected",
     "auth_transport_attempts": 1,
-    "credential_attempt_count": 14,
+    "credential_attempt_count": 15,
     "credential_attempts": [
       {
         "error": "Code: 516.\nDB::Exception: admin: Authentication failed: password is incorrect, or there is no user with such name.. Stack trace:\n\n0. DB::Exception::Exception(DB::Exception::Mess...",
@@ -155,6 +162,13 @@
         "error": null,
         "ok": true,
         "password": "",
+        "token": null,
+        "username": "default"
+      },
+      {
+        "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
+        "ok": false,
+        "password": "12345678",
         "token": null,
         "username": "default"
       },

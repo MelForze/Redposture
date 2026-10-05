@@ -83,7 +83,7 @@
       }
     ],
     "status": "auth_unverified_anonymous",
-    "tls_auto_insecure": true,
+    "tls_auto_insecure": false,
     "version": "v1.31.6+k3s1"
   }
 ]

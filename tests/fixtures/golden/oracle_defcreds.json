@@ -123,6 +123,13 @@
       {
         "error": "invalid credentials",
         "ok": false,
+        "password": "12345678",
+        "token": null,
+        "username": "system"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
         "password": "manager",
         "token": null,
         "username": "system"

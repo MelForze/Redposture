@@ -74,6 +74,42 @@
         "password": "<redacted>",
         "source": "default",
         "status": "auth_required",
+        "username": "admin",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
+        "username": "elastic",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "<redacted>",
+        "source": "default",
+        "status": "auth_required",
         "username": "elastic",
         "verification_capability": "identity_endpoint_supported"
       },

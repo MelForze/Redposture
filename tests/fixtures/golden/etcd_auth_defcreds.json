@@ -56,6 +56,13 @@
       {
         "error": "authenticate returned status 400",
         "ok": false,
+        "password": "12345678",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
         "password": "admin",
         "token": null,
         "username": "root"

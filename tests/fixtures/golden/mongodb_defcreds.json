@@ -48,6 +48,13 @@
       {
         "error": "connection timeout",
         "ok": false,
+        "password": "12345678",
+        "token": null,
+        "username": "admin"
+      },
+      {
+        "error": "connection timeout",
+        "ok": false,
         "password": "admin",
         "token": null,
         "username": "admin"
