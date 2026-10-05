@@ -55,6 +55,16 @@ Main workers: 64 for fewer than 1000 expanded `host:port` tasks, otherwise 128
 limits are MinIO/Elastic/Proxmox 8 and ClickHouse 4 (`max_threads=1` per query).
 Exporters use separate schedulers.
 
+Postgres and ClickHouse `--os-shell` show command exit status and separate
+stdout/stderr. Binary output gets a safe hex preview; use `:hex [stdout|stderr]
+[bytes]`, `:base64 [stdout|stderr] [bytes]`, or `:save [stdout|stderr]
+<local-path>` for captured bytes. `:limit 16M` changes the per-stream capture
+budget (default 8 MiB, maximum 50 MiB); `:help` lists local commands.
+`:save` never overwrites an existing file. A truncated capture is marked
+partial, and an interrupted command is never replayed automatically.
+Docker/KubeAPI exec include Base64 fields in JSON for binary output; Oracle
+Scheduler captures at most 8 KiB per stream when readback is available.
+
 `--discover` covers Airflow, MinIO, Elastic/OpenSearch, ClickHouse and Proxmox.
 The default budget is 50 MiB per target. Only Elastic/OpenSearch has a default
 deadline (300 s); other modules have no default time or item cap. Use

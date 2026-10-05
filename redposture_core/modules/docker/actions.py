@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 from collections.abc import Callable
@@ -18,6 +19,7 @@ from ...clients.docker_engine import (
 from ...clients.http_api import http_response_requires_https, infer_http_base_path
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...shell_capture import hex_preview
 from ...stage_runtime import (
     StageTelemetryBuilder,
 )
@@ -476,8 +478,14 @@ def _audit_docker_host(
                 capabilities["can_exec"] = False
             else:
                 result = client.exec_command(container_id, exec_cmd)
+                exit_code = result.get("exit_code")
                 result.update(
-                    {"ok": True, "container": container_selector, "container_id": container_id, "command": exec_cmd}
+                    {
+                        "ok": exit_code == 0 if isinstance(exit_code, int) else None,
+                        "container": container_selector,
+                        "container_id": container_id,
+                        "command": exec_cmd,
+                    }
                 )
                 record["exec_result"] = result
                 capabilities["can_exec"] = True
@@ -798,9 +806,15 @@ def _format_exec_lines(record: dict[str, Any], output_format: str, *, debug: boo
         ]
     prefix = _nxc_prefix(record)
     lines = [f"{prefix} [*] Exec Result"]
-    if not result.get("ok"):
-        lines.append(f"{prefix} [!] exec failed err={_clip(str(result.get('error') or '-'), 160)}")
-        return lines
+    exit_code = result.get("exit_code")
+    if result.get("ok") is False:
+        tail = f" (exit:{exit_code})" if isinstance(exit_code, int) else ""
+        error = str(result.get("error") or "").strip()
+        lines.append(f"{prefix} [-] exec failed{tail}" + (f" err={_clip(error, 160)}" if error else ""))
+    elif result.get("ok") is None:
+        lines.append(f"{prefix} [!] exec result unknown")
+    elif isinstance(exit_code, int):
+        lines.append(f"{prefix} [+] exec succeeded (exit:{exit_code})")
     stdout = str(result.get("stdout") or "").strip()
     stderr = str(result.get("stderr") or "").strip()
     if debug:
@@ -812,7 +826,15 @@ def _format_exec_lines(record: dict[str, Any], output_format: str, *, debug: boo
         return lines
     lines.extend(_split_exec_payload(prefix, stdout))
     lines.extend(_split_exec_payload(prefix, stderr))
-    if len(lines) == 1:
+    for stream in ("stdout", "stderr"):
+        encoded = result.get(f"{stream}_base64")
+        if isinstance(encoded, str):
+            try:
+                binary = base64.b64decode(encoded, validate=True)
+            except ValueError:
+                continue
+            lines.extend(f"{prefix} {line}" for line in hex_preview(binary, limit=32))
+    if not stdout and not stderr and result.get("ok") is True:
         lines.append(f"{prefix} <no output>")
     return lines
 

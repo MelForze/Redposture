@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import secrets
 import socket
 import time
 from collections.abc import Callable
@@ -26,6 +28,7 @@ from ...clients.oracle import (
 )
 from ...console import Console
 from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...shell_capture import build_capture_command, is_binary, parse_capture_lines, result_text_lines
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -905,7 +908,60 @@ def _run_oracle_exec(client: OracleAuditClient, command: str, method: str) -> di
     for candidate in methods:
         try:
             if candidate == "scheduler":
-                result = client.scheduler_exec(command, capture_output=True)
+                token = secrets.token_hex(6)
+                wrapped = build_capture_command(command, token, max_bytes=8192)
+                result = client.scheduler_exec(wrapped, capture_output=True)
+                if result.get("ok"):
+                    if result.get("output_available") and isinstance(result.get("output"), str):
+                        all_lines = result["output"].splitlines()
+                        start = next(
+                            (index for index, line in enumerate(all_lines) if line.startswith(f"RP:{token}:STATUS:")),
+                            -1,
+                        )
+                        end = next((index for index, line in enumerate(all_lines) if line == f"RP:{token}:END"), -1)
+                        if start >= 0 and end >= start:
+                            try:
+                                capture = parse_capture_lines(all_lines[start : end + 1], token, max_bytes=8192)
+                            except ValueError as exc:
+                                result.update(
+                                    {
+                                        "output": None,
+                                        "output_available": False,
+                                        "capture_error": str(exc),
+                                        "outcome_unknown": True,
+                                    }
+                                )
+                            else:
+                                result.update(
+                                    {
+                                        "output": "\n".join(result_text_lines(capture)),
+                                        "exit_code": capture.exit_code,
+                                        "ok": capture.exit_code == 0,
+                                        "error": f"exit code {capture.exit_code}" if capture.exit_code != 0 else None,
+                                        "output_truncated": capture.truncated,
+                                        **(
+                                            {"stdout_base64": base64.b64encode(capture.stdout).decode("ascii")}
+                                            if is_binary(capture.stdout)
+                                            else {}
+                                        ),
+                                        **(
+                                            {"stderr_base64": base64.b64encode(capture.stderr).decode("ascii")}
+                                            if is_binary(capture.stderr)
+                                            else {}
+                                        ),
+                                    }
+                                )
+                        else:
+                            result.update(
+                                {
+                                    "output": None,
+                                    "output_available": False,
+                                    "capture_error": "incomplete capture response",
+                                    "outcome_unknown": True,
+                                }
+                            )
+                    else:
+                        result["outcome_unknown"] = True
             elif candidate == "java":
                 result = client.java_exec(command)
             elif candidate == "external-table":
@@ -915,12 +971,33 @@ def _run_oracle_exec(client: OracleAuditClient, command: str, method: str) -> di
             else:
                 result = {"ok": False, "error": f"unknown exec method {candidate}"}
             enriched = {"method": candidate, "command": command, **result}
+            if candidate == "scheduler":
+                if enriched.get("ok") or "exit_code" in result:
+                    return enriched
+                error_text = str(enriched.get("error") or "").lower()
+                denied = any(
+                    marker in error_text
+                    for marker in ("scheduler denied", "insufficient privileges", "ora-27486", "ora-01031")
+                )
+                if not denied:
+                    enriched["outcome_unknown"] = True
+                    return enriched
             if enriched.get("ok"):
                 if errors:
                     enriched["fallback_errors"] = errors
                 return enriched
             errors.append({"method": candidate, "error": str(enriched.get("error") or "execution failed")})
         except Exception as exc:
+            if candidate == "scheduler":
+                return {
+                    "method": candidate,
+                    "command": command,
+                    "ok": False,
+                    "output": None,
+                    "output_available": False,
+                    "outcome_unknown": True,
+                    "error": normalize_oracle_error(exc),
+                }
             errors.append({"method": candidate, "error": normalize_oracle_error(exc)})
     return {
         "method": method,

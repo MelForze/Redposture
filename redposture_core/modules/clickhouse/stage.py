@@ -8,6 +8,7 @@ from typing import Any
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...console import Console
+from ...shell_capture import CommandResult, ShellView
 from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -455,6 +456,7 @@ def _run_clickhouse_os_shell(args: Any, logger: Any, console: Any) -> int:
     readline_module = actions._load_readline_module()
     console.success("clickhouse os-shell ready; type 'exit' or 'quit' to stop")
     shell_session: actions._ChSession | None = None
+    shell_view = ShellView()
     try:
         while True:
             try:
@@ -467,6 +469,11 @@ def _run_clickhouse_os_shell(args: Any, logger: Any, console: Any) -> int:
                 continue
             if command.lower() in {"exit", "quit"}:
                 break
+            handled, should_exit = shell_view.handle(raw_command, console)
+            if should_exit:
+                break
+            if handled:
+                continue
             actions._add_readline_history(readline_module, command)
             if shell_session is None:
                 shell_session, connect_error = actions._open_shell_session(
@@ -483,31 +490,24 @@ def _run_clickhouse_os_shell(args: Any, logger: Any, console: Any) -> int:
                 if shell_session is None:
                     console.error(connect_error or "failed to open ClickHouse shell session")
                     continue
-            output, error = actions._run_execute_command(shell_session, command)
-            if error and actions._probe_error_info(error).retryable:
+            try:
+                result = actions._run_execute_command_bytes(
+                    shell_session, raw_command, max_bytes=shell_view.capture_bytes
+                )
+            except KeyboardInterrupt:
+                result = CommandResult(error="interrupted locally", outcome_unknown=True)
+            if result.outcome_unknown or (result.error and actions._probe_error_info(result.error).retryable):
                 actions._close_client(shell_session.protocol, shell_session.client)
                 shell_session = None
-                error = f"{error}; connection will be restored before the next command"
-            shell_record = dict(record)
-            shell_record.update(
-                {
-                    "execute_command": command,
-                    "execute_attempted": True,
-                    "execute_ok": error is None,
-                    "execute_output": output,
-                    "execute_error": error,
-                }
-            )
-            for line in render._format_execute_detail_records(shell_record, "txt"):
-                print(line)
+            shell_view.show(result, console)
             if cfg.debug and hasattr(logger, "log"):
                 logger.log(
                     "clickhouse",
                     (str(host), int(port)),
                     phase="os_shell",
                     command=command,
-                    execute_ok=error is None,
-                    execute_error=error,
+                    execute_ok=result.exit_code == 0 and result.error is None,
+                    execute_error=result.error,
                 )
     finally:
         if shell_session is not None:

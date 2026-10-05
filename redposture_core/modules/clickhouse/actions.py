@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import json
 import logging
 import random
 import re
+import secrets
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,14 @@ from ...rendering import (
     format_count_value,
     render_colored_marker_line,
     render_tagged_detail_line,
+)
+from ...shell_capture import (
+    DEFAULT_CAPTURE_BYTES,
+    CommandResult,
+    build_capture_command,
+    is_binary,
+    parse_capture_lines,
+    result_text_lines,
 )
 from ...show_limits import (
     limit_metadata,
@@ -1277,6 +1287,45 @@ def _run_execute_command(
     return output, None
 
 
+def _run_execute_command_bytes(
+    session: _ChSession, command: str, *, max_bytes: int = DEFAULT_CAPTURE_BYTES
+) -> CommandResult:
+    """Use the existing executable() transport with framed, byte-safe output."""
+    started = time.monotonic()
+    clean_command = _normalize_execute_command(command)
+    if not clean_command:
+        return CommandResult(error="empty command")
+    if clean_command.upper().startswith("SYSTEM "):
+        output, error = _run_execute_command(session, clean_command)
+        return CommandResult(
+            stdout="\n".join(output).encode("utf-8"),
+            exit_code=0 if error is None else None,
+            error=error,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+    token = secrets.token_hex(6)
+    try:
+        wrapped = build_capture_command(clean_command, token, max_bytes=max_bytes)
+    except ValueError as exc:
+        return CommandResult(error=str(exc))
+    try:
+        rows, error = _query_rows(session, _build_os_exec_query(wrapped))
+    except (OSError, ConnectionError, ValueError) as exc:
+        return CommandResult(error=str(exc), outcome_unknown=True, duration_ms=int((time.monotonic() - started) * 1000))
+    duration_ms = int((time.monotonic() - started) * 1000)
+    if error:
+        return CommandResult(
+            error=str(error), outcome_unknown=_probe_error_info(error).retryable, duration_ms=duration_ms
+        )
+    try:
+        return replace(
+            parse_capture_lines([str(row[0]) for row in rows or [] if row], token, max_bytes=max_bytes),
+            duration_ms=duration_ms,
+        )
+    except ValueError as exc:
+        return CommandResult(error=str(exc), outcome_unknown=True, duration_ms=duration_ms)
+
+
 def _open_operational_session(
     protocol: str,
     host: str,
@@ -1387,6 +1436,7 @@ def _run_clickhouse_actions_on_session(
     execute_ok: bool | None = None
     execute_output: list[str] | None = None
     execute_error: str | None = None
+    execute_result: CommandResult | None = None
     action_statuses = {
         "databases": "not_requested",
         "tables": "not_requested",
@@ -1568,8 +1618,12 @@ def _run_clickhouse_actions_on_session(
             execute_output = []
             execute_error = "insufficient privileges for OS command execution"
         else:
-            execute_output, execute_error = _run_execute_command(operation_session, execute_command)
-            execute_ok = execute_error is None
+            execute_result = _run_execute_command_bytes(operation_session, execute_command)
+            execute_output = result_text_lines(execute_result)
+            execute_error = execute_result.error
+            if execute_error is None and execute_result.exit_code not in (None, 0):
+                execute_error = f"exit code {execute_result.exit_code}"
+            execute_ok = execute_result.exit_code == 0 and execute_error is None
         action_statuses["execute"] = "ok" if execute_ok else "error"
         if execute_error:
             _reason(f"execute: {execute_error}")
@@ -1594,6 +1648,24 @@ def _run_clickhouse_actions_on_session(
         "execute_ok": execute_ok,
         "execute_output": execute_output,
         "execute_error": execute_error,
+        **(
+            {
+                "execute_exit_code": execute_result.exit_code,
+                "execute_truncated": execute_result.truncated,
+                **(
+                    {"execute_stdout_base64": base64.b64encode(execute_result.stdout).decode("ascii")}
+                    if is_binary(execute_result.stdout)
+                    else {}
+                ),
+                **(
+                    {"execute_stderr_base64": base64.b64encode(execute_result.stderr).decode("ascii")}
+                    if is_binary(execute_result.stderr)
+                    else {}
+                ),
+            }
+            if execute_result is not None
+            else {}
+        ),
         "read_capability": read_capability,
         "execute_capability": execute_capability,
         "admin_capability": admin_capability,
@@ -2204,6 +2276,16 @@ def collect_clickhouse_data(
             "execute_ok": action_result["execute_ok"],
             "execute_output": action_result["execute_output"],
             "execute_error": action_result["execute_error"],
+            **{
+                key: action_result[key]
+                for key in (
+                    "execute_exit_code",
+                    "execute_truncated",
+                    "execute_stdout_base64",
+                    "execute_stderr_base64",
+                )
+                if key in action_result
+            },
             "read_capability": action_result["read_capability"],
             "execute_capability": action_result["execute_capability"],
             "admin_capability": action_result["admin_capability"],
@@ -2528,6 +2610,16 @@ def _audit_clickhouse_host_on_protocol_legacy(
             "execute_ok": action_result["execute_ok"],
             "execute_output": action_result["execute_output"],
             "execute_error": action_result["execute_error"],
+            **{
+                key: action_result[key]
+                for key in (
+                    "execute_exit_code",
+                    "execute_truncated",
+                    "execute_stdout_base64",
+                    "execute_stderr_base64",
+                )
+                if key in action_result
+            },
             "sql_command": sql_command,
             "sql_attempted": action_result["sql_attempted"],
             "sql_ok": action_result["sql_ok"],
@@ -3156,6 +3248,10 @@ def _format_execute_detail_records(record: dict[str, Any], output_format: str) -
                     "ok": execute_ok,
                     "output": [str(item) for item in execute_output] if isinstance(execute_output, list) else [],
                     "error": str(execute_error) if execute_error else None,
+                    **({"exit_code": record["execute_exit_code"]} if "execute_exit_code" in record else {}),
+                    **({"stdout_base64": record["execute_stdout_base64"]} if "execute_stdout_base64" in record else {}),
+                    **({"stderr_base64": record["execute_stderr_base64"]} if "execute_stderr_base64" in record else {}),
+                    **({"truncated": record["execute_truncated"]} if "execute_truncated" in record else {}),
                 },
                 ensure_ascii=False,
             )
@@ -3163,15 +3259,14 @@ def _format_execute_detail_records(record: dict[str, Any], output_format: str) -
 
     prefix = _nxc_prefix(record)
     lines = [f"{prefix} [*] Execute Command", f"{prefix} command={str(execute_command)}"]
-    if execute_ok is True:
-        if isinstance(execute_output, list) and execute_output:
-            for line in execute_output:
-                lines.append(f"{prefix} {line}")
-        else:
-            lines.append(f"{prefix} <ok>")
-    elif execute_ok is False:
+    if isinstance(execute_output, list) and execute_output:
+        for line in execute_output:
+            lines.append(f"{prefix} {line}")
+    elif execute_ok is True:
+        lines.append(f"{prefix} <ok>")
+    if execute_ok is False:
         lines.append(f"{prefix} <error:{_clip(str(execute_error or 'execute failed'), 160)}>")
-    else:
+    elif execute_ok is None:
         lines.append(f"{prefix} <not attempted>")
     return lines
 

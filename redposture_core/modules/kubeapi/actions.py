@@ -30,6 +30,7 @@ from ...clients.http_api import (
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...shell_capture import DEFAULT_CAPTURE_BYTES, hex_preview, is_binary
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
@@ -708,8 +709,10 @@ def _kube_exec_ws(
             result["error"] = "exec websocket handshake failed: invalid upgrade headers"
             return result
 
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
+        stdout_bytes = bytearray()
+        stderr_bytes = bytearray()
+        stdout_total = 0
+        stderr_total = 0
         error_parts: list[str] = []
         exit_code: int | None = None
         terminal_status_seen = False
@@ -719,17 +722,19 @@ def _kube_exec_ws(
         fragmented_payload = bytearray()
 
         def _consume_message(payload: bytes) -> None:
-            nonlocal exit_code, terminal_status_seen
+            nonlocal exit_code, terminal_status_seen, stdout_total, stderr_total
             if not payload:
                 return
             channel = payload[0]
             data_bytes = payload[1:]
-            text = data_bytes.decode("utf-8", errors="replace")
             if channel == 1:
-                stdout_parts.append(text)
+                stdout_total += len(data_bytes)
+                stdout_bytes.extend(data_bytes[: max(0, DEFAULT_CAPTURE_BYTES - len(stdout_bytes))])
             elif channel == 2:
-                stderr_parts.append(text)
+                stderr_total += len(data_bytes)
+                stderr_bytes.extend(data_bytes[: max(0, DEFAULT_CAPTURE_BYTES - len(stderr_bytes))])
             elif channel == 3:
+                text = data_bytes.decode("utf-8", errors="replace")
                 parsed_exit, parsed_msg, parsed_success = _kube_exec_status_from_error_channel(text)
                 if parsed_success is not None:
                     terminal_status_seen = True
@@ -780,8 +785,19 @@ def _kube_exec_ws(
                 fragmented_opcode = opcode
                 fragmented_payload.extend(payload)
 
-        result["stdout"] = "".join(stdout_parts)
-        result["stderr"] = "".join(stderr_parts)
+        for name, data, total in (
+            ("stdout", bytes(stdout_bytes), stdout_total),
+            ("stderr", bytes(stderr_bytes), stderr_total),
+        ):
+            if is_binary(data):
+                result[name] = f"[binary {total} B]"
+                result[f"{name}_base64"] = base64.b64encode(data).decode("ascii")
+            else:
+                result[name] = data.decode("utf-8", errors="replace")
+            if total > len(data):
+                result[f"{name}_truncated"] = True
+                result[f"{name}_total"] = total
+                result[f"{name}_base64"] = base64.b64encode(data).decode("ascii")
         if exit_code is not None:
             result["exit_code"] = exit_code
         error_text = " ".join(part.strip() for part in error_parts if part.strip()).strip()
@@ -2568,10 +2584,22 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
             lines.append(f"{prefix} [*] STDOUT")
             for line in stdout_text.splitlines():
                 lines.append(f"{prefix} {line}")
+            if isinstance(exec_result.get("stdout_base64"), str):
+                try:
+                    binary = base64.b64decode(exec_result["stdout_base64"], validate=True)
+                    lines.extend(f"{prefix} {line}" for line in hex_preview(binary, limit=32))
+                except ValueError:
+                    pass
         if stderr_text:
             lines.append(f"{prefix} [*] STDERR")
             for line in stderr_text.splitlines():
                 lines.append(f"{prefix} {line}")
+            if isinstance(exec_result.get("stderr_base64"), str):
+                try:
+                    binary = base64.b64decode(exec_result["stderr_base64"], validate=True)
+                    lines.extend(f"{prefix} {line}" for line in hex_preview(binary, limit=32))
+                except ValueError:
+                    pass
         if not stdout_text and not stderr_text:
             lines.append(f"{prefix} <no exec output>")
 

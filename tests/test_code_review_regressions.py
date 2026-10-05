@@ -30,7 +30,7 @@ def test_fix1_postgres_os_shell_prints_command_output(monkeypatch: pytest.Monkey
             self.plain_calls: list[str] = []
             self.error_calls: list[str] = []
 
-        def plain(self, message: str = "") -> None:
+        def plain(self, message: str = "", color: str | None = None) -> None:
             self.plain_calls.append(str(message))
 
         def error(self, message: str) -> None:
@@ -45,11 +45,13 @@ def test_fix1_postgres_os_shell_prints_command_output(monkeypatch: pytest.Monkey
     executed: list[str] = []
 
     def _fake_exec(*, host, port, timeout, retries, username, password, database, command):  # noqa: PLR0913
+        from redposture_core.shell_capture import CommandResult
+
         executed.append(command)
-        return ["uid=1000(postgres)"], None
+        return CommandResult(stdout=b"uid=1000(postgres)\n", exit_code=0)
 
     monkeypatch.setattr("builtins.input", _fake_input)
-    monkeypatch.setattr(pg_stage.actions, "_pg_execute_remote_command", _fake_exec)
+    monkeypatch.setattr(pg_stage.actions, "_pg_execute_remote_command_bytes", _fake_exec)
     monkeypatch.setattr(
         pg_stage,
         "build_postgres_plan",

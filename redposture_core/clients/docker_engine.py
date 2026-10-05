@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import ssl
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
+from ..shell_capture import is_binary
 from .http_api import HttpResponse
 from .http_redirects import follow_redirects, http_origin
 from .tls_cache import shared_client_ssl_context
@@ -311,7 +313,13 @@ class DockerEngineClient:
     def start_exec(self, exec_id: str) -> dict[str, Any]:
         encoded = quote(exec_id, safe="")
         response = self.request("POST", f"/exec/{encoded}/start", json_body={"Detach": False, "Tty": False})
-        streams = decode_docker_stream(response.body)
+        raw_streams = decode_docker_stream_bytes(response.body)
+        streams = {key: value.decode("utf-8", "replace") for key, value in raw_streams.items()}
+        binary_fields: dict[str, str] = {}
+        for key, value in raw_streams.items():
+            if is_binary(value):
+                streams[key] = f"[binary {len(value)} B]"
+                binary_fields[f"{key}_base64"] = base64.b64encode(value).decode("ascii")
         inspect_result: dict[str, Any] = {}
         try:
             raw_inspect = self.request("GET", f"/exec/{encoded}/json").json()
@@ -324,6 +332,7 @@ class DockerEngineClient:
             "stderr": streams.get("stderr", ""),
             "exit_code": inspect_result.get("ExitCode"),
             "running": inspect_result.get("Running"),
+            **binary_fields,
         }
 
     def exec_command(self, container_id: str, command: str) -> dict[str, Any]:
@@ -334,8 +343,15 @@ class DockerEngineClient:
 def decode_docker_stream(payload: bytes) -> dict[str, str]:
     """Decode Docker raw multiplexed stream into stdout/stderr text."""
 
+    streams = decode_docker_stream_bytes(payload)
+    return {key: value.decode("utf-8", "replace") for key, value in streams.items()}
+
+
+def decode_docker_stream_bytes(payload: bytes) -> dict[str, bytes]:
+    """Decode Docker's framed stream without losing invalid UTF-8 or NUL."""
+
     if not payload:
-        return {"stdout": "", "stderr": ""}
+        return {"stdout": b"", "stderr": b""}
     stdout = bytearray()
     stderr = bytearray()
     idx = 0
@@ -358,10 +374,7 @@ def decode_docker_stream(payload: bytes) -> dict[str, str]:
         stdout.extend(payload)
     elif idx < len(payload):
         stdout.extend(payload[idx:])
-    return {
-        "stdout": stdout.decode("utf-8", "replace"),
-        "stderr": stderr.decode("utf-8", "replace"),
-    }
+    return {"stdout": bytes(stdout), "stderr": bytes(stderr)}
 
 
 def find_container_id(containers: list[dict[str, Any]], selector: str) -> str | None:

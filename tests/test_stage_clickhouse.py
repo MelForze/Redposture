@@ -1090,11 +1090,13 @@ def test_run_clickhouse_stage_os_shell_executes_command(
     shell_session = _session()
     monkeypatch.setattr(clickhouse_stage, "_open_shell_session", lambda **_kwargs: (shell_session, None))
 
-    def fake_execute_once(_session_obj, command):
-        captured.update({"command": command, "session": _session_obj})
-        return ["uid=1000(redposture)"], None
+    def fake_execute_once(_session_obj, command, **_kwargs):
+        from redposture_core.shell_capture import CommandResult
 
-    monkeypatch.setattr(clickhouse_stage, "_run_execute_command", fake_execute_once)
+        captured.update({"command": command, "session": _session_obj})
+        return CommandResult(stdout=b"uid=1000(redposture)\n", exit_code=0)
+
+    monkeypatch.setattr(clickhouse_stage, "_run_execute_command_bytes", fake_execute_once)
 
     rc = clickhouse_stage.run_clickhouse_stage(
         _clickhouse_validation_args(os_shell=True),
@@ -1113,7 +1115,7 @@ def test_run_clickhouse_stage_os_shell_executes_command(
     ("shell_flag", "shell_input", "shell_runner"),
     [
         ("--sql-shell", "select 1", "_run_sql_query"),
-        ("--os-shell", "id", "_run_execute_command"),
+        ("--os-shell", "id", "_run_execute_command_bytes"),
     ],
 )
 def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
@@ -1155,8 +1157,12 @@ def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
     monkeypatch.setattr(builtins, "input", lambda _prompt: next(inputs))
     shell_calls: list[tuple[Any, str]] = []
 
-    def fake_shell_runner(session_obj, value):
+    def fake_shell_runner(session_obj, value, **_kwargs):
+        from redposture_core.shell_capture import CommandResult
+
         shell_calls.append((session_obj, value))
+        if shell_flag == "--os-shell":
+            return CommandResult(exit_code=0)
         return [], None
 
     monkeypatch.setattr(clickhouse_stage, shell_runner, fake_shell_runner)

@@ -1488,6 +1488,30 @@ def test_http_request_and_ws_exec_paths(monkeypatch: pytest.MonkeyPatch) -> None
     assert sec_key in success_sock.sent[0].decode("utf-8", errors="replace")
     assert any(frame[0] == 0x8A for frame in success_sock.sent[1:])
 
+    binary_sock = _Sock(
+        [
+            handshake
+            + _ws_frame(0x2, b"\x01\x00\xff")
+            + _ws_frame(0x2, b'\x03{"status":"Success"}')
+            + _ws_frame(0x8, b"")
+        ]
+    )
+    monkeypatch.setattr(kube.socket, "create_connection", lambda *_args, **_kwargs: binary_sock)
+    binary_result = kube._kube_exec_ws(
+        "127.0.0.1",
+        16443,
+        "default",
+        "api",
+        "cat /tmp/image",
+        1.0,
+        use_https=False,
+        insecure=False,
+        ca_file=None,
+    )
+    assert binary_result["stdout"] == "[binary 2 B]"
+    assert binary_result["stdout_base64"] == "AP8="
+    assert binary_result["exit_code"] == 0
+
     no_terminal_sock = _Sock([handshake + _ws_frame(0x2, b"\x01output") + _ws_frame(0x8, b"")])
     monkeypatch.setattr(kube.socket, "create_connection", lambda *_args, **_kwargs: no_terminal_sock)
     no_terminal = kube._kube_exec_ws(

@@ -14,6 +14,7 @@ from typing import Any
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...console import Console
+from ...shell_capture import CommandResult, ShellView
 from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -784,18 +785,25 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
     password = winning_credential.password
     database = str(getattr(args, "database", "postgres") or "postgres")
     if bool(getattr(args, "os_shell", False)):
+        shell_view = ShellView()
         while True:
             try:
-                command = input("pg-os> ").strip()
+                command = input("pg-os> ")
             except (EOFError, KeyboardInterrupt):
                 console.plain("")
                 break
-            if not command:
+            if not command.strip():
                 continue
-            if command.lower() in {"exit", "quit"}:
+            if command.strip().lower() in {"exit", "quit"}:
                 break
+            handled, should_exit = shell_view.handle(command, console)
+            if should_exit:
+                break
+            if handled:
+                continue
+            shell_view.remember(command)
             try:
-                output, exec_error = actions._pg_execute_remote_command(
+                result = actions._pg_execute_remote_command_bytes(
                     host=str(host),
                     port=int(port),
                     timeout=cfg.timeout,
@@ -805,11 +813,12 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
                     database=database,
                     command=command,
                     tls_config=_postgres_tls_config_from_args(args),
+                    max_bytes=shell_view.capture_bytes,
                 )
             except TypeError as exc:
-                if not is_signature_compat_typeerror(exc, expected_keywords={"tls_config"}):
+                if not is_signature_compat_typeerror(exc, expected_keywords={"tls_config", "max_bytes"}):
                     raise
-                output, exec_error = actions._pg_execute_remote_command(
+                result = actions._pg_execute_remote_command_bytes(
                     host=str(host),
                     port=int(port),
                     timeout=cfg.timeout,
@@ -819,10 +828,10 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
                     database=database,
                     command=command,
                 )
-            for line in output or []:
-                console.plain(str(line))
-            if exec_error:
-                console.error(exec_error)
+            except KeyboardInterrupt:
+                shell_view.show(CommandResult(error="interrupted locally", outcome_unknown=True), console)
+                continue
+            shell_view.show(result, console)
         return 0
     while True:
         try:

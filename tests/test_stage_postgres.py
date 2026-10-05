@@ -10,6 +10,7 @@ import pytest
 from redposture_core import stage_postgres as postgres
 from redposture_core.audit_models import AuditRecord
 from redposture_core.modules.postgres import stage as postgres_module_stage
+from redposture_core.shell_capture import CommandResult
 from redposture_core.stage_postgres import (
     _audit_postgres_host,
     _caps_suffix,
@@ -1310,10 +1311,14 @@ def test_run_postgres_stage_shell_modes_and_main_flow(monkeypatch: pytest.Monkey
     )
 
     executed_commands: list[str] = []
+    from redposture_core.shell_capture import CommandResult
+
     monkeypatch.setattr(
         postgres,
-        "_pg_execute_remote_command",
-        lambda **kwargs: (executed_commands.append(str(kwargs["command"])) or ["uid=1000"], None),
+        "_pg_execute_remote_command_bytes",
+        lambda **kwargs: (
+            executed_commands.append(str(kwargs["command"])) or CommandResult(stdout=b"uid=1000\n", exit_code=0)
+        ),
     )
     sql_queries: list[str] = []
     monkeypatch.setattr(
@@ -2710,8 +2715,8 @@ def test_audit_postgres_collects_execute_and_sql_outputs(monkeypatch) -> None:
     )
     monkeypatch.setattr("redposture_core.stage_postgres._pg_query_databases", lambda *_args, **_kwargs: ([], None))
     monkeypatch.setattr(
-        "redposture_core.stage_postgres._pg_try_execute_command",
-        lambda *_args, **_kwargs: (["uid=1000(postgres)"], None),
+        "redposture_core.stage_postgres._pg_try_execute_command_bytes",
+        lambda *_args, **_kwargs: CommandResult(stdout=b"uid=1000(postgres)\n", exit_code=0),
     )
     monkeypatch.setattr(
         "redposture_core.stage_postgres._pg_try_query_sql",
@@ -2745,6 +2750,7 @@ def test_audit_postgres_collects_execute_and_sql_outputs(monkeypatch) -> None:
     assert record["execute_attempted"] is True
     assert record["execute_ok"] is True
     assert record["execute_output"] == ["uid=1000(postgres)"]
+    assert record["execute_exit_code"] == 0
     assert record["sql_attempted"] is True
     assert record["sql_ok"] is True
     assert record["sql_output"] == ["1 | hello"]

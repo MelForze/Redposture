@@ -14,7 +14,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ...clients import transport
@@ -26,6 +26,14 @@ from ...rendering import (
     format_count_value,
     render_colored_marker_line,
     render_tagged_detail_line,
+)
+from ...shell_capture import (
+    DEFAULT_CAPTURE_BYTES,
+    CommandResult,
+    build_capture_command,
+    is_binary,
+    parse_capture_lines,
+    result_text_lines,
 )
 from ...show_limits import (
     limit_metadata,
@@ -1377,6 +1385,71 @@ def _pg_try_execute_command(
     return lines, None
 
 
+def _pg_try_execute_command_bytes(
+    sock: socket.socket, command: str, *, max_bytes: int = DEFAULT_CAPTURE_BYTES
+) -> CommandResult:
+    """Capture both streams without passing arbitrary bytes through PG text."""
+    nonce = secrets.token_hex(6)
+    temp_ident = f'"redposture_exec_{nonce}"'
+    wrapper = build_capture_command(command, nonce, max_bytes=max_bytes)
+    _, create_error = _pg_query_rows(sock, f"CREATE TEMP TABLE {temp_ident} (line text)")
+    if create_error:
+        return CommandResult(error=create_error)
+    try:
+        _, copy_error = _pg_query_rows(sock, f"COPY {temp_ident} FROM PROGRAM {_pg_quote_literal(wrapper)}")
+        if copy_error:
+            return CommandResult(error=copy_error, outcome_unknown=True)
+        rows, select_error = _pg_query_rows(sock, f"SELECT line FROM {temp_ident}")
+        if select_error:
+            return CommandResult(error=select_error, outcome_unknown=True)
+        try:
+            return parse_capture_lines(
+                [str(row[0]) for row in rows if row and row[0] is not None], nonce, max_bytes=max_bytes
+            )
+        except ValueError as exc:
+            return CommandResult(error=str(exc), outcome_unknown=True)
+    finally:
+        _pg_query_rows(sock, f"DROP TABLE IF EXISTS {temp_ident}")
+
+
+def _pg_execute_remote_command_bytes(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    username: str,
+    password: str | None,
+    database: str,
+    command: str,
+    tls_config: _PgTlsConfig | None = None,
+    *,
+    max_bytes: int = DEFAULT_CAPTURE_BYTES,
+) -> CommandResult:
+    """Retry connection setup only; never replay an ambiguous OS command."""
+    started = time.monotonic()
+    last_error = "connection failed"
+    for attempt in range(max(1, retries + 1)):
+        try:
+            with _pg_open_socket(host, port, timeout, tls_config=tls_config) as sock:
+                _pg_startup_and_auth(sock, username=username, password=password, database=database)
+                try:
+                    result = _pg_try_execute_command_bytes(sock, command, max_bytes=max_bytes)
+                except (OSError, ConnectionError, ValueError) as exc:
+                    result = CommandResult(error=str(exc), outcome_unknown=True)
+                try:
+                    _pg_send_terminate(sock)
+                except OSError:
+                    pass
+                return replace(result, duration_ms=int((time.monotonic() - started) * 1000))
+        except _PgAuditError as exc:
+            return CommandResult(error=str(exc), duration_ms=int((time.monotonic() - started) * 1000))
+        except (OSError, ValueError, ConnectionError) as exc:
+            last_error = str(exc)
+            if attempt < max(1, retries + 1) - 1:
+                time.sleep(_retry_delay(attempt))
+    return CommandResult(error=last_error, duration_ms=int((time.monotonic() - started) * 1000))
+
+
 def _pg_try_query_sql(sock: socket.socket, query: str, *, max_rows: int = 500) -> tuple[list[str] | None, str | None]:
     rows, error = _pg_query_rows(sock, query)
     if error:
@@ -2082,10 +2155,18 @@ def _audit_postgres_host(
                 execute_ok: bool | None = None
                 execute_output: list[str] | None = None
                 execute_error: str | None = None
+                execute_result: CommandResult | None = None
                 if execute_command:
                     execute_attempted = True
-                    execute_output, execute_error = _pg_try_execute_command(sock, execute_command)
-                    execute_ok = execute_error is None
+                    try:
+                        execute_result = _pg_try_execute_command_bytes(sock, execute_command)
+                    except (OSError, ConnectionError, ValueError, _PgAuditError) as exc:
+                        execute_result = CommandResult(error=str(exc), outcome_unknown=True)
+                    execute_output = result_text_lines(execute_result)
+                    execute_error = execute_result.error
+                    if execute_error is None and execute_result.exit_code not in (None, 0):
+                        execute_error = f"exit code {execute_result.exit_code}"
+                    execute_ok = execute_result.exit_code == 0 and execute_error is None
 
                 sql_attempted = False
                 sql_ok: bool | None = None
@@ -2169,6 +2250,25 @@ def _audit_postgres_host(
                     "execute_ok": execute_ok,
                     "execute_output": execute_output,
                     "execute_error": execute_error,
+                    **(
+                        {
+                            "execute_exit_code": execute_result.exit_code,
+                            "execute_truncated": execute_result.truncated,
+                            "execute_outcome_unknown": execute_result.outcome_unknown,
+                            **(
+                                {"execute_stdout_base64": base64.b64encode(execute_result.stdout).decode("ascii")}
+                                if is_binary(execute_result.stdout)
+                                else {}
+                            ),
+                            **(
+                                {"execute_stderr_base64": base64.b64encode(execute_result.stderr).decode("ascii")}
+                                if is_binary(execute_result.stderr)
+                                else {}
+                            ),
+                        }
+                        if execute_result is not None
+                        else {}
+                    ),
                     "sql_command": sql_command,
                     "sql_attempted": sql_attempted,
                     "sql_ok": sql_ok,
@@ -2694,6 +2794,10 @@ def _format_execute_detail_records(record: dict[str, Any], output_format: str) -
                     "ok": execute_ok,
                     "output": [str(item) for item in execute_output] if isinstance(execute_output, list) else [],
                     "error": str(execute_error) if execute_error else None,
+                    **({"exit_code": record["execute_exit_code"]} if "execute_exit_code" in record else {}),
+                    **({"stdout_base64": record["execute_stdout_base64"]} if "execute_stdout_base64" in record else {}),
+                    **({"stderr_base64": record["execute_stderr_base64"]} if "execute_stderr_base64" in record else {}),
+                    **({"truncated": record["execute_truncated"]} if "execute_truncated" in record else {}),
                 },
                 ensure_ascii=False,
             )
@@ -2701,15 +2805,14 @@ def _format_execute_detail_records(record: dict[str, Any], output_format: str) -
 
     prefix = _nxc_prefix(record)
     lines = [f"{prefix} [*] Execute Command", f"{prefix} command={_pg_text(execute_command)}"]
-    if execute_ok is True:
-        if isinstance(execute_output, list) and execute_output:
-            for line in execute_output:
-                lines.append(f"{prefix} {_pg_text(line)}")
-        else:
-            lines.append(f"{prefix} <no output>")
-    elif execute_ok is False:
+    if isinstance(execute_output, list) and execute_output:
+        for line in execute_output:
+            lines.append(f"{prefix} {_pg_text(line)}")
+    elif execute_ok is True:
+        lines.append(f"{prefix} <no output>")
+    if execute_ok is False:
         lines.append(f"{prefix} <error:{_pg_text(execute_error or 'execute failed')}>")
-    else:
+    elif execute_ok is None:
         lines.append(f"{prefix} <not attempted>")
     return lines
 
