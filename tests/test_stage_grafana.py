@@ -218,6 +218,8 @@ def test_grafana_keycloak_login_is_reported_as_sso(monkeypatch: pytest.MonkeyPat
             return 200, '{"database":"ok","commit":"abc","version":"11.2.0"}', {}
         if path == "/login":
             return 200, '<html><form id="kc-form-login"></form></html>', {}
+        if path == "/api/datasources":
+            return 401, '{"message":"Unauthorized"}', {}
         raise AssertionError(path)
 
     monkeypatch.setattr("redposture_core.stage_grafana._http_request", fake_http_request)
@@ -232,7 +234,7 @@ def test_grafana_keycloak_login_is_reported_as_sso(monkeypatch: pytest.MonkeyPat
     assert detected["auth_method"] == "sso"
     assert detected["sso_provider"] == "keycloak"
     assert detected["credential_verification_status"] == "unavailable"
-    assert paths == ["/api/health", "/login"]
+    assert paths == ["/api/health", "/login", "/api/datasources"]
 
     line = grafana_stage._format_detect_record(detected, "txt")
     assert "Grafana Service (auth required:sso) (provider:keycloak)" in line
@@ -246,7 +248,7 @@ def test_grafana_keycloak_login_is_reported_as_sso(monkeypatch: pytest.MonkeyPat
     assert audited["status"] == "auth_required"
     assert audited["auth_required"] is True
     assert audited["auth_method"] == "sso"
-    assert paths == ["/api/health", "/login"]
+    assert paths == ["/api/health", "/login", "/api/datasources"]
 
 
 def test_slow_grafana_login_does_not_erase_health_detection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,6 +257,8 @@ def test_slow_grafana_login_does_not_erase_health_detection(monkeypatch: pytest.
             return 200, '{"database":"ok","commit":"abc","version":"11.2.0"}', {}
         if path == "/login":
             raise TimeoutError("identity provider still loading")
+        if path == "/api/datasources":
+            return 401, '{"message":"Unauthorized"}', {}
         raise AssertionError(path)
 
     monkeypatch.setattr("redposture_core.stage_grafana._http_request", fake_http_request)
@@ -266,7 +270,7 @@ def test_slow_grafana_login_does_not_erase_health_detection(monkeypatch: pytest.
     )
     detected = grafana_stage.detect_grafana(context, {"show_datasources": False, "check_urls": []})
     assert detected["is_grafana"] is True
-    assert detected["status"] == "open_no_auth"
+    assert detected["status"] == "auth_required"
     assert detected["server_version"] == "11.2.0"
 
 
@@ -1371,7 +1375,7 @@ def test_grafana_defcreds_falls_back_after_api_token_transport_error(
             )
         if path == "/api/datasources":
             datasource_headers.append(authorization)
-            return 200, "[]", {}
+            return (200, "[]", {}) if authorization == winning_header else (401, "{}", {})
         raise AssertionError(path)
 
     monkeypatch.setattr("redposture_core.stage_grafana._http_request", fake_http)
@@ -1394,7 +1398,7 @@ def test_grafana_defcreds_falls_back_after_api_token_transport_error(
     assert record["auth_attempts"][0]["source"] == "apitoken"
     assert record["auth_attempts"][0]["ok"] is None
     assert "token transport failure" in record["auth_attempts"][0]["error"]
-    assert datasource_headers == [winning_header]
+    assert datasource_headers == [None, winning_header]
     lines = _format_auth_attempt_detail_records(record, "txt")
     assert lines[0].endswith("[-] API token (source:apitoken)")
     assert all("must-not-appear" not in line for line in lines)

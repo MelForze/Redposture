@@ -1994,13 +1994,11 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
         payload["error"] = f"requested {'/'.join(sorted(selected_vendors))} fingerprint not confirmed"
     payload["nexus_info"] = nexus_info
     if product != "registry":
-        challenge = str(probe[2].get("www-authenticate") or "")
-        scheme, _params = _parse_www_authenticate(challenge)
         payload["credential_verification_status"] = (
             "available"
             if product in {"harbor", "nexus"}
             or (product == "gitlab" and payload.get("is_gitlab") is True)
-            or (product == "docker-registry" and status == "auth_required" and scheme in {"basic", "bearer"})
+            or (product == "docker-registry" and status == "auth_required")
             else "unavailable"
         )
     stage_result = str(payload["status"]) if payload["status"] in {"fail", "not_registry"} else "ok"

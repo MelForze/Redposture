@@ -419,12 +419,9 @@ def _fetch_datasources(
 def _infer_grafana_auth_required(
     host: str, port: int, timeout: float, *, health_status: int, health_api_ok: bool
 ) -> bool | None:
-    if health_api_ok:
-        return False
-    if health_status in {401, 403}:
-        return True
-    # A Grafana login page identifies the service, but it does not prove that
-    # anonymous API access is disabled. Probe an API resource before deciding.
+    # /api/health is intentionally public on many installations. Only a
+    # resource requiring Grafana permissions can establish anonymous access.
+    _ = (health_status, health_api_ok)
     try:
         datasources, _error, status = _fetch_datasources(host, port, timeout)
     except (urllib.error.URLError, OSError, TimeoutError, ValueError):
@@ -1139,7 +1136,8 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
             ensure_ascii=False,
         )
     suffix = f" (provider:{record['sso_provider']})" if auth_text == "sso" and record.get("sso_provider") else ""
-    return f"{_nxc_prefix(record)} [*] Grafana Service (auth required:{auth_text}){suffix}"
+    version = str(record.get("server_version") or "unknown")
+    return f"{_nxc_prefix(record)} [*] Grafana Service (auth required:{auth_text}){suffix} (version:{version})"
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:

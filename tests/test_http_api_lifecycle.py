@@ -57,7 +57,7 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
                 else (401, "", {})
             )
         if path == "/api/datasources":
-            return 200, "[]", {}
+            return (401, "{}", {}) if authorization is None else (200, "[]", {})
         raise AssertionError(path)
 
     monkeypatch.setattr(grafana, "_http_request", fake_http)
@@ -67,6 +67,7 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
     assert events == [
         ("/api/health", None),
         ("/login", None),
+        ("/api/datasources", None),
         ("/api/user", grafana._auth_header("bad", "bad")),
         ("/api/user", grafana._auth_header("good", "good")),
         ("/api/datasources", grafana._auth_header("good", "good")),
@@ -99,7 +100,7 @@ def test_grafana_defcreds_are_explicit_ordered_runs_not_an_internal_batch(
             )
         if path == "/api/datasources":
             datasource_headers.append(authorization)
-            if authorization == "Bearer bad-token":
+            if authorization is None or authorization == "Bearer bad-token":
                 return 401, "", {}
             return 200, "[]", {}
         raise AssertionError(path)
@@ -142,7 +143,7 @@ def test_grafana_defcreds_are_explicit_ordered_runs_not_an_internal_batch(
     assert auth_headers == [
         grafana._auth_header(run.username or "admin", run.password or "") for run in plan.credential_runs
     ]
-    assert datasource_headers == [grafana._auth_header("admin", "admin")]
+    assert datasource_headers == [None, grafana._auth_header("admin", "admin")]
     assert result.records[0]["status"] == "weak_default_creds"
     assert result.records[0]["credentials_source"] == "default"
     assert result.records[0]["effective_username"] == "admin"
@@ -174,7 +175,7 @@ def test_grafana_rejected_api_token_falls_back_to_defaults(
             )
         if path == "/api/datasources":
             datasource_headers.append(authorization)
-            if authorization == "Bearer bad-token":
+            if authorization is None or authorization == "Bearer bad-token":
                 return 401, "", {}
             return 200, "[]", {}
         raise AssertionError(path)
@@ -206,7 +207,7 @@ def test_grafana_rejected_api_token_falls_back_to_defaults(
         "Bearer bad-token",
         *[grafana._auth_header(run.username or "admin", run.password or "") for run in plan.credential_runs[1:]],
     ]
-    assert datasource_headers == ["Bearer bad-token", winning_header]
+    assert datasource_headers == [None, "Bearer bad-token", winning_header]
     assert result.records[0]["status"] == "weak_default_creds"
     assert result.records[0]["credentials_source"] == "default"
     assert len(result.records[0]["auth_attempts"]) == len(plan.credential_runs)
@@ -239,7 +240,7 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
             )
         if path == "/api/datasources":
             datasource_headers.append(authorization)
-            return 200, "[]", {}
+            return (401, "{}", {}) if authorization is None else (200, "[]", {})
         raise AssertionError(path)
 
     monkeypatch.setattr(grafana, "_http_request", fake_http)
@@ -264,7 +265,7 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
     assert auth_headers == [
         grafana._auth_header(run.username or "admin", run.password or "") for run in plan.credential_runs
     ]
-    assert datasource_headers == [winning_header]
+    assert datasource_headers == [None, winning_header]
     record = result.records[0]
     assert record["status"] == "weak_default_creds"
     assert record["effective_username"] == "admin"

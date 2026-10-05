@@ -343,7 +343,7 @@ def test_proxmox_lifecycle_preserves_detection_when_authenticated_data_raises(
     assert records[0]["status"] == "fail"
     assert records[0]["is_proxmox"] is True
     assert records[0]["detection_preserved"] is True
-    assert records[0]["detected_status"] == "auth_failed"
+    assert records[0]["detected_status"] == "auth_required"
     assert records[0]["deep_error"] == "deep API exploded"
 
 

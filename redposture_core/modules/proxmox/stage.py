@@ -212,7 +212,7 @@ def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
         record_status = "open_no_auth"
         error_text = None
     elif status in {401, 403}:
-        record_status = "auth_failed"
+        record_status = "auth_required"
         error_text = actions._extract_error_message(payload) or "authentication required"
     else:
         record_status = "fail"
@@ -376,6 +376,9 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
             }
         )
         return _proxmox_record(payload)
+
+    if not token and credential.username is None and credential.password is None:
+        return detect_record
 
     if token:
         auth_headers = actions._proxmox_auth_headers(token)

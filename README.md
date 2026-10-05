@@ -199,6 +199,9 @@ redposture grafana -t targets.txt --defcreds
 redposture grafana -t https://grafana.example -u auditor -p 'password' --show-datasources --enum-cve
 ```
 
+The public `/api/health` identifies Grafana and its version, but anonymous
+access is determined from a protected API resource.
+
 ### Keycloak
 
 ```bash
@@ -321,6 +324,8 @@ redposture proxmox -t targets.txt --defcreds
 redposture proxmox -t https://pve.example:8006 -u auditor@pve -p 'password' --nodes --discover
 ```
 
+Without supplied credentials, a protected API does not produce token or password failure lines.
+
 ### Qdrant
 
 ```bash
@@ -372,6 +377,8 @@ redposture docker-registry -t https://registry.example -u auditor -p 'password' 
 `docker-registry` accepts only a plain OCI Registry fingerprint. Harbor, Nexus and
 GitLab require their product commands. Image, tag, metadata and download options
 are available on each product command; inaccessible inventory sections are omitted.
+On a protected `/v2/`, Basic pairs are checked even if the auth challenge is absent;
+only definitive results are printed.
 
 ### ZooKeeper
 

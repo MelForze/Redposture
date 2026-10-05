@@ -384,6 +384,8 @@ def _looks_like_proxmox_response(
 ) -> bool:
     """Require a Proxmox-specific response shape instead of a bare HTTP status."""
 
+    if status not in {200, 401, 403}:
+        return False
     normalized_headers = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
     server = normalized_headers.get("server", "").lower()
     if "pve-api-daemon" in server or any(key.startswith("x-pve-") for key in normalized_headers):
@@ -1766,6 +1768,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if output_format == "json":
         return json.dumps(record, ensure_ascii=False)
 
+    if record.get("status") == "auth_required":
+        return ""
     prefix = _nxc_prefix(record)
     status = str(record.get("status") or "fail")
     if _proxmox_sweep_attempts(record) and status in {
