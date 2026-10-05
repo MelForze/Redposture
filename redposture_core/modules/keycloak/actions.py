@@ -12,8 +12,41 @@ host_stage = None  # The module uses phase-aware audit hooks.
 
 _REALM_PATH = re.compile(r"^(?P<base>.*?)/realms/(?P<realm>[^/]+)(?:/.*)?$")
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
-_COMMON_REALMS = ("master", "test", "dev", "staging", "prod", "production")
+_COMMON_REALMS = (
+    "master",
+    "admin",
+    "dev",
+    "development",
+    "test",
+    "testing",
+    "staging",
+    "stage",
+    "prod",
+    "production",
+    "internal",
+    "external",
+    "public",
+    "api",
+    "app",
+    "sso",
+    "auth",
+    "users",
+    "customers",
+    "partners",
+    "employees",
+    "corp",
+    "demo",
+    "uat",
+    "qa",
+    "identity",
+    "idp",
+    "keycloak",
+    "login",
+)
 _MAX_REALMS = 12
+_MAX_REALM_CANDIDATES = 32
+_MAX_CLIENT_ENDPOINT_VALUES = 20
+_MAX_CLIENT_ENDPOINT_LENGTH = 512
 
 
 def _json_object(response: HttpResponse) -> dict[str, Any] | None:
@@ -98,7 +131,80 @@ def _realms(args: Any, target_path: str) -> tuple[str, ...]:
         selected.append("master")
     if getattr(args, "enum_realms", False):
         selected.extend(_COMMON_REALMS)
-    return tuple(dict.fromkeys(selected))[:_MAX_REALMS]
+    return tuple(dict.fromkeys(selected))[:_MAX_REALM_CANDIDATES]
+
+
+def _json_list(response: HttpResponse) -> list[Any] | None:
+    if response.error or response.status != 200 or response.truncated:
+        return None
+    try:
+        value = response.json()
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return value if isinstance(value, list) else None
+
+
+def _realm_settings(value: dict[str, Any] | None, realm: str) -> dict[str, Any] | None:
+    if value is None or value.get("realm") != realm:
+        return None
+    brute_force = value.get("bruteForceProtected")
+    registration = value.get("registrationAllowed")
+    ssl_required = value.get("sslRequired")
+    password_policy = value.get("passwordPolicy")
+    return {
+        "realm": realm,
+        "brute_force_protected": brute_force if isinstance(brute_force, bool) else None,
+        "registration_allowed": registration if isinstance(registration, bool) else None,
+        "ssl_required": ssl_required
+        if isinstance(ssl_required, str) and ssl_required in {"all", "external", "none"}
+        else None,
+        "password_policy": password_policy if isinstance(password_policy, str) else None,
+    }
+
+
+def _endpoint_values(value: Any) -> tuple[list[str], int | None, bool]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        return [], None, False
+    selected = value[:_MAX_CLIENT_ENDPOINT_VALUES]
+    return (
+        [item[:_MAX_CLIENT_ENDPOINT_LENGTH] for item in selected],
+        len(value),
+        len(value) > len(selected) or any(len(item) > _MAX_CLIENT_ENDPOINT_LENGTH for item in selected),
+    )
+
+
+def _client_settings(value: dict[str, Any], realm: str) -> dict[str, Any] | None:
+    client_id = value.get("clientId")
+    if not isinstance(client_id, str) or not client_id:
+        return None
+    public = value.get("publicClient")
+    bearer_only = value.get("bearerOnly")
+    direct_grants = value.get("directAccessGrantsEnabled")
+    implicit = value.get("implicitFlowEnabled")
+    redirects, redirect_count, redirects_truncated = _endpoint_values(value.get("redirectUris"))
+    origins, origin_count, origins_truncated = _endpoint_values(value.get("webOrigins"))
+    client_type = (
+        "bearer-only"
+        if bearer_only is True
+        else "public"
+        if public is True
+        else "confidential"
+        if public is False
+        else "unknown"
+    )
+    return {
+        "realm": realm,
+        "client_id": client_id,
+        "type": client_type,
+        "direct_access_grants": direct_grants if isinstance(direct_grants, bool) else None,
+        "implicit_flow": implicit if isinstance(implicit, bool) else None,
+        "redirect_uris": redirects,
+        "redirect_uri_count": redirect_count,
+        "redirects_truncated": redirects_truncated,
+        "web_origins": origins,
+        "web_origin_count": origin_count,
+        "origins_truncated": origins_truncated,
+    }
 
 
 def _origin(ctx: Any, scheme: str) -> str:
@@ -311,35 +417,77 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
 
 def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     result = dict(prior)
+    enum_realms = bool(getattr(ctx.args, "enum_realms", False))
     show_realms = bool(getattr(ctx.args, "show_realms", False))
     show_clients = bool(getattr(ctx.args, "show_clients", False))
-    if not (show_realms or show_clients):
+    if not (enum_realms or show_realms or show_clients):
         return result
     base = str(prior.get("api_endpoint") or "")
     token = getattr(ctx.args, "_keycloak_token", None)
     client = _client(ctx)
+    if enum_realms:
+        selected = _realms(ctx.args, str(getattr(ctx.target, "path", "") or ""))
+        found: set[str] = set()
+        detected_realm = prior.get("detected_realm")
+        if isinstance(detected_realm, str) and detected_realm in selected:
+            found.add(detected_realm)
+        for realm in selected:
+            if realm in found:
+                continue
+            realm_url = f"{base}/realms/{quote(realm, safe='')}"
+            realm_response = _get_public(client, realm_url)
+            realm_data = _json_object(realm_response)
+            if not _realm_response(realm_data, realm):
+                continue
+            resolved_url = str(realm_response.final_url or realm_url)
+            oidc_response = _get_public(client, f"{resolved_url}/.well-known/openid-configuration")
+            oidc_data = _json_object(oidc_response)
+            if not _oidc_response(oidc_data, realm) or realm_data is None or oidc_data is None:
+                continue
+            issuer = str(oidc_data["issuer"])
+            if (
+                realm_data.get("token-service") == issuer + "/protocol/openid-connect"
+                and realm_data.get("account-service") == issuer + "/account"
+            ):
+                found.add(realm)
+        result["public_realms"] = sorted(found)
+        result["public_realm_candidates_checked"] = len(selected)
     if show_realms:
         response = _get(client, f"{base}/admin/realms", token)
-        data = None
-        if response.status == 200 and not response.error:
-            try:
-                data = response.json()
-            except ValueError:
-                pass
-        if isinstance(data, list):
+        data = _json_list(response)
+        if data is not None:
             realm_names = sorted(
                 {str(item["realm"]) for item in data if isinstance(item, dict) and isinstance(item.get("realm"), str)}
             )
             result["visible_realms"] = realm_names[:1000]
             result["realms_truncated"] = len(realm_names) > 1000
+            settings: list[dict[str, Any]] = []
+            settings_access: dict[str, str] = {}
+            for realm in realm_names[:1000]:
+                detail = _get(client, f"{base}/admin/realms/{quote(realm, safe='')}", token)
+                parsed = _realm_settings(_json_object(detail), realm)
+                if parsed is not None:
+                    settings.append(parsed)
+                else:
+                    settings_access[realm] = "denied" if detail.status in {401, 403} else "unknown"
+            result["realm_settings"] = settings
+            if settings_access:
+                result["realm_settings_access"] = settings_access
         else:
             result["realms_access"] = "denied" if response.status in {401, 403} else "unknown"
     if show_clients:
         names: list[str] = []
+        settings_by_name: dict[str, dict[str, Any]] = {}
+        clients_access: dict[str, str] = {}
         limit = getattr(ctx.args, "show_clients", None)
         max_count = int(limit) if isinstance(limit, int) and not isinstance(limit, bool) else 10_000
         any_access = False
-        for realm in _realms(ctx.args, str(getattr(ctx.target, "path", "") or "")):
+        client_realms = (
+            tuple(result["public_realms"])
+            if enum_realms and isinstance(result.get("public_realms"), list)
+            else _realms(ctx.args, str(getattr(ctx.target, "path", "") or ""))
+        )
+        for realm in client_realms:
             offset = 0
             seen_pages: set[tuple[str, ...]] = set()
             while offset < max_count:
@@ -350,12 +498,13 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                     token,
                 )
                 if response.status != 200 or response.error:
+                    if offset == 0:
+                        clients_access[realm] = "denied" if response.status in {401, 403} else "unknown"
                     break
-                try:
-                    data = response.json()
-                except ValueError:
-                    break
-                if not isinstance(data, list):
+                data = _json_list(response)
+                if data is None:
+                    if offset == 0:
+                        clients_access[realm] = "unknown"
                     break
                 any_access = True
                 page_names = tuple(
@@ -367,9 +516,19 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                     break
                 seen_pages.add(page_names)
                 names.extend(f"{realm}/{name}" for name in page_names)
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    parsed = _client_settings(item, realm)
+                    if parsed is not None:
+                        settings_by_name[f"{realm}/{parsed['client_id']}"] = parsed
                 if len(data) < page_size:
                     break
                 offset += page_size
         if any_access:
-            result["visible_clients"] = sorted(set(names))[:max_count]
+            selected_names = sorted(set(names))[:max_count]
+            result["visible_clients"] = selected_names
+            result["client_settings"] = [settings_by_name[name] for name in selected_names if name in settings_by_name]
+        if clients_access:
+            result["clients_access"] = clients_access
     return result

@@ -211,7 +211,12 @@ Keycloak requires a product-specific realm response and matching OIDC discovery;
 generic SSO pages are at most `probable` in debug/JSON. The Admin API supplies an exact
 version only when accessible. `--enum-cve` never guesses from a UI theme or URL.
 The public `master` realm is checked by default; `--realm` is repeatable and
-`--enum-realms` uses a bounded candidate list. Admin inventory uses GET requests.
+`--enum-realms` checks up to 32 common names and reports only realms confirmed by
+the public Keycloak and OIDC endpoints. With an authorized token, `--show-realms`
+reports brute-force protection, registration, HTTPS requirement and password policy;
+`--show-clients` reports client type, Direct Access Grants, implicit flow, redirect
+URIs and web origins. Denied or absent settings remain `unknown` rather than `False`.
+Admin inventory uses GET requests and never prints client secrets.
 
 ### gRPC
 

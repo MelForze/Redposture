@@ -53,16 +53,16 @@ def configure_keycloak_parser(
     enumeration.add_argument(
         "--enum-realms",
         action="store_true",
-        help="Check a bounded list of common realm names.",
+        help="Check up to 32 common realm names for confirmed public Keycloak realms.",
     )
     enumeration.add_argument(
         "--show-realms",
         action="store_true",
-        help="List realms visible to the token.",
+        help="List token-visible realms and their read-only security settings.",
     )
     enumeration.add_argument(
         "--show-clients",
-        **optional_show_count_kwargs("List visible clients in checked realms."),
+        **optional_show_count_kwargs("List visible clients and their flow, redirect, and origin settings."),
     )
 
 

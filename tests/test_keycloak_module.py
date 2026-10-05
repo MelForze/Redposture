@@ -18,13 +18,24 @@ from hypothesis import strategies as st
 from redposture_core.cli import main
 from redposture_core.clients.http_api import HttpResponse
 from redposture_core.cve import enumerate_record, load_catalog
-from redposture_core.modules.keycloak.actions import _get_public, _oidc_response, _realm_response, _realms
+from redposture_core.modules.keycloak.actions import (
+    _client_settings,
+    _endpoint_values,
+    _get_public,
+    _oidc_response,
+    _realm_response,
+    _realm_settings,
+    _realms,
+)
 from redposture_core.modules.keycloak.render import _render_colored_keycloak_line
 
 
 class _KeycloakHandler(BaseHTTPRequestHandler):
     prefix = ""
     fake = False
+    rich = False
+    deny_partner_settings = False
+    deny_partner_clients = False
     calls: list[tuple[str, str]] = []
 
     def log_message(self, *_args: Any) -> None:
@@ -37,19 +48,22 @@ class _KeycloakHandler(BaseHTTPRequestHandler):
         authorized = self.headers.get("Authorization") == "Bearer valid-token"
         payload: Any = {"error": "not found"}
         code = 404
-        if path == f"{self.prefix}/realms/master":
+        public_realms = ("master", "corp", "partners") if self.rich else ("master",)
+        if path in {f"{self.prefix}/realms/{realm}" for realm in public_realms}:
+            realm = path.rsplit("/", 1)[-1]
             code = 200
             payload = {
-                "realm": "master",
+                "realm": realm,
                 "public_key": "A" * 128,
-                "token-service": f"{root}/realms/master/protocol/openid-connect",
-                "account-service": f"{root}/realms/master/account",
+                "token-service": f"{root}/realms/{realm}/protocol/openid-connect",
+                "account-service": f"{root}/realms/{realm}/account",
             }
             if self.fake:
                 payload = {"realm": "master", "version": "26.3.4"}
-        elif path == f"{self.prefix}/realms/master/.well-known/openid-configuration":
+        elif path in {f"{self.prefix}/realms/{realm}/.well-known/openid-configuration" for realm in public_realms}:
             code = 200
-            issuer = f"{root}/realms/master"
+            realm = path.split("/realms/", 1)[1].split("/", 1)[0]
+            issuer = f"{root}/realms/{realm}"
             payload = {
                 "issuer": issuer,
                 "jwks_uri": issuer + "/protocol/openid-connect/certs",
@@ -67,10 +81,60 @@ class _KeycloakHandler(BaseHTTPRequestHandler):
             payload = {"systemInfo": {"version": "26.3.4"}} if authorized else {"error": "unauthorized"}
         elif path == f"{self.prefix}/admin/realms":
             code = 200 if authorized else 401
-            payload = [{"realm": "master"}] if authorized else {"error": "unauthorized"}
+            payload = [{"realm": realm} for realm in public_realms] if authorized else {"error": "unauthorized"}
         elif path == f"{self.prefix}/admin/realms/master/clients":
             code = 200 if authorized else 401
             payload = [{"clientId": "sample-app"}] if authorized else {"error": "unauthorized"}
+        elif self.rich and path in {
+            f"{self.prefix}/admin/realms/corp/clients",
+            f"{self.prefix}/admin/realms/partners/clients",
+        }:
+            realm = path.split("/admin/realms/", 1)[1].split("/", 1)[0]
+            code = 200 if authorized else 401
+            if realm == "partners" and self.deny_partner_clients:
+                code = 403
+            payload = (
+                [
+                    {
+                        "clientId": "legacy-reports",
+                        "publicClient": True,
+                        "directAccessGrantsEnabled": True,
+                        "implicitFlowEnabled": True,
+                        "redirectUris": ["https://reports.example.test/*"],
+                        "webOrigins": ["*"],
+                        "secret": "never-print-this-secret",
+                    }
+                ]
+                if code == 200 and realm == "corp"
+                else [
+                    {
+                        "clientId": "partner-portal",
+                        "publicClient": True,
+                        "directAccessGrantsEnabled": False,
+                        "implicitFlowEnabled": False,
+                        "redirectUris": ["https://partner.example.test/callback"],
+                        "webOrigins": ["https://partner.example.test"],
+                    }
+                ]
+                if code == 200
+                else {"error": "forbidden"}
+            )
+        elif self.rich and path in {f"{self.prefix}/admin/realms/{realm}" for realm in public_realms}:
+            realm = path.rsplit("/", 1)[-1]
+            code = 200 if authorized else 401
+            if realm == "partners" and self.deny_partner_settings:
+                code = 403
+            payload = (
+                {
+                    "realm": realm,
+                    "bruteForceProtected": realm != "partners",
+                    "registrationAllowed": realm == "partners",
+                    "sslRequired": "external",
+                    "passwordPolicy": "length(12) and digits(1)" if realm == "corp" else "",
+                }
+                if code == 200
+                else {"error": "forbidden"}
+            )
         body = json.dumps(payload).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -233,6 +297,52 @@ def test_keycloak_output_colors_follow_airflow_baseline() -> None:
     assert "<orange>CVE-2026-11800 potentially affected" in console.lines[5]
 
 
+def test_keycloak_settings_colors_follow_airflow_baseline() -> None:
+    class ConsoleStub:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, value: str, color: str, _stream: Any) -> str:
+            return f"<{color}>{value}</{color}>"
+
+        def plain(self, value: str) -> None:
+            self.lines.append(value)
+
+    console = ConsoleStub()
+    lines = (
+        "KEYCLOAK\th\t8080\t [*] Public Realms Enumeration (realms:3)",
+        "KEYCLOAK\th\t8080\t [+] Realm Name=corp (brute-force protected:True) "
+        "(registration allowed:False) (SSL required:external) "
+        '(password policy:"length(12) and digits(1)")',
+        "KEYCLOAK\th\t8080\t [+] Realm Name=partners (brute-force protected:False) "
+        "(registration allowed:True) (SSL required:none) (password policy:none)",
+        "KEYCLOAK\th\t8080\t [+] Client Name=corp/legacy-reports (type:public) "
+        "(direct grants:True) (implicit:True) (redirect URIs:1) (web origins:1)",
+        'KEYCLOAK\th\t8080\t [+] Client Web Origin="*" (client:corp/legacy-reports)',
+        "KEYCLOAK\th\t8080\t [*] Realm Settings Name=partners (access:denied)",
+        "KEYCLOAK\th\t8080\t [+] Client Name=corp/service (type:unknown) "
+        "(direct grants:unknown) (implicit:unknown) (redirect URIs:unknown) (web origins:0)",
+    )
+    for line in lines:
+        assert _render_colored_keycloak_line(console, line)
+    assert "<white>Public Realms Enumeration" in console.lines[0]
+    assert "<true_red>realms:3</true_red>" in console.lines[0]
+    assert "<orange>Realm Name=corp</orange>" in console.lines[1]
+    assert "<bright_green>brute-force protected:True</bright_green>" in console.lines[1]
+    assert "<bright_green>registration allowed:False</bright_green>" in console.lines[1]
+    assert '<orange>password policy:"length(12) and digits(1)"</orange>' in console.lines[1]
+    assert "<orange>SSL required:external</orange>" in console.lines[1]
+    assert "<true_red>brute-force protected:False</true_red>" in console.lines[2]
+    assert "<true_red>registration allowed:True</true_red>" in console.lines[2]
+    assert "<true_red>direct grants:True</true_red>" in console.lines[3]
+    assert "<orange>type:public</orange>" in console.lines[3]
+    assert "<true_red>redirect URIs:1</true_red>" in console.lines[3]
+    assert '<orange>Client Web Origin="*" (client:corp/legacy-reports)</orange>' in console.lines[4]
+    assert "<bright_green>access:denied</bright_green>" in console.lines[5]
+    assert "<orange>direct grants:unknown</orange>" in console.lines[6]
+    assert "<bright_green>web origins:0</bright_green>" in console.lines[6]
+
+
 def test_public_redirect_keeps_endpoint_and_never_follows_idp() -> None:
     class ClientStub:
         def __init__(self, destination: str) -> None:
@@ -260,7 +370,154 @@ def test_realm_candidates_are_bounded_and_infer_url_realm() -> None:
     realms = _realms(args, "/prefix/auth/realms/custom/protocol/openid-connect")
     assert realms[0] == "custom"
     assert "master" in realms
-    assert len(realms) <= 12
+    assert {"corp", "partners", "development", "uat", "identity"}.issubset(realms)
+    assert 20 < len(realms) <= 32
+    assert len(realms) == len(set(realms))
+
+
+def test_enumerates_public_realms_and_authenticated_settings(
+    keycloak_server: tuple[str, type[_KeycloakHandler]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    url, handler = keycloak_server
+    handler.rich = True
+    args = [
+        "keycloak",
+        "-t",
+        url,
+        "--realm",
+        "corp",
+        "--realm",
+        "partners",
+        "--token",
+        "valid-token",
+        "--enum-realms",
+        "--show-realms",
+        "--show-clients",
+        "--no-color",
+    ]
+    assert main([*args, "-f", "json"]) == 0
+    data = _records(capsys.readouterr().out)[0]
+    assert data["public_realms"] == ["corp", "master", "partners"]
+    assert data["visible_realms"] == ["corp", "master", "partners"]
+    assert data["realm_settings"][0] == {
+        "realm": "corp",
+        "brute_force_protected": True,
+        "registration_allowed": False,
+        "ssl_required": "external",
+        "password_policy": "length(12) and digits(1)",
+    }
+    legacy = next(item for item in data["client_settings"] if item["client_id"] == "legacy-reports")
+    assert legacy["type"] == "public"
+    assert legacy["direct_access_grants"] is True
+    assert legacy["implicit_flow"] is True
+    assert legacy["redirect_uris"] == ["https://reports.example.test/*"]
+    assert legacy["web_origins"] == ["*"]
+    assert "never-print-this-secret" not in json.dumps(data)
+    assert all(not auth for path, auth in handler.calls if path.startswith("/realms/") and "userinfo" not in path)
+
+    assert main(args) == 0
+    output = capsys.readouterr().out
+    assert "Public Realms Enumeration (realms:3)" in output
+    assert "Realm Name=corp (brute-force protected:True) (registration allowed:False)" in output
+    assert "Client Name=corp/legacy-reports (type:public) (direct grants:True) (implicit:True)" in output
+    assert 'Client Redirect URI="https://reports.example.test/*"' in output
+    assert 'Client Web Origin="*"' in output
+    assert "never-print-this-secret" not in output
+    assert "\x1b[" not in output
+
+
+def test_restricted_settings_remain_denied_not_false(
+    keycloak_server: tuple[str, type[_KeycloakHandler]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    url, handler = keycloak_server
+    handler.rich = True
+    handler.deny_partner_settings = True
+    handler.deny_partner_clients = True
+    args = ["keycloak", "-t", url, "--token", "valid-token", "--show-realms", "--show-clients", "--realm", "partners"]
+    assert main([*args, "-f", "json", "--no-color"]) == 0
+    data = _records(capsys.readouterr().out)[0]
+    assert data["realm_settings_access"]["partners"] == "denied"
+    assert "partners" not in {item["realm"] for item in data["realm_settings"]}
+    assert data["clients_access"]["partners"] == "denied"
+    assert data.get("client_settings", []) == [] or all(item["realm"] != "partners" for item in data["client_settings"])
+    assert main([*args, "--no-color"]) == 0
+    output = capsys.readouterr().out
+    assert "Realm Settings Name=partners (access:denied)" in output
+    assert "Clients Name=partners (access:denied)" in output
+    assert "Realm Name=partners (brute-force protected:False)" not in output
+
+
+def test_malformed_admin_settings_do_not_become_safe_values() -> None:
+    realm = _realm_settings(
+        {"realm": "corp", "bruteForceProtected": "false", "registrationAllowed": 0, "sslRequired": "maybe"}, "corp"
+    )
+    assert realm == {
+        "realm": "corp",
+        "brute_force_protected": None,
+        "registration_allowed": None,
+        "ssl_required": None,
+        "password_policy": None,
+    }
+    assert _realm_settings({"realm": "other", "bruteForceProtected": True}, "corp") is None
+    client = _client_settings(
+        {
+            "clientId": "portal",
+            "publicClient": "true",
+            "directAccessGrantsEnabled": 1,
+            "implicitFlowEnabled": "false",
+            "redirectUris": "*",
+            "webOrigins": None,
+        },
+        "corp",
+    )
+    assert client is not None
+    assert client["type"] == "unknown"
+    assert client["direct_access_grants"] is None
+    assert client["implicit_flow"] is None
+    assert client["redirect_uri_count"] is None
+    assert client["web_origin_count"] is None
+    assert _endpoint_values([1, "https://example.test"]) == ([], None, False)
+
+
+@given(st.lists(st.text(max_size=600), max_size=80))
+def test_client_endpoint_inventory_is_bounded(values: list[str]) -> None:
+    selected, count, truncated = _endpoint_values(values)
+    assert count == len(values)
+    assert len(selected) <= 20
+    assert all(len(item) <= 512 for item in selected)
+    assert truncated == (len(values) > 20 or any(len(item) > 512 for item in values[:20]))
+
+
+def test_enriched_inventory_files_are_ansi_free(
+    keycloak_server: tuple[str, type[_KeycloakHandler]], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    url, handler = keycloak_server
+    handler.rich = True
+    args = [
+        "keycloak",
+        "-t",
+        url,
+        "--token",
+        "valid-token",
+        "--enum-realms",
+        "--show-realms",
+        "--show-clients",
+    ]
+    txt_path = tmp_path / "inventory.txt"
+    assert main([*args, "-o", str(txt_path), "--no-color"]) == 0
+    assert "\x1b[" not in capsys.readouterr().out
+    text = txt_path.read_text()
+    assert "\x1b[" not in text
+    assert "Client Name=corp/legacy-reports" in text
+    assert "never-print-this-secret" not in text
+    assert all(len(line.split("\t", 3)) == 4 for line in text.splitlines() if line.startswith("KEYCLOAK\t"))
+    json_path = tmp_path / "inventory.json"
+    assert main([*args, "-f", "json", "-o", str(json_path), "--no-color"]) == 0
+    assert "\x1b[" not in capsys.readouterr().out
+    payload = json_path.read_text()
+    assert "\x1b[" not in payload
+    assert "never-print-this-secret" not in payload
+    assert _records(payload)[0]["public_realms"] == ["corp", "master", "partners"]
 
 
 @given(
