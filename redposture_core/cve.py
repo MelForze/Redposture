@@ -415,6 +415,7 @@ def resolve_products(module: str, payload: Mapping[str, Any]) -> list[DetectedPr
         "etcd": ("etcd", "etcd", "server_version"),
         "gitlab": ("gitlab", "GitLab", "version"),
         "grafana": ("grafana", "Grafana", "server_version"),
+        "keycloak": ("keycloak", "Keycloak", "version"),
         "kubeapi": ("kubernetes", "Kubernetes", "version"),
         "minio": ("minio", "MinIO", "version"),
         "mongodb": ("mongodb", "MongoDB", "server_version"),

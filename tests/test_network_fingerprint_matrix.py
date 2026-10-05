@@ -36,6 +36,7 @@ HTTP_PRODUCTS = (
     "etcd",
     "gitlab",
     "grafana",
+    "keycloak",
     "kubeapi",
     "minio",
     "proxmox",
@@ -53,6 +54,7 @@ HTTP_API_SUFFIXES = {
     "etcd": "/version",
     "gitlab": "/api/v4/version",
     "grafana": "/api/health",
+    "keycloak": "/realms/master/.well-known/openid-configuration",
     "kubeapi": "/version",
     "minio": "/minio/health/live",
     "proxmox": "/api2/json/version",
@@ -66,7 +68,7 @@ NATIVE_PRODUCTS = ("clickhouse", "grpc", "kafka", "keeper", "mongodb", "oracle",
 PRODUCTS = HTTP_PRODUCTS + NATIVE_PRODUCTS
 
 
-def _http_response(product: str, path: str, *, proxy_headers: bool = False) -> bytes:
+def _http_response(product: str, path: str, *, proxy_headers: bool = False, origin: str = "http://127.0.0.1") -> bytes:
     path = urlsplit(path).path
     if product == "grpc_web":
         trailer = b"grpc-status: 12\r\n"
@@ -117,6 +119,25 @@ def _http_response(product: str, path: str, *, proxy_headers: bool = False) -> b
         if path == "/login":
             payload = "<title>Grafana</title>"
             headers["Content-Type"] = "text/html"
+    elif product == "keycloak":
+        issuer = origin + "/realms/master"
+        payload = {
+            "realm": "master",
+            "public_key": "A" * 128,
+            "token-service": issuer + "/protocol/openid-connect",
+            "account-service": issuer + "/account",
+        }
+        if path.endswith("/.well-known/openid-configuration"):
+            payload = {
+                "issuer": issuer,
+                "jwks_uri": issuer + "/protocol/openid-connect/certs",
+                "token_endpoint": issuer + "/protocol/openid-connect/token",
+                "authorization_endpoint": issuer + "/protocol/openid-connect/auth",
+            }
+        elif path.endswith("/protocol/openid-connect/certs"):
+            payload = {"keys": []}
+        elif path == "/admin/serverinfo":
+            status, payload = 401, {"error": "unauthorized"}
     elif product == "kubeapi":
         payload = {"major": "1", "minor": "27", "gitVersion": "v1.27.5", "gitCommit": "abc123"}
         if path == "/api":
@@ -157,7 +178,7 @@ def _http_response(product: str, path: str, *, proxy_headers: bool = False) -> b
         headers["Server"] = "nginx"
     body = payload.encode() if isinstance(payload, str) else json.dumps(payload).encode()
     headers["Content-Length"] = str(len(body))
-    reason = {200: "OK", 403: "Forbidden", 404: "Not Found"}[status]
+    reason = {200: "OK", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found"}[status]
     return (
         f"HTTP/1.1 {status} {reason}\r\n" + "".join(f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
     ).encode() + body
@@ -344,7 +365,12 @@ def _product_server(
                         )
                     else:
                         self.request.sendall(
-                            _http_response(product, path[len(prefix) :] or "/", proxy_headers=proxy_headers)
+                            _http_response(
+                                product,
+                                path[len(prefix) :] or "/",
+                                proxy_headers=proxy_headers,
+                                origin=f"http://127.0.0.1:{server.server_address[1]}{prefix}",
+                            )
                         )
                 else:
                     requests.append(initial)
@@ -453,6 +479,8 @@ def _detect(
     if verify_foreign or with_credentials:
         if module == "gitlab":
             extra += ["--token", "qa-token"]
+        elif module == "keycloak":
+            extra += ["--token", "qa-token"]
         elif module == "qdrant":
             extra += ["--api-key", "qa-token"]
         elif module != "docker":
@@ -491,7 +519,7 @@ def _detect(
 
 
 def test_wire_corpus_covers_exactly_all_audit_modules() -> None:
-    assert len(PRODUCTS) == len(set(PRODUCTS)) == 24
+    assert len(PRODUCTS) == len(set(PRODUCTS)) == 25
     assert set(PRODUCTS) == set(AUDIT_MODULE_NAMES)
 
 

@@ -1859,6 +1859,7 @@ _HTTP_DETECTION_MODULES = frozenset(
         "etcd",
         "gitlab",
         "grafana",
+        "keycloak",
         "kubeapi",
         "minio",
         "proxmox",

@@ -568,6 +568,7 @@ _ROOT_HELP_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("etcd", "KV access and auth"),
             ("gitlab", "projects, tokens, registry"),
             ("grafana", "login and datasources"),
+            ("keycloak", "realms, tokens, clients"),
             ("kubeapi", "namespaces and workloads"),
             ("proxmox", "nodes, VMs, storage"),
             ("rabbitmq", "users, queues, permissions"),

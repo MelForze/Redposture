@@ -73,6 +73,12 @@ def _detected_payload(module: str, spec: ModuleAuditSpec) -> dict[str, Any]:
             "etcd": {"is_etcd": True, "api_versions": "v3", "server_version": "3.5.0"},
             "proxmox": {"is_proxmox": True},
             "grafana": {"is_grafana": True, "server_version": "11.0.0"},
+            "keycloak": {
+                "is_keycloak": True,
+                "detection_status": "confirmed",
+                "detected_realm": "master",
+                "version": "26.6.4",
+            },
             "gitlab": {"is_gitlab": True, "status": "detected", "login_page": True, "version": "17.0.0"},
             "consul": {"is_consul": True, "anonymous_scopes": {}, "version": "1.22.0"},
             "qdrant": {"is_qdrant": True, "version": "1.9.0", "anonymous_access": True},

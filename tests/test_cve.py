@@ -26,7 +26,7 @@ from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, 
 
 def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
     catalog = load_catalog()
-    assert catalog.version == "2026-10-03"
+    assert catalog.version == "2026-10-05"
     assert catalog.entries
     keys: set[tuple[str, str]] = set()
     for entry in catalog.entries:
@@ -61,7 +61,7 @@ def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
 
 def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
     counts = Counter(entry["product"] for entry in load_catalog().entries)
-    assert len(load_catalog().entries) == 197
+    assert len(load_catalog().entries) == 198
     assert counts == {
         "apache_airflow": 11,
         "apache_zookeeper": 2,
@@ -76,6 +76,7 @@ def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
         "harbor": 2,
         "hashicorp_consul": 1,
         "kubernetes": 1,
+        "keycloak": 1,
         "minio": 5,
         "mongodb": 7,
         "nexus_repository": 10,
@@ -89,7 +90,7 @@ def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
         "valkey": 3,
     }
     assert Counter(entry["impact"] for entry in load_catalog().entries)["ssrf"] == 32
-    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 94, "L": 101, "H": 2}
+    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 94, "L": 102, "H": 2}
 
 
 @pytest.mark.parametrize(

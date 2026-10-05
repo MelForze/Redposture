@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_version": "2026-10-03",
+  "catalog_version": "2026-10-05",
   "entries": [
     {
       "id": "CVE-2017-15720",
@@ -5513,6 +5513,25 @@
         "https://nvd.nist.gov/vuln/detail/CVE-2026-63639"
       ],
       "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-11800",
+      "product": "keycloak",
+      "title": "Keycloak JWT grant authentication bypass requiring valid client credentials",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "fixed": "26.6.4"
+        }
+      ],
+      "references": [
+        "https://github.com/keycloak/keycloak/security/advisories/GHSA-j97h-3f8r-mrjr",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-11800"
+      ],
+      "verified_at": "2026-10-05"
     }
   ]
 }

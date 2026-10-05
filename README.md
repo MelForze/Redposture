@@ -11,7 +11,7 @@
   <a href="https://github.com/MelForze/Redposture/releases">
     <img src="https://img.shields.io/github/v/tag/MelForze/Redposture?style=flat-square&label=version" alt="Latest version">
   </a>
-  <img src="https://img.shields.io/badge/modules-24-2b2f36?style=flat-square" alt="Modules">
+  <img src="https://img.shields.io/badge/modules-25-2b2f36?style=flat-square" alt="Modules">
   <img src="https://img.shields.io/badge/Python-3.12%2B-2b2f36?style=flat-square" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/install-pipx-2b2f36?style=flat-square" alt="Install with pipx">
 </p>
@@ -21,7 +21,7 @@
 
 CLI for authorized audits of exposed services: identify the product, verify access,
 enumerate data, find secrets, and match versions against an offline CVE catalog.
-Python 3.12+; 24 audit modules plus exporter scan/collect/trigger workflows.
+Python 3.12+; 25 audit modules plus exporter scan/collect/trigger workflows.
 
 ## Install
 
@@ -198,6 +198,20 @@ redposture grafana -t targets.txt --enum-cve
 redposture grafana -t targets.txt --defcreds
 redposture grafana -t https://grafana.example -u auditor -p 'password' --show-datasources --enum-cve
 ```
+
+### Keycloak
+
+```bash
+redposture keycloak -t targets.txt --enum-cve
+redposture keycloak -t https://id.example/auth --enum-realms
+redposture keycloak -t https://id.example --token-file token.txt --show-realms --show-clients
+```
+
+Keycloak requires a product-specific realm response and matching OIDC discovery;
+generic SSO pages are at most `probable` in debug/JSON. The Admin API supplies an exact
+version only when accessible. `--enum-cve` never guesses from a UI theme or URL.
+The public `master` realm is checked by default; `--realm` is repeatable and
+`--enum-realms` uses a bounded candidate list. Admin inventory uses GET requests.
 
 ### gRPC
 
@@ -404,6 +418,8 @@ invalid credentials and `--defcreds` alone do not qualify. Selected Nexus
 script/licensing entries need elevated permissions, and Grafana Image Renderer
 needs a detected plugin and reachable renderer; other title prerequisites such as
 Enterprise SCIM or a write-enabled MinIO key are not proven by version matching.
+The Keycloak JWT grant entry additionally requires valid client credentials;
+a verified bearer token alone does not prove that prerequisite.
 
 Credential checks precede newest-first CVE findings. `CVE's Enumeration` appears
 only with matches; unknown/no-match/unsupported details remain in debug/JSON.
@@ -414,7 +430,7 @@ GRAFANA         10.0.0.1        3000  [*] CVE's Enumeration
 GRAFANA         10.0.0.1        3000  [!] CVE-2021-43798 potentially affected (HIGH 7.5) Unauthenticated path traversal and arbitrary file read
 ```
 
-The bundled `2026-10-03` catalog contains 197 reviewed product/CVE records:
+The bundled `2026-10-05` catalog contains 198 reviewed product/CVE records:
 
 | Product | CVEs | Product | CVEs |
 |---|---:|---|---:|
@@ -430,7 +446,8 @@ The bundled `2026-10-03` catalog contains 197 reviewed product/CVE records:
 | Grafana Enterprise SCIM | 1 | Grafana Image Renderer | 1 |
 | Consul | 1 | Docker Engine | 1 |
 | etcd | 1 | Kubernetes | 1 |
-| **Total** | **197** | | |
+| Keycloak | 1 | | |
+| **Total** | **198** | | |
 
 Elasticsearch/OpenSearch, Redis/Valkey, ZooKeeper/Keeper and Registry vendors are
 matched separately. Plain Docker Registry and gRPC are unsupported; Kafka lacks
