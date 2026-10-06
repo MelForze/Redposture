@@ -4,6 +4,7 @@ import json
 import socket
 import urllib.request
 from collections import Counter
+from datetime import date
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,16 +18,18 @@ from redposture_core.cve import (
     enumerate_record,
     load_catalog,
     normalize_version,
+    render_finding_lines,
     resolve_products,
     version_in_range,
 )
 from redposture_core.module_registry import AUDIT_MODULE_NAMES
+from redposture_core.rendering import render_colored_marker_line
 from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun, ModuleAuditSpec
 
 
 def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
     catalog = load_catalog()
-    assert catalog.version == "2026-10-05"
+    assert catalog.version == "2026-10-06"
     assert catalog.entries
     keys: set[tuple[str, str]] = set()
     for entry in catalog.entries:
@@ -57,11 +60,15 @@ def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
         assert len(entry["references"]) >= 2
         assert any("nvd.nist.gov" in ref for ref in entry["references"])
         assert any("nvd.nist.gov" not in ref for ref in entry["references"])
+        if entry.get("unknown_version_candidate") is True:
+            assert date.fromisoformat(entry["published_at"])
+            assert entry["impact"] == "rce"
+            assert entry["privileges_required"] == "N"
 
 
 def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
     counts = Counter(entry["product"] for entry in load_catalog().entries)
-    assert len(load_catalog().entries) == 198
+    assert len(load_catalog().entries) == 200
     assert counts == {
         "apache_airflow": 11,
         "apache_zookeeper": 2,
@@ -76,7 +83,7 @@ def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
         "harbor": 2,
         "hashicorp_consul": 1,
         "kubernetes": 1,
-        "keycloak": 1,
+        "keycloak": 3,
         "minio": 5,
         "mongodb": 7,
         "nexus_repository": 10,
@@ -90,7 +97,7 @@ def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
         "valkey": 3,
     }
     assert Counter(entry["impact"] for entry in load_catalog().entries)["ssrf"] == 32
-    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 94, "L": 102, "H": 2}
+    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 95, "L": 103, "H": 2}
 
 
 @pytest.mark.parametrize(
@@ -274,6 +281,149 @@ def test_unknown_unsupported_and_unconfirmed_are_not_guessed() -> None:
         "unsupported"
     )
     assert enumerate_record("grafana", {"server_version": "8.2.6"}, catalog=catalog, confirmed=False)["findings"] == []
+
+
+@pytest.mark.parametrize(
+    ("module", "payload", "expected"),
+    [
+        ("clickhouse", {"server_version": None}, "CVE-2024-6873"),
+        ("qdrant", {"version": "unknown"}, "CVE-2024-2221"),
+        ("redis", {"server_version": "7.x"}, "CVE-2023-41056"),
+    ],
+)
+def test_confirmed_unknown_version_shows_only_curated_recent_unauth_rce(
+    module: str, payload: dict[str, object], expected: str
+) -> None:
+    result = enumerate_record(module, payload, catalog=load_catalog(), confirmed=True, as_of=date(2026, 10, 6))
+    assert result["status"] == "version_unknown"
+    assert [item["id"] for item in result["findings"]] == [expected]
+    finding = result["findings"][0]
+    assert finding["version_assessment"] == "unknown"
+    assert finding["detected_version"] is None
+    assert finding["access_basis"] == "network"
+    assert finding["privileges_required"] == "N"
+    assert finding["impact"] == "rce"
+    lines = render_finding_lines({"cve_enumeration": result}, label=module.upper(), host="127.0.0.1", port=1234)
+    assert len(lines) == 2
+    assert f"{expected} potentially affected; version unknown" in lines[1]
+    assert "\x1b[" not in "".join(lines)
+
+
+def test_unknown_version_fallback_respects_publication_window_and_product_identity() -> None:
+    catalog = load_catalog()
+    redis = {"server_version": None}
+    assert enumerate_record("redis", redis, catalog=catalog, confirmed=True, as_of=date(2028, 1, 9))["findings"]
+    assert not enumerate_record("redis", redis, catalog=catalog, confirmed=True, as_of=date(2028, 1, 10))["findings"]
+    assert not enumerate_record("redis", redis, catalog=catalog, confirmed=False, as_of=date(2026, 10, 6))["findings"]
+    assert not enumerate_record(
+        "redis", {"implementation": "valkey", "server_version": None}, catalog=catalog, confirmed=True
+    )["findings"]
+    assert not enumerate_record("keycloak", {"version": None}, catalog=catalog, confirmed=True)["findings"]
+    assert not enumerate_record("nexus", {"is_nexus": True}, catalog=catalog, confirmed=True)["findings"]
+    assert not enumerate_record("kafka", {}, catalog=catalog, confirmed=True)["findings"]
+    assert not enumerate_record("grpc", {}, catalog=catalog, confirmed=True)["findings"]
+    probable = enumerate_record(
+        "demo",
+        {},
+        catalog=catalog,
+        confirmed=True,
+        resolver=lambda _payload: [DetectedProduct("redis", "Redis", None, "probable")],
+    )
+    assert not probable["findings"]
+
+
+def test_known_version_match_keeps_matched_status_with_another_unknown_product() -> None:
+    result = enumerate_record(
+        "demo",
+        {},
+        catalog=load_catalog(),
+        confirmed=True,
+        as_of=date(2026, 10, 6),
+        resolver=lambda _payload: [
+            DetectedProduct("grafana", "Grafana", "8.2.6"),
+            DetectedProduct("redis", "Redis", None),
+        ],
+    )
+    assert result["status"] == "matched"
+    assert {"CVE-2021-43798", "CVE-2023-41056"} <= {finding["id"] for finding in result["findings"]}
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("23.9.0", set()),
+        ("24.0.4", set()),
+        ("24.0.5", set()),
+        ("25.0.0", set()),
+        ("26.0.0", {"CVE-2026-18963"}),
+        ("26.4.14", {"CVE-2026-18963"}),
+        ("26.4.15", set()),
+        ("26.5.7", {"CVE-2026-18963"}),
+        ("26.6.5", {"CVE-2026-18963"}),
+        ("26.6.6", set()),
+        ("26.7.1", {"CVE-2026-18963"}),
+        ("26.7.2", set()),
+    ],
+)
+def test_keycloak_new_cve_version_boundaries(version: str, expected: set[str]) -> None:
+    result = enumerate_record(
+        "keycloak",
+        {"version": version, "auth_required": True},
+        catalog=load_catalog(),
+        confirmed=True,
+        credentials_provided=False,
+    )
+    assert {item["id"] for item in result["findings"]} == expected
+
+
+def test_keycloak_low_privilege_admin_cve_requires_verified_credentials() -> None:
+    catalog = load_catalog()
+    vulnerable = enumerate_record(
+        "keycloak",
+        {"version": "24.0.4", "auth_required": True},
+        catalog=catalog,
+        confirmed=True,
+        credentials_provided=True,
+    )
+    fixed = enumerate_record(
+        "keycloak",
+        {"version": "24.0.5", "auth_required": True},
+        catalog=catalog,
+        confirmed=True,
+        credentials_provided=True,
+    )
+    assert "CVE-2024-3656" in {item["id"] for item in vulnerable["findings"]}
+    assert "CVE-2024-3656" not in {item["id"] for item in fixed["findings"]}
+
+
+def test_qdrant_vendor_range_includes_18_and_excludes_fixed_19() -> None:
+    catalog = load_catalog()
+    vulnerable = enumerate_record("qdrant", {"version": "1.8.4"}, catalog=catalog, confirmed=True)
+    fixed = enumerate_record("qdrant", {"version": "1.9.0"}, catalog=catalog, confirmed=True)
+    assert "CVE-2024-2221" in {item["id"] for item in vulnerable["findings"]}
+    assert "CVE-2024-2221" not in {item["id"] for item in fixed["findings"]}
+
+
+def test_unknown_version_finding_colors_match_airflow_baseline() -> None:
+    class ConsoleStub:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, value: str, color: str, _stream: object) -> str:
+            return f"<{color}>{value}</{color}>"
+
+        def plain(self, value: str) -> None:
+            self.lines.append(value)
+
+    result = enumerate_record(
+        "redis", {"server_version": None}, catalog=load_catalog(), confirmed=True, as_of=date(2026, 10, 6)
+    )
+    lines = render_finding_lines({"cve_enumeration": result}, label="REDIS", host="127.0.0.1", port=6379)
+    console = ConsoleStub()
+    assert all(render_colored_marker_line(console, line, tag="REDIS") for line in lines)
+    assert "<white>CVE's Enumeration</white>" in console.lines[0]
+    assert "<red>[!]</red>" in console.lines[1]
+    assert "<orange>CVE-2023-41056 potentially affected; version unknown" in console.lines[1]
 
 
 def test_qdrant_privileged_endpoint_check_remains_additional_evidence_without_access() -> None:

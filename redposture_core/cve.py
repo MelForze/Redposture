@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import json
 import re
+from calendar import monthrange
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from importlib.resources import files
 from typing import Any
@@ -216,6 +217,24 @@ def _validate_entry(raw: Any, seen: set[tuple[str, str]]) -> dict[str, Any]:
         date.fromisoformat(verified_at)
     except ValueError as exc:
         raise CveCatalogError(f"{cve_id}: verified_at must use YYYY-MM-DD") from exc
+    if type(raw.get("unknown_version_candidate", False)) is not bool:
+        raise CveCatalogError(f"{cve_id}: unknown_version_candidate must be boolean")
+    published_at = raw.get("published_at")
+    if published_at is not None:
+        if not isinstance(published_at, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", published_at):
+            raise CveCatalogError(f"{cve_id}: published_at must use YYYY-MM-DD")
+        try:
+            date.fromisoformat(published_at)
+        except ValueError as exc:
+            raise CveCatalogError(f"{cve_id}: published_at must use YYYY-MM-DD") from exc
+    if raw.get("unknown_version_candidate") is True and (
+        published_at is None
+        or impact != "rce"
+        or privilege != "N"
+        or "AV:N" not in vector_parts
+        or "UI:N" not in vector_parts
+    ):
+        raise CveCatalogError(f"{cve_id}: unknown-version candidate requires dated unauthenticated network RCE")
     entry = dict(raw)
     entry.update(
         {
@@ -529,6 +548,7 @@ def enumerate_record(
     confirmed: bool,
     resolver: ProductResolver | None = None,
     credentials_provided: bool = False,
+    as_of: date | None = None,
 ) -> dict[str, Any]:
     evidence = _additional_evidence(module, payload)
     if not confirmed:
@@ -570,6 +590,7 @@ def enumerate_record(
         }
     findings: list[dict[str, Any]] = []
     has_unknown_version = False
+    has_known_match = False
     low_privilege_basis = (
         "anonymous_access"
         if payload.get("auth_required") is False
@@ -577,9 +598,39 @@ def enumerate_record(
         if credentials_provided
         else None
     )
+    today = as_of or datetime.now(timezone.utc).date()
+    cutoff_year = today.year - 4
+    cutoff = date(cutoff_year, today.month, min(today.day, monthrange(cutoff_year, today.month)[1]))
     for product in products:
+        if product.confidence not in {"confirmed", "high"}:
+            continue
         if not product.version or normalize_version(product.version, _version_scheme(product.product_key)) is None:
             has_unknown_version = True
+            for entry in catalog.entries:
+                if entry["product"] != product.product_key or entry.get("unknown_version_candidate") is not True:
+                    continue
+                published = date.fromisoformat(entry["published_at"])
+                if not cutoff <= published <= today:
+                    continue
+                findings.append(
+                    {
+                        "id": entry["id"],
+                        "title": entry["title"],
+                        "product": product.product_key,
+                        "detected_version": None,
+                        "version_assessment": "unknown",
+                        "published_at": entry["published_at"],
+                        "severity": entry["severity"],
+                        "score": entry["score"],
+                        "vector": entry["vector"],
+                        "privileges_required": "N",
+                        "access_basis": "network",
+                        "impact": entry["impact"],
+                        "affected_range": "; ".join(_range_text(item) for item in entry["affected"]),
+                        "fixed_version": None,
+                        "references": list(entry["references"]),
+                    }
+                )
             continue
         for entry in catalog.entries:
             if entry["product"] != product.product_key:
@@ -593,6 +644,7 @@ def enumerate_record(
                     )
                     if privileges_required == "L" and low_privilege_basis is None and not version_only_exception:
                         break
+                    has_known_match = True
                     findings.append(
                         {
                             "id": entry["id"],
@@ -620,7 +672,7 @@ def enumerate_record(
                     )
                     break
     findings.sort(key=_finding_recency_key)
-    status = "matched" if findings else "version_unknown" if has_unknown_version else "no_matches"
+    status = "matched" if has_known_match else "version_unknown" if has_unknown_version else "no_matches"
     return {
         "status": status,
         "catalog_version": catalog.version,
@@ -655,7 +707,8 @@ def render_finding_lines(payload: Mapping[str, Any], *, label: str, host: str, p
         if not isinstance(finding, Mapping):
             continue
         lines.append(
-            f"{prefix}[!] {finding.get('id')} potentially affected "
+            f"{prefix}[!] {finding.get('id')} potentially affected"
+            f"{'; version unknown' if finding.get('version_assessment') == 'unknown' else ''} "
             f"({finding.get('severity')} {float(finding.get('score') or 0):g}) {finding.get('title')}"
         )
     return lines

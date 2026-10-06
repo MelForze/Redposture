@@ -435,8 +435,13 @@ Enterprise SCIM or a write-enabled MinIO key are not proven by version matching.
 The Keycloak JWT grant entry additionally requires valid client credentials;
 a verified bearer token alone does not prove that prerequisite.
 
-Credential checks precede newest-first CVE findings. `CVE's Enumeration` appears
-only with matches; unknown/no-match/unsupported details remain in debug/JSON.
+Credential checks precede newest-first CVE findings. With an unknown or malformed
+version, a confirmed product may show only catalogued unauthenticated network RCEs
+published within the previous four calendar years. These lines say
+`potentially affected; version unknown`: no version match has been established.
+Keycloak currently has no qualifying unauthenticated RCE for this fallback.
+`CVE's Enumeration` appears only when there are findings; otherwise status and
+reason remain in debug/JSON.
 
 ```text
 GRAFANA         10.0.0.1        3000  [*] Grafana Service (auth required:False) (version:8.2.6)
@@ -444,7 +449,7 @@ GRAFANA         10.0.0.1        3000  [*] CVE's Enumeration
 GRAFANA         10.0.0.1        3000  [!] CVE-2021-43798 potentially affected (HIGH 7.5) Unauthenticated path traversal and arbitrary file read
 ```
 
-The bundled `2026-10-05` catalog contains 198 reviewed product/CVE records:
+The bundled `2026-10-06` catalog contains 200 reviewed product/CVE records:
 
 | Product | CVEs | Product | CVEs |
 |---|---:|---|---:|
@@ -460,8 +465,8 @@ The bundled `2026-10-05` catalog contains 198 reviewed product/CVE records:
 | Grafana Enterprise SCIM | 1 | Grafana Image Renderer | 1 |
 | Consul | 1 | Docker Engine | 1 |
 | etcd | 1 | Kubernetes | 1 |
-| Keycloak | 1 | | |
-| **Total** | **198** | | |
+| Keycloak | 3 | | |
+| **Total** | **200** | | |
 
 Elasticsearch/OpenSearch, Redis/Valkey, ZooKeeper/Keeper and Registry vendors are
 matched separately. Plain Docker Registry and gRPC are unsupported; Kafka lacks

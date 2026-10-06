@@ -305,9 +305,9 @@ def test_keycloak_cve_requires_verified_access_and_respects_fixed_boundary() -> 
     fixed = enumerate_record(
         "keycloak", {**payload, "version": "26.6.4"}, catalog=catalog, confirmed=True, credentials_provided=True
     )
-    assert not unauthenticated["findings"]
-    assert [finding["id"] for finding in authenticated["findings"]] == ["CVE-2026-11800"]
-    assert not fixed["findings"]
+    assert [finding["id"] for finding in unauthenticated["findings"]] == ["CVE-2026-18963"]
+    assert [finding["id"] for finding in authenticated["findings"]] == ["CVE-2026-18963", "CVE-2026-11800"]
+    assert [finding["id"] for finding in fixed["findings"]] == ["CVE-2026-18963"]
 
 
 def test_keycloak_output_colors_follow_airflow_baseline() -> None:
