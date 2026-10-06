@@ -20,7 +20,7 @@
       }
     ],
     "auth_method": null,
-    "auth_required": false,
+    "auth_required": true,
     "check_results": [
       {
         "cleanup_error": null,

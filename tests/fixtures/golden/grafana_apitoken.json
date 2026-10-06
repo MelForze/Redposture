@@ -21,7 +21,7 @@
     ],
     "auth_method": null,
     "auth_required": true,
-    "check_results": [],
+    "check_results": null,
     "check_urls": [],
     "credential_attempts": [
       {
@@ -45,7 +45,7 @@
     "detection_status": "confirmed",
     "effective_password": null,
     "effective_username": null,
-    "error": "authentication required",
+    "error": "invalid api token",
     "host": "127.0.0.1",
     "is_grafana": true,
     "module": "grafana",
@@ -74,14 +74,14 @@
       },
       {
         "attempt": 1,
-        "error": null,
-        "result": "ok",
+        "error": "deep checks disabled",
+        "result": "skip",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "authentication required",
-        "result": "error",
+        "error": "deep checks disabled",
+        "result": "skip",
         "stage_name": "data"
       }
     ],

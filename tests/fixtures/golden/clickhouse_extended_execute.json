@@ -47,10 +47,12 @@
     "execute_capability": true,
     "execute_command": "id",
     "execute_error": null,
+    "execute_exit_code": 0,
     "execute_ok": true,
     "execute_output": [
-      "[\"uid=101(clickhouse) gid=101(clickhouse) groups=101(clickhouse),0(root)\"]"
+      "uid=101(clickhouse) gid=101(clickhouse) groups=101(clickhouse),0(root)"
     ],
+    "execute_truncated": false,
     "host": "127.0.0.1",
     "is_clickhouse": true,
     "module": "clickhouse",

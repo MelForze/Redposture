@@ -292,6 +292,33 @@ wait_healthy_service() {
   return 1
 }
 
+wait_minio_seed() {
+  local seed_id
+  seed_id="$(compose_service minio ps --all -q minio-seed)"
+  if [ -z "${seed_id}" ]; then
+    echo "[error] MinIO seed container was not created" >&2
+    return 1
+  fi
+  local elapsed=0
+  local state
+  while [ "${elapsed}" -lt 180 ]; do
+    state="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "${seed_id}")" || return 1
+    case "${state}" in
+      "exited 0") return 0 ;;
+      "exited "*|"dead "*)
+        echo "[error] MinIO seed failed: ${state}" >&2
+        docker logs --tail 80 "${seed_id}" >&2 || true
+        return 1
+        ;;
+    esac
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  echo "[error] MinIO seed did not finish within 180 seconds" >&2
+  docker logs --tail 80 "${seed_id}" >&2 || true
+  return 1
+}
+
 start_service() {
   local service="$1"
   local timeout
@@ -331,6 +358,9 @@ start_service() {
   if ! wait_healthy_service "${service}" "${remaining}"; then
     compose_service "${service}" logs --tail 80 >&2 || true
     return 1
+  fi
+  if [ "${service}" = "minio" ]; then
+    wait_minio_seed || return 1
   fi
   if [ "${service}" = "gitlab" ]; then
     "${PYTHON_BIN}" scripts/bootstrap_gitlab_lab.py "${OUT_DIR}/gitlab-seed" \

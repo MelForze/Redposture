@@ -15,10 +15,13 @@
     "execute_attempted": true,
     "execute_command": "id",
     "execute_error": null,
+    "execute_exit_code": 0,
     "execute_ok": true,
+    "execute_outcome_unknown": false,
     "execute_output": [
       "uid=70(postgres) gid=70(postgres) groups=70(postgres)"
     ],
+    "execute_truncated": false,
     "host": "127.0.0.1",
     "is_postgres": true,
     "module": "postgres",
