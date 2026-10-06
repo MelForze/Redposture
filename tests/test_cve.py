@@ -12,7 +12,9 @@ import pytest
 
 from redposture_core.audit_models import AuditRecord
 from redposture_core.cli_args import parse_args
+from redposture_core.console import Console
 from redposture_core.cve import (
+    CveCatalog,
     CveCatalogError,
     DetectedProduct,
     enumerate_record,
@@ -286,26 +288,29 @@ def test_unknown_unsupported_and_unconfirmed_are_not_guessed() -> None:
 @pytest.mark.parametrize(
     ("module", "payload", "expected"),
     [
-        ("clickhouse", {"server_version": None}, "CVE-2024-6873"),
-        ("qdrant", {"version": "unknown"}, "CVE-2024-2221"),
-        ("redis", {"server_version": "7.x"}, "CVE-2023-41056"),
+        ("clickhouse", {"server_version": None}, {"CVE-2024-6873"}),
+        (
+            "qdrant",
+            {"version": "unknown"},
+            {"CVE-2024-3829", "CVE-2024-3584", "CVE-2024-3078", "CVE-2024-2221"},
+        ),
+        ("redis", {"server_version": "7.x"}, {"CVE-2023-41056"}),
+        ("keycloak", {"version": None}, {"CVE-2026-18963"}),
     ],
 )
-def test_confirmed_unknown_version_shows_only_curated_recent_unauth_rce(
-    module: str, payload: dict[str, object], expected: str
+def test_confirmed_unknown_version_shows_recent_network_cves_as_speculative(
+    module: str, payload: dict[str, object], expected: set[str]
 ) -> None:
     result = enumerate_record(module, payload, catalog=load_catalog(), confirmed=True, as_of=date(2026, 10, 6))
     assert result["status"] == "version_unknown"
-    assert [item["id"] for item in result["findings"]] == [expected]
-    finding = result["findings"][0]
-    assert finding["version_assessment"] == "unknown"
-    assert finding["detected_version"] is None
-    assert finding["access_basis"] == "network"
-    assert finding["privileges_required"] == "N"
-    assert finding["impact"] == "rce"
+    assert {item["id"] for item in result["findings"]} == expected
+    assert all(item["version_assessment"] == "unknown" for item in result["findings"])
+    assert all(item["detected_version"] is None for item in result["findings"])
+    assert all(item["access_basis"] == "network" for item in result["findings"])
+    assert all(item["privileges_required"] == "N" for item in result["findings"])
     lines = render_finding_lines({"cve_enumeration": result}, label=module.upper(), host="127.0.0.1", port=1234)
-    assert len(lines) == 2
-    assert f"{expected} potentially affected; version unknown" in lines[1]
+    assert len(lines) == len(expected) + 1
+    assert all("[!] Possibly CVE-" in line and "version unknown" in line for line in lines[1:])
     assert "\x1b[" not in "".join(lines)
 
 
@@ -318,8 +323,16 @@ def test_unknown_version_fallback_respects_publication_window_and_product_identi
     assert not enumerate_record(
         "redis", {"implementation": "valkey", "server_version": None}, catalog=catalog, confirmed=True
     )["findings"]
-    assert not enumerate_record("keycloak", {"version": None}, catalog=catalog, confirmed=True)["findings"]
-    assert not enumerate_record("nexus", {"is_nexus": True}, catalog=catalog, confirmed=True)["findings"]
+    assert [
+        item["id"]
+        for item in enumerate_record("keycloak", {"version": None}, catalog=catalog, confirmed=True)["findings"]
+    ] == ["CVE-2026-18963"]
+    nexus_ids = {
+        item["id"]
+        for item in enumerate_record("nexus", {"is_nexus": True}, catalog=catalog, confirmed=True)["findings"]
+    }
+    assert "CVE-2024-4956" in nexus_ids
+    assert "CVE-2026-77124" not in nexus_ids  # Requires elevated privileges.
     assert not enumerate_record("kafka", {}, catalog=catalog, confirmed=True)["findings"]
     assert not enumerate_record("grpc", {}, catalog=catalog, confirmed=True)["findings"]
     probable = enumerate_record(
@@ -330,6 +343,40 @@ def test_unknown_version_fallback_respects_publication_window_and_product_identi
         resolver=lambda _payload: [DetectedProduct("redis", "Redis", None, "probable")],
     )
     assert not probable["findings"]
+
+
+def test_unknown_version_recency_uses_publication_date_or_conservative_cve_year() -> None:
+    base = next(item for item in load_catalog().entries if item["id"] == "CVE-2026-18963")
+    entries = tuple(
+        {**base, "id": cve_id, "published_at": published_at, "title": cve_id}
+        for cve_id, published_at in (
+            ("CVE-2020-10000", "2022-10-05"),
+            ("CVE-2020-10001", "2022-10-06"),
+            ("CVE-2020-10002", "2026-10-07"),
+            ("CVE-2022-10003", None),
+            ("CVE-2023-10004", None),
+        )
+    )
+    catalog = CveCatalog(version="test", entries=entries)
+    result = enumerate_record("keycloak", {"version": None}, catalog=catalog, confirmed=True, as_of=date(2026, 10, 6))
+    assert {item["id"] for item in result["findings"]} == {"CVE-2020-10001", "CVE-2023-10004"}
+    assert {item["recency_basis"] for item in result["findings"]} == {"published_at", "cve_id_year"}
+
+
+def test_unknown_version_low_privilege_requires_access_and_keeps_products_separate() -> None:
+    catalog = load_catalog()
+    payload = {"implementation": "valkey", "server_version": None, "auth_required": True}
+    without = enumerate_record("redis", payload, catalog=catalog, confirmed=True)
+    with_credentials = enumerate_record("redis", payload, catalog=catalog, confirmed=True, credentials_provided=True)
+    anonymous = enumerate_record("redis", {**payload, "auth_required": False}, catalog=catalog, confirmed=True)
+    assert without["findings"] == []
+    assert with_credentials["findings"]
+    assert {item["id"] for item in with_credentials["findings"]} == {item["id"] for item in anonymous["findings"]}
+    assert all(
+        item["product"] == "valkey" and item["privileges_required"] == "L" for item in with_credentials["findings"]
+    )
+    assert all(item["access_basis"] == "provided_credentials" for item in with_credentials["findings"])
+    assert all(item["access_basis"] == "anonymous_access" for item in anonymous["findings"])
 
 
 def test_known_version_match_keeps_matched_status_with_another_unknown_product() -> None:
@@ -422,8 +469,28 @@ def test_unknown_version_finding_colors_match_airflow_baseline() -> None:
     console = ConsoleStub()
     assert all(render_colored_marker_line(console, line, tag="REDIS") for line in lines)
     assert "<white>CVE's Enumeration</white>" in console.lines[0]
-    assert "<red>[!]</red>" in console.lines[1]
-    assert "<orange>CVE-2023-41056 potentially affected; version unknown" in console.lines[1]
+    assert "<yellow>[!]</yellow>" in console.lines[1]
+    assert "<yellow>Possibly CVE-2023-41056 may affect this service; version unknown" in console.lines[1]
+    known = enumerate_record("clickhouse", {"server_version": "24.4.2.140"}, catalog=load_catalog(), confirmed=True)
+    known_line = render_finding_lines({"cve_enumeration": known}, label="CLICKHOUSE", host="127.0.0.1", port=9000)[1]
+    assert render_colored_marker_line(console, known_line, tag="CLICKHOUSE")
+    assert "<red>[!]</red>" in console.lines[-1]
+    assert "<orange>CVE-2024-6873 potentially affected" in console.lines[-1]
+
+
+def test_known_version_remains_red_and_no_color_output_is_plain(capsys: pytest.CaptureFixture[str]) -> None:
+    matched = enumerate_record("clickhouse", {"server_version": "24.4.2.140"}, catalog=load_catalog(), confirmed=True)
+    unknown = enumerate_record("keycloak", {"version": None}, catalog=load_catalog(), confirmed=True)
+    known_line = render_finding_lines({"cve_enumeration": matched}, label="CLICKHOUSE", host="host", port=9000)[1]
+    unknown_line = render_finding_lines({"cve_enumeration": unknown}, label="KEYCLOAK", host="host", port=8080)[1]
+    assert "[!] CVE-2024-6873 potentially affected" in known_line
+    assert "[!] Possibly CVE-2026-18963 may affect this service; version unknown" in unknown_line
+    console = Console(no_color=True)
+    assert render_colored_marker_line(console, known_line, tag="CLICKHOUSE")
+    assert render_colored_marker_line(console, unknown_line, tag="KEYCLOAK")
+    output = capsys.readouterr().out
+    assert "\x1b[" not in output
+    assert known_line in output and unknown_line in output
 
 
 def test_qdrant_privileged_endpoint_check_remains_additional_evidence_without_access() -> None:
@@ -919,7 +986,7 @@ def test_runtime_without_flag_preserves_record_and_text() -> None:
     assert "_cve_credentials_verified" not in result.records[0]
 
 
-def test_debug_reports_unknown_version_without_normal_txt_noise() -> None:
+def test_debug_reports_unknown_version_with_speculative_txt_findings() -> None:
     emitted: list[str] = []
     debug: list[str] = []
     spec = ModuleAuditSpec(
@@ -937,7 +1004,9 @@ def test_debug_reports_unknown_version_without_normal_txt_noise() -> None:
     AuditCommandRunner(args=args, spec=spec, emit_line=emitted.append).run_plan(
         AuditCommandPlan(targets_by_port={3000: ("host",)}, output_format="txt")
     )
-    assert emitted == ["service"]
+    assert emitted[0] == "service"
+    assert emitted[1].endswith("[*] CVE's Enumeration")
+    assert all("[!] Possibly CVE-" in line and "version unknown" in line for line in emitted[2:])
     assert any("status=version_unknown" in line for line in debug)
 
 

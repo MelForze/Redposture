@@ -1,4 +1,4 @@
-"""Offline, version-only CVE enumeration for confirmed audit services.
+"""Offline CVE enumeration for confirmed audit services.
 
 The runtime deliberately performs no network I/O here.  The bundled catalog is
 reviewed and shipped with Redposture so a scan never discloses product/version
@@ -540,6 +540,21 @@ def _additional_evidence(module: str, payload: Mapping[str, Any]) -> list[dict[s
     ]
 
 
+def _recent_unknown_version_entry(entry: Mapping[str, Any], *, today: date, cutoff: date) -> str | None:
+    """Return the evidence for recency, excluding an undated boundary year.
+
+    Most catalog entries lack a publication date. A CVE identifier is not a
+    publication timestamp, so its year is usable only when that *whole* year
+    falls inside the rolling four-year window.
+    """
+
+    published_at = entry.get("published_at")
+    if isinstance(published_at, str):
+        return "published_at" if cutoff <= date.fromisoformat(published_at) <= today else None
+    cve_year = int(str(entry["id"]).split("-", maxsplit=2)[1])
+    return "cve_id_year" if cutoff.year < cve_year <= today.year else None
+
+
 def enumerate_record(
     module: str,
     payload: Mapping[str, Any],
@@ -607,10 +622,18 @@ def enumerate_record(
         if not product.version or normalize_version(product.version, _version_scheme(product.product_key)) is None:
             has_unknown_version = True
             for entry in catalog.entries:
-                if entry["product"] != product.product_key or entry.get("unknown_version_candidate") is not True:
+                if entry["product"] != product.product_key:
                     continue
-                published = date.fromisoformat(entry["published_at"])
-                if not cutoff <= published <= today:
+                recency_basis = _recent_unknown_version_entry(entry, today=today, cutoff=cutoff)
+                if recency_basis is None:
+                    continue
+                privileges_required = str(entry.get("privileges_required") or "N")
+                # A speculative match must not imply that elevated product
+                # permissions are available on an otherwise unverified target.
+                if privileges_required == "H":
+                    continue
+                version_only_exception = entry.get("version_only_exception") is True and entry["id"] == "CVE-2025-11539"
+                if privileges_required == "L" and low_privilege_basis is None and not version_only_exception:
                     continue
                 findings.append(
                     {
@@ -619,12 +642,19 @@ def enumerate_record(
                         "product": product.product_key,
                         "detected_version": None,
                         "version_assessment": "unknown",
-                        "published_at": entry["published_at"],
+                        "published_at": entry.get("published_at"),
+                        "recency_basis": recency_basis,
                         "severity": entry["severity"],
                         "score": entry["score"],
                         "vector": entry["vector"],
-                        "privileges_required": "N",
-                        "access_basis": "network",
+                        "privileges_required": privileges_required,
+                        "access_basis": (
+                            "network"
+                            if privileges_required == "N"
+                            else "renderer_token_required"
+                            if version_only_exception and low_privilege_basis is None
+                            else low_privilege_basis
+                        ),
                         "impact": entry["impact"],
                         "affected_range": "; ".join(_range_text(item) for item in entry["affected"]),
                         "fixed_version": None,
@@ -706,11 +736,16 @@ def render_finding_lines(payload: Mapping[str, Any], *, label: str, host: str, p
     for finding in findings:
         if not isinstance(finding, Mapping):
             continue
-        lines.append(
-            f"{prefix}[!] {finding.get('id')} potentially affected"
-            f"{'; version unknown' if finding.get('version_assessment') == 'unknown' else ''} "
-            f"({finding.get('severity')} {float(finding.get('score') or 0):g}) {finding.get('title')}"
-        )
+        if finding.get("version_assessment") == "unknown":
+            lines.append(
+                f"{prefix}[!] Possibly {finding.get('id')} may affect this service; version unknown "
+                f"({finding.get('severity')} {float(finding.get('score') or 0):g}) {finding.get('title')}"
+            )
+        else:
+            lines.append(
+                f"{prefix}[!] {finding.get('id')} potentially affected "
+                f"({finding.get('severity')} {float(finding.get('score') or 0):g}) {finding.get('title')}"
+            )
     return lines
 
 

@@ -436,10 +436,15 @@ The Keycloak JWT grant entry additionally requires valid client credentials;
 a verified bearer token alone does not prove that prerequisite.
 
 Credential checks precede newest-first CVE findings. With an unknown or malformed
-version, a confirmed product may show only catalogued unauthenticated network RCEs
-published within the previous four calendar years. These lines say
-`potentially affected; version unknown`: no version match has been established.
-Keycloak currently has no qualifying unauthenticated RCE for this fallback.
+version, a confirmed product shows catalogued CVEs from the last four years as
+yellow speculative findings: `Possibly CVE-… may affect this service; version unknown`.
+This does not establish that its installed version is vulnerable. When a catalog
+entry has a publication date, the rolling four-year cutoff uses it. Otherwise
+the CVE ID year is used only when the entire year is inside that window; undated
+entries from the boundary year are omitted. `PR:L` still requires confirmed
+anonymous access or verified explicit credentials; entries requiring elevated
+permissions are omitted from unknown-version findings. A known vulnerable version
+continues to use the red `[!]` marker and `potentially affected` wording.
 `CVE's Enumeration` appears only when there are findings; otherwise status and
 reason remain in debug/JSON.
 

@@ -239,7 +239,10 @@ def test_nexus_basic_realm_confirms_product_but_does_not_invent_version() -> Non
         lines = _audit(port)
     assert record["is_nexus"] is True and record["auth_required"] is True
     assert record["cve_enumeration"]["status"] == "version_unknown"
-    assert not any("CVE's Enumeration" in line for line in lines)
+    assert record["nexus_info"].get("version") is None
+    assert sum("CVE's Enumeration" in line for line in lines) == 1
+    assert any("Possibly CVE-2024-4956 may affect this service; version unknown" in line for line in lines)
+    assert all(item["privileges_required"] == "N" for item in record["cve_enumeration"]["findings"])
 
 
 def test_nexus_version_revealed_after_auth_stays_on_single_service_line() -> None:

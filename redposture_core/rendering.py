@@ -465,6 +465,16 @@ def render_colored_marker_line(
         if token not in line:
             continue
         _left, right = line.split(token, 1)
+        if marker == "[!]" and re.match(r"^Possibly CVE-\d{4}-\d+ may affect this service; version unknown\b", right):
+            # A version-unknown candidate is a weaker signal than a version
+            # match. Keep its marker and text yellow in every audit module.
+            return render_module_marker_line(
+                console,
+                line,
+                tag=tag,
+                spans=((0, len(right), "yellow"),),
+                marker_colors={**_DEFAULT_MARKER_COLORS, "[!]": "yellow"},
+            )
         spans = collect_stage_payload_spans(
             right,
             include_auth_required=include_auth_required,
