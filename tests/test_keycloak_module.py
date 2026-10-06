@@ -8,6 +8,7 @@ import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -27,7 +28,49 @@ from redposture_core.modules.keycloak.actions import (
     _realm_settings,
     _realms,
 )
+from redposture_core.modules.keycloak.policy import validate_args
 from redposture_core.modules.keycloak.render import _render_colored_keycloak_line
+
+
+@pytest.mark.parametrize(
+    ("token_file_text", "token", "realms", "expected_error"),
+    [
+        ("", None, [], "--token-file is empty"),
+        (None, "first\nsecond", [], "token contains a line break"),
+        (None, "token", ["invalid/realm"], "--realm requires"),
+        (None, "token", ["realm"] * 13, "--realm requires"),
+    ],
+)
+def test_keycloak_rejects_invalid_auth_and_realm_inputs(
+    tmp_path: Path,
+    token_file_text: str | None,
+    token: str | None,
+    realms: list[str],
+    expected_error: str,
+) -> None:
+    class ConsoleStub:
+        def __init__(self) -> None:
+            self.errors: list[str] = []
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+    token_file = None
+    if token_file_text is not None:
+        token_file = tmp_path / "token"
+        token_file.write_text(token_file_text, encoding="utf-8")
+    args = SimpleNamespace(token=token, token_file=token_file, realm=realms)
+    console = ConsoleStub()
+    assert validate_args(args, console) == 2
+    assert any(expected_error in message for message in console.errors)
+
+
+def test_keycloak_reports_unreadable_token_file(tmp_path: Path) -> None:
+    errors: list[str] = []
+    args = SimpleNamespace(token=None, token_file=tmp_path / "missing-token", realm=[])
+    console = SimpleNamespace(error=errors.append)
+    assert validate_args(args, console) == 2
+    assert errors and errors[0].startswith("cannot read --token-file:")
 
 
 class _KeycloakHandler(BaseHTTPRequestHandler):
@@ -358,10 +401,10 @@ def test_public_redirect_keeps_endpoint_and_never_follows_idp() -> None:
 
     source = "http://id.example:8080/realms/master"
     accepted = ClientStub("https://id.example:8443/edge/realms/master")
-    assert _get_public(accepted, source).status == 200  # type: ignore[arg-type]
+    assert _get_public(accepted, source).status == 200
     assert accepted.urls == [source, accepted.destination]
     rejected = ClientStub("https://idp.example/login")
-    assert _get_public(rejected, source).status == 302  # type: ignore[arg-type]
+    assert _get_public(rejected, source).status == 302
     assert rejected.urls == [source]
 
 
