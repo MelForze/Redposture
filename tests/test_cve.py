@@ -310,7 +310,7 @@ def test_confirmed_unknown_version_shows_recent_network_cves_as_speculative(
     assert all(item["privileges_required"] == "N" for item in result["findings"])
     lines = render_finding_lines({"cve_enumeration": result}, label=module.upper(), host="127.0.0.1", port=1234)
     assert len(lines) == len(expected) + 1
-    assert all("[!] Possibly CVE-" in line and "version unknown" in line for line in lines[1:])
+    assert all("[!] Possibly CVE-" in line and "version unknown" not in line for line in lines[1:])
     assert "\x1b[" not in "".join(lines)
 
 
@@ -470,7 +470,7 @@ def test_unknown_version_finding_colors_match_airflow_baseline() -> None:
     assert all(render_colored_marker_line(console, line, tag="REDIS") for line in lines)
     assert "<white>CVE's Enumeration</white>" in console.lines[0]
     assert "<yellow>[!]</yellow>" in console.lines[1]
-    assert "<yellow>Possibly CVE-2023-41056 may affect this service; version unknown" in console.lines[1]
+    assert "<yellow>Possibly CVE-2023-41056 may affect this service" in console.lines[1]
     known = enumerate_record("clickhouse", {"server_version": "24.4.2.140"}, catalog=load_catalog(), confirmed=True)
     known_line = render_finding_lines({"cve_enumeration": known}, label="CLICKHOUSE", host="127.0.0.1", port=9000)[1]
     assert render_colored_marker_line(console, known_line, tag="CLICKHOUSE")
@@ -484,7 +484,7 @@ def test_known_version_remains_red_and_no_color_output_is_plain(capsys: pytest.C
     known_line = render_finding_lines({"cve_enumeration": matched}, label="CLICKHOUSE", host="host", port=9000)[1]
     unknown_line = render_finding_lines({"cve_enumeration": unknown}, label="KEYCLOAK", host="host", port=8080)[1]
     assert "[!] CVE-2024-6873 potentially affected" in known_line
-    assert "[!] Possibly CVE-2026-18963 may affect this service; version unknown" in unknown_line
+    assert "[!] Possibly CVE-2026-18963 may affect this service" in unknown_line
     console = Console(no_color=True)
     assert render_colored_marker_line(console, known_line, tag="CLICKHOUSE")
     assert render_colored_marker_line(console, unknown_line, tag="KEYCLOAK")
@@ -1006,7 +1006,7 @@ def test_debug_reports_unknown_version_with_speculative_txt_findings() -> None:
     )
     assert emitted[0] == "service"
     assert emitted[1].endswith("[*] CVE's Enumeration")
-    assert all("[!] Possibly CVE-" in line and "version unknown" in line for line in emitted[2:])
+    assert all("[!] Possibly CVE-" in line and "version unknown" not in line for line in emitted[2:])
     assert any("status=version_unknown" in line for line in debug)
 
 

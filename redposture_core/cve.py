@@ -738,7 +738,7 @@ def render_finding_lines(payload: Mapping[str, Any], *, label: str, host: str, p
             continue
         if finding.get("version_assessment") == "unknown":
             lines.append(
-                f"{prefix}[!] Possibly {finding.get('id')} may affect this service; version unknown "
+                f"{prefix}[!] Possibly {finding.get('id')} may affect this service "
                 f"({finding.get('severity')} {float(finding.get('score') or 0):g}) {finding.get('title')}"
             )
         else:

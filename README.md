@@ -437,7 +437,7 @@ a verified bearer token alone does not prove that prerequisite.
 
 Credential checks precede newest-first CVE findings. With an unknown or malformed
 version, a confirmed product shows catalogued CVEs from the last four years as
-yellow speculative findings: `Possibly CVE-… may affect this service; version unknown`.
+yellow speculative findings: `Possibly CVE-… may affect this service`.
 This does not establish that its installed version is vulnerable. When a catalog
 entry has a publication date, the rolling four-year cutoff uses it. Otherwise
 the CVE ID year is used only when the entire year is inside that window; undated

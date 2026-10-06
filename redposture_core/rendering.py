@@ -465,7 +465,7 @@ def render_colored_marker_line(
         if token not in line:
             continue
         _left, right = line.split(token, 1)
-        if marker == "[!]" and re.match(r"^Possibly CVE-\d{4}-\d+ may affect this service; version unknown\b", right):
+        if marker == "[!]" and re.match(r"^Possibly CVE-\d{4}-\d+ may affect this service\b", right):
             # A version-unknown candidate is a weaker signal than a version
             # match. Keep its marker and text yellow in every audit module.
             return render_module_marker_line(

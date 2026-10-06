@@ -241,7 +241,8 @@ def test_nexus_basic_realm_confirms_product_but_does_not_invent_version() -> Non
     assert record["cve_enumeration"]["status"] == "version_unknown"
     assert record["nexus_info"].get("version") is None
     assert sum("CVE's Enumeration" in line for line in lines) == 1
-    assert any("Possibly CVE-2024-4956 may affect this service; version unknown" in line for line in lines)
+    assert any("Possibly CVE-2024-4956 may affect this service" in line for line in lines)
+    assert not any("; version unknown" in line for line in lines)
     assert all(item["privileges_required"] == "N" for item in record["cve_enumeration"]["findings"])
 
 
