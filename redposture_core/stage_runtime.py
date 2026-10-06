@@ -1605,6 +1605,8 @@ def _can_call_detail_renderer(func: Callable[..., Any]) -> bool:
 def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig) -> Any:
     args = ctx.args
     credential = ctx.credential
+    if name == "lifecycle_state":
+        return ctx.lifecycle_state
     target_scheme = str(ctx.target.scheme).lower() if ctx.target is not None and ctx.target.scheme else None
     if name == "host":
         return ctx.host

@@ -22,7 +22,7 @@
       "listener_restricted": false,
       "ok": true,
       "protocol": "tcp",
-      "raw_services": "\"Q(DESCRIPTION=(TMP=)(VSNNUM=0)(ERR=1189)(ERROR_STACK=(ERROR=(CODE=1189)(EMFI=4))))",
+      "raw_services": "\"(DESCRIPTION=(TMP=)(VSNNUM=0)(ERR=1189)(ERROR_STACK=(ERROR=(CODE=1189)(EMFI=4))(ERROR=(CODE=12554)(EMFI=4))(ERROR=(CODE=12560)(EMFI=4))(ERROR=(CODE=524)(EMFI=4))(ERROR=(BUF='Linux Error: 115: Operation now in progress'))))",
       "raw_status": "\"Q(DESCRIPTION=(TMP=)(VSNNUM=0)(ERR=1189)(ERROR_STACK=(ERROR=(CODE=1189)(EMFI=4))))",
       "security": null,
       "services": [],
@@ -37,8 +37,8 @@
       },
       "version": null
     },
-    "listener_password_protected": null,
-    "listener_restricted": null,
+    "listener_password_protected": false,
+    "listener_restricted": false,
     "listener_services": [
       {
         "auth_required": true,
@@ -60,15 +60,6 @@
         "service": "FREEPDB1",
         "sid": null,
         "status": "available"
-      },
-      {
-        "auth_required": null,
-        "error": "connection refused (listener is not available)",
-        "exists": null,
-        "protocol": "tcps",
-        "service": "FREEPDB1",
-        "sid": null,
-        "status": "fail"
       }
     ],
     "module": "oracle",

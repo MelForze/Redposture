@@ -308,6 +308,8 @@ redposture oracle -t oracle.example --service ORCLPDB1 --defcreds
 redposture oracle -t oracle.example --service ORCLPDB1 -u auditor -p 'password' --show-schemas --show-tables --privesc-check
 ```
 
+Oracle reuses the confirmed listener/service for credential checks. Its automatic limit is 8 concurrent targets; explicit `--workers` overrides it. `--defcreds` still checks every candidate, except further passwords for an account reported locked.
+
 ### PostgreSQL
 
 ```bash

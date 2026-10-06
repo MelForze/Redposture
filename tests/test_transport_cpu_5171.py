@@ -443,7 +443,7 @@ def test_grafana_retries_are_linear_not_squared(monkeypatch: pytest.MonkeyPatch)
         ("kafka", 50),
         ("kubeapi", 12),
         ("mongodb", 50),
-        ("oracle", 50),
+        ("oracle", 8),
         ("postgres", 50),
         ("proxmox", 50),
         ("qdrant", 50),

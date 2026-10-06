@@ -104,6 +104,12 @@ class _FakeOracleClient:
 
 
 def _patch_open(monkeypatch: pytest.MonkeyPatch, *, auth_required: bool = False) -> None:
+    monkeypatch.setattr(
+        oracle,
+        "tns_listener_command",
+        lambda *_args, **_kwargs: {"ok": True, "text": "(DESCRIPTION=(ERR=1189))", "error": None},
+    )
+
     def fake_open(
         host,
         port,
@@ -680,8 +686,231 @@ def test_oracle_service_list_is_used_for_auth_fallback(monkeypatch: pytest.Monke
     assert record["status"] == "valid_credentials"
     assert record["connect_service"] == "FREEPDB1"
     assert record["service_candidates"] == ["BADPDB", "FREEPDB1"]
-    assert any(item.get("service") == "BADPDB" for item in record["credential_attempts"])
+    assert all(item.get("service") != "BADPDB" for item in record["credential_attempts"])
+    assert any(item.get("service") == "BADPDB" for item in record["listener_targets"])
     assert any(item.get("service") == "FREEPDB1" for item in record["listener_targets"])
+
+
+def test_oracle_detection_is_reused_and_all_unlocked_defcreds_are_checked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    status_calls: list[str] = []
+    probe_calls: list[str | None] = []
+    auth_calls: list[tuple[str, str | None, str | None]] = []
+
+    def fake_status(_host: str, _port: int, command: str, **kwargs: Any) -> dict[str, Any]:
+        assert command == "status"
+        status_calls.append(str(kwargs["protocol"]))
+        return {"ok": True, "text": "(DESCRIPTION=(ERR=1189))", "error": None}
+
+    def fake_open(_host: str, _port: int, **kwargs: Any) -> _FakeOracleClient:
+        service = kwargs["service"]
+        username = kwargs["username"]
+        password = kwargs["password"]
+        if username == "REDPOSTURE_PROBE":
+            probe_calls.append(service)
+            if service not in {"FREEPDB1", "ORCLPDB1"}:
+                raise oracle.OracleServiceError("listener does not know service")
+            raise oracle.OracleAuthError("invalid credentials")
+        auth_calls.append((username, password, service))
+        if service != "ORCLPDB1" or (username, password) != ("scott", "tiger"):
+            raise oracle.OracleAuthError("invalid credentials")
+        return _FakeOracleClient(username=username, password=password)
+
+    monkeypatch.setattr(oracle, "tns_listener_command", fake_status)
+    monkeypatch.setattr(oracle, "_open_client", fake_open)
+    output = tmp_path / "oracle.jsonl"
+    rc = oracle.run_oracle_stage(
+        _args(service=None, protocol="auto", defcreds=True, output=str(output), output_format="json"), logger=object()
+    )
+
+    assert rc == 0
+    assert status_calls == ["tcp"]  # detect once; deep phase uses its cached fingerprint
+    assert probe_calls[:2] == ["FREEPDB1", "ORCLPDB1"]
+    assert len(probe_calls) == 12  # one transport, one discovery pass
+    assert len(auth_calls) == 2 * len(oracle._ORACLE_DEFAULT_CREDS) + 1
+    assert {service for _, _, service in auth_calls} == {"FREEPDB1", "ORCLPDB1"}
+    record = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+    assert record["status"] == "weak_default_creds"
+    assert len(record["credential_attempts"]) == 2 * len(oracle._ORACLE_DEFAULT_CREDS)
+    assert "\x1b[" not in output.read_text(encoding="utf-8")
+
+
+def test_oracle_skips_remaining_passwords_for_locked_username(monkeypatch: pytest.MonkeyPatch) -> None:
+    users_tried: list[str] = []
+
+    def fake_open(_host: str, _port: int, **kwargs: Any) -> _FakeOracleClient:
+        username = str(kwargs["username"])
+        users_tried.append(username)
+        if username == "ADMIN":
+            raise oracle.OracleAccountLockedError("account locked")
+        raise oracle.OracleAuthError("invalid credentials")
+
+    monkeypatch.setattr(oracle, "_open_client", fake_open)
+    winner, attempts, terminal = oracle._try_credentials(
+        "127.0.0.1",
+        1521,
+        1.0,
+        protocol="tcp",
+        service="FREEPDB1",
+        sid=None,
+        wallet=None,
+        ssl_server_dn=None,
+        insecure=False,
+        as_sysdba=False,
+        credential_candidates=[
+            {"username": "ADMIN", "password": "a"},
+            {"username": "admin", "password": "b"},
+            {"username": "system", "password": "c"},
+        ],
+    )
+    assert winner is None
+    assert users_tried == ["ADMIN", "system"]
+    assert len(attempts) == 2
+    assert terminal == "account_locked"
+
+
+def test_oracle_status_blocked_uses_confirmed_tcps_protocol_for_remaining_services(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    attempts: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        oracle,
+        "tns_listener_command",
+        lambda *_args, **_kwargs: {"ok": False, "error": "status denied"},
+    )
+
+    def fake_open(_host: str, _port: int, **kwargs: Any) -> _FakeOracleClient:
+        proto, service = kwargs["protocol"], kwargs["service"]
+        attempts.append((proto, service))
+        if proto == "tcp":
+            raise ConnectionError("TLS required")
+        if kwargs["username"] == "REDPOSTURE_PROBE":
+            if service == "FIRST":
+                raise oracle.OracleServiceError("listener does not know service")
+            raise oracle.OracleAuthError("invalid credentials")
+        raise oracle.OracleAuthError("invalid credentials")
+
+    monkeypatch.setattr(oracle, "_open_client", fake_open)
+    output = tmp_path / "oracle.jsonl"
+    assert (
+        oracle.run_oracle_stage(
+            _args(
+                service=None,
+                service_list="FIRST,SECOND",
+                output=str(output),
+                output_format="json",
+            ),
+            logger=object(),
+        )
+        == 0
+    )
+    assert ("tcps", "SECOND") in attempts
+    assert ("tcp", "SECOND") not in attempts
+    record = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+    assert record["is_oracle"] is True
+    assert any(row["service"] == "SECOND" and row["protocol"] == "tcps" for row in record["listener_targets"])
+
+
+def test_oracle_unconfirmed_descriptor_does_not_try_passwords(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        oracle,
+        "tns_listener_command",
+        lambda *_args, **_kwargs: {"ok": True, "text": "(DESCRIPTION=(ERR=1189))", "error": None},
+    )
+    attempted_users: list[str] = []
+
+    def fake_open(_host: str, _port: int, **kwargs: Any) -> _FakeOracleClient:
+        username = str(kwargs["username"])
+        attempted_users.append(username)
+        raise oracle.OracleServiceError("listener does not know service")
+
+    monkeypatch.setattr(oracle, "_open_client", fake_open)
+    output = tmp_path / "oracle.jsonl"
+    assert (
+        oracle.run_oracle_stage(
+            _args(service="MISSING", username="system", password="oracle", output=str(output), output_format="json"),
+            logger=object(),
+        )
+        == 0
+    )
+    assert attempted_users == ["REDPOSTURE_PROBE"]
+    record = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+    assert record["is_oracle"] is True
+    assert record["credential_verification_status"] == "unavailable"
+    assert not record.get("credential_attempts")
+
+
+def test_oracle_default_worker_cap_does_not_override_explicit_workers() -> None:
+    from redposture_core.cli_args import parse_args
+
+    automatic = parse_args(["oracle", "-t", "127.0.0.1"])
+    assert oracle.build_oracle_plan(automatic).workers == 8
+    explicit = parse_args(["oracle", "-t", "127.0.0.1", "--workers", "16"])
+    assert oracle.build_oracle_plan(explicit).workers == 16
+
+
+def test_oracle_restricted_listener_skips_descriptor_guesses_and_keeps_txt_clean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    status_calls: list[str] = []
+
+    def fake_status(_host: str, _port: int, command: str, **_kwargs: Any) -> dict[str, Any]:
+        status_calls.append(command)
+        return {
+            "ok": True,
+            "text": "(DESCRIPTION=(ERR=1194))",
+            "listener_restricted": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(oracle, "tns_listener_command", fake_status)
+    monkeypatch.setattr(
+        oracle,
+        "_open_client",
+        lambda *_args, **_kwargs: pytest.fail("restricted listener must not trigger guessed logins"),
+    )
+    output = tmp_path / "oracle.txt"
+    rc = oracle.run_oracle_stage(
+        _args(service=None, protocol="tcp", no_color=True, output=str(output)), logger=object()
+    )
+    text = output.read_text(encoding="utf-8")
+    assert rc == 0
+    assert status_calls == ["status"]
+    assert "Oracle Database" in text
+    assert "\x1b[" not in text
+
+
+def test_oracle_foreign_status_does_not_confirm_service(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        oracle,
+        "tns_listener_command",
+        lambda *_args, **_kwargs: {"ok": True, "text": "HTTP/1.1 200 OK", "error": None},
+    )
+    usernames: list[str] = []
+
+    def fake_open(_host: str, _port: int, **kwargs: Any) -> _FakeOracleClient:
+        usernames.append(str(kwargs["username"]))
+        raise oracle.OracleClientError("network close")
+
+    monkeypatch.setattr(oracle, "_open_client", fake_open)
+    output = tmp_path / "foreign.jsonl"
+    oracle.run_oracle_stage(
+        _args(
+            service=None,
+            protocol="tcp",
+            username="system",
+            password="oracle",
+            output=str(output),
+            output_format="json",
+        ),
+        logger=object(),
+    )
+    record = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+    assert record["is_oracle"] is False
+    assert usernames == ["REDPOSTURE_PROBE"]
+    assert oracle._status_confirms_oracle({"ok": True, "text": "HTTP/1.1 200 OK"}) is False
 
 
 def test_oracle_reuses_discovered_descriptor_for_ordered_credential_batch(

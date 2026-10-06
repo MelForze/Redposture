@@ -365,8 +365,11 @@ def _try_credentials(
     attempts: list[dict[str, Any]] = []
     selected: dict[str, Any] | None = None
     terminal_status: str | None = None
+    locked_users: set[str] = set()
     for candidate in credential_candidates:
         username = str(candidate.get("username") or "")
+        if username.casefold() in locked_users:
+            continue
         password = None if candidate.get("password") is None else str(candidate.get("password"))
         client: OracleAuditClient | None = None
         try:
@@ -398,6 +401,7 @@ def _try_credentials(
                 selected = attempt
         except OracleAccountLockedError as exc:
             terminal_status = "account_locked"
+            locked_users.add(username.casefold())
             attempts.append(
                 {
                     "username": username,
@@ -449,6 +453,7 @@ def _probe_listener_targets(
     wallet: str | None,
     ssl_server_dn: str | None,
     insecure: bool,
+    stop_on_available: bool = False,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for proto in protocol_candidates:
@@ -503,11 +508,23 @@ def _probe_listener_targets(
                 if client is not None:
                     client.close()
             results.append(row)
+            if stop_on_available and row["status"] in {"accepted", "available", "restricted"}:
+                return results
     return results
 
 
-def _probe_listener_dump(host: str, port: int, timeout: float, *, protocol: str, insecure: bool) -> dict[str, Any]:
-    status = tns_listener_command(host, port, "status", timeout=timeout, protocol=protocol, insecure=insecure)
+def _probe_listener_dump(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    protocol: str,
+    insecure: bool,
+    status_response: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    status = status_response or tns_listener_command(
+        host, port, "status", timeout=timeout, protocol=protocol, insecure=insecure
+    )
     services = tns_listener_command(host, port, "services", timeout=timeout, protocol=protocol, insecure=insecure)
     dump = parse_listener_dump(status, services)
     dump["protocol"] = protocol
@@ -516,6 +533,17 @@ def _probe_listener_dump(host: str, port: int, timeout: float, *, protocol: str,
 
 def _listener_probe_is_oracle(rows: list[dict[str, Any]]) -> bool:
     return any(str(row.get("status") or "") in {"accepted", "available", "unknown", "restricted"} for row in rows)
+
+
+def _status_confirms_oracle(response: dict[str, Any]) -> bool:
+    if not response.get("ok"):
+        return False
+    text = str(response.get("text") or "").upper()
+    return bool(
+        response.get("listener_password_protected")
+        or response.get("listener_restricted")
+        or any(token in text for token in ("TNSLSNR", "TNS-", "(VSNNUM=", "(ERR=", "(SERVICE_NAME="))
+    )
 
 
 def _select_listener_target(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1054,6 +1082,7 @@ def _audit_oracle_host(
     hashes: bool,
     sensitive_scan: bool,
     dblink_check: bool,
+    probe_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, int(retries) + 1)
     last_error: str | None = None
@@ -1076,22 +1105,137 @@ def _audit_oracle_host(
         client: OracleAuditClient | None = None
         try:
             probe_errors: list[str] = []
-            try:
-                with socket.create_connection((host, int(port)), timeout=max(0.1, float(timeout))):
-                    pass
-            except OSError as exc:
-                probe_errors.append(normalize_oracle_error(exc))
-
-            listener_targets = _probe_listener_targets(
-                host,
-                port,
-                timeout,
-                protocol_candidates=protocol_candidates,
-                target_candidates=target_candidates,
-                wallet=wallet,
-                ssl_server_dn=ssl_server_dn,
-                insecure=insecure,
-            )
+            cached_probe = probe_state.get("oracle_detection") if probe_state is not None else None
+            listener_targets: list[dict[str, Any]]
+            listener_reachable: bool
+            auth_target: bool
+            auth_probes: list[dict[str, Any]]
+            if isinstance(cached_probe, dict):
+                listener_targets = list(cached_probe["listener_targets"])
+                listener_reachable = bool(cached_probe["listener_reachable"])
+                selected_protocol = str(cached_probe["protocol"])
+                selected_service = cached_probe["service"]
+                selected_sid = cached_probe["sid"]
+                auth_target = bool(cached_probe["auth_target"])
+                auth_probes = list(cached_probe["auth_probes"])
+                record["listener_dump"] = cached_probe.get("listener_dump")
+                record["listener_restricted"] = cached_probe.get("listener_restricted")
+                record["listener_password_protected"] = cached_probe.get("listener_password_protected")
+            else:
+                listener_targets = []
+                listener_reachable = False
+                status_response: dict[str, Any] | None = None
+                for proto in protocol_candidates:
+                    response = tns_listener_command(
+                        host, port, "status", timeout=min(float(timeout), 1.0), protocol=proto, insecure=insecure
+                    )
+                    if _status_confirms_oracle(response):
+                        status_response = response
+                        selected_protocol = proto
+                        listener_reachable = True
+                        break
+                    if response.get("error"):
+                        probe_errors.append(str(response["error"]))
+                if status_response is not None:
+                    advertised = parse_listener_dump(status_response)
+                    record["listener_restricted"] = bool(status_response.get("listener_restricted"))
+                    record["listener_password_protected"] = bool(status_response.get("listener_password_protected"))
+                    if not any((service, sid, service_list, sid_list)):
+                        discovered = _target_candidates(
+                            None,
+                            None,
+                            ",".join(advertised["services"]),
+                            ",".join(advertised["sids"]),
+                        )
+                        ordered_candidates: list[dict[str, str | None]] = []
+                        seen_candidates: set[tuple[str | None, str | None]] = set()
+                        for item in (*discovered, *target_candidates):
+                            key = (item.get("service"), item.get("sid"))
+                            if key not in seen_candidates:
+                                seen_candidates.add(key)
+                                ordered_candidates.append(item)
+                        target_candidates = ordered_candidates
+                    if not (
+                        (advertised["listener_restricted"] or advertised["listener_password_protected"])
+                        and not any((service, sid, service_list, sid_list))
+                    ):
+                        listener_targets = _probe_listener_targets(
+                            host,
+                            port,
+                            timeout,
+                            protocol_candidates=[selected_protocol],
+                            target_candidates=target_candidates,
+                            wallet=wallet,
+                            ssl_server_dn=ssl_server_dn,
+                            insecure=insecure,
+                            stop_on_available=len(target_candidates) == 1,
+                        )
+                elif target_candidates:
+                    # STATUS may be blocked. One known descriptor per transport
+                    # can still prove a listener via an Oracle-specific refusal.
+                    listener_targets = _probe_listener_targets(
+                        host,
+                        port,
+                        timeout,
+                        protocol_candidates=protocol_candidates,
+                        target_candidates=target_candidates[:1],
+                        wallet=wallet,
+                        ssl_server_dn=ssl_server_dn,
+                        insecure=insecure,
+                        stop_on_available=True,
+                    )
+                    listener_reachable = _listener_probe_is_oracle(listener_targets)
+                    if listener_reachable and len(target_candidates) > 1:
+                        confirmed_probe = next(
+                            row
+                            for row in listener_targets
+                            if row.get("status") in {"accepted", "available", "restricted", "unknown"}
+                        )
+                        selected_protocol = str(confirmed_probe.get("protocol") or protocol_candidates[0])
+                        listener_targets.extend(
+                            _probe_listener_targets(
+                                host,
+                                port,
+                                timeout,
+                                protocol_candidates=[selected_protocol],
+                                target_candidates=target_candidates[1:],
+                                wallet=wallet,
+                                ssl_server_dn=ssl_server_dn,
+                                insecure=insecure,
+                                stop_on_available=False,
+                            )
+                        )
+                auth_probes = [
+                    row for row in listener_targets if row.get("status") in {"accepted", "available", "restricted"}
+                ]
+                auth_target = bool(auth_probes)
+                if auth_probes:
+                    selected_probe = auth_probes[0]
+                    selected_protocol = str(selected_probe.get("protocol") or selected_protocol)
+                    selected_service = selected_probe.get("service")
+                    selected_sid = selected_probe.get("sid")
+                if listener_dump and listener_reachable:
+                    record["listener_dump"] = _probe_listener_dump(
+                        host,
+                        port,
+                        min(float(timeout), 1.5),
+                        protocol=selected_protocol,
+                        insecure=insecure,
+                        status_response=status_response,
+                    )
+                if probe_state is not None and listener_reachable:
+                    probe_state["oracle_detection"] = {
+                        "listener_targets": listener_targets,
+                        "listener_reachable": listener_reachable,
+                        "protocol": selected_protocol,
+                        "service": selected_service,
+                        "sid": selected_sid,
+                        "auth_target": auth_target,
+                        "auth_probes": auth_probes,
+                        "listener_dump": record["listener_dump"],
+                        "listener_restricted": record["listener_restricted"],
+                        "listener_password_protected": record["listener_password_protected"],
+                    }
             record["listener_targets"] = listener_targets
             record["listener_services"] = [
                 row
@@ -1103,34 +1247,8 @@ def _audit_oracle_host(
                 for row in listener_targets
                 if row.get("sid") and row.get("status") in {"accepted", "available", "restricted"}
             ]
-            selected_probe = _select_listener_target(listener_targets)
-            if selected_probe:
-                selected_protocol = str(selected_probe.get("protocol") or selected_protocol)
-                selected_service = selected_probe.get("service")
-                selected_sid = selected_probe.get("sid")
-            listener_reachable = _listener_probe_is_oracle(listener_targets)
-            bare_listener: dict[str, Any] | None = None
-            if not listener_reachable and not probe_errors:
-                bare_listener = _probe_listener_dump(
-                    host,
-                    port,
-                    min(float(timeout), 1.0),
-                    protocol=protocol_candidates[0] if protocol_candidates else "tcp",
-                    insecure=insecure,
-                )
-                summary = as_dict(bare_listener.get("summary"))
-                raw_payload = json.dumps(bare_listener, ensure_ascii=False)
-                if bare_listener.get("status_ok") or summary.get("password_protected") or "TNS-" in raw_payload:
-                    record["listener_dump"] = bare_listener
-                    listener_reachable = True
-            if listener_dump:
-                record["listener_dump"] = bare_listener or _probe_listener_dump(
-                    host,
-                    port,
-                    min(float(timeout), 1.5),
-                    protocol=selected_protocol if selected_protocol in {"tcp", "tcps"} else protocol_candidates[0],
-                    insecure=insecure,
-                )
+            record["service_candidates"] = [item.get("service") for item in target_candidates if item.get("service")]
+            record["sid_candidates"] = [item.get("sid") for item in target_candidates if item.get("sid")]
             if nne_check:
                 tcp_available = any(
                     row.get("protocol") == "tcp" and row.get("status") in {"accepted", "available", "restricted"}
@@ -1153,42 +1271,40 @@ def _audit_oracle_host(
             active_client_owned = False
             terminal_status: str | None = None
 
-            if credential_candidates:
+            if credential_candidates and auth_target:
                 selected_credential = None
                 credential_attempts = []
                 last_auth_error: str | None = None
-                for proto in protocol_candidates:
-                    for candidate in target_candidates:
-                        candidate_service = candidate.get("service")
-                        candidate_sid = candidate.get("sid")
-                        credential, attempts_for_candidate, terminal = _try_credentials(
-                            host,
-                            port,
-                            timeout,
-                            protocol=proto,
-                            service=candidate_service,
-                            sid=candidate_sid,
-                            wallet=wallet,
-                            ssl_server_dn=ssl_server_dn,
-                            insecure=insecure,
-                            as_sysdba=as_sysdba,
-                            credential_candidates=credential_candidates,
-                        )
-                        for auth_attempt in attempts_for_candidate:
-                            auth_attempt.setdefault("protocol", proto)
-                            auth_attempt.setdefault("service", candidate_service)
-                            auth_attempt.setdefault("sid", candidate_sid)
-                            last_auth_error = str(auth_attempt.get("error") or last_auth_error or "")
-                        credential_attempts.extend(attempts_for_candidate)
-                        if terminal is not None:
-                            terminal_status = terminal
-                        if credential is not None:
-                            selected_protocol = proto
-                            selected_service = candidate_service
-                            selected_sid = candidate_sid
-                            selected_credential = credential
-                            break
-                    if selected_credential is not None:
+                for candidate in auth_probes:
+                    proto = str(candidate.get("protocol") or selected_protocol)
+                    candidate_service = candidate.get("service")
+                    candidate_sid = candidate.get("sid")
+                    credential, attempts_for_candidate, terminal = _try_credentials(
+                        host,
+                        port,
+                        timeout,
+                        protocol=proto,
+                        service=candidate_service,
+                        sid=candidate_sid,
+                        wallet=wallet,
+                        ssl_server_dn=ssl_server_dn,
+                        insecure=insecure,
+                        as_sysdba=as_sysdba,
+                        credential_candidates=credential_candidates,
+                    )
+                    for auth_attempt in attempts_for_candidate:
+                        auth_attempt.setdefault("protocol", proto)
+                        auth_attempt.setdefault("service", candidate_service)
+                        auth_attempt.setdefault("sid", candidate_sid)
+                        last_auth_error = str(auth_attempt.get("error") or last_auth_error or "")
+                    credential_attempts.extend(attempts_for_candidate)
+                    if terminal is not None:
+                        terminal_status = terminal
+                    if credential is not None:
+                        selected_protocol = proto
+                        selected_service = candidate_service
+                        selected_sid = candidate_sid
+                        selected_credential = credential
                         break
                 if selected_credential is not None:
                     active_client = _open_client(
@@ -1220,6 +1336,9 @@ def _audit_oracle_host(
                     status = "invalid_credentials"
                 else:
                     status = "auth_required"
+            elif credential_candidates:
+                record["credential_verification_status"] = "unavailable"
+                probe_errors.append("Oracle service/SID not confirmed; credentials were not attempted")
 
             if active_client is None and not credential_candidates:
                 if not listener_reachable:
@@ -1290,7 +1409,7 @@ def _audit_oracle_host(
                 port=port,
                 protocol=selected_protocol,
                 insecure=insecure,
-                listener_dump=listener_dump,
+                listener_dump=False,
                 nne_check=nne_check,
                 show_pdbs=show_pdbs,
                 show_users=show_users,
@@ -1321,6 +1440,8 @@ def _audit_oracle_host(
             )
             if active_client_owned:
                 active_client.close()
+            if listener_dump:
+                data["listener_dump"] = record["listener_dump"]
             record.update(data)
             record.update(
                 {
@@ -1415,6 +1536,7 @@ def _audit_oracle_host_stage(
     run_deep_checks: bool,
     debug: bool,
     debug_emit: Callable[[str], None] | None,
+    lifecycle_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     record = _audit_oracle_host(
@@ -1460,6 +1582,7 @@ def _audit_oracle_host_stage(
         hashes=hashes if run_deep_checks else False,
         sensitive_scan=sensitive_scan if run_deep_checks else False,
         dblink_check=dblink_check if run_deep_checks else False,
+        probe_state=lifecycle_state,
     )
     record["show_pdbs_limit"] = show_pdbs_limit if run_deep_checks else None
     record["show_users_limit"] = show_users_limit if run_deep_checks else None

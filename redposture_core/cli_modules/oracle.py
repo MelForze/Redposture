@@ -217,6 +217,7 @@ def configure_oracle_parser(
         "--dblink-check", action="store_true", help="List visible Oracle database links and linked usernames/hosts."
     )
 
+    parser.set_defaults(workers=8)
     append_selected_defaults(parser, "timeout", "workers", "retries", "port", "protocol", "output_format")
 
 

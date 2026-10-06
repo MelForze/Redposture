@@ -21,10 +21,22 @@ from . import actions, policy, render
 
 _DEFAULT_PORT = 1521
 _DEFAULT_PORTS: tuple[int, ...] | None = (1521, 2484, 11521)
+_DEFAULT_ORACLE_WORKERS = 8
 
 
 def build_oracle_plan(args: Any) -> AuditCommandPlan:
-    return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    if getattr(args, "_workers_option_provided", None) is False:
+        from dataclasses import replace
+
+        plan = replace(plan, workers=min(plan.workers, _DEFAULT_ORACLE_WORKERS))
+        args.workers = plan.workers
+        args._audit_worker_profile = {
+            "endpoint_count": plan.target_count,
+            "workers": plan.workers,
+            "automatic": True,
+        }
+    return plan
 
 
 def build_oracle_spec(args: Any) -> ModuleAuditSpec:
@@ -38,6 +50,7 @@ def build_oracle_spec(args: Any) -> ModuleAuditSpec:
         is_detected=lambda record: record.extra.get("is_oracle") is True,
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
+        lifecycle_state_factory=lambda _ctx: {},
     )
 
 
