@@ -72,6 +72,8 @@ def _build_kafka_lifecycle_options(args: Any) -> dict[str, Any]:
         "max_messages": max_messages,
         "max_messages_explicit": explicit_max is not None or dump_limit is not None,
         "probe_write": bool(getattr(args, "probe_write", False)),
+        "write_payload": getattr(args, "_kafka_write_payload", None),
+        "write_key": getattr(args, "_kafka_write_key", None),
     }
 
 

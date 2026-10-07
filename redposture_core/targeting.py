@@ -168,6 +168,33 @@ class StreamingTargetPlan:
         for spec in self.iter_specs():
             yield spec.host
 
+    def unique_host_count(self) -> int:
+        """Count distinct hosts without expanding potentially large IPv4 ranges."""
+
+        literal_hosts: set[str] = set()
+        ranges: list[tuple[int, int]] = []
+        for entry in self._entries:
+            if isinstance(entry, _IPv4RangeTargetEntry):
+                ranges.extend(entry.ranges)
+            else:
+                for spec in entry.specs:
+                    literal_hosts.add(spec.host)
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(ranges):
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        count = sum(end - start + 1 for start, end in merged) + len(literal_hosts)
+        for host in literal_hosts:
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                continue
+            if isinstance(address, ipaddress.IPv4Address) and _range_contains(merged, int(address)):
+                count -= 1
+        return count
+
     def contains_host(self, host: str) -> bool:
         """Return whether a normalized host belongs to this lazy target plan."""
 

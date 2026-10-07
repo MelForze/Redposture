@@ -61,20 +61,17 @@ class _RootArgumentParser(_NoColorArgumentParser):
             "Audit services and exporter workflows.",
             f"Run {self.prog} MODULE -h for module options.",
             "",
+            "Global options:",
+            "  -h, --help           show this help and exit",
+            "  --version            show version and exit",
+            "  --selfcert           create local TLS certificate and key",
+            "",
             "Commands:",
         ]
         for title, commands in _ROOT_HELP_GROUPS:
             lines.append(f"  {title}")
             lines.extend(f"    {name:<18} {purpose}" for name, purpose in commands)
             lines.append("")
-        lines.extend(
-            (
-                "Global options:",
-                "  -h, --help           show this help and exit",
-                "  --version            show version and exit",
-                "  --selfcert           create local TLS certificate and key",
-            )
-        )
         return "\n".join(lines) + "\n"
 
 
@@ -549,6 +546,7 @@ def _build_selfcert_option_parser() -> argparse.ArgumentParser:
 
 
 _ROOT_HELP_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    ("Functional modules", (("spray", "credential verification across services"),)),
     (
         "Protocol & callback checks",
         (

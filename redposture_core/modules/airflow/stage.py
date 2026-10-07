@@ -25,6 +25,9 @@ _DEFAULT_PORTS: tuple[int, ...] = (8080, 8081, 18080, 28080, 8443)
 
 def build_airflow_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
     default_runs = (
         sort_default_audit_credential_runs(
             AuditCredentialRun(username=user, password=pw, source=source)

@@ -38,6 +38,7 @@ def test_root_help_groups_every_command_by_function_with_one_module_per_line() -
     assert "{" not in help_text.splitlines()[0]
     assert "Examples:" not in help_text
     headers = (
+        "  Functional modules\n",
         "  Protocol & callback checks\n",
         "  Management & permissions\n",
         "  Data & secrets\n",
@@ -45,12 +46,13 @@ def test_root_help_groups_every_command_by_function_with_one_module_per_line() -
     )
     positions = [help_text.index(header) for header in headers]
     assert positions == sorted(positions)
+    assert help_text.index("Global options:") < help_text.index("Commands:")
     command_lines = [line for line in help_text.splitlines() if line.startswith("    ")]
     names = [line.split()[0] for line in command_lines]
     expected = {"exporters", *(spec.name for spec in COMMAND_SPECS)}
     assert len(names) == len(set(names)) == len(expected)
     assert set(names) == expected
-    assert names[:5] == ["exporters", "grpc", "kafka", "keeper", "zookeeper"]
+    assert names[:6] == ["spray", "exporters", "grpc", "kafka", "keeper", "zookeeper"]
     assert all(len(line.split(maxsplit=1)) == 2 for line in command_lines)
     assert "--selfcert" in help_text
 

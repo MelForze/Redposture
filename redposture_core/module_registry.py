@@ -33,6 +33,7 @@ from .cli_modules.postgres import PostgresHelpFormatter, configure_postgres_pars
 from .cli_modules.proxmox import configure_proxmox_parser
 from .cli_modules.qdrant import configure_qdrant_parser
 from .cli_modules.rabbitmq import configure_rabbitmq_parser
+from .cli_modules.spray import configure_spray_parser
 from .cli_modules.zookeeper import configure_zookeeper_parser
 
 COMMAND_LISTEN = "listen"
@@ -66,6 +67,7 @@ COMMAND_DOCKER = "docker"
 COMMAND_ORACLE = "oracle"
 COMMAND_SELFCERT = "selfcert"
 COMMAND_EXPORTERS = "exporters"
+COMMAND_SPRAY = "spray"
 
 
 @dataclass(frozen=True)
@@ -243,6 +245,15 @@ EXPORTERS_ACTION_SPECS: tuple[ExportersActionSpec, ...] = (
 
 
 COMMAND_SPECS: tuple[CommandSpec, ...] = (
+    CommandSpec(
+        name=COMMAND_SPRAY,
+        help="Verify supplied credentials on confirmed services.",
+        runner_attr="run_spray_stage",
+        runner_module="redposture_core.stage_spray",
+        configure_parser=_make_configurator(
+            configure_spray_parser, ("add_output_flags", "add_log_flag", "add_save_flag")
+        ),
+    ),
     CommandSpec(
         name=COMMAND_DOCKER_REGISTRY,
         help="Audit plain Docker Registry v2 / OCI exposure and image metadata.",

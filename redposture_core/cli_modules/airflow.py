@@ -31,7 +31,11 @@ def configure_airflow_parser(
         type=port_type,
         default=None,
         metavar="port",
-        help="Airflow webserver port spec: single port, list/range, or file. If omitted, scans 8080,8081,18080,28080,8443.",
+        help=(
+            "Airflow webserver port spec: single port, list/range, or file. "
+            "If omitted, bare hosts scan 8080,8081,18080,28080,8443; "
+            "URLs without a port use 80 (HTTP) or 443 (HTTPS)."
+        ),
     )
     add_multi_ports_flag(common)
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")

@@ -367,7 +367,7 @@ def _server_version(data: dict[str, Any] | None) -> str | None:
 
 def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     result = dict(prior)
-    token = getattr(ctx.args, "_keycloak_token", None)
+    token = getattr(ctx.args, "_keycloak_token", None) or getattr(ctx.credential, "token", None)
     if not token:
         return result
     base = str(prior.get("api_endpoint") or "")

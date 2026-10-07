@@ -224,7 +224,7 @@ def test_fix_e6_retain_records_disabled_emits_debug_marker(monkeypatch: pytest.M
         fallback_target_count = 0
         credential_runs = (stage_runtime.AuditCredentialRun(source="anonymous"),)
 
-        def iter_target_windows(self):
+        def iter_target_specs(self):
             return iter([])
 
     class _FakeSpec:

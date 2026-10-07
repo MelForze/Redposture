@@ -610,6 +610,33 @@ class AuditCommandPlan:
         return sum(len(hosts) for hosts in self.targets_by_port.values())
 
     @property
+    def unique_host_count(self) -> int:
+        if self.target_plan is not None:
+            return self.target_plan.unique_host_count()
+        if self.target_specs_by_port:
+            return len({spec.host for specs in self.target_specs_by_port.values() for spec in specs})
+        return len({host for hosts in self.targets_by_port.values() for host in hosts})
+
+    def target_counts_by_port(self) -> dict[int, int]:
+        """Exact endpoint counts per port without expanding a large CIDR."""
+
+        if self.target_plan is None:
+            source = self.target_specs_by_port or self.targets_by_port
+            return {int(port): len(items) for port, items in source.items() if items}
+        target_plan = self.target_plan
+        matrix_ports = tuple(dict.fromkeys(int(port) for port in self.ports))
+        explicit_total = sum(target_plan.explicit_port_counts.values())
+        result: dict[int, int] = {}
+        for port in target_plan.execution_ports(matrix_ports):
+            explicit_count = target_plan.explicit_port_counts.get(port, 0)
+            count = explicit_count
+            if port in matrix_ports:
+                count += target_plan.count_for_ports((port,)) - explicit_total
+            if count:
+                result[port] = count
+        return result
+
+    @property
     def fallback_target_count(self) -> int:
         return int(self.requested_target_count or self.target_count)
 
@@ -2079,6 +2106,21 @@ class AuditCommandRunner:
             self.console.set_structured_output(plan.output_format == "json")
         sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append)
         sink.prepare()
+        if self.console is not None and plan.target_count > 1:
+            port_counts = plan.target_counts_by_port()
+            credential_count = sum(
+                run.username is not None or run.password is not None or run.token is not None
+                for run in plan.credential_runs
+            )
+            info = getattr(self.console, "info", None)
+            if callable(info):
+                info(
+                    f"Scan plan: addresses={plan.unique_host_count} "
+                    f"host:port={plan.target_count} workers={plan.workers} "
+                    f"nested_workers={self._nested_scheduler.max_workers} "
+                    f"auth_attempts_up_to={plan.target_count * credential_count}"
+                )
+                info("Ports: " + ", ".join(f"{port}={count}" for port, count in port_counts.items()))
         # Data hooks may stream lines live (real-time output) via this sink, but only
         # for TXT; JSON stays a single serialized record per target.
         self._live_emit = sink.emit_many if plan.output_format == "txt" else None
@@ -2270,28 +2312,27 @@ class AuditCommandRunner:
         total_deep_candidates = 0
         processed_deep = 0
         try:
-            for window in plan.iter_target_windows():
-                for (_idx, _host, _port, _target), outcome in scheduler.iter_completed(
-                    window,
-                    lambda item: self._run_target_pipeline(
-                        item[1],
-                        item[2],
-                        item[3],
-                        plan.credential_runs,
-                        debug_emit,
-                    ),
-                ):
-                    detected_count += int(outcome.detected)
-                    total_deep_candidates += int(outcome.deep_candidate)
-                    processed_deep += int(outcome.deep_processed)
-                    # The progress total retains the historical detect+deep
-                    # accounting, but both units are advanced only when that
-                    # target's corresponding lifecycle has actually completed.
+            for (_idx, _host, _port, _target), outcome in scheduler.iter_completed(
+                plan.iter_target_specs(),
+                lambda item: self._run_target_pipeline(
+                    item[1],
+                    item[2],
+                    item[3],
+                    plan.credential_runs,
+                    debug_emit,
+                ),
+            ):
+                detected_count += int(outcome.detected)
+                total_deep_candidates += int(outcome.deep_candidate)
+                processed_deep += int(outcome.deep_processed)
+                # The progress total retains the historical detect+deep
+                # accounting, but both units are advanced only when that
+                # target's corresponding lifecycle has actually completed.
+                progress.advance(1)
+                if outcome.detected:
+                    progress.add_total(1)
                     progress.advance(1)
-                    if outcome.detected:
-                        progress.add_total(1)
-                        progress.advance(1)
-                    _finalize_record(outcome.record)
+                _finalize_record(outcome.record)
         except BaseException:
             cancelled.set()
             raise

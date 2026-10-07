@@ -21,7 +21,7 @@
 
 CLI for authorized audits of exposed services: identify the product, verify access,
 enumerate data, find secrets, and match versions against an offline CVE catalog.
-Python 3.12+; 25 audit modules plus exporter scan/collect/trigger workflows.
+Python 3.12+; 25 audit modules, credential spray, and exporter scan/collect/trigger workflows.
 
 ## Install
 
@@ -53,7 +53,9 @@ Inconclusive pairs appear only in debug/JSON.
 Main workers: 64 for fewer than 1000 expanded `host:port` tasks, otherwise 128
 (`-w` overrides). Shared nested workers: 32/64, capped by `-w`; per-target discovery
 limits are MinIO/Elastic/Proxmox 8 and ClickHouse 4 (`max_threads=1` per query).
-Exporters use separate schedulers.
+Audit targets stream continuously through a bounded queue. Multi-target scans show
+address and `host:port` counts by port before starting; this plan stays out of
+saved TXT/JSON. Exporters use separate schedulers.
 
 Postgres and ClickHouse `--os-shell` show command exit status and separate
 stdout/stderr. Binary output gets a safe hex preview; use `:hex [stdout|stderr]
@@ -81,6 +83,27 @@ where supported, a CA file enables certificate and hostname verification. mTLS
 needs a client certificate and key. For a reverse proxy, supply its mounted URL (for example
 `https://host/airflow/api/v1/version`) and the DNS name required for Host/SNI;
 the module retains the URL prefix after removing a known API suffix.
+
+`spray` checks supplied pairs or tokens only after a module confirms the product.
+It does not run inventory, discovery, or CVE checks. A bare host uses the selected
+modules' normal ports; a URL or `host:port` keeps its explicit port.
+
+```bash
+redposture spray -t targets.txt --modules airflow,grafana --pairs pairs.txt -o spray.txt
+redposture spray -t targets.txt --modules keycloak,kubeapi --tokens tokens.txt --checkpoint spray.sqlite3 -o spray-tokens.txt
+redposture spray -t targets.txt --modules all --users users.txt --passwords passwords.txt --origin-rate 2 --account-interval 60 -o spray-all.txt
+redposture spray -t targets.txt --modules all --users users.txt --passwords passwords.txt --origin-rate 2 --account-interval 60 --checkpoint spray-all.txt.checkpoint.sqlite3 --resume -o spray-all.txt
+```
+
+Pairs use the first colon as separator. The users/passwords combination tries
+each password across all users before the next password. Results and the raw
+secrets appear in terminal, TXT, and JSON as requested; output and checkpoint
+files are mode `0600`. A begun attempt interrupted before its result becomes
+`inconclusive` on resume and is not retried. `--module-config` accepts only
+auth/transport settings, such as `{"keeper":{"znode":"/protected"}}` or
+`{"keycloak":{"realm":"master"}}`; action flags are rejected. Docker Engine
+pairs and Keycloak pairs report `unsupported` because those modules cannot
+verify them. `redposture spray -h` lists all options.
 
 ## Default credentials checked by `--defcreds`
 
@@ -235,9 +258,11 @@ redposture grpc -t grpc.example --invoke /grpc.health.v1.Health/Check --data '{"
 redposture kafka -t targets.txt --show-topics
 redposture kafka -t targets.txt --defcreds
 redposture kafka -t kafka.example -u auditor -p 'password' --topic events --dump 10
+redposture kafka -t kafka.example -u producer -p 'password' --topic audit.events --write-message 'test event'
 ```
 
 `--probe-write` works alone or with `--topic NAME`; it appends one audit marker to each probed topic. An inconclusive result is shown as `write:unknown`.
+`--write-message` sends one UTF-8 record; `--write-file` sends one binary record (up to 1 MiB). Both require `--topic`, and `--write-key` is optional. A lost broker acknowledgment is reported as unconfirmed and never retried, because the record may already be present.
 
 ### Keeper
 

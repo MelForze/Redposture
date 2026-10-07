@@ -40,6 +40,22 @@ _COMMON_EXCLUDED_DESTS: dict[str, str] = {
 }
 
 _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
+    "spray": {
+        "debug": "spray diagnostics are covered by focused tests rather than the product audit matrix.",
+        "targets": "explicit URL/port and all-module expansion are covered by focused spray tests.",
+        "modules": "the 25-module spray matrix is covered by focused tests.",
+        "module_config": "auth/transport allowlisting is covered by focused spray tests.",
+        "output_format": "spray TXT/JSON output is covered by focused tests.",
+        "output": "0600 live output and replay are covered by focused spray tests.",
+        "pairs": "pair parsing and real Kafka auth are covered by focused spray QA.",
+        "users": "password-major user ordering is covered by focused spray tests.",
+        "passwords": "password-major user ordering is covered by focused spray tests.",
+        "tokens": "JWT/API token verification and real Keycloak auth are covered by focused spray QA.",
+        "origin_rate": "per-origin pacing is covered by focused spray tests.",
+        "account_interval": "per-account pacing is covered by focused spray tests.",
+        "checkpoint": "private journal creation is covered by focused spray tests.",
+        "resume": "interrupted-attempt and duplicate-free replay are covered by focused spray tests.",
+    },
     "exporters scan": {
         "tls_ca": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",
         "tls_cert": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",

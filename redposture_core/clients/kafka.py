@@ -35,6 +35,7 @@ KAFKA_SASL_AUTHENTICATE = 36
 KAFKA_AUTH_ERROR_CODES = {29, 31, 58}
 KAFKA_MAX_FRAME = 16 * 1024 * 1024
 KAFKA_FETCH_MAX_BYTES = 1024 * 1024
+KAFKA_MAX_WRITE_VALUE_BYTES = 1024 * 1024
 _KAFKA_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("admin", "admin"),
     ("admin", "admin-secret"),
@@ -1638,12 +1639,12 @@ def _probe_topic_read_permission(
 _WRITE_PROBE_MARKER = b"[REDPOSTURE-AUDIT-PROBE-DO-NOT-USE]"
 
 
-def _build_produce_probe_batch() -> bytes:
-    """Build a minimal but VALID Kafka v2 record batch containing one marker
-    record (`[REDPOSTURE-AUDIT-PROBE-DO-NOT-USE]`). Used by
-    `_probe_topic_write_permission` — a `Produce` request with this batch
-    goes through the broker's ACL check before it accepts the record,
-    letting us see `TOPIC_AUTHORIZATION_FAILED` for topics we can't write.
+def _build_produce_probe_batch(value: bytes = _WRITE_PROBE_MARKER, key: bytes | None = None) -> bytes:
+    """Build a valid Kafka v2 batch containing exactly one record.
+
+    The default value is the write-probe marker. A `Produce` request with it
+    goes through the broker's ACL check before it accepts the record, letting
+    the probe distinguish `TOPIC_AUTHORIZATION_FAILED` from a real write.
 
     ⚠️ IF THE PROBE SUCCEEDS, THE RECORD IS ACTUALLY WRITTEN to the topic
     (destructive). Callers must gate this behind an explicit opt-in flag.
@@ -1651,12 +1652,12 @@ def _build_produce_probe_batch() -> bytes:
     # v2 record: length(varint) | attributes(int8) | timestamp_delta(varlong) |
     #            offset_delta(varint) | key_size(varint,-1=null) |
     #            value_size(varint) | value(bytes) | headers_count(varint,0)
-    value = _WRITE_PROBE_MARKER
     record_body = (
         struct.pack(">b", 0)  # attributes (no compression)
         + _write_varlong(0)  # timestamp_delta
         + _write_varint(0)  # offset_delta
-        + _write_varint(-1)  # key = null
+        + _write_varint(-1 if key is None else len(key))
+        + (key or b"")
         + _write_varint(len(value))
         + value
         + _write_varint(0)  # headers count = 0
@@ -1720,6 +1721,21 @@ def _write_unsigned_varint(value: int) -> bytes:
     return bytes(out)
 
 
+def _produce_request_body(topic: str, partition: int, batch: bytes) -> bytes:
+    """Encode one Produce v3 request with a leader acknowledgment."""
+    return (
+        struct.pack(">h", -1)
+        + struct.pack(">h", 1)
+        + struct.pack(">i", 5000)
+        + struct.pack(">i", 1)
+        + _encode_kafka_string(topic)
+        + struct.pack(">i", 1)
+        + struct.pack(">i", partition)
+        + struct.pack(">i", len(batch))
+        + batch
+    )
+
+
 def _probe_topic_write_permission(
     sock: socket.socket,
     correlation: int,
@@ -1755,17 +1771,7 @@ def _probe_topic_write_permission(
     #       records (bytes: int32 length + batch)
     #     ]
     #   ]
-    body = (
-        struct.pack(">h", -1)  # transactional_id = null
-        + struct.pack(">h", 1)  # acks = 1 (leader)
-        + struct.pack(">i", 5000)  # timeout_ms
-        + struct.pack(">i", 1)  # topics count
-        + _encode_kafka_string(topic)
-        + struct.pack(">i", 1)  # partitions count
-        + struct.pack(">i", int(partition))
-        + struct.pack(">i", len(batch))
-        + batch
-    )
+    body = _produce_request_body(topic, int(partition), batch)
     try:
         payload = _send_kafka_request(
             sock,
@@ -1800,6 +1806,144 @@ def _probe_topic_write_permission(
         return None, correlation
     except (ValueError, struct.error):
         return None, correlation
+
+
+def _produce_message_once(
+    sock: socket.socket,
+    correlation: int,
+    topic: str,
+    partition: int,
+    value: bytes,
+    key: bytes | None,
+) -> tuple[dict[str, Any], int]:
+    """Send one record once; a lost response is unknown and must not be retried."""
+    result: dict[str, Any] = {"status": "unknown", "partition": partition, "offset": None, "error_code": None}
+    batch = _build_produce_probe_batch(value, key)
+    try:
+        response = _send_kafka_request(
+            sock,
+            api_key=KAFKA_PRODUCE,
+            api_version=3,
+            correlation_id=correlation,
+            client_id=KAFKA_CLIENT_ID,
+            body=_produce_request_body(topic, partition, batch),
+        )
+    except (TimeoutError, ConnectionError, OSError, ValueError, struct.error) as exc:
+        result["reason"] = f"broker response unavailable ({type(exc).__name__}); record may have been written"
+        return result, correlation + 1
+    try:
+        reader = _KafkaReader(response)
+        if reader.read_i32() != correlation or reader.read_i32() != 1:
+            raise ValueError("unexpected Produce response correlation or topic count")
+        if reader.read_string(nullable=False) != topic or reader.read_i32() != 1:
+            raise ValueError("unexpected Produce response topic or partition count")
+        if reader.read_i32() != partition:
+            raise ValueError("unexpected Produce response partition")
+        error_code = reader.read_i16()
+        offset = reader.read_i64()
+        _ = reader.read_i64()  # log append time
+    except (ValueError, struct.error):
+        result["reason"] = "malformed Produce response; record may have been written"
+        return result, correlation + 1
+    result["error_code"] = error_code
+    if error_code == 0:
+        result.update(status="written", offset=offset, reason="broker acknowledged record")
+    elif error_code == 29:
+        result.update(status="denied", reason="topic write authorization denied")
+    else:
+        result.update(status="rejected", reason=f"broker rejected Produce (error:{error_code})")
+    return result, correlation + 1
+
+
+def produce_kafka_message(
+    host: str,
+    port: int,
+    timeout: float,
+    topic: str,
+    value: bytes,
+    *,
+    key: bytes | None = None,
+    metadata: dict[str, Any] | None,
+    username: str | None,
+    password: str | None,
+    use_tls: bool | None,
+    tls_config: KafkaTlsConfig | None,
+    sasl_first: bool,
+    existing_session: KafkaSession | None,
+    leader_pool: KafkaLeaderPool | None,
+) -> dict[str, Any]:
+    """Write one record to an existing topic after caller verified identity."""
+    unavailable = {"status": "unavailable", "partition": None, "offset": None, "error_code": None}
+    if len(value) > KAFKA_MAX_WRITE_VALUE_BYTES:
+        return {**unavailable, "reason": "message exceeds 1 MiB"}
+    if not isinstance(metadata, dict):
+        return {**unavailable, "reason": "authenticated topic metadata unavailable"}
+    topic_map = metadata.get("topic_map")
+    if not isinstance(topic_map, dict) or topic not in topic_map:
+        return {**unavailable, "reason": "topic absent from authenticated metadata"}
+    leaders = (metadata.get("partition_leaders") or {}).get(topic, {})
+    brokers = metadata.get("broker_map") or {}
+    if not isinstance(leaders, dict) or not isinstance(brokers, dict):
+        return {**unavailable, "reason": "partition leader unavailable"}
+    choices: list[tuple[int, tuple[str, int]]] = []
+    for raw_partition, raw_leader in leaders.items():
+        try:
+            partition = int(raw_partition)
+            endpoint = brokers.get(int(raw_leader))
+            if not isinstance(endpoint, (list, tuple)) or len(endpoint) != 2:
+                continue
+            leader_host, leader_port = str(endpoint[0]), int(endpoint[1])
+            if partition >= 0 and leader_host and 0 < leader_port <= 65535:
+                choices.append((partition, (leader_host, leader_port)))
+        except (TypeError, ValueError):
+            continue
+    if not choices:
+        return {**unavailable, "reason": "partition leader unavailable"}
+    partition, endpoint = min(choices)
+    session: KafkaSession | None = None
+    owned = False
+    if endpoint == (host, port) and existing_session is not None and not existing_session.closed:
+        session = existing_session
+    elif leader_pool is not None:
+        session, _error = leader_pool.get_or_open(
+            *endpoint,
+            timeout,
+            username=username,
+            password=password,
+            use_tls=use_tls,
+            tls_config=tls_config,
+            sasl_first=sasl_first,
+            known_kafka=True,
+        )
+    else:
+        try:
+            session = KafkaSession.open(
+                *endpoint, timeout, username=username, password=password, use_tls=use_tls, tls_config=tls_config
+            )
+            owned = True
+            ok, _error = session.bootstrap(known_kafka=True, sasl_first=sasl_first)
+            if not ok:
+                session.close()
+                session = None
+        except (TimeoutError, ConnectionError, OSError, ValueError):
+            if session is not None:
+                session.close()
+            session = None
+    # An advertised leader may be unreachable from outside a container or
+    # proxy. The bootstrap endpoint is a safe fallback before any Produce was
+    # sent; a non-leader broker will reject the request without a retry.
+    if session is None and existing_session is not None and not existing_session.closed:
+        session = existing_session
+    if session is None:
+        return {**unavailable, "partition": partition, "reason": "leader connection unavailable"}
+    try:
+        result, session.correlation_id = _produce_message_once(
+            session.sock, session.correlation_id, topic, partition, value, key
+        )
+        return {**result, "bytes": len(value)}
+    finally:
+        if owned:
+            session.close()
 
 
 def _probe_create_topic_permission(

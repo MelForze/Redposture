@@ -164,8 +164,8 @@ def test_exact_90k_synthetic_plan_uses_bounded_mass_profile_without_network(
     assert args._elastic_effective_profile["endpoint_count"] == 90_000
 
     # Exercise retention accounting without iterating the synthetic targets or
-    # invoking a detect hook: an empty window stream represents a dry runtime.
-    monkeypatch.setattr(AuditCommandPlan, "iter_target_windows", lambda _self, _window_size=None: iter(()))
+    # invoking a detect hook. The continuous scheduler consumes target specs.
+    monkeypatch.setattr(AuditCommandPlan, "iter_target_specs", lambda _self: iter(()))
     emitted: list[str] = []
     result = AuditCommandRunner(
         args=args,

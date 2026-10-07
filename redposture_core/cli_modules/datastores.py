@@ -316,12 +316,28 @@ def configure_kafka_parser(
             "The marker is a real record and stays in the log."
         ),
     )
+    write_input = actions.add_mutually_exclusive_group()
+    write_input.add_argument(
+        "--write-message",
+        metavar="text",
+        help="Write one UTF-8 message per confirmed target to --topic after access is verified.",
+    )
+    write_input.add_argument(
+        "--write-file",
+        metavar="path",
+        help="Write one binary message per confirmed target from a file to --topic (maximum 1 MiB).",
+    )
+    actions.add_argument(
+        "--write-key",
+        metavar="text",
+        help="Optional UTF-8 record key for --write-message or --write-file.",
+    )
     actions.add_argument(
         "--topic",
         dest="topic",
         default=None,
         metavar="name",
-        help="Show one topic detail by name (partition count / not found).",
+        help="Select one topic for details, dump, write probe, or message write.",
     )
     actions.add_argument(
         "--dump",

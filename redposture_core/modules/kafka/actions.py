@@ -1477,6 +1477,7 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
     max_messages = int(options["max_messages"])
     show_topics_limit = options.get("show_topics_limit")
     probe_write = bool(options["probe_write"])
+    write_payload = options.get("write_payload")
     username = credential.username if use_authenticated else None
     password = credential.password if use_authenticated else None
     transport_mode = str(payload.get("transport_mode") or state.transport_mode or "plaintext")
@@ -1562,6 +1563,28 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
         leader_pool=state.leader_pool,
     )
 
+    write_result: dict[str, Any] | None = None
+    if isinstance(write_payload, bytes):
+        if use_authenticated or status == "open_no_auth":
+            write_result = _kafka_client.produce_kafka_message(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                query_topic_name,
+                write_payload,
+                key=options.get("write_key"),
+                metadata=metadata,
+                username=username,
+                password=password,
+                use_tls=(transport_mode == "tls") or None,
+                tls_config=state.tls_config,
+                sasl_first=state.sasl_first,
+                existing_session=selected_session,
+                leader_pool=state.leader_pool,
+            )
+        else:
+            write_result = {"status": "unavailable", "reason": "authenticated access not verified"}
+
     errors: list[str] = []
     for item in (payload.get("error"), dump_error, *dump_errors.values()):
         clean = str(item or "").strip()
@@ -1593,6 +1616,7 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
             "partial": bool(payload.get("partial")) or dump_partial,
             "topic_messages": topic_messages,
             "topic_read_error": topic_read_error,
+            "write_result": write_result,
             "error": "; ".join(errors) if errors else None,
         }
     )
@@ -1804,6 +1828,7 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
         [str(item) for item in topic_messages_raw] if isinstance(topic_messages_raw, list) else []
     )
     topic_read_error = str(record.get("topic_read_error") or "").strip()
+    write_result = record.get("write_result")
 
     topics = record.get("topics")
     topic_names: list[str] = []
@@ -1885,7 +1910,7 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
         if query_topic not in dump_topics and (query_topic in dump_results or query_topic in dump_errors):
             dump_topics.append(query_topic)
 
-    if not show_topics and not query_topic and not dump and not probe_write:
+    if not show_topics and not query_topic and not dump and not probe_write and not isinstance(write_result, dict):
         return []
 
     if output_format == "json":
@@ -1984,6 +2009,21 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
                         ensure_ascii=False,
                     )
                 )
+        if isinstance(write_result, dict):
+            lines.append(
+                json.dumps(
+                    {
+                        "timestamp": record.get("timestamp"),
+                        "type": "topic_write",
+                        "service": "kafka",
+                        "host": record.get("host"),
+                        "port": record.get("port"),
+                        "topic": query_topic,
+                        **write_result,
+                    },
+                    ensure_ascii=False,
+                )
+            )
         return lines
 
     prefix = _nxc_prefix(record)
@@ -2105,6 +2145,21 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
                 lines.append(f"{prefix} [-] {_strip_debug_context(dump_error, debug=debug)}")
             else:
                 lines.append(f"{prefix} <no topics>")
+    if isinstance(write_result, dict):
+        lines.append(f"{prefix} [*] Topic Write")
+        write_status = str(write_result.get("status") or "unknown")
+        reason = str(write_result.get("reason") or "unknown")
+        if write_status == "written":
+            lines.append(
+                f'{prefix} [+] Message written to "{query_topic}" '
+                f"(partition:{write_result.get('partition')}) "
+                f"(offset:{write_result.get('offset')}) "
+                f"(bytes:{write_result.get('bytes')})"
+            )
+        elif write_status == "unknown":
+            lines.append(f'{prefix} [!] Message write unconfirmed for "{query_topic}" (reason:{reason})')
+        else:
+            lines.append(f'{prefix} [-] Message not written to "{query_topic}" (reason:{reason})')
     return lines
 
 
@@ -2148,7 +2203,12 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
             CountColorRule("partitions", "red", unknown_color="orange", zero_color="bright_green"),
         ),
         extra_spans=lambda marker, right: (
-            [(0, len(right), "orange")] if marker == "[!]" and right.startswith("Write probe unavailable:") else []
+            [(0, len(right), "orange")]
+            if marker == "[!]" and right.startswith("Write probe unavailable:")
+            else [(right.index('"'), len(right), "orange")]
+            if right.startswith(("Message written to ", "Message not written to ", "Message write unconfirmed for "))
+            and '"' in right
+            else []
         ),
     ):
         return True
