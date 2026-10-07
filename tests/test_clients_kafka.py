@@ -118,6 +118,90 @@ def test_parse_protocol_response_error_edges() -> None:
     assert error == "ListOffsets failed: REQUEST_TIMED_OUT"
 
 
+def test_apiversions_ignores_reversed_ranges_and_negative_entry_count() -> None:
+    response = struct.pack(">ihi", 17, 0, 2)
+    response += struct.pack(">hhh", 1, 3, 2)  # Invalid min/max range.
+    response += struct.pack(">hhh", kafka.KAFKA_FETCH, 0, 10)
+    result = kafka._parse_apiversions_response(response, 17)
+    assert result.ok is True
+    assert result.versions == {kafka.KAFKA_FETCH: (0, 10)}
+
+    negative_count = kafka._parse_apiversions_response(struct.pack(">ihi", 17, 0, -1), 17)
+    assert negative_count.ok is True
+    assert negative_count.versions == {}
+
+    no_count = kafka._parse_apiversions_response(struct.pack(">ih", 17, 0), 17)
+    assert no_count.ok is True
+    assert no_count.versions == {}
+
+
+def test_fetch_version_rejects_unsupported_range_and_encodes_legacy_v4() -> None:
+    with pytest.raises(ValueError, match="no supported version"):
+        kafka._select_fetch_api_version({kafka.KAFKA_FETCH: (0, 3)})
+    with pytest.raises(ValueError, match="unsupported Fetch API version 6"):
+        kafka._build_fetch_request_body("orders", 2, 5, api_version=6)
+
+    body = kafka._build_fetch_request_body("orders", 2, 5, max_bytes=1024, api_version=4)
+    assert struct.unpack_from(">iiii", body) == (-1, 300, 1, 2048)
+    assert struct.unpack_from(">b", body, 16) == (0,)
+    assert struct.unpack_from(">i", body, 17) == (1,)  # One topic.
+    assert body[21:29] == _kstr("orders")
+    assert struct.unpack_from(">iiqi", body, 29) == (1, 2, 5, 1024)
+
+
+def test_kafka_probe_helpers_preserve_api_correlation_and_topic_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[dict[str, object]] = []
+
+    def respond(_sock: object, **request: object) -> bytes:
+        sent.append(request)
+        correlation = int(request["correlation_id"])
+        if request["api_key"] == kafka.KAFKA_API_VERSIONS:
+            return struct.pack(">ihi", correlation, 0, 1) + struct.pack(">hhh", kafka.KAFKA_FETCH, 0, 10)
+        if request["api_key"] == kafka.KAFKA_METADATA:
+            return struct.pack(">iii", correlation, 0, 0)
+        raise AssertionError("unexpected Kafka API request")
+
+    monkeypatch.setattr(kafka, "_send_kafka_request", respond)
+    parsed = kafka._probe_apiversions(object(), 17)
+    assert parsed.ok and parsed.versions == {kafka.KAFKA_FETCH: (0, 10)}
+    assert kafka._bootstrap_known_kafka_session(object(), 18) == (True, 19, None)
+    metadata, error = kafka._fetch_metadata(object(), 19, topics=["orders"])
+    assert error is None and metadata is not None and metadata["topics"] == []
+    assert [(request["api_key"], request["correlation_id"]) for request in sent] == [
+        (kafka.KAFKA_API_VERSIONS, 17),
+        (kafka.KAFKA_API_VERSIONS, 18),
+        (kafka.KAFKA_METADATA, 19),
+    ]
+    assert sent[-1]["body"] == struct.pack(">i", 1) + _kstr("orders")
+
+
+def test_metadata_ignores_incomplete_broker_and_topic_identity() -> None:
+    response = (
+        struct.pack(">ii", 17, 1)
+        + struct.pack(">i", 4)
+        + _kstr("")  # A broker without a host cannot be used for leader routing.
+        + struct.pack(">i", 9092)
+        + struct.pack(">i", 2)
+        + struct.pack(">h", 0)
+        + _kstr("")  # Do not expose an unnamed topic.
+        + struct.pack(">i", 1)
+        + struct.pack(">hii", 0, 0, -1)
+        + struct.pack(">ii", -1, -1)
+        + struct.pack(">h", 29)
+        + _kstr("orders")
+        + struct.pack(">i", -1)  # Invalid partition count is treated as empty.
+    )
+    metadata, error = kafka._parse_metadata_response(response, 17)
+    assert error is None
+    assert metadata is not None
+    assert metadata["broker_map"] == {}
+    assert metadata["partition_leaders"] == {}
+    assert metadata["topics"] == ["orders"]
+    assert metadata["topic_map"] == {"orders": 0}
+    assert metadata["error_codes"] == [0, 0, 29]
+    assert metadata["auth_required"] is False  # One accessible topic overrides another auth error.
+
+
 def test_varint_record_and_message_set_edges() -> None:
     with pytest.raises(ValueError, match="varint is too long"):
         kafka._read_unsigned_varint(kafka._KafkaReader(b"\x80" * 5))
