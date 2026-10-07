@@ -1941,12 +1941,146 @@ def test_write_probe_uses_metadata_partition_leader(monkeypatch: pytest.MonkeyPa
         probe_write=True,
         existing_session=bootstrap,
         metadata={"partition_leaders": {"orders": {1: 2}}, "broker_map": {2: ("leader", 9092)}},
-        leader_pool=LeaderPool(),  # type: ignore[arg-type]
+        leader_pool=LeaderPool(),
     )
     assert result["topics"]["orders"]["write"] is True
     assert seen == [(leader_sock, 40, "orders", 1)]
     assert leader.correlation_id == 41
     assert bootstrap.correlation_id == 13
+
+
+def test_write_probe_falls_back_once_when_advertised_leader_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap_sock = _DummySocket()
+    bootstrap = kafka_client.KafkaSession(
+        bootstrap_sock, "tls", ("user", "pass"), correlation_id=10, api_versions={kafka_client.KAFKA_FETCH: (0, 10)}
+    )
+    writes: list[tuple[object, str]] = []
+    debug: list[str] = []
+
+    class UnreachablePool:
+        calls = 0
+
+        def get_or_open(self, _host, _port, _timeout, **_kwargs):
+            self.calls += 1
+            return None, "advertised host cannot be resolved"
+
+    pool = UnreachablePool()
+    monkeypatch.setattr(kafka_client, "_probe_create_topic_permission", lambda _sock, corr: (None, corr + 1))
+    monkeypatch.setattr(kafka_client, "_probe_delete_topic_permission", lambda _sock, corr: (None, corr + 1))
+    monkeypatch.setattr(
+        kafka_client, "_probe_topic_read_permission", lambda _sock, corr, _topic, **_k: (None, corr + 1)
+    )
+
+    def fake_write(sock, corr, topic, _partition=0):
+        writes.append((sock, topic))
+        return None, corr + 1
+
+    monkeypatch.setattr(kafka_client, "_probe_topic_write_permission", fake_write)
+    result = kafka_client._probe_kafka_acls(
+        "bootstrap",
+        9092,
+        1.0,
+        ["orders", "audit"],
+        username="user",
+        password="pass",
+        probe_write=True,
+        existing_session=bootstrap,
+        metadata={
+            "partition_leaders": {"orders": {0: 2}, "audit": {0: 2}},
+            "broker_map": {2: ("unresolvable-leader", 9092)},
+        },
+        leader_pool=pool,
+        debug_emit=debug.append,
+    )
+    assert pool.calls == 1
+    assert writes == [(bootstrap_sock, "orders"), (bootstrap_sock, "audit")]
+    assert result["topics"] == {
+        "orders": {"read": None, "write": None},
+        "audit": {"read": None, "write": None},
+    }
+    assert any("leader unresolvable-leader:9092 unavailable" in message for message in debug)
+
+    # Malformed leader metadata must not hide a probe that can still run on bootstrap.
+    malformed = {
+        "partition_leaders": {"orders": {"bad": "id", -1: 2, 0: 3, 1: 4, 2: 5}},
+        "broker_map": {2: ("leader", 9092), 3: ("", 9092), 4: ("leader", 0), 5: ("leader", "bad")},
+    }
+    fallback = kafka_client._probe_kafka_acls(
+        "bootstrap",
+        9092,
+        1.0,
+        ["orders"],
+        username="user",
+        password="pass",
+        probe_write=True,
+        existing_session=bootstrap,
+        metadata=malformed,
+        leader_pool=pool,
+    )
+    assert fallback["topics"]["orders"]["write"] is None
+    assert writes[-1] == (bootstrap_sock, "orders")
+    assert pool.calls == 1
+
+
+def test_write_probe_opens_and_closes_uncached_leader_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ClosableSocket(_DummySocket):
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    leader_sock = ClosableSocket()
+    leader = kafka_client.KafkaSession(leader_sock, "plaintext", (None, None), correlation_id=30)
+    bootstrap = kafka_client.KafkaSession(
+        _DummySocket(), "plaintext", (None, None), correlation_id=10, api_versions={kafka_client.KAFKA_FETCH: (0, 10)}
+    )
+    opened: list[tuple[str, int]] = []
+
+    def fake_open(_cls, host, port, _timeout, **_kwargs):
+        opened.append((host, port))
+        return leader
+
+    monkeypatch.setattr(kafka_client.KafkaSession, "open", classmethod(fake_open))
+    monkeypatch.setattr(kafka_client.KafkaSession, "bootstrap", lambda _self, **_kwargs: (True, None))
+    monkeypatch.setattr(kafka_client, "_probe_create_topic_permission", lambda _sock, corr: (None, corr + 1))
+    monkeypatch.setattr(kafka_client, "_probe_delete_topic_permission", lambda _sock, corr: (None, corr + 1))
+    monkeypatch.setattr(
+        kafka_client, "_probe_topic_read_permission", lambda _sock, corr, _topic, **_k: (None, corr + 1)
+    )
+    monkeypatch.setattr(
+        kafka_client, "_probe_topic_write_permission", lambda _sock, corr, _topic, _part: (True, corr + 1)
+    )
+    result = kafka_client._probe_kafka_acls(
+        "bootstrap",
+        9092,
+        1.0,
+        ["orders"],
+        probe_write=True,
+        existing_session=bootstrap,
+        metadata={"partition_leaders": {"orders": {0: 2}}, "broker_map": {2: ("leader", 9092)}},
+    )
+    assert opened == [("leader", 9092)]
+    assert result["topics"]["orders"]["write"] is True
+    assert leader_sock.closed is True
+
+    rejected_sock = ClosableSocket()
+    rejected = kafka_client.KafkaSession(rejected_sock, "plaintext", (None, None), correlation_id=30)
+    monkeypatch.setattr(kafka_client.KafkaSession, "open", classmethod(lambda _cls, *_a, **_k: rejected))
+    monkeypatch.setattr(kafka_client.KafkaSession, "bootstrap", lambda _self, **_kwargs: (False, "denied"))
+    fallback = kafka_client._probe_kafka_acls(
+        "bootstrap",
+        9092,
+        1.0,
+        ["orders"],
+        probe_write=True,
+        existing_session=bootstrap,
+        metadata={"partition_leaders": {"orders": {0: 2}}, "broker_map": {2: ("leader", 9092)}},
+    )
+    assert fallback["topics"]["orders"]["write"] is True
+    assert rejected_sock.closed is True
 
 
 def test_cluster_acl_probe_retries_with_sasl_first_session(monkeypatch: pytest.MonkeyPatch) -> None:
