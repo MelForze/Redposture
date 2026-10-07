@@ -9,6 +9,7 @@ import pytest
 from redposture_core import stage_kafka as kafka
 from redposture_core.audit_models import AuditRecord
 from redposture_core.clients import kafka as kafka_client
+from redposture_core.console import Console
 from redposture_core.modules.kafka import actions as kafka_actions
 from redposture_core.modules.kafka import stage as kafka_stage_pkg
 from redposture_core.stage_kafka import _parse_apiversions_response, _parse_metadata_response
@@ -1766,6 +1767,8 @@ def test_sasl_fallback_collects_and_renders_acl_markers(monkeypatch: pytest.Monk
 
     assert isinstance(record, dict)
     assert record["auth_flow"] == "sasl_fallback"
+    assert record["probe_write"] is True
+    assert json.loads(kafka._format_record(record, "json"))["probe_write"] is True
     assert record["cluster_permissions"] == {"create": True, "delete": False}
     assert record["topic_permissions"] == {"raw-keycloak": {"read": True, "write": None}}
     assert acl_calls == [
@@ -1779,7 +1782,171 @@ def test_sasl_fallback_collects_and_renders_acl_markers(monkeypatch: pytest.Monk
         }
     ]
     assert "[+] user:pass (create:true) (delete:false) (topics:1)" in kafka._format_record(record, "txt")
-    assert kafka._format_topics_detail_records(record, "txt")[-1].endswith("raw-keycloak (read:true)")
+    assert kafka._format_topics_detail_records(record, "txt")[-1].endswith("raw-keycloak (read:true) (write:unknown)")
+
+
+def test_probe_write_without_show_topics_probes_visible_topics(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    def fake_probe(_host, _port, _timeout, topics, **_kwargs):
+        seen.append(topics)
+        return {
+            "cluster": {"create": None, "delete": None},
+            "topics": {name: {"read": None, "write": name == "orders"} for name in topics},
+        }
+
+    monkeypatch.setattr(kafka_actions._kafka_client, "_probe_kafka_acls", fake_probe)
+    kwargs = dict(
+        host="broker",
+        port=9092,
+        timeout=1.0,
+        topic_names=["orders", "audit"],
+        query_topic_name="",
+        show_topics=False,
+        dump=False,
+        provided_credentials_ok=True,
+        auth_required=True,
+        username="user",
+        password="pass",
+        transport_mode="tls",
+        show_topics_limit=None,
+        probe_write=True,
+        debug_emit=None,
+    )
+    permissions, _cluster = kafka_actions._probe_kafka_acl_state(**kwargs)
+    assert seen == [["audit", "orders"]]
+    record = {
+        "host": "broker",
+        "port": 9092,
+        "topics": ["orders", "audit"],
+        "probe_write": True,
+        "topic_permissions": permissions,
+    }
+    text_lines = kafka._format_topics_detail_records(record, "txt")
+    assert "Write Probe (topics:2)" in text_lines[0]
+    assert text_lines[1].endswith("audit (write:false)")
+    assert text_lines[2].endswith("orders (write:true)")
+    json_lines = [json.loads(line) for line in kafka._format_topics_detail_records(record, "json")]
+    assert json_lines[0]["type"] == "write_probe"
+    assert json_lines[0]["topic_permissions"] == permissions
+
+    kwargs["query_topic_name"] = "missing"
+    permissions, _cluster = kafka_actions._probe_kafka_acl_state(**kwargs)
+    assert permissions == {}
+    assert len(seen) == 1  # --topic must never fall back to writing every topic.
+
+
+def test_probe_write_unknown_is_visible_without_falsely_claiming_access() -> None:
+    record = {
+        "host": "broker",
+        "port": 9092,
+        "topics": ["orders"],
+        "show_topics": True,
+        "probe_write": True,
+        "topic_permissions": {"orders": {"read": False, "write": None}},
+    }
+    assert kafka._format_topics_detail_records(record, "txt")[-1].endswith("orders (read:false) (write:unknown)")
+    record["show_topics"] = False
+    assert kafka._format_topics_detail_records(record, "txt")[-1].endswith("orders (read:false) (write:unknown)")
+    record["topics"] = None
+    lines = kafka._format_topics_detail_records(record, "txt")
+    assert "Write Probe (topics:unknown)" in lines[0]
+    assert "topic metadata unavailable" in lines[1]
+
+
+def test_probe_write_unknown_color_and_plain_output(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    line = "KAFKA   \tbroker\t9092\t orders (write:unknown)"
+    assert kafka._render_colored_kafka_line(Console(no_color=False), line)
+    colored = capsys.readouterr().out
+    assert "\x1b[1;38;5;208m(write:unknown)" in colored
+    assert kafka._render_colored_kafka_line(Console(no_color=True), line)
+    plain = capsys.readouterr().out
+    assert plain.strip() == line
+    assert "\x1b[" not in plain
+
+    header = "KAFKA   \tbroker\t9092\t [*] Write Probe (topics:0)"
+    assert kafka._render_colored_kafka_line(Console(no_color=False), header)
+    colored_header = capsys.readouterr().out
+    assert "\x1b[1;97mWrite Probe" in colored_header
+    unavailable = "KAFKA   \tbroker\t9092\t [!] Write probe unavailable: no topics available"
+    assert kafka._render_colored_kafka_line(Console(no_color=False), unavailable)
+    assert "\x1b[1;38;5;208mWrite probe unavailable:" in capsys.readouterr().out
+
+
+def test_unsupported_fetch_does_not_prevent_explicit_write_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kafka_client, "_open_kafka_socket_configured", lambda *_a, **_k: (_DummySocket(), "tls"))
+
+    def fake_auth(_sock, corr, _user, _password, **kwargs):
+        kwargs["api_versions_out"][kafka_client.KAFKA_FETCH] = (0, 3)
+        return True, corr + 1, None
+
+    monkeypatch.setattr(kafka_client, "_authenticate_or_probe", fake_auth)
+    monkeypatch.setattr(kafka_client, "_probe_create_topic_permission", lambda _sock, corr: (None, corr + 1))
+    monkeypatch.setattr(kafka_client, "_probe_delete_topic_permission", lambda _sock, corr: (None, corr + 1))
+    monkeypatch.setattr(
+        kafka_client,
+        "_probe_topic_read_permission",
+        lambda *_a, **_k: pytest.fail("unsupported Fetch must not be sent"),
+    )
+    writes: list[str] = []
+
+    def fake_write(_sock, corr, topic, _partition=0):
+        writes.append(topic)
+        return True, corr + 1
+
+    monkeypatch.setattr(kafka_client, "_probe_topic_write_permission", fake_write)
+    result = kafka_client._probe_kafka_acls(
+        "broker", 9092, 1.0, ["orders"], username="user", password="pass", probe_write=True
+    )
+    assert result["topics"] == {"orders": {"read": None, "write": True}}
+    assert writes == ["orders"]
+
+
+def test_write_probe_uses_metadata_partition_leader(monkeypatch: pytest.MonkeyPatch) -> None:
+    bootstrap_sock = _DummySocket()
+    leader_sock = _DummySocket()
+    bootstrap = kafka_client.KafkaSession(
+        bootstrap_sock, "tls", ("user", "pass"), correlation_id=10, api_versions={kafka_client.KAFKA_FETCH: (0, 10)}
+    )
+    leader = kafka_client.KafkaSession(leader_sock, "tls", ("user", "pass"), correlation_id=40)
+    seen: list[tuple[object, int, str, int]] = []
+
+    class LeaderPool:
+        def get_or_open(self, host, port, _timeout, **_kwargs):
+            assert (host, port) == ("leader", 9092)
+            return leader, None
+
+    monkeypatch.setattr(kafka_client, "_probe_create_topic_permission", lambda _sock, corr: (None, corr + 1))
+    monkeypatch.setattr(kafka_client, "_probe_delete_topic_permission", lambda _sock, corr: (None, corr + 1))
+    monkeypatch.setattr(
+        kafka_client, "_probe_topic_read_permission", lambda _sock, corr, _topic, **_k: (None, corr + 1)
+    )
+
+    def fake_write(sock, corr, topic, partition=0):
+        seen.append((sock, corr, topic, partition))
+        return True, corr + 1
+
+    monkeypatch.setattr(kafka_client, "_probe_topic_write_permission", fake_write)
+    result = kafka_client._probe_kafka_acls(
+        "bootstrap",
+        9092,
+        1.0,
+        ["orders"],
+        username="user",
+        password="pass",
+        probe_write=True,
+        existing_session=bootstrap,
+        metadata={"partition_leaders": {"orders": {1: 2}}, "broker_map": {2: ("leader", 9092)}},
+        leader_pool=LeaderPool(),  # type: ignore[arg-type]
+    )
+    assert result["topics"]["orders"]["write"] is True
+    assert seen == [(leader_sock, 40, "orders", 1)]
+    assert leader.correlation_id == 41
+    assert bootstrap.correlation_id == 13
 
 
 def test_cluster_acl_probe_retries_with_sasl_first_session(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1992,6 +1992,12 @@ def test_kafka_flags_are_parsed() -> None:
     assert args.output == "kafka_audit.jsonl"
 
 
+def test_kafka_probe_write_does_not_require_show_topics() -> None:
+    args = parse_args(["kafka", "-t", "127.0.0.1:9092", "--probe-write"])
+    assert args.probe_write is True
+    assert args.show_topics is False
+
+
 def test_kafka_rejects_profiles_file_flag() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args(["kafka", "-t", "10.0.0.9", "--profiles-file", "profiles.json"])

@@ -60,6 +60,35 @@ def _varint(value: int) -> bytes:
     return _uvarint((int(value) << 1) ^ (int(value) >> 63))
 
 
+def test_write_probe_batch_has_valid_crc32c() -> None:
+    assert kafka._crc32c(b"123456789") == 0xE3069283
+    batch = kafka._build_produce_probe_batch()
+    assert struct.unpack_from(">i", batch, 8)[0] == len(batch) - 12
+    assert batch[16] == 2  # Kafka record-batch magic.
+    assert struct.unpack_from(">I", batch, 17)[0] == kafka._crc32c(batch[21:])
+    assert kafka._WRITE_PROBE_MARKER in batch
+
+
+@pytest.mark.parametrize(("error_code", "expected"), [(0, True), (29, False), (6, None)])
+def test_write_probe_classifies_broker_reply(
+    monkeypatch: pytest.MonkeyPatch, error_code: int, expected: bool | None
+) -> None:
+    requests: list[dict[str, object]] = []
+
+    def fake_send(_sock: object, **kwargs: object) -> bytes:
+        requests.append(kwargs)
+        return struct.pack(">ii", 7, 1) + _kstr("orders") + struct.pack(">iihqqi", 1, 2, error_code, 12, 0, 0)
+
+    monkeypatch.setattr(kafka, "_send_kafka_request", fake_send)
+    result, next_correlation = kafka._probe_topic_write_permission(object(), 7, "orders", 2)
+    assert (result, next_correlation) == (expected, 8)
+    assert requests[0]["api_key"] == kafka.KAFKA_PRODUCE
+    body = requests[0]["body"]
+    assert isinstance(body, bytes)
+    assert body.startswith(struct.pack(">hhi", -1, 1, 5000))
+    assert _kstr("orders") in body
+
+
 def test_kafka_reader_and_encode_error_branches() -> None:
     assert kafka._KafkaReader(struct.pack(">h", -1)).read_string(nullable=True) is None
     assert kafka._KafkaReader(struct.pack(">i", -1)).read_bytes(nullable=True) is None

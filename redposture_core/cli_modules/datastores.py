@@ -311,9 +311,9 @@ def configure_kafka_parser(
         dest="probe_write",
         action="store_true",
         help=(
-            "DESTRUCTIVE: also probe topic write ACL by producing a marker record "
-            "'[REDPOSTURE-AUDIT-PROBE-DO-NOT-USE]'. Only combine with --show-topics on "
-            "topics you own; the marker is a real record and stays in the log."
+            "DESTRUCTIVE: probe topic write ACL by producing a marker record "
+            "'[REDPOSTURE-AUDIT-PROBE-DO-NOT-USE]' to each visible topic, or only --topic NAME. "
+            "The marker is a real record and stays in the log."
         ),
     )
     actions.add_argument(

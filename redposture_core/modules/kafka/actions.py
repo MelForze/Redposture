@@ -431,19 +431,21 @@ def _probe_kafka_acl_state(
     known_kafka: bool = False,
     tls_config: KafkaTlsConfig | None = None,
     existing_session: KafkaSession | None = None,
+    metadata: dict[str, Any] | None = None,
+    leader_pool: KafkaLeaderPool | None = None,
 ) -> tuple[dict[str, dict[str, bool | None]], dict[str, bool | None]]:
     """Collect topic and cluster ACL markers for either Kafka auth path."""
 
     topic_permissions: dict[str, dict[str, bool | None]] = {}
     cluster_permissions: dict[str, bool | None] = {"create": None, "delete": None}
     any_probe_target = bool(topic_names) or bool(query_topic_name)
-    any_probe_action = bool(show_topics or query_topic_name or dump)
+    any_probe_action = bool(show_topics or query_topic_name or dump or probe_write)
     session_probable = provided_credentials_ok or auth_required is False
     if not (any_probe_target and any_probe_action and session_probable):
         return topic_permissions, cluster_permissions
 
-    if query_topic_name and query_topic_name in (topic_names or ()):
-        probe_targets = [query_topic_name]
+    if query_topic_name:
+        probe_targets = [query_topic_name] if query_topic_name in (topic_names or ()) else []
     else:
         probe_targets = (
             sorted(topic_names or ())[:show_topics_limit]
@@ -465,12 +467,17 @@ def _probe_kafka_acl_state(
         acl_kwargs["known_kafka"] = True
     if tls_config is not None:
         acl_kwargs["tls_config"] = tls_config
+    accepted_parameters: Mapping[str, inspect.Parameter]
     try:
-        accepts_existing = "existing_session" in inspect.signature(_kafka_client._probe_kafka_acls).parameters
+        accepted_parameters = inspect.signature(_kafka_client._probe_kafka_acls).parameters
     except (TypeError, ValueError):
-        accepts_existing = False
-    if existing_session is not None and accepts_existing:
+        accepted_parameters = {}
+    if existing_session is not None and "existing_session" in accepted_parameters:
         acl_kwargs["existing_session"] = existing_session
+    if metadata is not None and "metadata" in accepted_parameters:
+        acl_kwargs["metadata"] = metadata
+    if leader_pool is not None and "leader_pool" in accepted_parameters:
+        acl_kwargs["leader_pool"] = leader_pool
     acl_state = _kafka_client._probe_kafka_acls(
         host,
         port,
@@ -521,6 +528,7 @@ def _audit_kafka_via_sasl_fallback(
 
             auth_required = True
             provided_credentials_ok: bool | None = None
+            metadata: dict[str, Any] | None = None
             topic_map: dict[str, int] | None = None
             error_parts: list[str] = []
 
@@ -635,6 +643,7 @@ def _audit_kafka_via_sasl_fallback(
                 probe_write=probe_write,
                 debug_emit=debug_emit,
                 tls_config=tls_config,
+                metadata=metadata,
             )
 
             return {
@@ -652,6 +661,7 @@ def _audit_kafka_via_sasl_fallback(
                 "credential_attempts": credential_attempts,
                 "effective_username": username if provided_credentials_ok else None,
                 "show_topics": show_topics,
+                **({"probe_write": True} if probe_write else {}),
                 "show_topics_limit": show_topics_limit,
                 "query_topic": query_topic_name or None,
                 "topic_count": topic_count,
@@ -801,6 +811,7 @@ def _audit_kafka_host(
                             "provided_password": password if provided_credentials else None,
                             "provided_credentials_ok": None,
                             "show_topics": show_topics,
+                            **({"probe_write": True} if probe_write else {}),
                             "show_topics_limit": show_topics_limit,
                             "query_topic": query_topic,
                             "dump": bool(dump),
@@ -989,6 +1000,7 @@ def _audit_kafka_host(
                     probe_write=probe_write,
                     debug_emit=debug_emit,
                     tls_config=tls_config,
+                    metadata=metadata,
                 )
 
                 return {
@@ -1006,6 +1018,7 @@ def _audit_kafka_host(
                     "credential_attempts": credential_attempts,
                     "effective_username": username if provided_credentials_ok else None,
                     "show_topics": show_topics,
+                    **({"probe_write": True} if probe_write else {}),
                     "show_topics_limit": show_topics_limit,
                     "query_topic": query_topic_name or None,
                     "dump": bool(dump),
@@ -1082,6 +1095,7 @@ def _audit_kafka_host(
         "provided_password": password if provided_credentials else None,
         "provided_credentials_ok": None,
         "show_topics": show_topics,
+        **({"probe_write": True} if probe_write else {}),
         "show_topics_limit": show_topics_limit,
         "query_topic": (query_topic or "").strip() or None,
         "dump": bool(dump),
@@ -1544,6 +1558,8 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
         known_kafka=True,
         tls_config=state.tls_config,
         existing_session=selected_session,
+        metadata=metadata,
+        leader_pool=state.leader_pool,
     )
 
     errors: list[str] = []
@@ -1555,6 +1571,7 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
         {
             "timestamp": utc_now_iso(),
             "show_topics": show_topics,
+            **({"probe_write": True} if probe_write else {}),
             "show_topics_limit": show_topics_limit,
             "query_topic": query_topic_name or None,
             "dump": dump,
@@ -1777,6 +1794,7 @@ def _strip_debug_context(text: str, *, debug: bool) -> str:
 
 def _format_topics_detail_records(record: dict[str, Any], output_format: str, *, debug: bool = False) -> list[str]:
     show_topics = bool(record.get("show_topics"))
+    probe_write = bool(record.get("probe_write"))
     query_topic = str(record.get("query_topic") or "").strip()
     query_topic_value = record.get("query_topic_value")
     dump = bool(record.get("dump"))
@@ -1867,7 +1885,7 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
         if query_topic not in dump_topics and (query_topic in dump_results or query_topic in dump_errors):
             dump_topics.append(query_topic)
 
-    if not show_topics and not query_topic and not dump:
+    if not show_topics and not query_topic and not dump and not probe_write:
         return []
 
     if output_format == "json":
@@ -1886,6 +1904,21 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
                         "topics_shown": topic_meta["shown"],
                         "topics_limit": topic_meta["limit"],
                         "topics_truncated": topic_meta["truncated"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        if probe_write and not show_topics and not query_topic and not dump:
+            lines.append(
+                json.dumps(
+                    {
+                        "timestamp": record.get("timestamp"),
+                        "type": "write_probe",
+                        "service": "kafka",
+                        "host": record.get("host"),
+                        "port": record.get("port"),
+                        "topic_count": len(topic_names) if isinstance(topics, list) else None,
+                        "topic_permissions": record.get("topic_permissions"),
                     },
                     ensure_ascii=False,
                 )
@@ -1984,10 +2017,21 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
             parts.append("(write:true)")
         elif write_value is False:
             parts.append("(write:false)")
+        elif probe_write:
+            parts.append("(write:unknown)")
         return (" " + " ".join(parts)) if parts else ""
 
     prefix = _nxc_prefix(record)
     lines = []
+    if probe_write and not show_topics and not query_topic and not dump:
+        count = len(topic_names) if isinstance(topics, list) else "unknown"
+        lines.append(f"{prefix} [*] Write Probe (topics:{count})")
+        if topic_names:
+            for item in topic_names:
+                lines.append(f"{prefix} {item}{_topic_marker_suffix(item)}")
+        else:
+            reason = "topic metadata unavailable" if topics is None else "no topics available"
+            lines.append(f"{prefix} [!] Write probe unavailable: {reason}")
     if show_topics and topic_names:
         total = record.get("topic_count")
         if show_topics_limit is not None and isinstance(total, int) and total > len(displayed_topic_names):
@@ -2093,6 +2137,7 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
             LiteralColorRule("(read:false)", "bright_green"),
             LiteralColorRule("(write:true)", "red"),
             LiteralColorRule("(write:false)", "bright_green"),
+            LiteralColorRule("(write:unknown)", "orange"),
             LiteralColorRule("(create:true)", "red"),
             LiteralColorRule("(create:false)", "bright_green"),
             LiteralColorRule("(delete:true)", "red"),
@@ -2101,6 +2146,9 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
         counts=(
             CountColorRule("topics", "red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("partitions", "red", unknown_color="orange", zero_color="bright_green"),
+        ),
+        extra_spans=lambda marker, right: (
+            [(0, len(right), "orange")] if marker == "[!]" and right.startswith("Write probe unavailable:") else []
         ),
     ):
         return True
@@ -2128,7 +2176,7 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
         # token (including parens) uniformly painted by semantic — red
         # for "dangerous power confirmed" / "plaintext confirmed",
         # bright_green for "ACL blocked" / "TLS active".
-        for match in re.finditer(r"\((?:read|write|create|delete|tls):(?:true|false|True|False)\)", right):
+        for match in re.finditer(r"\((?:read|write|create|delete|tls):(?:true|false|True|False|unknown)\)", right):
             token = match.group(0)
             if token in {
                 "(tls:false)",
@@ -2148,6 +2196,8 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
                 "(delete:false)",
             }:
                 spans.append((match.start(), match.end(), "bright_green"))
+            elif token == "(write:unknown)":
+                spans.append((match.start(), match.end(), "orange"))
         return render_tagged_detail_line(
             console,
             line,

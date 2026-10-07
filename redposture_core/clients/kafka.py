@@ -1679,16 +1679,23 @@ def _build_produce_probe_batch() -> bytes:
         + struct.pack(">i", 1)  # record_count
         + record
     )
-    header_with_crc_placeholder = (
-        struct.pack(">i", 0)
-        + struct.pack(">b", 2)
-        + struct.pack(">I", 0)  # partition_leader_epoch, magic, crc placeholder
-    )
+    header_with_crc = struct.pack(">i", 0) + struct.pack(">b", 2) + struct.pack(">I", _crc32c(body_after_crc))
     # batch_length = bytes after (base_offset + batch_length) = everything
     # from `partition_leader_epoch` through the last record byte.
-    batch_body = header_with_crc_placeholder + body_after_crc
+    batch_body = header_with_crc + body_after_crc
     batch_length = len(batch_body)
     return struct.pack(">q", 0) + struct.pack(">i", batch_length) + batch_body
+
+
+def _crc32c(data: bytes) -> int:
+    """Kafka record-batch CRC32C (Castagnoli) over attributes through records."""
+
+    checksum = 0xFFFFFFFF
+    for byte in data:
+        checksum ^= byte
+        for _ in range(8):
+            checksum = (checksum >> 1) ^ (0x82F63B78 if checksum & 1 else 0)
+    return checksum ^ 0xFFFFFFFF
 
 
 def _write_varint(value: int) -> bytes:
@@ -1946,6 +1953,8 @@ def _probe_kafka_acls(
     debug_emit: Any = None,
     known_kafka: bool = False,
     existing_session: KafkaSession | None = None,
+    metadata: dict[str, Any] | None = None,
+    leader_pool: KafkaLeaderPool | None = None,
 ) -> dict[str, Any]:
     """Probe Read (and optionally Write) ACLs per topic AND cluster-level
     Create/Delete ACLs — all on a single authenticated socket.
@@ -1979,6 +1988,77 @@ def _probe_kafka_acls(
         "cluster": {"create": None, "delete": None},
         "topics": {topic: {"read": None, "write": None} for topic in topics},
     }
+    failed_leaders: set[tuple[str, int]] = set()
+
+    def _write_to_topic_leader(bootstrap_sock: socket.socket, correlation: int, topic: str) -> tuple[bool | None, int]:
+        """Use Metadata's partition leader when reachable; preserve one write attempt."""
+
+        partition = 0
+        endpoint: tuple[str, int] | None = None
+        if isinstance(metadata, dict):
+            leaders = (metadata.get("partition_leaders") or {}).get(topic, {})
+            brokers = metadata.get("broker_map") or {}
+            if isinstance(leaders, dict) and isinstance(brokers, dict):
+                valid_leaders: list[tuple[int, int]] = []
+                for raw_partition, raw_leader in leaders.items():
+                    try:
+                        valid_leaders.append((int(raw_partition), int(raw_leader)))
+                    except (TypeError, ValueError):
+                        continue
+                for candidate_partition, leader_id in sorted(valid_leaders):
+                    broker = brokers.get(leader_id)
+                    if not isinstance(broker, (tuple, list)) or len(broker) != 2:
+                        continue
+                    try:
+                        candidate_endpoint = (str(broker[0]), int(broker[1]))
+                    except (TypeError, ValueError):
+                        continue
+                    if candidate_partition >= 0 and candidate_endpoint[0] and 0 < candidate_endpoint[1] <= 65535:
+                        partition, endpoint = candidate_partition, candidate_endpoint
+                        break
+        if endpoint is None or endpoint == (host, port) or endpoint in failed_leaders:
+            return _probe_topic_write_permission(bootstrap_sock, correlation, topic, partition)
+
+        leader_session: KafkaSession | None = None
+        owned_session = False
+        try:
+            if leader_pool is not None:
+                leader_session, error = leader_pool.get_or_open(
+                    *endpoint,
+                    timeout,
+                    username=username,
+                    password=password,
+                    use_tls=use_tls,
+                    tls_config=tls_config,
+                    sasl_first=False,
+                    known_kafka=known_kafka,
+                )
+                if leader_session is None:
+                    raise OSError(error or "leader session unavailable")
+            else:
+                leader_session = KafkaSession.open(
+                    *endpoint, timeout, username=username, password=password, use_tls=use_tls, tls_config=tls_config
+                )
+                owned_session = True
+                ok, error = leader_session.bootstrap(known_kafka=known_kafka)
+                if not ok:
+                    raise OSError(error or "leader authentication failed")
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            if leader_session is not None and owned_session:
+                leader_session.close()
+            failed_leaders.add(endpoint)
+            _log(f"leader {endpoint[0]}:{endpoint[1]} unavailable for {topic}: {exc}")
+            return _probe_topic_write_permission(bootstrap_sock, correlation, topic, partition)
+
+        try:
+            result, next_correlation = _probe_topic_write_permission(
+                leader_session.sock, leader_session.correlation_id, topic, partition
+            )
+            leader_session.correlation_id = next_correlation
+            return result, correlation
+        finally:
+            if owned_session:
+                leader_session.close()
 
     # Broad exception net around the whole probe flow. Best-effort probing
     # must never sink the parent audit — degrade to `None` markers instead.
@@ -2029,15 +2109,24 @@ def _probe_kafka_acls(
                     cluster_perms["create"], correlation = _probe_create_topic_permission(sock, correlation)
                     cluster_perms["delete"], correlation = _probe_delete_topic_permission(sock, correlation)
                 topic_perms: dict[str, dict[str, bool | None]] = {}
-                fetch_api_version = _select_fetch_api_version(api_versions)
+                try:
+                    fetch_api_version = _select_fetch_api_version(api_versions)
+                except ValueError as exc:
+                    _log(f"read probe unavailable: {exc}")
+                    fetch_api_version = None
                 for topic in topics:
                     read_kwargs: dict[str, Any] = {}
-                    if _accepts_keyword(_probe_topic_read_permission, "fetch_api_version"):
+                    if fetch_api_version is not None and _accepts_keyword(
+                        _probe_topic_read_permission, "fetch_api_version"
+                    ):
                         read_kwargs["fetch_api_version"] = fetch_api_version
-                    read_result, correlation = _probe_topic_read_permission(sock, correlation, topic, **read_kwargs)
+                    if fetch_api_version is None:
+                        read_result = None
+                    else:
+                        read_result, correlation = _probe_topic_read_permission(sock, correlation, topic, **read_kwargs)
                     write_result: bool | None = None
                     if probe_write:
-                        write_result, correlation = _probe_topic_write_permission(sock, correlation, topic)
+                        write_result, correlation = _write_to_topic_leader(sock, correlation, topic)
                     topic_perms[topic] = {"read": read_result, "write": write_result}
                 if borrowed is not None:
                     borrowed.correlation_id = correlation

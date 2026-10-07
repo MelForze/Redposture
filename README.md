@@ -237,6 +237,8 @@ redposture kafka -t targets.txt --defcreds
 redposture kafka -t kafka.example -u auditor -p 'password' --topic events --dump 10
 ```
 
+`--probe-write` works alone or with `--topic NAME`; it appends one audit marker to each probed topic. An inconclusive result is shown as `write:unknown`.
+
 ### Keeper
 
 ```bash
