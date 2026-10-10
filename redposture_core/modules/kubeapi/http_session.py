@@ -14,6 +14,7 @@ from ...clients.http_api import (
     HttpApiClient,
     HttpClientConfig,
     HttpResponse,
+    decode_http_content,
     join_http_target_path,
     normalize_http_error,
     pin_http_redirect_path,
@@ -170,6 +171,7 @@ class KubeApiHttpSession:
             return self._request_once(method, path, headers, body, timeout=timeout, response_size_cap=response_size_cap)
 
         response = follow_redirects(send, method, initial_url, headers=headers, body=body)
+        response = decode_http_content(response, max_bytes=response_size_cap)
         pin_http_redirect_path(response, method=method)
         return response
 

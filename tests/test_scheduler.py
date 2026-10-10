@@ -195,9 +195,10 @@ def test_shared_nested_scheduler_bounds_each_producer_window() -> None:
     thread = threading.Thread(target=lambda: completed.append(next(iterator)))
     thread.start()
     deadline = time.monotonic() + 1
-    while len(consumed) < 4 and time.monotonic() < deadline:
+    while len(consumed) < 2 and time.monotonic() < deadline:
         time.sleep(0.005)
-    assert consumed == [0, 1, 2, 3]
+    # Do not prefetch tasks that would only wait on this target's semaphore.
+    assert consumed == [0, 1]
 
     release.set()
     thread.join(timeout=1)
@@ -335,3 +336,78 @@ def test_shared_nested_scheduler_cancels_queued_work_when_iterator_closes() -> N
     scheduler.close()
 
     assert set(started) == started_before_release
+
+
+def test_shared_nested_scheduler_cancel_wakes_active_coordinator() -> None:
+    scheduler = SharedNestedScheduler(max_workers=1)
+    started = threading.Event()
+    release = threading.Event()
+    coordinator_done = threading.Event()
+    completed: list[int] = []
+    errors: list[BaseException] = []
+
+    def worker(value: int) -> int:
+        started.set()
+        release.wait(timeout=3)
+        return value
+
+    def coordinator() -> None:
+        try:
+            for _item, result in scheduler.iter_completed([1], worker, key="target", per_key_limit=1):
+                completed.append(result)
+        except RuntimeError as exc:
+            errors.append(exc)
+        finally:
+            coordinator_done.set()
+
+    thread = threading.Thread(target=coordinator)
+    thread.start()
+    try:
+        assert started.wait(timeout=1)
+        scheduler.cancel()
+        assert coordinator_done.wait(timeout=0.5), "cancel left the discovery coordinator waiting for a network call"
+    finally:
+        release.set()
+        thread.join(timeout=3)
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert completed == []
+
+
+def test_shared_nested_scheduler_cancel_stops_dynamic_follow_up() -> None:
+    scheduler = SharedNestedScheduler(max_workers=1)
+    started = threading.Event()
+    release = threading.Event()
+    coordinator_done = threading.Event()
+    completed: list[int] = []
+    errors: list[BaseException] = []
+
+    def worker(value: int) -> int:
+        started.set()
+        release.wait(timeout=3)
+        return value
+
+    def on_completed(_item: int, result: int) -> list[int]:
+        completed.append(result)
+        return [result + 1]
+
+    def coordinator() -> None:
+        try:
+            scheduler.run_dynamic([1], worker, on_completed)
+        except RuntimeError as exc:
+            errors.append(exc)
+        finally:
+            coordinator_done.set()
+
+    thread = threading.Thread(target=coordinator)
+    thread.start()
+    try:
+        assert started.wait(timeout=1)
+        scheduler.cancel()
+        assert coordinator_done.wait(timeout=0.5)
+    finally:
+        release.set()
+        thread.join(timeout=3)
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert completed == []

@@ -424,6 +424,24 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
                         password=password,
                         database=target_database,
                     )
+                    capability_fields: dict[str, Any] = {}
+                    if bool(getattr(ctx.args, "_spray_capabilities", False)) and session.auth_required is not False:
+                        try:
+                            superuser, can_execute, can_read, readable_tables, query_error = (
+                                actions._collect_postgres_privileges(sock, probe_readable_table_sample=False)
+                            )
+                            databases, database_error = actions._pg_query_databases(sock)
+                            capability_fields = {
+                                "superuser": superuser,
+                                "can_execute_commands": can_execute,
+                                "can_read_tables": can_read,
+                                "readable_tables": readable_tables,
+                                "database_count": len(databases) if isinstance(databases, list) else None,
+                                "query_error": "; ".join(error for error in (query_error, database_error) if error)
+                                or None,
+                            }
+                        except Exception as exc:
+                            capability_fields = {"query_error": f"capability probe: {type(exc).__name__}"}
                 finally:
                     try:
                         actions._pg_send_terminate(sock)
@@ -458,6 +476,7 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
                     "effective_username": username,
                     "credential_verified": credential_verified,
                     "credential_verification": "verified" if credential_verified else "unverified",
+                    **capability_fields,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": None,
                 }

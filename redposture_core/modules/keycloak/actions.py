@@ -7,6 +7,8 @@ from typing import Any
 from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, HttpResponse, http_response_requires_https
+from ...clients.http_session import HttpSessionPool
+from ...clients.scoped_http import ScopedHttpClient
 
 host_stage = None  # The module uses phase-aware audit hooks.
 
@@ -214,7 +216,10 @@ def _origin(ctx: Any, scheme: str) -> str:
     return f"{scheme}://{host}:{ctx.port}"
 
 
-def _client(ctx: Any) -> HttpApiClient:
+def _client(ctx: Any) -> HttpApiClient | ScopedHttpClient:
+    pool = getattr(getattr(ctx, "lifecycle_state", None), "http", None)
+    if isinstance(pool, HttpSessionPool):
+        return ScopedHttpClient(pool, 512 * 1024)
     return HttpApiClient(
         HttpClientConfig(
             timeout=float(getattr(ctx.args, "timeout", 5.0) or 5.0),
@@ -227,14 +232,14 @@ def _client(ctx: Any) -> HttpApiClient:
     )
 
 
-def _get(client: HttpApiClient, url: str, token: str | None = None) -> HttpResponse:
+def _get(client: HttpApiClient | ScopedHttpClient, url: str, token: str | None = None) -> HttpResponse:
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return client.get(url, headers=headers)
 
 
-def _get_public(client: HttpApiClient, url: str) -> HttpResponse:
+def _get_public(client: HttpApiClient | ScopedHttpClient, url: str) -> HttpResponse:
     """Follow one same-host GET redirect only when the realm endpoint is preserved."""
     response = _get(client, url)
     if response.status not in {301, 302, 307, 308}:

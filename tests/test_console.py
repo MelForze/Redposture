@@ -17,6 +17,26 @@ class _FakeStream(io.StringIO):
         return self._tty
 
 
+class _RecordingStream(_FakeStream):
+    def __init__(self) -> None:
+        super().__init__(tty=False)
+        self.writes: list[str] = []
+
+    def write(self, value: str) -> int:
+        self.writes.append(value)
+        return super().write(value)
+
+
+def test_console_emits_each_line_in_one_write() -> None:
+    stream = _RecordingStream()
+    console = Console(no_color=True)
+
+    console.plain("first", stream=stream)
+    console._line("[*]", "second", "cyan", stream)
+
+    assert stream.writes == ["first\n", "[*] second\n"]
+
+
 def test_should_use_color_gates_on_isatty_when_no_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FORCE_COLOR", raising=False)
     monkeypatch.delenv("NO_COLOR", raising=False)

@@ -136,15 +136,15 @@ class Console:
     def _line(self, prefix: str, message: str, color: str, stream: TextIO) -> None:
         mark = self._paint(prefix, color, stream)
         with suspend_active_progress_for_output(stream):
-            print(f"{mark} {message}", file=stream, flush=True)
+            stream.write(f"{mark} {message}\n")
+            stream.flush()
 
     def plain(self, message: str, color: str | None = None, stream: TextIO | None = None) -> None:
         out = stream or sys.stdout
         with suspend_active_progress_for_output(out):
-            if color:
-                print(self._paint(message, color, out), file=out, flush=True)
-                return
-            print(message, file=out, flush=True)
+            rendered = self._paint(message, color, out) if color else message
+            out.write(rendered + "\n")
+            out.flush()
 
     def render_tagged_payload_line(
         self,

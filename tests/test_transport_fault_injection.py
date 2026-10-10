@@ -107,12 +107,32 @@ def test_http_pool_enforces_body_read_timeout() -> None:
     assert elapsed < 0.8
 
 
+def test_http_pool_close_interrupts_active_body_read() -> None:
+    with _serve_fault("stalled") as server:
+        pool = HttpSessionPool(timeout=5)
+        responses = []
+        thread = threading.Thread(
+            target=lambda: responses.append(pool.request("GET", f"http://127.0.0.1:{server.server_address[1]}/"))
+        )
+        thread.start()
+        try:
+            assert server.request_seen.wait(timeout=1)
+            pool.close()
+            thread.join(timeout=0.5)
+            assert not thread.is_alive(), "closing the pool left an active body read blocked"
+            assert responses and responses[0].error
+        finally:
+            pool.close()
+            thread.join(timeout=5)
+
+
 def test_corrupt_gzip_is_rejected_after_real_http_read() -> None:
     with _serve_fault("gzip") as server:
         with closing(HttpSessionPool(timeout=0.5)) as pool:
             response = pool.request("GET", f"http://127.0.0.1:{server.server_address[1]}/", retries=0)
 
-    assert response.status == 200 and response.error is None
+    assert response.status == 200 and response.error == "invalid gzip HTTP response"
+    assert response.body == b""
     assert _load_json_dict_loose(response.body, response.headers) is None
 
 

@@ -256,7 +256,8 @@ def configure_kafka_parser(
             "Kafka port spec: single port, list/range, or file "
             "(examples: 9092, '9092,9093,29092', 9092-9095, ./ports.txt). "
             "If omitted, scans 9092, 9093 (commonly SASL_SSL), "
-            "19092, 19093, 29092, and 29093."
+            "19092, 19093, 29092, 29093, and common Kafka UI ports "
+            "80, 443, 8080, 8081, 8443. A host:port target also checks both protocols."
         ),
     )
     add_multi_ports_flag(common)
@@ -266,7 +267,7 @@ def configure_kafka_parser(
         dest="username",
         default=None,
         metavar="name",
-        help="Optional Kafka username or credential file for credential check (SASL/PLAIN).",
+        help="Kafka SASL or Kafka UI username, or a credential file.",
     )
     auth.add_argument(
         "-p",
@@ -274,12 +275,12 @@ def configure_kafka_parser(
         dest="password",
         default=None,
         metavar="value",
-        help="Optional Kafka password for credential check (SASL/PLAIN).",
+        help="Kafka SASL or Kafka UI password for credential check.",
     )
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try the curated Kafka SASL/PLAIN credential set after provided or file credentials.",
+        help="Try curated weak pairs on confirmed Kafka brokers or login-form Kafka UI.",
     )
     transport = parser.add_argument_group("TLS")
     transport_mode = transport.add_mutually_exclusive_group()
@@ -305,6 +306,13 @@ def configure_kafka_parser(
     actions.add_argument(
         "--show-topics",
         **optional_show_count_kwargs("Show topic names after successful access/auth. Optional count limits output."),
+    )
+    actions.add_argument(
+        "--show-clusters", action="store_true", help="Show clusters exposed by Kafbat/Provectus Kafka UI."
+    )
+    actions.add_argument("--show-brokers", action="store_true", help="Show Kafka UI broker inventory (read-only).")
+    actions.add_argument(
+        "--show-consumer-groups", action="store_true", help="Show Kafka UI consumer groups (read-only)."
     )
     actions.add_argument(
         "--probe-write",

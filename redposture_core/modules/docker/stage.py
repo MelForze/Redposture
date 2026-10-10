@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ...audit_config import AuditConfig
@@ -19,7 +20,11 @@ _DEFAULT_PORTS: tuple[int, ...] | None = (2375, 2376, 4243, 12375, 12376)
 
 
 def build_docker_plan(args: Any) -> AuditCommandPlan:
-    return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
+    return plan
 
 
 def build_docker_spec(args: Any) -> ModuleAuditSpec:

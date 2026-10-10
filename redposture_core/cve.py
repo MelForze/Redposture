@@ -435,6 +435,7 @@ def resolve_products(module: str, payload: Mapping[str, Any]) -> list[DetectedPr
         "gitlab": ("gitlab", "GitLab", "version"),
         "grafana": ("grafana", "Grafana", "server_version"),
         "keycloak": ("keycloak", "Keycloak", "version"),
+        "jenkins": ("jenkins", "Jenkins", "version"),
         "kubeapi": ("kubernetes", "Kubernetes", "version"),
         "minio": ("minio", "MinIO", "version"),
         "mongodb": ("mongodb", "MongoDB", "server_version"),
@@ -447,6 +448,22 @@ def resolve_products(module: str, payload: Mapping[str, Any]) -> list[DetectedPr
     if module in version_fields:
         key, name, field = version_fields[module]
         version_products = [_product(key, name, payload.get(field))]
+        if module == "jenkins":
+            plugins = payload.get("plugins")
+            if isinstance(plugins, list):
+                for plugin in plugins:
+                    if not isinstance(plugin, Mapping):
+                        continue
+                    plugin_version = plugin.get("version")
+                    if (
+                        plugin.get("short_name") == "allure-jenkins-plugin"
+                        and isinstance(plugin_version, str)
+                        and normalize_version(plugin_version) is not None
+                        and plugin.get("active") is not False
+                    ):
+                        version_products.append(
+                            _product("jenkins_plugin_allure", "Jenkins Allure Plugin", plugin_version)
+                        )
         if module == "grafana":
             server_version = _clean_version(payload.get(field))
             parsed_server = normalize_version(server_version) if server_version is not None else None

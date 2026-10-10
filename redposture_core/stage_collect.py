@@ -10,6 +10,7 @@ import ssl
 import sys
 import time
 from collections.abc import Iterable, Iterator
+from dataclasses import replace
 from typing import Any, TextIO, cast
 
 from .console import Console
@@ -304,7 +305,6 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
-
     try:
         profiles = load_profiles(args.profiles_file)
     except (OSError, ValueError) as exc:
@@ -325,6 +325,14 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     except (OSError, ValueError, ssl.SSLError) as exc:
         console.error(f"invalid exporter TLS configuration: {exc}")
         return 2
+    if not custom_ports:
+        target_plan = target_plan.with_scheme_default_ports({"http": 80, "https": 443})
+        target_specs = [
+            replace(spec, explicit_port={"http": 80, "https": 443}[spec.scheme])
+            if spec.explicit_port is None and spec.scheme in {"http", "https"}
+            else spec
+            for spec in target_specs
+        ]
     target_plan = target_plan.with_additional_ports_for_bare_explicit_targets(bool(custom_ports))
     try:
         selected_collect_exporters = _parse_collect_exporter_filter(

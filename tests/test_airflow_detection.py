@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from redposture_core.clients.airflow_api import AirflowResponse
+from redposture_core.clients.http_api import HttpResponse
 from redposture_core.modules.airflow import actions
+from redposture_core.targeting import ScanTargetSpec
 
 
 class _FakeClient:
@@ -37,6 +40,32 @@ def test_detect_confirmed_v2_captures_version_and_generation():
     assert d.status == "confirmed"
     assert d.api_generation == "v2"
     assert d.version == "3.0.2"
+
+
+def test_scheme_probe_response_is_reused_for_same_airflow_api_url() -> None:
+    class Pool:
+        def __init__(self) -> None:
+            self.paths: list[str] = []
+
+        def request(self, _method: str, url: str, **_kwargs: object) -> HttpResponse:
+            self.paths.append(url)
+            if url.endswith("/api/v2/version"):
+                return HttpResponse(200, b'{"version":"3.0.2","git_version":"abc"}', {}, final_url=url)
+            return HttpResponse(403, b"", {}, final_url=url)
+
+    args = SimpleNamespace(timeout=1.0, retries=0)
+    state = actions.AirflowLifecycleState(args, "airflow.test", 8080, scheme="http")
+    pool = Pool()
+    state.pool = pool  # type: ignore[assignment]
+    ctx = SimpleNamespace(
+        args=args,
+        host="airflow.test",
+        port=8080,
+        target=ScanTargetSpec("airflow.test", scheme="http", explicit_port=8080),
+        lifecycle_state=state,
+    )
+    assert actions.detect_record(ctx)["detection_status"] == "confirmed"
+    assert sum(path.endswith("/api/v2/version") for path in pool.paths) == 1
 
 
 def test_detect_confirmed_v1_when_v2_absent():

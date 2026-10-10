@@ -63,6 +63,11 @@ def _resolve_openapi_path(args: Any, plan: AuditCommandPlan) -> str:
 
 def build_grpc_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = bool(getattr(args, "_port_option_provided", False)) or bool(
+        str(getattr(args, "ports", "") or "").strip()
+    )
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
     token = str(getattr(args, "token", "") or "").strip() or None
     token_runs = (AuditCredentialRun(token=token, source="provided"),) if token is not None else ()
     default_runs = (

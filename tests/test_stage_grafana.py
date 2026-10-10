@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import redposture_core.stage_grafana as grafana_stage
+from redposture_core.modules.grafana import actions as grafana_actions
 from redposture_core.stage_grafana import (
     _audit_grafana_host,
     _auth_header,
@@ -29,7 +30,44 @@ from redposture_core.stage_grafana import (
     _verify_credentials,
     run_grafana_stage,
 )
+from redposture_core.stage_runtime import AuditCredentialRun, AuditHookContext
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
+
+
+def test_grafana_spray_counts_datasources_for_each_verified_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = grafana_actions.GrafanaLifecycleState()
+    monkeypatch.setattr(grafana_actions, "_verify_credentials", lambda *_args: (True, None))
+    monkeypatch.setattr(
+        grafana_actions,
+        "_http_request",
+        lambda *_args, **_kwargs: (200, '{"database":"ok","version":"11.3.1","commit":"abc123"}', {}),
+    )
+    seen_headers: list[str | None] = []
+
+    def datasources(_host: str, _port: int, _timeout: float, *, auth_header: str | None):
+        seen_headers.append(auth_header)
+        count = 1 if auth_header == _auth_header("first", "one") else 2
+        return ([{"id": index} for index in range(count)], None, 200)
+
+    monkeypatch.setattr(grafana_actions, "_fetch_datasources", datasources)
+    base = {"host": "localhost", "port": 3000, "is_grafana": True, "auth_required": True}
+    options = {"show_datasources": False, "check_urls": []}
+    for username, password, expected_count in (("first", "one", 1), ("second", "two", 2)):
+        ctx = AuditHookContext(
+            SimpleNamespace(timeout=1.0, defcreds=False, enum_cve=False, _spray_capabilities=True),
+            None,
+            "localhost",
+            3000,
+            AuditCredentialRun(username, password, source="provided"),
+            lifecycle_state=state,
+        )
+        authenticated = grafana_actions.authenticate_grafana(ctx, base, options)
+        data = grafana_actions.collect_grafana_data(ctx, authenticated, options)
+        assert data["datasource_count"] == expected_count
+        assert data["server_version"] == "11.3.1"
+        detail_lines = grafana_actions._format_auth_attempt_detail_records(data, "txt")
+        assert any(f"[+] {username}:{password} (datasources:{expected_count})" in line for line in detail_lines)
+    assert seen_headers == [_auth_header("first", "one"), _auth_header("second", "two")]
 
 
 def test_normalize_check_urls_builds_cartesian_product_for_targets_and_ports() -> None:

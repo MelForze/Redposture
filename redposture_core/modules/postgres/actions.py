@@ -695,6 +695,8 @@ def _pg_startup_and_auth(sock: socket.socket, username: str, password: str | Non
 
 def _collect_postgres_privileges(
     sock: socket.socket,
+    *,
+    probe_readable_table_sample: bool = True,
 ) -> tuple[bool | None, bool | None, bool | None, int | None, str | None]:
     superuser, superuser_error = _pg_query_scalar_bool(
         sock,
@@ -721,7 +723,7 @@ def _collect_postgres_privileges(
             "AND has_table_privilege(format('%I.%I', table_schema, table_name), 'SELECT')"
         ),
     )
-    if readable_tables is None and readable_tables_error:
+    if readable_tables is None and readable_tables_error and probe_readable_table_sample:
         sample_can_read, sample_readable_tables, sample_error = _pg_probe_readable_table_sample(sock)
         if sample_can_read is not None:
             readable_tables = sample_readable_tables

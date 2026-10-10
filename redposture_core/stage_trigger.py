@@ -1050,16 +1050,19 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     for spec in target_specs:
         is_bare_target = spec.scheme is None
         scheme = spec.scheme or "http"
-        if spec.explicit_port is None or is_bare_target:
+        target_port = spec.explicit_port
+        if target_port is None and spec.scheme and not custom_ports:
+            target_port = {"http": 80, "https": 443}.get(scheme)
+        if target_port is None or is_bare_target:
             scheme_hosts = additional_port_hosts.setdefault(scheme, [])
             if spec.host not in scheme_hosts:
                 scheme_hosts.append(spec.host)
-        if spec.explicit_port is None:
+        if target_port is None:
             scheme_hosts = plain_hosts.setdefault(scheme, [])
             if spec.host not in scheme_hosts:
                 scheme_hosts.append(spec.host)
             continue
-        port_key = int(spec.explicit_port)
+        port_key = int(target_port)
         explicit_targets = explicit_port_groups.setdefault((port_key, scheme), [])
         target_key = (spec.host, is_bare_target)
         if target_key not in explicit_targets:

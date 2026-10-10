@@ -21,7 +21,7 @@ from ...stage_runtime import (
     merge_audit_credential_runs,
     sort_default_audit_credential_runs,
 )
-from . import actions, policy, render
+from . import actions, policy, render, ui
 
 _DEFAULT_PORT = 9092
 # 9093 = the well-known Kafka SASL_SSL / SSL listener. Many production
@@ -37,13 +37,17 @@ _DEFAULT_PORT = 9092
 # `redposture_core/clients/kafka.py`; the transport used ends up as the
 # `transport_mode` field on the audit record, rendered as `(transport:tls)`
 # in text output — same convention as docker/grpc/oracle.
-_DEFAULT_PORTS: tuple[int, ...] | None = (9092, 9093, 19092, 19093, 29092, 29093)
+_DEFAULT_PORTS: tuple[int, ...] | None = (9092, 9093, 19092, 19093, 29092, 29093, 8080, 8081, 8443, 80, 443)
+_UI_PORTS = {80, 443, 8080, 8081, 8443}
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_kafka_host
 
 
 def build_kafka_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
     default_runs = (
         sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source="default")
@@ -74,12 +78,23 @@ def _build_kafka_lifecycle_options(args: Any) -> dict[str, Any]:
         "probe_write": bool(getattr(args, "probe_write", False)),
         "write_payload": getattr(args, "_kafka_write_payload", None),
         "write_key": getattr(args, "_kafka_write_key", None),
+        "show_clusters": bool(getattr(args, "show_clusters", False)),
+        "show_brokers": bool(getattr(args, "show_brokers", False)),
+        "show_consumer_groups": bool(getattr(args, "show_consumer_groups", False)),
     }
 
 
 def _kafka_credential_gate(credential: AuditCredentialRun, record: AuditRecord) -> tuple[bool, str]:
     """Only select a credential after Kafka has verified that identity."""
 
+    if record.extra.get("is_kafka_ui"):
+        if credential.username is None and credential.password is None:
+            return record.status == "open_no_auth", f"status={record.status}"
+        verified = record.extra.get("provided_credentials_ok") is True or record.status in {
+            "valid_credentials",
+            "weak_default_creds",
+        }
+        return verified, "Kafka UI identity verified" if verified else "Kafka UI identity unverified"
     has_credentials = credential.username is not None or credential.password is not None
     if not has_credentials:
         accepted = str(record.status or "") in {
@@ -144,9 +159,31 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         )
 
     def _detect(ctx: AuditHookContext) -> AuditRecord:
-        return AuditRecord.from_mapping(actions.detect_kafka(ctx, options), module="kafka", service="kafka")
+        scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
+        ui_first = scheme in {"http", "https"} or int(ctx.port) in _UI_PORTS
+        ui_record: dict[str, Any] | None = None
+        if ui_first:
+            ui_record = ui.detect_ui(ctx, ctx.lifecycle_state)
+            if ui_record.get("is_kafka"):
+                return AuditRecord.from_mapping(ui_record, module="kafka", service="kafka")
+        broker_record = actions.detect_kafka(ctx, options)
+        if broker_record.get("is_kafka"):
+            return AuditRecord.from_mapping(broker_record, module="kafka", service="kafka")
+        if not ui_first:
+            ui_record = ui.detect_ui(ctx, ctx.lifecycle_state)
+            if ui_record.get("is_kafka"):
+                return AuditRecord.from_mapping(ui_record, module="kafka", service="kafka")
+        if ui_record is not None:
+            broker_record["ui_detection_status"] = ui_record.get("detection_status")
+            broker_record["ui_detection_signals"] = ui_record.get("detection_signals")
+            broker_record["ui_detection_error"] = ui_record.get("error")
+        return AuditRecord.from_mapping(broker_record, module="kafka", service="kafka")
 
     def _auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        if record.extra.get("is_kafka_ui"):
+            return AuditRecord.from_mapping(
+                ui.authenticate_ui(ctx, record.to_dict(), ctx.lifecycle_state), module="kafka", service="kafka"
+            )
         return AuditRecord.from_mapping(
             actions.authenticate_kafka(ctx, record, options),
             module="kafka",
@@ -154,6 +191,10 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         )
 
     def _data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        if record.extra.get("is_kafka_ui"):
+            return AuditRecord.from_mapping(
+                ui.collect_ui(ctx, record.to_dict(), ctx.lifecycle_state, options), module="kafka", service="kafka"
+            )
         return AuditRecord.from_mapping(
             actions.collect_kafka_data(ctx, record, options),
             module="kafka",

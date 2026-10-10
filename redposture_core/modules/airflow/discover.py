@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from ...clients.airflow_api import AirflowClient
+from ...scheduler import NestedSchedulerCancelled
 from ...secret_detection import fingerprint, mask_secret, scan_value
 
 
@@ -51,12 +52,15 @@ def _collection(
     *,
     order_by: str | None = None,
     start_offset: int = 0,
+    cancelled: Callable[[], bool] | None = None,
 ) -> _Collection:
     items: list[dict[str, Any]] = []
     seen_pages: set[tuple[str, str, int]] = set()
     selected_order = order_by
     latest_total: int | None = None
     while limit is None or len(items) < limit:
+        if cancelled is not None and cancelled():
+            raise NestedSchedulerCancelled("Airflow discovery cancelled")
         if deadline is not None and time.monotonic() >= deadline:
             return _Collection(tuple(items), False, "discover_time")
         page_size = min(100, limit - len(items)) if limit is not None else 100
@@ -157,12 +161,15 @@ def _read_log(
     max_log_bytes: int,
     max_total_bytes: int,
     deadline: float | None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[str, int, str | None]:
     parts: list[str] = []
     used = 0
     token: str | None = None
     seen_tokens: set[str] = set()
     for _page in range(64):
+        if cancelled is not None and cancelled():
+            raise NestedSchedulerCancelled("Airflow discovery cancelled")
         if deadline is not None and time.monotonic() >= deadline:
             return "".join(parts), used, "discover_time"
         remaining = min(max_log_bytes - used, max_total_bytes - used)
@@ -238,6 +245,7 @@ def discover_task_logs(
     generation: str,
     config: DiscoverConfig,
     on_finding: Callable[[dict[str, Any]], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Read DAG task logs in stable order and retain only secret findings."""
     started = time.monotonic()
@@ -322,11 +330,22 @@ def discover_task_logs(
         offset = 0
         seen_pages: set[tuple[str, str, int]] = set()
         while True:
+            if cancelled is not None and cancelled():
+                raise NestedSchedulerCancelled("Airflow discovery cancelled")
             page_limit = min(100, limit - offset) if limit is not None else 100
             if page_limit <= 0:
                 partial(max_reason)
                 return
-            page = _collection(client, path, key, page_limit, deadline, order_by=order_by, start_offset=offset)
+            page = _collection(
+                client,
+                path,
+                key,
+                page_limit,
+                deadline,
+                order_by=order_by,
+                start_offset=offset,
+                cancelled=cancelled,
+            )
             if page.items:
                 signature = (repr(page.items[0])[:256], repr(page.items[-1])[:256], len(page.items))
                 if signature in seen_pages:
@@ -420,6 +439,8 @@ def discover_task_logs(
         else iter_collection(f"{prefix}/dags", "dags", config.max_dags, error_prefix="dags", max_reason="max_dags")
     )
     for dag in dag_items:
+        if cancelled is not None and cancelled():
+            raise NestedSchedulerCancelled("Airflow discovery cancelled")
         if stopped:
             break
         dag_id = dag.get("dag_id")
@@ -517,6 +538,8 @@ def discover_task_logs(
                 if not isinstance(map_index, int) or isinstance(map_index, bool):
                     map_index = -1
                 for attempt in range(1, try_number + 1):
+                    if cancelled is not None and cancelled():
+                        raise NestedSchedulerCancelled("Airflow discovery cancelled")
                     if deadline is not None and time.monotonic() >= deadline:
                         partial("discover_time")
                         stopped = True
@@ -542,6 +565,7 @@ def discover_task_logs(
                         max_log_bytes=config.max_log_bytes,
                         max_total_bytes=config.max_bytes - bytes_scanned,
                         deadline=deadline,
+                        cancelled=cancelled,
                     )
                     logs_scanned += 1
                     bytes_scanned += used

@@ -148,6 +148,12 @@ class KafkaLifecycleState:
     sessions_reused: int = 0
     transport_retries: int = 0
     protocol_requests: int = 0
+    ui_http: Any = None
+    ui_base: str | None = None
+    ui_auth_type: str | None = None
+    ui_vendor: str | None = None
+    ui_cookie: str = ""
+    ui_anonymous_clusters: list[dict[str, Any]] | None = None
 
     def stats(self) -> dict[str, int]:
         leader = self.leader_pool.stats()
@@ -159,6 +165,9 @@ class KafkaLifecycleState:
         }
 
     def close(self) -> None:
+        if self.ui_http is not None:
+            self.ui_http.close()
+            self.ui_http = None
         sessions = (self.anonymous_session, self.authenticated_session)
         self.anonymous_session = None
         self.authenticated_session = None

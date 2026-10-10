@@ -16,6 +16,7 @@ RUN_CASES = {
     "elastic": ["elastic", "-t", "127.0.0.1"],
     "grafana": ["grafana", "-t", "127.0.0.1"],
     "keycloak": ["keycloak", "-t", "127.0.0.1"],
+    "jenkins": ["jenkins", "-t", "127.0.0.1"],
     "gitlab": ["gitlab", "-t", "127.0.0.1"],
     "consul": ["consul", "-t", "127.0.0.1"],
     "qdrant": ["qdrant", "-t", "127.0.0.1"],

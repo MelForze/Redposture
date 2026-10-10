@@ -7,6 +7,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import threading
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -23,10 +25,17 @@ from .cli_args import build_parser
 from .console import Console
 from .module_registry import AUDIT_MODULE_NAMES
 from .network_proxy import RuntimeNetworkConfig
-from .rendering import format_report_line_for_console
+from .rendering import BooleanColorRule, collect_boolean_spans, format_report_line_for_console
 from .scheduler import BoundedScheduler
 from .spray_render import render_spray_line
-from .stage_runtime import AuditCommandRunner, AuditCredentialRun, AuditHookContext
+from .stage_runtime import (
+    AuditCommandRunner,
+    AuditCredentialRun,
+    AuditHookContext,
+    ModuleAuditSpec,
+    render_record_with_module,
+)
+from .targeting import TargetParsePolicy, stream_scan_target_specs
 
 _PAIR_MODULES = frozenset(AUDIT_MODULE_NAMES) - {"docker", "keycloak", "qdrant"}
 _TOKEN_MODULES = frozenset(
@@ -59,6 +68,7 @@ _MODULE_CONFIG: dict[str, frozenset[str]] = {
     "proxmox": frozenset({"realm"}),
 }
 _LOCK_MARKERS = ("captcha", "account locked", "account has been locked", "too many requests", "too many login attempts")
+_SPRAY_READ_ONLY_DATA_MODULES = frozenset({"grafana", "redis"})
 _DISPLAY_NAMES = {
     "clickhouse": "ClickHouse",
     "docker": "Docker Engine",
@@ -68,6 +78,7 @@ _DISPLAY_NAMES = {
     "gitlab": "GitLab",
     "grafana": "Grafana",
     "grpc": "gRPC",
+    "jenkins": "Jenkins",
     "keeper": "ClickHouse Keeper",
     "kubeapi": "Kubernetes API",
     "minio": "MinIO",
@@ -100,6 +111,31 @@ def _read_lines(path: str) -> list[str]:
         return [line.rstrip("\r\n") for line in stream if line.rstrip("\r\n") and not line.startswith("#")]
 
 
+def _source_file(value: str) -> Path | None:
+    """Accept a literal, an existing legacy file, or an explicit @file."""
+    if value.startswith("@"):
+        path = Path(value[1:])
+        if not path.is_file():
+            raise ValueError(f"credential source file does not exist: {path}")
+        return path
+    try:
+        path = Path(value)
+        return path if path.is_file() else None
+    except (OSError, ValueError):
+        # An unusually long or non-path credential is still a literal.
+        return None
+
+
+def _source_values(value: str, *, passwords: bool = False) -> list[str]:
+    path = _source_file(value)
+    if path is None:
+        return [value]
+    if not passwords:
+        return _read_lines(str(path))
+    with path.open(encoding="utf-8-sig") as stream:
+        return [line.rstrip("\r\n") for line in stream if not line.startswith("#")]
+
+
 def load_candidates(args: Any) -> tuple[Candidate, ...]:
     if bool(args.users) != bool(args.passwords):
         raise ValueError("--users and --passwords must be supplied together")
@@ -115,10 +151,8 @@ def load_candidates(args: Any) -> tuple[Candidate, ...]:
                 raise ValueError("--pairs contains an empty username")
             values.append(Candidate("pair", user, password))
     if args.users:
-        users = _read_lines(args.users)
-        # Empty passwords are valid candidates; preserve blank lines here.
-        with open(args.passwords, encoding="utf-8-sig") as stream:
-            passwords = [line.rstrip("\r\n") for line in stream if not line.startswith("#")]
+        users = _source_values(args.users)
+        passwords = _source_values(args.passwords, passwords=True)
         for password in passwords:
             for user in users:
                 values.append(Candidate("pair", user, password))
@@ -159,14 +193,24 @@ def _config(path: str | None, modules: tuple[str, ...]) -> dict[str, dict[str, A
 
 def _input_fingerprint(args: Any, modules: tuple[str, ...], config: dict[str, Any]) -> str:
     files: dict[str, str] = {}
+    literals: dict[str, str] = {}
     for name in ("targets", "pairs", "users", "passwords", "tokens", "module_config"):
         value = getattr(args, name, None)
-        if value and Path(str(value)).is_file():
-            files[name] = hashlib.sha256(Path(str(value)).read_bytes()).hexdigest()
+        if value:
+            if name in {"users", "passwords"}:
+                path = _source_file(str(value))
+                if path is None:
+                    literals[name] = hashlib.sha256(str(value).encode()).hexdigest()
+                    continue
+            else:
+                path = Path(str(value))
+            if path.is_file():
+                files[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     payload = {
         "targets": args.targets,
         "modules": modules,
         "files": files,
+        "literals": literals,
         "config": config,
         "timeout": args.timeout,
         "retries": args.retries,
@@ -202,8 +246,11 @@ class AttemptJournal:
         self.db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS results (id TEXT PRIMARY KEY, module TEXT NOT NULL, host TEXT NOT NULL, "
-            "port INTEGER NOT NULL, candidate INTEGER, status TEXT NOT NULL, evidence TEXT NOT NULL)"
+            "port INTEGER NOT NULL, candidate INTEGER, status TEXT NOT NULL, evidence TEXT NOT NULL, "
+            "detail TEXT NOT NULL DEFAULT '')"
         )
+        if not any(row[1] == "detail" for row in self.db.execute("PRAGMA table_info(results)")):
+            self.db.execute("ALTER TABLE results ADD COLUMN detail TEXT NOT NULL DEFAULT ''")
         previous = self.db.execute("SELECT value FROM meta WHERE key='fingerprint'").fetchone()
         if previous and previous[0] != fingerprint:
             self.db.close()
@@ -226,23 +273,32 @@ class AttemptJournal:
             return (row[0], row[1]) if row else None
 
     def put(
-        self, key: str, module: str, host: str, port: int, candidate: int | None, status: str, evidence: str
+        self,
+        key: str,
+        module: str,
+        host: str,
+        port: int,
+        candidate: int | None,
+        status: str,
+        evidence: str,
+        detail: str = "",
     ) -> None:
         with self.lock:
             if self.closed:
                 return
             self.db.execute(
-                "INSERT OR REPLACE INTO results VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (key, module, host, port, candidate, status, evidence),
+                "INSERT OR REPLACE INTO results (id, module, host, port, candidate, status, evidence, detail) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (key, module, host, port, candidate, status, evidence, detail),
             )
             self.db.commit()
             if self.on_result is not None:
-                self.on_result(module, host, port, candidate, status, evidence)
+                self.on_result(module, host, port, candidate, status, evidence, detail)
 
-    def rows(self) -> list[tuple[str, str, int, int | None, str, str]]:
+    def rows(self) -> list[tuple[str, str, int, int | None, str, str, str]]:
         with self.lock:
             return self.db.execute(
-                "SELECT module, host, port, candidate, status, evidence FROM results ORDER BY rowid"
+                "SELECT module, host, port, candidate, status, evidence, detail FROM results ORDER BY rowid"
             ).fetchall()
 
     def close(self) -> None:
@@ -331,6 +387,8 @@ def classify(record: AuditRecord, credential: AuditCredentialRun, runner: AuditC
         or str(payload.get("credential_state") or "").lower() == "invalid"
     ):
         return "invalid", "credential rejected by product verifier"
+    if status == "auth_required" and why == "status=auth_required":
+        return "inconclusive", "credential not verified; authentication still required"
     return "inconclusive", _clean(why or status or "verification unavailable")
 
 
@@ -366,6 +424,7 @@ def _module_runtime_args(module: str, args: Any, config: dict[str, Any]) -> Any:
     ns.debug = args.debug
     ns.no_color = args.no_color
     ns.enum_cve = False
+    ns._spray_capabilities = module in {"grafana", "postgres", "redis"}
     # KubeAPI advertises Basic only when its detect hook is asked to inspect
     # the WWW-Authenticate challenge. No default credentials are attempted.
     ns.defcreds = module == "kubeapi"
@@ -420,6 +479,101 @@ def _readonly_keeper_detection(ctx: AuditHookContext, args: Any) -> AuditRecord:
     return AuditRecord.from_mapping(payload, module="keeper", service="keeper")
 
 
+def _oracle_spray_preflight(host: str, port: int, args: Any) -> bool:
+    """Avoid the Oracle driver on unrelated ports; its connect can outlive --timeout."""
+    from .clients.oracle import tns_listener_command, tns_service_fingerprint
+    from .modules.oracle.actions import _protocols, _status_confirms_oracle, _target_candidates
+
+    protocols = _protocols(str(getattr(args, "protocol", "auto")), port)
+    candidates = _target_candidates(
+        getattr(args, "service", None),
+        getattr(args, "sid", None),
+        getattr(args, "service_list", None),
+        getattr(args, "sid_list", None),
+    )
+    timeout = min(max(float(getattr(args, "timeout", 1.0)), 0.1), 1.0)
+    insecure = not bool(getattr(args, "secure", False))
+    for protocol in protocols:
+        status = tns_listener_command(host, port, "status", timeout=timeout, protocol=protocol, insecure=insecure)
+        if _status_confirms_oracle(status):
+            return True
+        if candidates:
+            candidate = candidates[0]
+            if tns_service_fingerprint(
+                host,
+                port,
+                service=candidate.get("service"),
+                sid=candidate.get("sid"),
+                timeout=timeout,
+                protocol=protocol,
+                insecure=insecure,
+            ):
+                return True
+    return False
+
+
+def _credential_detail(spec: ModuleAuditSpec, record: AuditRecord, candidate: Candidate) -> str:
+    """Reuse only the matching credential suffix from the module's normal TXT row."""
+    try:
+        if spec.render_module is not None:
+            lines = render_record_with_module(spec.render_module, record, "txt")
+        elif spec.render is not None:
+            lines = list(spec.render(record))
+        else:
+            return ""
+    except Exception:
+        return ""
+    for line in lines:
+        body = str(line).split("\t", 3)[-1].strip()
+        if not body.startswith("[+] "):
+            continue
+        credential = body[4:]
+        if not credential.startswith(candidate.display):
+            continue
+        suffix = credential[len(candidate.display) :]
+        if not suffix.startswith(" ("):
+            continue
+        detail = suffix.strip()
+        for secret in (candidate.password, candidate.token):
+            if secret:
+                detail = detail.replace(secret, "<redacted>")
+        return _clean(detail[:512])
+    return ""
+
+
+def _record_version(record: AuditRecord) -> str | None:
+    fields = record.extra
+    for key in ("version", "server_version", "redis_version", "valkey_version"):
+        value = fields.get(key)
+        if isinstance(value, str) and value.strip().lower() not in {"", "-", "unknown", "none"}:
+            return _clean(value.strip()[:80])
+    for key, version_keys in (
+        ("harbor_info", ("harbor_version", "version")),
+        ("nexus_info", ("version", "release")),
+        ("gitlab_info", ("version", "release")),
+    ):
+        info = fields.get(key)
+        if isinstance(info, dict):
+            for version_key in version_keys:
+                value = info.get(version_key)
+                if isinstance(value, str) and value.strip().lower() not in {"", "-", "unknown", "none"}:
+                    return _clean(value.strip()[:80])
+    return None
+
+
+def _spray_credential_detail(module: str, record: AuditRecord, detail: str) -> str:
+    error = str(record.extra.get("error") or "").lower()
+    if module == "grafana" and "(datasources:unknown)" in detail and "authentication required" in error:
+        return detail.replace("(datasources:unknown)", "(datasources:Access Denied)")
+    if (
+        module == "redis"
+        and "(keys:unknown)" in detail
+        and any(marker in error for marker in ("noperm", "noauth", "permission denied"))
+    ):
+        return detail.replace("(keys:unknown)", "(keys:Access Denied)")
+    return detail
+
+
 def _run_target(
     module: str,
     base_ns: Any,
@@ -432,6 +586,8 @@ def _run_target(
     logger: Any,
 ) -> None:
     ns = copy.copy(base_ns)
+    if module == "oracle" and not _oracle_spray_preflight(host, port, ns):
+        return
     stage = importlib.import_module(f"redposture_core.modules.{module.replace('-', '_')}.stage")
     spec = getattr(stage, f"build_{module.replace('-', '_')}_spec")(ns)
     runner = AuditCommandRunner(args=ns, spec=spec, logger=logger, emit_line=lambda _line: None)
@@ -452,8 +608,9 @@ def _run_target(
             return
         detection_key = _attempt_id(module, target, port, None)
         prior_detection = journal.get(detection_key)
+        detection_version = _record_version(detection)
         if prior_detection is None or prior_detection[0] != "confirmed":
-            version = detection.extra.get("version") or "unknown"
+            version = detection_version or "unknown"
             auth_required = detection.auth_required
             evidence = f"auth required:{auth_required if auth_required is not None else 'unknown'}; version:{version}"
             journal.put(detection_key, module, host, port, None, "confirmed", _clean(evidence))
@@ -487,16 +644,37 @@ def _run_target(
                 if hasattr(ns, name):
                     setattr(ns, name, candidate.token)
             journal.put(key, module, host, port, index, "started", "request begun; no automatic retry")
+            detail = ""
             try:
                 result = runner._auth(replace(context, credential=credential, phase="auth"), detection)
                 status, evidence = classify(result, credential, runner)
+                if status == "valid":
+                    if spec.capabilities is not None:
+                        try:
+                            result = runner._capabilities(
+                                replace(context, credential=credential, phase="capabilities"), result
+                            )
+                        except Exception:
+                            pass  # The verified authentication result remains valid.
+                    if module in _SPRAY_READ_ONLY_DATA_MODULES and spec.data is not None:
+                        try:
+                            result = runner._data(
+                                replace(context, credential=credential, phase="data", run_deep_checks=True), result
+                            )
+                        except Exception:
+                            pass  # A capability read must not erase a verified credential.
+                    detail = _credential_detail(spec, result, candidate)
+                    detail = _spray_credential_detail(module, result, detail)
+                    auth_version = _record_version(result)
+                    if auth_version and not detection_version and "(version:" not in detail:
+                        detail = f"(version:{auth_version}) {detail}".strip()
             except Exception as exc:  # an individual verifier must not abort other products
                 status, evidence = "inconclusive", f"verifier error: {type(exc).__name__}"
             safe_evidence = _clean(evidence)
             for secret in (candidate.password, candidate.token):
                 if secret:
                     safe_evidence = safe_evidence.replace(secret, "<redacted>")
-            journal.put(key, module, host, port, index, status, safe_evidence)
+            journal.put(key, module, host, port, index, status, safe_evidence, detail)
             if status == "rate_limited":
                 gate.stop(origin, evidence)
     finally:
@@ -505,7 +683,11 @@ def _run_target(
 
 
 def _render_rows(
-    rows: Iterable[tuple[str, str, int, int | None, str, str]], candidates: tuple[Candidate, ...], fmt: str
+    rows: Iterable[tuple[str, str, int, int | None, str, str] | tuple[str, str, int, int | None, str, str, str]],
+    candidates: tuple[Candidate, ...],
+    fmt: str,
+    *,
+    debug: bool = False,
 ) -> list[str]:
     lines: list[str] = []
     markers = {
@@ -513,12 +695,16 @@ def _render_rows(
         "invalid": "[-]",
         "access_denied": "[-]",
         "rate_limited": "[!]",
-        "inconclusive": "[!]",
+        "inconclusive": "[-]",
         "unsupported": "[*]",
     }
-    for module, host, port, index, status, evidence in rows:
+    for row in rows:
+        module, host, port, index, status, evidence = row[:6]
+        detail = _clean(row[6]) if len(row) == 7 else ""
         if status == "started":
             status, evidence = "inconclusive", "request began before interruption; not retried"
+        elif status == "inconclusive" and evidence == "status=auth_required":
+            evidence = "credential not verified; authentication still required"
         if index is None:
             if status == "confirmed":
                 fields = dict(part.split(":", 1) for part in evidence.split("; ") if ":" in part)
@@ -540,7 +726,11 @@ def _render_rows(
                 "password": candidate.password,
                 "token": candidate.token,
             }
-            text = f"{markers.get(status, '[!]')} {_clean(candidate.display)} ({status}) (evidence:{_clean(evidence)})"
+            if status == "valid" and detail:
+                payload["credential_detail"] = detail
+            suffix = f" {detail}" if status == "valid" and detail else ""
+            diagnostic = f" (evidence:{_clean(evidence)})" if debug else ""
+            text = f"{markers.get(status, '[!]')} {_clean(candidate.display)}{suffix}{diagnostic}"
         lines.append(
             json.dumps(payload, ensure_ascii=False) if fmt == "json" else f"{module.upper()}\t{host}\t{port}\t {text}"
         )
@@ -548,51 +738,142 @@ def _render_rows(
 
 
 class SpraySink:
-    """Live terminal/TXT output, replayed from the journal on resume."""
+    """Live JSON output and target-grouped TXT output, replayed on resume."""
 
-    def __init__(self, output: str | None, fmt: str, candidates: tuple[Candidate, ...], console: Console) -> None:
+    def __init__(
+        self,
+        output: str | None,
+        fmt: str,
+        candidates: tuple[Candidate, ...],
+        console: Console,
+        *,
+        debug: bool = False,
+        group_targets: bool = False,
+    ) -> None:
         self.output = output
         self.fmt = fmt
         self.candidates = candidates
         self.console = console
+        self.debug = debug
+        self.group_targets = group_targets
         self.lock = threading.Lock()
+        self._target_buffer = threading.local()
+        self._deferred_rows: dict[tuple[str, str, int], list[tuple[str, str, int, int | None, str, str, str]]] = {}
+        self.closed = False
         self.handle: Any = None
         if output:
             _private_file(output)
             self.handle = open(output, "w", encoding="utf-8")
 
-    def emit(self, module: str, host: str, port: int, index: int | None, status: str, evidence: str) -> None:
+    def defer_replay_rows(
+        self,
+        key: tuple[str, str, int],
+        rows: list[tuple[str, str, int, int | None, str, str, str]],
+    ) -> None:
+        self._deferred_rows[key] = rows
+
+    def begin_target(self, module: str = "", host: str = "", port: int = 0) -> None:
+        if self.fmt == "txt" and self.group_targets:
+            # Large password lists spill to a private temporary file instead
+            # of retaining every pending row for every concurrent target.
+            self._target_buffer.stream = tempfile.SpooledTemporaryFile(
+                max_size=256 * 1024, mode="w+t", encoding="utf-8"
+            )
+            for row in self._deferred_rows.pop((module, host, port), ()):
+                self._buffer_row(self._target_buffer.stream, row)
+
+    @staticmethod
+    def _buffer_row(stream: Any, row: tuple[str, str, int, int | None, str, str, str]) -> None:
+        stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def end_target(self) -> None:
+        stream = getattr(self._target_buffer, "stream", None)
+        if stream is None:
+            return
+        del self._target_buffer.stream
+        try:
+            stream.seek(0)
+            with self.lock:
+                for line in stream:
+                    self._emit_locked(*json.loads(line))
+        finally:
+            stream.close()
+
+    def emit(
+        self, module: str, host: str, port: int, index: int | None, status: str, evidence: str, detail: str = ""
+    ) -> None:
         if status == "started":
             return
         if index is None and status != "confirmed" and self.fmt == "txt":
             return
-        line = _render_rows([(module, host, port, index, status, evidence)], self.candidates, self.fmt)[0]
+        stream = getattr(self._target_buffer, "stream", None)
+        if stream is not None:
+            self._buffer_row(stream, (module, host, port, index, status, evidence, detail))
+            return
         with self.lock:
-            if self.handle is not None:
-                self.handle.write(line + "\n")
-                self.handle.flush()
-            if self.fmt == "json":
-                self.console.plain(line)
-                return
-            aligned = format_report_line_for_console(line)
-            spans: list[tuple[int, int, str]] = []
-            if index is not None:
-                display = _clean(self.candidates[index].display)
-                spans.append((0, len(display), "orange"))
-                state = f"({status})"
-                state_start = len(display) + 1
-                spans.append(
-                    (
-                        state_start,
-                        state_start + len(state),
-                        {"valid": "red", "invalid": "green", "access_denied": "green"}.get(status, "orange"),
-                    )
+            self._emit_locked(module, host, port, index, status, evidence, detail)
+
+    def _emit_locked(
+        self, module: str, host: str, port: int, index: int | None, status: str, evidence: str, detail: str
+    ) -> None:
+        if self.closed:
+            return
+        line = _render_rows(
+            [(module, host, port, index, status, evidence, detail)], self.candidates, self.fmt, debug=self.debug
+        )[0]
+        if self.handle is not None:
+            self.handle.write(line + "\n")
+            self.handle.flush()
+        if self.fmt == "json":
+            self.console.plain(line)
+            return
+        aligned = format_report_line_for_console(line)
+        spans: list[tuple[int, int, str]] = []
+        if index is not None:
+            display = _clean(self.candidates[index].display)
+            if status == "valid":
+                spans.append((0, len(display), "true_red"))
+            if status == "valid" and detail:
+                for match in re.finditer(r"\([^()]*\)", detail):
+                    value = match.group()[1:-1].partition(":")[2].strip().lower()
+                    if value in {"access denied", "denied", "false", "0"}:
+                        color = "bright_green"
+                    elif value == "true" or re.fullmatch(r"[1-9]\d*", value):
+                        color = "true_red"
+                    else:
+                        color = "orange"
+                    offset = len(display) + 1
+                    spans.append((offset + match.start(), offset + match.end(), color))
+        elif status == "confirmed":
+            payload = aligned.split(" [*] ", 1)[-1]
+            spans.extend(
+                collect_boolean_spans(
+                    payload,
+                    (BooleanColorRule("auth required", true_color="bright_green", false_color="true_red"),),
                 )
-            render_spray_line(self.console, aligned, tag=module.upper(), spans=spans)
+            )
+            unknown = "(version:unknown)"
+            at = payload.find(unknown)
+            if at >= 0:
+                spans.append((at, at + len(unknown), "orange"))
+        render_spray_line(self.console, aligned, tag=module.upper(), spans=spans)
 
     def close(self) -> None:
-        if self.handle is not None:
-            self.handle.close()
+        with self.lock:
+            self.closed = True
+            if self.handle is not None:
+                self.handle.close()
+                self.handle = None
+
+
+def _group_txt_replay_rows(
+    rows: list[tuple[str, str, int, int | None, str, str, str]],
+) -> list[tuple[str, str, int, int | None, str, str, str]]:
+    """Keep each target's journal rows together without reordering its attempts."""
+    order: dict[tuple[str, str, int], int] = {}
+    for row in rows:
+        order.setdefault((row[0], row[1], row[2]), len(order))
+    return sorted(rows, key=lambda row: order[(row[0], row[1], row[2])])
 
 
 def run_spray_stage(args: Any, logger: Any) -> int:
@@ -600,9 +881,19 @@ def run_spray_stage(args: Any, logger: Any) -> int:
         if args.workers < 1 or args.retries < 0:
             raise ValueError("--workers must be positive and --retries non-negative")
         modules = _modules(args.modules)
+        if "clickhouse" in modules:
+            from .modules.clickhouse import actions as clickhouse_actions
+
+            clickhouse_actions._configure_clickhouse_loggers()
         candidates = load_candidates(args)
         config = _config(args.module_config, modules)
+        target_plan = stream_scan_target_specs(
+            args.targets,
+            policy=TargetParsePolicy(url_mode="preserve", path_policy="preserve"),
+        )
         module_args = {module: _module_runtime_args(module, args, config.get(module, {})) for module in modules}
+        for ns in module_args.values():
+            ns._preparsed_target_plan = target_plan
         if not candidates:
             raise ValueError("credential files contain no candidates")
         if args.resume and not args.checkpoint:
@@ -616,7 +907,12 @@ def run_spray_stage(args: Any, logger: Any) -> int:
             temporary_checkpoint = checkpoint
         if args.output and os.path.abspath(args.output) == os.path.abspath(checkpoint):
             raise ValueError("--output and --checkpoint must be different files")
-        protected_inputs = [args.pairs, args.users, args.passwords, args.tokens, args.module_config]
+        protected_inputs = [args.pairs, args.tokens, args.module_config]
+        for source in (args.users, args.passwords):
+            if source:
+                path = _source_file(str(source))
+                if path is not None:
+                    protected_inputs.append(str(path))
         if Path(str(args.targets)).is_file():
             protected_inputs.append(args.targets)
         destinations = [checkpoint, args.output]
@@ -639,10 +935,30 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                         yield module, ns, host, port, target
 
             console = Console(debug=args.debug, no_color=args.no_color, structured_output=args.output_format == "json")
-            sink = SpraySink(args.output, args.output_format, candidates, console)
+            group_targets = args.output_format == "txt" and len(modules) > 1
+            sink = SpraySink(
+                args.output,
+                args.output_format,
+                candidates,
+                console,
+                debug=bool(args.debug),
+                group_targets=group_targets,
+            )
             try:
-                for row in journal.rows():
-                    sink.emit(*row)
+                replay_rows = journal.rows()
+                if group_targets:
+                    replay_rows = _group_txt_replay_rows(replay_rows)
+                    for key, grouped in groupby(replay_rows, key=lambda row: (row[0], row[1], row[2])):
+                        group_rows = list(grouped)
+                        finished = {row[3] for row in group_rows if row[3] is not None}
+                        if finished == set(range(len(candidates))):
+                            for row in group_rows:
+                                sink.emit(*row)
+                        else:
+                            sink.defer_replay_rows(key, group_rows)
+                else:
+                    for row in replay_rows:
+                        sink.emit(*row)
                 journal.on_result = sink.emit
                 # The shared scheduler bounds the queue and uses daemon workers,
                 # so Ctrl+C cannot be held up by a blocked socket.
@@ -652,7 +968,11 @@ def run_spray_stage(args: Any, logger: Any) -> int:
 
                 def work(job: tuple[str, Any, str, int, Any]) -> None:
                     module, ns, host, port, target = job
-                    _run_target(module, ns, host, port, target, candidates, journal, gate, logger)
+                    sink.begin_target(module, host, port)
+                    try:
+                        _run_target(module, ns, host, port, target, candidates, journal, gate, logger)
+                    finally:
+                        sink.end_target()
 
                 outcomes = scheduler.iter_completed(jobs(), work)
                 try:

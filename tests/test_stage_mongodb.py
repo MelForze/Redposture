@@ -229,6 +229,38 @@ def test_audit_mongodb_auth_required_and_valid_credentials(monkeypatch: pytest.M
     assert valid["credential_attempts"][0]["ok"] is True
 
 
+def test_mongodb_version_is_read_after_verified_auth_when_anonymous_server_info_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_open(monkeypatch, auth_required=True)
+
+    def protected_server_info(self: _FakeRaw) -> dict[str, str]:
+        self._check_auth()
+        return {"version": "7.0.5"}
+
+    monkeypatch.setattr(_FakeRaw, "server_info", protected_server_info)
+    record = mongodb._audit_mongodb_host(
+        "127.0.0.1",
+        27018,
+        1.0,
+        0,
+        [{"username": "root", "password": "root", "default": False}],
+        "admin",
+        None,
+        False,
+        False,
+        False,
+        [],
+        {},
+        False,
+        None,
+        None,
+        None,
+    )
+    assert record["status"] == "valid_credentials"
+    assert record["server_version"] == "7.0.5"
+
+
 def test_audit_mongodb_targets_two_pass_debug_and_output(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_open(monkeypatch, auth_required=False)
     lines: list[str] = []

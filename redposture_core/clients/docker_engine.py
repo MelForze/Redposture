@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from ..shell_capture import is_binary
-from .http_api import HttpResponse
+from .http_api import HttpResponse, decode_http_content
 from .http_redirects import follow_redirects, http_origin
 from .tls_cache import shared_client_ssl_context
 
@@ -251,6 +251,7 @@ class DockerEngineClient:
         result = follow_redirects(send, method, url, headers=req_headers, body=body)
         if failure is not None:
             raise failure
+        result = decode_http_content(result, max_bytes=response_size_cap)
         if result.error:
             raise DockerEngineError(result.error)
         if result.redirected and 200 <= result.status < 300 and result.final_url:

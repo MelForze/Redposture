@@ -7,6 +7,8 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.http_session import HttpSessionPool
+from ...clients.scoped_http import HttpLifecycleState
 from ...console import Console
 from ...stage_runtime import AuditCommandPlan, ModuleAuditSpec, build_basic_audit_plan, run_basic_host_audit
 from . import actions, policy, render
@@ -23,6 +25,16 @@ def build_keycloak_plan(args: Any) -> AuditCommandPlan:
 
 
 def build_keycloak_spec(args: Any) -> ModuleAuditSpec:
+    def _state(ctx: Any) -> HttpLifecycleState:
+        return HttpLifecycleState(
+            HttpSessionPool(
+                timeout=float(getattr(ctx.args, "timeout", 5.0) or 5.0),
+                retries=int(getattr(ctx.args, "retries", 0) or 0),
+                proxy=getattr(ctx.args, "_proxy_config", None),
+                insecure=True,
+            )
+        )
+
     def _detect(ctx: Any) -> AuditRecord:
         return AuditRecord.from_mapping(actions.detect_record(ctx), module="keycloak", service="keycloak")
 
@@ -40,6 +52,8 @@ def build_keycloak_spec(args: Any) -> ModuleAuditSpec:
         module="keycloak",
         label="KEYCLOAK",
         default_port=8080,
+        lifecycle_state_factory=_state,
+        lifecycle_state_close=lambda state: state.close(),
         detect=_detect,
         auth=_auth,
         data=_data,

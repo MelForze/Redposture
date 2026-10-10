@@ -76,7 +76,7 @@ _DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
 # --- detection -------------------------------------------------------------
 
 
-def detect_airflow(client: AirflowClient) -> AirflowDetection:
+def detect_airflow(client: AirflowClient, *, prefetched_v2: AirflowResponse | None = None) -> AirflowDetection:
     """Probe the public version endpoint (v2 then v1) to confirm Airflow, capture the
     version, and pin the API generation used for later auth."""
     evidence: dict[str, Any] = {}
@@ -84,7 +84,11 @@ def detect_airflow(client: AirflowClient) -> AirflowDetection:
     transport_failures = 0
     version_candidates: list[tuple[str, str, dict[str, Any]]] = []
     for generation in ("v2", "v1"):
-        resp = client.get(_ENDPOINTS[generation]["version"], authed=False)
+        resp = (
+            prefetched_v2
+            if generation == "v2" and prefetched_v2 is not None
+            else client.get(_ENDPOINTS[generation]["version"], authed=False)
+        )
         if resp.transport_error:
             transport_failures += 1
             evidence[f"{generation}_transport_error"] = resp.transport_error
@@ -397,6 +401,7 @@ class AirflowLifecycleState:
             raise ValueError("airflow supports HTTP/HTTPS targets only")
         self.preferred_scheme: str | None = scheme
         self.resolved_scheme: str | None = None
+        self.version_probe: AirflowResponse | None = None
         self.bearer_token: str | None = None
         self.bearer_tokens: dict[tuple[str, str], str] = {}
         self.pool = HttpSessionPool(
@@ -439,6 +444,17 @@ class AirflowLifecycleState:
             )
             break
         self.resolved_scheme = selected
+        if not resp.transport_error and resp.final_url:
+            final = urlsplit(resp.final_url)
+            expected_path = f"{self.base_path}{_ENDPOINTS['v2']['version']}"
+            if (
+                final.scheme == selected
+                and final.hostname == self.host
+                and (final.port or (443 if selected == "https" else 80)) == self.port
+                and final.path == expected_path
+                and not final.query
+            ):
+                self.version_probe = resp
         return selected
 
     def close(self) -> None:
@@ -502,7 +518,9 @@ def _client_for(
 
 def detect_record(ctx: Any) -> dict[str, Any]:
     client = _client_for(ctx)
-    detection = detect_airflow(client)
+    state = getattr(ctx, "lifecycle_state", None)
+    prefetched = state.version_probe if isinstance(state, AirflowLifecycleState) else None
+    detection = detect_airflow(client, prefetched_v2=prefetched)
     status_word = {
         "confirmed": "detected",
         "probable": "probable",
@@ -762,11 +780,13 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             ]
         )
 
-    report = (
-        discover_task_logs(client, generation, config, on_finding=_on_finding)
-        if callable(live_emit)
-        else discover_task_logs(client, generation, config)
-    )
+    nested_scheduler = getattr(ctx, "nested_scheduler", None)
+    discover_kwargs: dict[str, Any] = {}
+    if nested_scheduler is not None:
+        discover_kwargs["cancelled"] = lambda: bool(getattr(nested_scheduler, "cancelled", False))
+    if callable(live_emit):
+        discover_kwargs["on_finding"] = _on_finding
+    report = discover_task_logs(client, generation, config, **discover_kwargs)
     merged["discover_report"] = report
     if callable(live_emit):
         merged["_discover_findings_streamed"] = True

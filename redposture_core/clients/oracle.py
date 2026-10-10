@@ -8,6 +8,7 @@ import shlex
 import socket
 import ssl
 import struct
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -178,6 +179,89 @@ def build_tns_connect_packet(connect_data: str) -> bytes:
         + data
     )
     return _tns_header(_TNS_TYPE_CONNECT, payload)
+
+
+def tns_service_fingerprint(
+    host: str,
+    port: int,
+    *,
+    service: str | None = None,
+    sid: str | None = None,
+    timeout: float = 1.0,
+    protocol: str = "tcp",
+    insecure: bool = False,
+) -> bool:
+    """Bounded, unauthenticated TNS CONNECT probe before a full Oracle client.
+
+    A foreign listener may hold a python-oracledb connection far beyond its
+    configured timeout. Only a framed TNS accept/refuse/redirect proves that a
+    full connection attempt is worth making.
+    """
+    target = str(service or sid or "").strip()
+    if (
+        not target
+        or len(target) > 128
+        or any(character in target for character in "()\r\n\x00")
+        or any(character in host for character in "()\r\n\x00")
+    ):
+        return False
+    target_field = "SERVICE_NAME" if service else "SID"
+    descriptor = (
+        f"(DESCRIPTION=(ADDRESS=(PROTOCOL={protocol.upper()})(HOST={host})(PORT={int(port)}))"
+        f"(CONNECT_DATA=({target_field}={target})))"
+    )
+    packet = build_tns_connect_packet(descriptor)
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    raw_sock: socket.socket | None = None
+    wrapped_sock: socket.socket | ssl.SSLSocket | None = None
+
+    def read_exact(sock: socket.socket | ssl.SSLSocket, size: int) -> bytes | None:
+        result = bytearray()
+        while len(result) < size:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            sock.settimeout(remaining)
+            chunk = sock.recv(size - len(result))
+            if not chunk:
+                return None
+            result.extend(chunk)
+        return bytes(result)
+
+    try:
+        raw_sock = socket.create_connection((host, int(port)), timeout=max(0.1, float(timeout)))
+        if protocol.lower() == "tcps":
+            context = shared_client_ssl_context(insecure=insecure)
+            wrapped_sock = context.wrap_socket(raw_sock, server_hostname=host)
+        else:
+            wrapped_sock = raw_sock
+        wrapped_sock.settimeout(max(0.1, deadline - time.monotonic()))
+        wrapped_sock.sendall(packet)
+        header = read_exact(wrapped_sock, 8)
+        if header is None:
+            return False
+        length, _checksum, packet_type, reserved, _header_checksum = struct.unpack(">HHBBH", header)
+        if (
+            length < 10
+            or length > 16384
+            or reserved != 0
+            or packet_type
+            not in {
+                _TNS_TYPE_ACCEPT,
+                _TNS_TYPE_REFUSE,
+                5,  # REDIRECT
+            }
+        ):
+            return False
+        body = read_exact(wrapped_sock, length - 8)
+        return body is not None
+    except (OSError, ValueError, TimeoutError, ssl.SSLError):
+        return False
+    finally:
+        if wrapped_sock is not None:
+            close_quietly(wrapped_sock)
+        elif raw_sock is not None:
+            close_quietly(raw_sock)
 
 
 def parse_tns_packet(packet: bytes) -> dict[str, Any]:
@@ -1257,4 +1341,5 @@ __all__ = [
     "parse_listener_dump",
     "parse_tns_packet",
     "tns_listener_command",
+    "tns_service_fingerprint",
 ]

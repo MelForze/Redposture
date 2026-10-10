@@ -76,14 +76,10 @@ def _run_zk(monkeypatch: pytest.MonkeyPatch, client_factory, **kw) -> dict:
     return _audit_zookeeper_host(**defaults)
 
 
-def test_fix_a1_zk_post_auth_noauth_when_anon_was_ok_marks_creds_invalid(
+def test_fix_a1_zk_post_auth_noauth_when_anon_was_ok_remains_unverified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A1: server accepted the digest frame but the associated principal has
-    no rights. Anon read succeeded on `/`, post-auth on the same path
-    returned NOAUTH — that's a silent credential rejection. Old code left
-    provided_credentials_ok=None and the record slipped through as
-    open_no_auth."""
+    """A changed ACL result does not prove that the digest itself was rejected."""
 
     state = {"called": 0}
 
@@ -105,8 +101,8 @@ def test_fix_a1_zk_post_auth_noauth_when_anon_was_ok_marks_creds_invalid(
         username="admin",
         password="bad",
     )
-    # provided_credentials_ok must reflect the invalid credential, not None.
-    assert record["provided_credentials_ok"] is False
+    assert record["provided_credentials_ok"] is None
+    assert record["credential_verdict"] == "unverified"
 
 
 def test_zk_noauth_after_digest_does_not_become_valid_via_control_probe(
@@ -132,15 +128,14 @@ def test_zk_noauth_after_digest_does_not_become_valid_via_control_probe(
         username="admin",
         password="admin",
     )
-    assert record["provided_credentials_ok"] is False
+    assert record["provided_credentials_ok"] is None
+    assert record["credential_verdict"] == "unverified"
 
 
-def test_fix_a1d3_zk_ambiguous_noauth_pair_creds_rejected_when_zookeeper_also_denies(
+def test_fix_a1d3_zk_ambiguous_noauth_pair_remains_unverified_when_zookeeper_also_denies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A1 + D3 sub-scenario 2: `/zookeeper` also NOAUTH → the session's auth
-    principal really has zero rights, so the digest was silently rejected.
-    provided_credentials_ok=False."""
+    """NOAUTH on every known path may mean valid credentials without ACL rights."""
 
     def _get_children_all_noauth(_path):
         return None, -102, None
@@ -158,7 +153,8 @@ def test_fix_a1d3_zk_ambiguous_noauth_pair_creds_rejected_when_zookeeper_also_de
         username="admin",
         password="admin",
     )
-    assert record["provided_credentials_ok"] is False
+    assert record["provided_credentials_ok"] is None
+    assert record["credential_verdict"] == "unverified"
 
 
 def test_zk_open_target_with_digest_frame_reports_unverified(

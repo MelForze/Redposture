@@ -21,7 +21,7 @@
 
 CLI for authorized audits of exposed services: identify the product, verify access,
 enumerate data, find secrets, and match versions against an offline CVE catalog.
-Python 3.12+; 25 audit modules, credential spray, and exporter scan/collect/trigger workflows.
+Python 3.12+; 26 audit modules, credential spray, and exporter scan/collect/trigger workflows.
 
 ## Install
 
@@ -83,20 +83,29 @@ where supported, a CA file enables certificate and hostname verification. mTLS
 needs a client certificate and key. For a reverse proxy, supply its mounted URL (for example
 `https://host/airflow/api/v1/version`) and the DNS name required for Host/SNI;
 the module retains the URL prefix after removing a known API suffix.
+In HTTP audit modules, a URL without a port uses 80 for `http` or 443 for
+`https`; bare hosts still use the module's port list. An explicit URL port or
+`--port` overrides the scheme default. ClickHouse treats an HTTP(S) URL as an
+HTTP target unless `--protocol` was explicitly selected.
 
 `spray` checks supplied pairs or tokens only after a module confirms the product.
 It does not run inventory, discovery, or CVE checks. A bare host uses the selected
 modules' normal ports; a URL or `host:port` keeps its explicit port.
+With multiple modules, TXT prints each target as one block after its attempts
+finish; JSON stays live. Rate limits can therefore delay a target's TXT block.
 
 ```bash
 redposture spray -t targets.txt --modules airflow,grafana --pairs pairs.txt -o spray.txt
 redposture spray -t targets.txt --modules keycloak,kubeapi --tokens tokens.txt --checkpoint spray.sqlite3 -o spray-tokens.txt
 redposture spray -t targets.txt --modules all --users users.txt --passwords passwords.txt --origin-rate 2 --account-interval 60 -o spray-all.txt
+redposture spray -t targets.txt --modules airflow -u admin -p @passwords.txt -o spray-admin.txt
 redposture spray -t targets.txt --modules all --users users.txt --passwords passwords.txt --origin-rate 2 --account-interval 60 --checkpoint spray-all.txt.checkpoint.sqlite3 --resume -o spray-all.txt
 ```
 
-Pairs use the first colon as separator. The users/passwords combination tries
-each password across all users before the next password. Results and the raw
+Pairs use the first colon as separator. `-u/--users` and `-p/--passwords`
+each accept a literal or an existing file; prefix a filename with `@` to
+require that it exists. Sources can be mixed, and each password is tried
+across all users before the next password. Results and the raw
 secrets appear in terminal, TXT, and JSON as requested; output and checkpoint
 files are mode `0600`. A begun attempt interrupted before its result becomes
 `inconclusive` on resume and is not retried. `--module-config` accepts only
@@ -124,6 +133,7 @@ verify them. `redposture spray -h` lists all options.
 | ZooKeeper | `admin:admin`, `admin:changeme`, `admin:kafka`, `admin:password`, `admin:zookeeper`, `broker:broker`, `broker:brokerpass`, `client:client`, `dev:dev`, `guest:guest`, `hadoop:hadoop`, `kafka:changeme`, `kafka:kafka`, `kafka:password`, `kafka:zookeeper`, `root:admin`, `root:password`, `root:root`, `root:rootpass`, `root:zookeeper`, `service:password`, `service:service`, `solr:solr`, `super:super`, `test:test`, `user:password`, `user:user`, `user1:12345`, `zk:password`, `zk:zk`, `zk:zookeeper`, `zookeeper:admin`, `zookeeper:password`, `zookeeper:zookeeper`, `admin:12345678` |
 | Keeper | `admin:admin`, `admin:changeme`, `admin:clickhouse`, `admin:keeper`, `admin:password`, `clickhouse:changeme`, `clickhouse:clickhouse`, `clickhouse:keeper`, `clickhouse:password`, `default:<empty>`, `default:changeme`, `default:clickhouse`, `default:default`, `default:password`, `keeper:changeme`, `keeper:clickhouse`, `keeper:keeper`, `keeper:password`, `root:clickhouse`, `root:keeper`, `root:password`, `root:root`, `service:password`, `service:service`, `user:password`, `user:user`, `default:12345678` |
 | Airflow | `airflow:airflow`, `admin:admin`, `admin:airflow`, `airflow:admin`, `airflow:password`, `airflow:changeme`, `airflow:airflow123`, `admin:password`, `admin:changeme`, `admin:airflow123`, `root:root`, `root:password`, `user:user`, `user:password`, `test:test`, `dev:dev`, `service:service`, `guest:guest`, `admin:12345678` |
+| Jenkins | `admin:admin`, `admin:changeme`, `admin:jenkins`, `admin:password`, `admin:admin123`, `admin:12345678`, `jenkins:jenkins`, `jenkins:password`, `jenkins:changeme`, `jenkins:admin`, `root:root`, `root:password`, `user:user`, `user:password`, `test:test`, `dev:dev`, `guest:guest`, `service:service` |
 | GitLab | `root:root`, `root:password`, `root:admin`, `root:changeme`, `root:gitlab`, `root:admin123`, `admin:admin`, `admin:password`, `admin:changeme`, `admin:gitlab`, `gitlab:gitlab`, `gitlab:password`, `gitlab:admin`, `user:user`, `user:password`, `test:test`, `guest:guest`, `dev:dev`, `root:12345678` |
 | Harbor | `admin:Harbor12345`, `admin:harbor`, `admin:harbor123`, `admin:Harbor123`, `harbor:harbor`, `harbor:password`, then `admin:admin`, `admin:password`, `admin:changeme`, `admin:admin123`, `admin:123456`, `root:root`, `root:password`, `root:admin`, `root:changeme`, `user:user`, `user:password`, `test:test`, `guest:guest`, `dev:dev`, `service:service`, `admin:12345678` |
 | Nexus | `admin:admin123`, `nexus:nexus`, `admin:nexus`, `admin:nexus123`, `admin:sonatype`, `nexus:password`, `nexus:admin`, then `admin:admin`, `admin:password`, `admin:changeme`, `admin:123456`, `root:root`, `root:password`, `root:admin`, `root:changeme`, `user:user`, `user:password`, `test:test`, `guest:guest`, `dev:dev`, `service:service`, `admin:12345678` |
@@ -244,6 +254,23 @@ reports brute-force protection, registration, HTTPS requirement and password pol
 URIs and web origins. Denied or absent settings remain `unknown` rather than `False`.
 Admin inventory uses GET requests and never prints client secrets.
 
+### Jenkins
+
+```bash
+redposture jenkins -t targets.txt --enum-cve
+redposture jenkins -t targets.txt --defcreds
+redposture jenkins -t https://ci.example/jenkins -u auditor --api-token-file token.txt --show-jobs --show-builds 3 --show-plugins --show-nodes --show-queue --show-artifacts 20
+```
+
+Detection combines Jenkins-specific API, identity, login-form, or version signals;
+generic login pages are not confirmed. `--defcreds` tries common weak pairs, not
+an installation password: Jenkins generates its initial admin password. A pair
+or API token is accepted only when the identity endpoint confirms authentication.
+Jobs, recent builds, plugins, agents, queue and artifact metadata are read-only;
+visibility depends on the account's permissions. `--show-artifacts` also lists
+recent builds and uses HEAD requests to obtain artifact sizes without downloading
+their contents. Each inventory flag accepts an optional count limit.
+
 ### gRPC
 
 ```bash
@@ -259,7 +286,10 @@ redposture kafka -t targets.txt --show-topics
 redposture kafka -t targets.txt --defcreds
 redposture kafka -t kafka.example -u auditor -p 'password' --topic events --dump 10
 redposture kafka -t kafka.example -u producer -p 'password' --topic audit.events --write-message 'test event'
+redposture kafka -t http://kafka-ui.example:8080 -u auditor -p 'password' --show-clusters --show-topics --show-brokers --show-consumer-groups
 ```
+
+Kafka detects broker listeners and Kafbat/Provectus Kafka UI on explicit `host:port` targets automatically. Bare hosts also scan common UI ports. UI logins are verified through the UI identity API; broker SASL credentials are checked only against brokers. A UI login or generic HTTP response alone does not confirm the product. UI inventory is read-only; topic dumps and writes require a broker listener.
 
 `--probe-write` works alone or with `--topic NAME`; it appends one audit marker to each probed topic. An inconclusive result is shown as `write:unknown`.
 `--write-message` sends one UTF-8 record; `--write-file` sends one binary record (up to 1 MiB). Both require `--topic`, and `--write-key` is optional. A lost broker acknowledgment is reported as unconfirmed and never retried, because the record may already be present.
@@ -428,6 +458,9 @@ redposture exporters trigger -t targets.txt --callback-dns callback.example
 Trigger supports Redis, Postgres, Blackbox, Proxmox, MySQL, JSON, Elasticsearch,
 SNMP and IPMI exporters. All nine callback listeners start by default; `-e` selects
 exporter types and matching listeners, while `-s` selects listeners explicitly.
+For exporter `scan`, `collect` and `trigger`, `http://host` checks port 80 and
+`https://host` checks port 443. `--ports` overrides these defaults; an explicit
+port in the URL takes priority over `--ports`.
 Exporter HTTPS accepts self-signed certificates unless `--tls-ca file` is supplied.
 `--no-postgres-tls` disables Postgres callback TLS; `--no-with-listen` skips
 listeners. SNMP/IPMI use UDP. A trigger is confirmed only when its listener

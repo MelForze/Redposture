@@ -153,6 +153,8 @@ def _render_colored_keycloak_line(console: Console, line: str) -> bool:
             RegexColorRule(r"\(type:(?:public|confidential|bearer-only|unknown)\)", "orange"),
             RegexColorRule(r"\(access:denied\)", "bright_green"),
             RegexColorRule(r"\(access:unknown\)", "orange"),
+            RegexColorRule(r"\(realm:[^)]+\)", "orange"),
+            RegexColorRule(r"\((?:realms|clients|redirect URIs|web origins):unknown\)", "orange"),
         ),
         extra_spans=lambda marker, payload: (
             [(0, payload.find(" ("), "orange")]

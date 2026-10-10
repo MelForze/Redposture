@@ -79,6 +79,7 @@ def _detected_payload(module: str, spec: ModuleAuditSpec) -> dict[str, Any]:
                 "detected_realm": "master",
                 "version": "26.6.4",
             },
+            "jenkins": {"is_jenkins": True, "detection_status": "confirmed", "version": "2.541.3"},
             "gitlab": {"is_gitlab": True, "status": "detected", "login_page": True, "version": "17.0.0"},
             "consul": {"is_consul": True, "anonymous_scopes": {}, "version": "1.22.0"},
             "qdrant": {"is_qdrant": True, "version": "1.9.0", "anonymous_access": True},

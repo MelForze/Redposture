@@ -25,6 +25,9 @@ _DEFAULT_PORTS: tuple[int, ...] = (9000, 9001, 80, 443, 10080, 10443, 19000, 190
 
 def build_minio_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
     default_runs = (
         sort_default_audit_credential_runs(
             AuditCredentialRun(username=ak, password=sk, source=source)

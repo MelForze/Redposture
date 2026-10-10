@@ -20,6 +20,8 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, TypeAlias
 
+from ...scheduler import NestedSchedulerCancelled
+
 JsonObject: TypeAlias = dict[str, Any]
 FieldClass: TypeAlias = Literal["strong", "medium", "excluded", "neutral"]
 SurfaceStatus: TypeAlias = Literal["complete", "partial", "denied", "unsupported", "timeout", "error"]
@@ -1613,6 +1615,7 @@ class DiscoverEngine:
             vendor=self.vendor,
             options=self.options,
             monotonic=self.monotonic,
+            nested_scheduler=self.nested_scheduler,
         )
         child.budget = self.budget
         child.accumulator = self.accumulator
@@ -1632,6 +1635,8 @@ class DiscoverEngine:
         body: Mapping[str, Any] | list[Any] | None = None,
         cleanup: bool = False,
     ) -> tuple[DiscoverResponse, Any]:
+        if bool(getattr(self.nested_scheduler, "cancelled", False)):
+            raise NestedSchedulerCancelled("Elastic discovery cancelled")
         if not cleanup and not self.budget.check(findings=len(self.accumulator)):
             return (
                 DiscoverResponse(status=0, payload=b"", error="discover budget exhausted"),

@@ -60,6 +60,9 @@ def build_clickhouse_plan(args: Any) -> AuditCommandPlan:
         default_port = _DEFAULT_TLS_PORT if tls_enabled else _DEFAULT_PORT
         default_ports = (_DEFAULT_TLS_PORT,) if tls_enabled else _DEFAULT_PORTS
         plan = build_basic_audit_plan(args, default_port=default_port, default_ports=default_ports)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
     defaults = (
         sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source=source)
@@ -202,7 +205,15 @@ def run_clickhouse_stage(args: Any, logger: Any) -> int:
     if validation_rc is not None:
         return int(validation_rc)
     try:
-        if _raw_protocol(args) in {"http", "auto"}:
+        plan = build_clickhouse_plan(args)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
+    has_http_url = bool(
+        plan.target_plan is not None and (plan.target_plan.has_scheme("http") or plan.target_plan.has_scheme("https"))
+    )
+    try:
+        if _raw_protocol(args) in {"http", "auto"} or has_http_url:
             actions._load_clickhouse_connect_module()
         if _raw_protocol(args) in {"native", "auto"}:
             actions._load_clickhouse_driver_client()
@@ -213,11 +224,6 @@ def run_clickhouse_stage(args: Any, logger: Any) -> int:
         return _run_clickhouse_os_shell(args, logger, console)
     if bool(getattr(args, "sql_shell", False)):
         return _run_clickhouse_sql_shell(args, logger, console)
-    try:
-        plan = build_clickhouse_plan(args)
-    except ValueError as exc:
-        console.error(str(exc))
-        return 2
     _emit_debug_start(args, console, plan)
     try:
         runner = AuditCommandRunner(args=args, spec=build_clickhouse_spec(args), logger=logger, console=console)

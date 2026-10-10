@@ -27,6 +27,7 @@ COMMAND_CLICKHOUSE = _registry.COMMAND_CLICKHOUSE
 COMMAND_ETCD = _registry.COMMAND_ETCD
 COMMAND_PROXMOX = _registry.COMMAND_PROXMOX
 COMMAND_GRAFANA = _registry.COMMAND_GRAFANA
+COMMAND_JENKINS = _registry.COMMAND_JENKINS
 COMMAND_GITLAB = _registry.COMMAND_GITLAB
 COMMAND_CONSUL = _registry.COMMAND_CONSUL
 COMMAND_QDRANT = _registry.COMMAND_QDRANT
@@ -566,6 +567,7 @@ _ROOT_HELP_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("etcd", "KV access and auth"),
             ("gitlab", "projects, tokens, registry"),
             ("grafana", "login and datasources"),
+            ("jenkins", "jobs, builds, plugins"),
             ("keycloak", "realms, tokens, clients"),
             ("kubeapi", "namespaces and workloads"),
             ("proxmox", "nodes, VMs, storage"),

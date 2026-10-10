@@ -1669,11 +1669,13 @@ def authenticate_grafana(ctx: Any, detect_record: Any, _options: dict[str, Any])
         auth_header = _auth_header(effective_user, effective_password)
         username, password = effective_user, effective_password
     state.auth_attempts.append(attempt)
-    if ok and state.auth_header is None:
+    if ok and (state.auth_header is None or bool(getattr(ctx.args, "_spray_capabilities", False))):
         state.auth_header = auth_header
         state.credentials_source = source
         state.effective_username = username
         state.effective_password = password
+        if bool(getattr(ctx.args, "_spray_capabilities", False)):
+            state.deep_record = None
     if ok and bool(getattr(ctx.args, "enum_cve", False)) and not record.get("renderer_plugin_version"):
         record["renderer_plugin_version"] = _fetch_renderer_plugin_version(
             str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), auth_header
@@ -1765,6 +1767,20 @@ def collect_grafana_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
         str(attempt.get("source") or "") == "default" for attempt in merged_attempts
     )
     timeout = float(getattr(ctx.args, "timeout", 5.0))
+    if bool(getattr(ctx.args, "_spray_capabilities", False)) and state.auth_header and not record.get("server_version"):
+        try:
+            health_status, health_body, _headers = _http_request(
+                str(ctx.host),
+                int(ctx.port),
+                "/api/health",
+                timeout,
+                headers={"Authorization": state.auth_header},
+            )
+            health_ok, version = _looks_like_grafana_health(health_status, health_body)
+            if health_ok and version:
+                record["server_version"] = version
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+            pass  # Exact version is optional; do not erase a verified login.
     datasources, datasource_error, datasource_status = _fetch_datasources(
         str(ctx.host),
         int(ctx.port),

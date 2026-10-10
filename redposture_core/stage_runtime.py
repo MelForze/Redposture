@@ -341,6 +341,7 @@ class LineOutputSink:
         self._append = bool(append)
         self._handle: Any = None
         self._lock = threading.Lock()
+        self._closed = False
 
     def _prepare_unlocked(self) -> None:
         if not self.output_path or self._handle is not None:
@@ -356,6 +357,8 @@ class LineOutputSink:
         """
 
         with self._lock:
+            if self._closed:
+                return
             self._prepare_unlocked()
 
     def emit_many(self, lines: Iterable[str]) -> None:
@@ -368,6 +371,8 @@ class LineOutputSink:
         if not console_lines:
             return
         with self._lock:
+            if self._closed:
+                return
             if self.output_path:
                 self._prepare_unlocked()
                 for line in console_lines:
@@ -415,6 +420,7 @@ class LineOutputSink:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             if self._handle is not None:
                 self._handle.close()
                 self._handle = None
@@ -879,14 +885,16 @@ def build_basic_audit_plan(
     hosts_file = getattr(args, "hosts_file", None)
     if hosts_file:
         targets = f"{targets},{hosts_file}" if targets else hosts_file
-    try:
-        target_plan = stream_scan_target_specs(
-            targets,
-            policy=TargetParsePolicy(url_mode="preserve", path_policy="preserve"),
-            exclude_targets=getattr(args, "out_targets", None),
-        )
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"failed to parse targets: {exc}") from exc
+    target_plan = getattr(args, "_preparsed_target_plan", None)
+    if target_plan is None:
+        try:
+            target_plan = stream_scan_target_specs(
+                targets,
+                policy=TargetParsePolicy(url_mode="preserve", path_policy="preserve"),
+                exclude_targets=getattr(args, "out_targets", None),
+            )
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"failed to parse targets: {exc}") from exc
     if not target_plan:
         if targets and getattr(args, "out_targets", None):
             raise ValueError("all targets were excluded by --out-target")
@@ -1889,6 +1897,7 @@ _HTTP_DETECTION_MODULES = frozenset(
         "gitlab",
         "grafana",
         "keycloak",
+        "jenkins",
         "kubeapi",
         "minio",
         "proxmox",
@@ -2106,36 +2115,43 @@ class AuditCommandRunner:
             self.console.set_structured_output(plan.output_format == "json")
         sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append)
         sink.prepare()
-        if self.console is not None and plan.target_count > 1:
+        if self.console is not None and bool(getattr(self.args, "debug", False)) and plan.target_count > 1:
             port_counts = plan.target_counts_by_port()
             credential_count = sum(
                 run.username is not None or run.password is not None or run.token is not None
                 for run in plan.credential_runs
             )
-            info = getattr(self.console, "info", None)
-            if callable(info):
-                info(
+            debug = getattr(self.console, "debug", None)
+            if callable(debug):
+                debug(
                     f"Scan plan: addresses={plan.unique_host_count} "
                     f"host:port={plan.target_count} workers={plan.workers} "
                     f"nested_workers={self._nested_scheduler.max_workers} "
                     f"auth_attempts_up_to={plan.target_count * credential_count}"
                 )
-                info("Ports: " + ", ".join(f"{port}={count}" for port, count in port_counts.items()))
+                debug("Ports: " + ", ".join(f"{port}={count}" for port, count in port_counts.items()))
         # Data hooks may stream lines live (real-time output) via this sink, but only
         # for TXT; JSON stays a single serialized record per target.
-        self._live_emit = sink.emit_many if plan.output_format == "txt" else None
+        live_cancelled = threading.Event()
+
+        def _emit_live(lines: Iterable[str]) -> None:
+            if not live_cancelled.is_set():
+                sink.emit_many(lines)
+
+        self._live_emit = _emit_live if plan.output_format == "txt" else None
         completed = False
         try:
             result = self._run_prepared_plan(plan, sink)
             completed = True
             return result
         finally:
+            live_cancelled.set()
+            if not completed and self._nested_scheduler is not None:
+                self._nested_scheduler.cancel()
             self._close_all_lifecycle_states()
             if self._nested_scheduler is not None:
                 if completed:
                     self._nested_scheduler.close()
-                else:
-                    self._nested_scheduler.cancel()
             sink.close()
             if self.console is not None and bool(getattr(self.args, "debug", False)):
                 tls_stats = tls_context_cache_stats()
@@ -2929,6 +2945,17 @@ class AuditCommandRunner:
                 ):
                     break
             selected_credential, selected_record, gate_reason = self._select_deep_record(detect_record, auth_records)
+        skipped_credentials = sum(
+            candidate.username is not None or candidate.password is not None or candidate.token is not None
+            for candidate in candidates[len(auth_records) :]
+        )
+        if skipped_credentials:
+            import dataclasses as _dc
+
+            selected_record = _dc.replace(
+                selected_record,
+                extra={**selected_record.extra, "credential_attempts_skipped": skipped_credentials},
+            )
         credentials_verified = self._credential_gate(selected_credential, selected_record)[0]
         selected_record = self._mark_cve_credentials_verified(
             selected_record,

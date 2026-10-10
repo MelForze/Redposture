@@ -605,6 +605,18 @@ def test_line_output_sink_removes_module_padding_only_from_stored_tsv(tmp_path) 
     assert output_path.read_text(encoding="utf-8") == "DOCKER\t127.0.0.1\t2376\t [*] Docker Engine API\n"
 
 
+def test_line_output_sink_does_not_reopen_after_cancelled_run(tmp_path) -> None:
+    output_path = tmp_path / "result.txt"
+    emitted: list[str] = []
+    sink = LineOutputSink(str(output_path), emitted.append)
+    sink.emit_many(["first finding"])
+    sink.close()
+    sink.emit_many(["late finding"])
+
+    assert output_path.read_text(encoding="utf-8") == "first finding\n"
+    assert emitted == ["first finding"]
+
+
 def test_line_output_sink_emit_stream_file_streams_in_bounded_batches(tmp_path) -> None:
     src = tmp_path / "stream.txt"
     src.write_text("a\nb\n\nc\n", encoding="utf-8")  # blank line is skipped
@@ -2933,10 +2945,12 @@ def test_defcreds_stops_after_authentication_is_rate_limited(monolithic: bool, s
     credentials = tuple(
         AuditCredentialRun(username=name, password="x", source="default") for name in ("first", "second", "third")
     )
-    AuditCommandRunner(args=SimpleNamespace(defcreds=True), spec=spec, emit_line=lambda _line: None).run_plan(
+    result = AuditCommandRunner(args=SimpleNamespace(defcreds=True), spec=spec, emit_line=lambda _line: None).run_plan(
         AuditCommandPlan(targets_by_port={1234: ("host",)}, credential_runs=credentials)
     )
     assert attempted == ["first", "second"]
+    if not monolithic:
+        assert result.records[0]["credential_attempts_skipped"] == 1
 
 
 def test_run_plan_outer_finally_closes_registered_lifecycle_state(monkeypatch) -> None:

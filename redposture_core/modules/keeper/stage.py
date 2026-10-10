@@ -8,6 +8,7 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.zookeeper import _ZK_ERR_NOAUTH
 from ...console import Console
 from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
@@ -105,6 +106,25 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
                     "ddl_access_detail": detail,
                 }
             )
+            if (
+                access == "Denied"
+                and payload.get("credential_verification_requested")
+                and isinstance(state, engine.ZooKeeperImplementationLifecycleState)
+            ):
+                # The Keeper-specific DDL probe has established a protected
+                # read path that the generic root/child search may have missed.
+                verifier = state.zookeeper_state
+                verifier.anonymous_auth_probe_results[actions._DDL_QUEUE] = _ZK_ERR_NOAUTH
+                verifier.credential_verification_path = verifier.credential_verification_path or actions._DDL_QUEUE
+                verifier.credential_verification_status = "available"
+                verifier.credential_verification_reason = None
+                payload["anonymous_auth_probe_results"] = {
+                    **dict(payload.get("anonymous_auth_probe_results") or {}),
+                    actions._DDL_QUEUE: "noauth",
+                }
+                payload["credential_verification_path"] = verifier.credential_verification_path
+                payload["credential_verification_status"] = "available"
+                payload["credential_verification_reason"] = None
         return AuditRecord.from_mapping(payload, module="keeper", service="keeper")
 
     def _auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
@@ -258,7 +278,11 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
         continue_after_credential_success=exhaustive_credentials,
         continue_after_credential_error=exhaustive_credentials,
         fallback_to_anonymous_detect_record=exhaustive_credentials,
-        credential_attempt_detail_fields=("provided_credentials_ok", "credential_verdict"),
+        credential_attempt_detail_fields=(
+            "provided_credentials_ok",
+            "credential_verdict",
+            "credential_auth_probe_results",
+        ),
         suppress_undetected_records_in_text=True,
     )
 

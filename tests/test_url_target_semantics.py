@@ -231,6 +231,118 @@ def test_collect_explicit_url_port_still_overrides_ports_flag(monkeypatch: pytes
     assert scanned_pairs == [("127.0.0.1", 19100)]
 
 
+@pytest.mark.parametrize("stage", ["scan", "collect"])
+@pytest.mark.parametrize(
+    ("target", "extra", "expected"),
+    [
+        ("http://127.0.0.1", [], [("127.0.0.1", 80, "http")]),
+        ("https://127.0.0.1", [], [("127.0.0.1", 443, "https")]),
+        ("https://127.0.0.1:19100", [], [("127.0.0.1", 19100, "https")]),
+        ("https://127.0.0.1", ["--ports", "19100"], [("127.0.0.1", 19100, "https")]),
+    ],
+)
+def test_exporter_url_without_port_uses_scheme_default(
+    stage: str,
+    target: str,
+    extra: list[str],
+    expected: list[tuple[str, int, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[str, int, str]] = []
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        hosts = [str(host) for host in kwargs.get("hosts") or []]
+        ports = [int(port) for port in kwargs.get("custom_ports") or []]
+        scheme = str(kwargs.get("scheme") or "http")
+        observed.extend((host, port, scheme) for host in hosts for port in ports)
+        return len(hosts) * len(ports), 0, {host: [] for host in hosts}
+
+    profiles: dict[str, object] = {
+        "discovery_exporters": [{"name": "node_exporter", "port": 9100}],
+        "collect_exporters": [],
+        "collect_debug_endpoints": [],
+    }
+    monkeypatch.setattr(f"redposture_core.stage_{stage}.load_profiles", lambda *_args, **_kwargs: profiles)
+    monkeypatch.setattr(f"redposture_core.stage_{stage}.scan_exporter_presence", fake_scan)
+
+    args = parse_args(["exporters", stage, "-t", target, *extra])
+    rc = run_scan_stage(args) if stage == "scan" else run_collect_stage(args, AttemptLogger())
+
+    assert rc == 0
+    assert observed == expected
+
+
+@pytest.mark.parametrize("stage", ["scan", "collect"])
+def test_exporter_streamed_urls_without_ports_keep_distinct_schemes(
+    stage: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: list[tuple[str, int, str]] = []
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        hosts = [str(host) for host in kwargs.get("hosts") or []]
+        ports = [int(port) for port in kwargs.get("custom_ports") or []]
+        scheme = str(kwargs.get("scheme") or "http")
+        observed.extend((host, port, scheme) for host in hosts for port in ports)
+        return len(hosts) * len(ports), 0, {host: [] for host in hosts}
+
+    profiles: dict[str, object] = {
+        "discovery_exporters": [{"name": "node_exporter", "port": 9100}],
+        "collect_exporters": [],
+        "collect_debug_endpoints": [],
+    }
+    monkeypatch.setattr(f"redposture_core.stage_{stage}.DEFAULT_MAX_NETWORK_HOSTS", 1)
+    monkeypatch.setattr(f"redposture_core.stage_{stage}.load_profiles", lambda *_args, **_kwargs: profiles)
+    monkeypatch.setattr(f"redposture_core.stage_{stage}.scan_exporter_presence", fake_scan)
+    args = parse_args(["exporters", stage, "-t", "http://127.0.0.1,https://127.0.0.2"])
+    rc = run_scan_stage(args) if stage == "scan" else run_collect_stage(args, AttemptLogger())
+
+    assert rc == 0
+    assert sorted(observed) == [("127.0.0.1", 80, "http"), ("127.0.0.2", 443, "https")]
+
+
+@pytest.mark.parametrize(
+    ("target", "extra", "expected"),
+    [
+        ("http://127.0.0.1", [], [(80, "http")]),
+        ("https://127.0.0.1", [], [(443, "https")]),
+        ("https://127.0.0.1:19121", [], [(19121, "https")]),
+        ("https://127.0.0.1", ["--ports", "19121"], [(19121, "https")]),
+    ],
+)
+def test_trigger_url_without_port_uses_scheme_default(
+    target: str,
+    extra: list[str],
+    expected: list[tuple[int, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        "redposture_core.stage_trigger.load_profiles",
+        lambda *_args, **_kwargs: {
+            "trigger_exporters": [{"name": "redis_exporter", "port": 9121, "target_fmt": "redis://{our_host}:6379"}]
+        },
+    )
+
+    def fake_run_trigger_requests(
+        _args: object,
+        _logger: object,
+        _console: object,
+        _hosts: object,
+        _callback_targets: object,
+        trigger_exporters: list[dict[str, object]],
+        **kwargs: object,
+    ) -> None:
+        observed.extend((int(item["port"]), str(kwargs.get("scheme") or "http")) for item in trigger_exporters)
+
+    monkeypatch.setattr("redposture_core.stage_trigger._run_trigger_requests", fake_run_trigger_requests)
+    args = parse_args(
+        ["exporters", "trigger", "-t", target, "--callback-dns", "host.docker.internal", "--no-with-listen", *extra]
+    )
+
+    assert run_trigger_stage(args, AttemptLogger()) == 0
+    assert observed == expected
+
+
 def test_trigger_uses_explicit_port_batches(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[list[str], list[int]]] = []
 

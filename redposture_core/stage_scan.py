@@ -8,6 +8,7 @@ import ssl
 import sys
 import time
 from collections.abc import Iterable, Iterator
+from dataclasses import replace
 from typing import Any
 
 from .console import Console
@@ -248,14 +249,21 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
-    hosts = list(dict.fromkeys(spec.host for spec in target_specs))
-
     try:
         custom_ports = collect_scan_ports(getattr(args, "ports", None))
     except ValueError as exc:
         console.error(f"failed to parse --ports: {exc}")
         return 2
+    if not custom_ports:
+        target_plan = target_plan.with_scheme_default_ports({"http": 80, "https": 443})
+        target_specs = [
+            replace(spec, explicit_port={"http": 80, "https": 443}[spec.scheme])
+            if spec.explicit_port is None and spec.scheme in {"http", "https"}
+            else spec
+            for spec in target_specs
+        ]
     target_plan = target_plan.with_additional_ports_for_bare_explicit_targets(bool(custom_ports))
+    hosts = list(dict.fromkeys(spec.host for spec in target_specs))
 
     try:
         profiles = load_profiles(args.profiles_file)

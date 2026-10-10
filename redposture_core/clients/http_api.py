@@ -9,10 +9,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..network_proxy import ProxyConfig, open_connection_via_proxy, parse_proxy_config
@@ -67,6 +68,31 @@ class HttpResponse:
     @property
     def redirected(self) -> bool:
         return bool(self.redirect_history)
+
+
+def decode_http_content(response: HttpResponse, *, max_bytes: int) -> HttpResponse:
+    """Decode a gzip HTTP body within the same limit as an uncompressed body."""
+    encoding = next((value for key, value in response.headers.items() if key.lower() == "content-encoding"), "")
+    if response.error or response.truncated or encoding.strip().lower() != "gzip":
+        return response
+    limit = max(0, int(max_bytes))
+    try:
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        body = decoder.decompress(response.body, limit + 1)
+        if len(body) <= limit:
+            body += decoder.flush(limit + 1 - len(body))
+        if len(body) > limit:
+            return replace(response, body=b"", truncated=True, error="decompressed HTTP response exceeds limit")
+        if not decoder.eof or decoder.unused_data:
+            return replace(response, body=b"", error="invalid gzip HTTP response")
+    except zlib.error:
+        return replace(response, body=b"", error="invalid gzip HTTP response")
+    headers = {
+        key: value
+        for key, value in response.headers.items()
+        if key.lower() not in {"content-encoding", "content-length"}
+    }
+    return replace(response, body=body, headers=headers)
 
 
 @dataclass(frozen=True)
@@ -640,6 +666,7 @@ class HttpApiClient:
             body=body,
             allow_cross_origin=self.config.allow_cross_origin_redirects,
         )
+        response = decode_http_content(response, max_bytes=self.config.response_size_cap)
         pin_http_redirect_path(response, method=request.method)
         return response
 

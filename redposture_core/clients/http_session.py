@@ -15,7 +15,7 @@ from typing import Any
 
 from ..network_proxy import ProxyConfig, open_connection_via_proxy
 from . import transport
-from .http_api import HttpResponse, normalize_http_error, pin_http_redirect_path
+from .http_api import HttpResponse, decode_http_content, normalize_http_error, pin_http_redirect_path
 from .http_redirects import RequestPreparer, follow_redirects
 from .tls_cache import shared_client_ssl_context
 
@@ -116,6 +116,9 @@ class _LayeredTlsSocket:
 
     def settimeout(self, timeout: float | None) -> None:
         self._outer.settimeout(timeout)
+
+    def shutdown(self, how: int) -> None:
+        self._outer.shutdown(how)
 
     def close(self) -> None:
         if self._closed:
@@ -260,14 +263,17 @@ class HttpSessionPool:
             with self._lock:
                 self._stats["requests"] += 1
             return (
-                HttpResponse(
-                    status=int(response.status),
-                    body=payload,
-                    headers={str(name): str(value) for name, value in response.getheaders()},
-                    error=None,
-                    truncated=truncated,
-                    request_url=url,
-                    final_url=url,
+                decode_http_content(
+                    HttpResponse(
+                        status=int(response.status),
+                        body=payload,
+                        headers={str(name): str(value) for name, value in response.getheaders()},
+                        error=None,
+                        truncated=truncated,
+                        request_url=url,
+                        final_url=url,
+                    ),
+                    max_bytes=cap,
                 ),
                 None,
                 reused,
@@ -380,6 +386,14 @@ class HttpSessionPool:
             self._idle.clear()
         for connection in connections:
             try:
+                sock = getattr(connection, "sock", None)
+                if sock is not None:
+                    shutdown = getattr(sock, "shutdown", None)
+                    try:
+                        if callable(shutdown):
+                            shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
                 connection.close()
             except OSError:
                 pass

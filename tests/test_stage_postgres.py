@@ -43,7 +43,7 @@ from redposture_core.stage_postgres import (
     _scram_client_final,
     _scram_client_first,
 )
-from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun
+from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun, AuditHookContext
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
@@ -79,6 +79,59 @@ class _ProtocolSocket(_DummySocket):
 
     def gettimeout(self) -> float:
         return self._timeout
+
+
+def test_postgres_spray_capabilities_use_verified_connection_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    sock = _DummySocket()
+
+    def open_socket(*_args: object, **_kwargs: object) -> _DummySocket:
+        calls.append("open")
+        return sock
+
+    def authenticate(*_args: object, **_kwargs: object) -> _PgSession:
+        calls.append("auth")
+        return _PgSession(auth_required=True, auth_method="scram-sha-256", server_version="16.4")
+
+    def privileges(_sock: _DummySocket, *, probe_readable_table_sample: bool) -> tuple[bool, bool, bool, int, None]:
+        calls.append("privileges")
+        assert probe_readable_table_sample is False
+        return True, True, True, 4, None
+
+    def databases(_sock: _DummySocket) -> tuple[list[str], None]:
+        calls.append("databases")
+        return ["postgres", "app"], None
+
+    monkeypatch.setattr(postgres_module_stage.actions, "_pg_open_socket", open_socket)
+    monkeypatch.setattr(postgres_module_stage.actions, "_pg_startup_and_auth", authenticate)
+    monkeypatch.setattr(postgres_module_stage.actions, "_collect_postgres_privileges", privileges)
+    monkeypatch.setattr(postgres_module_stage.actions, "_pg_query_databases", databases)
+    monkeypatch.setattr(postgres_module_stage.actions, "_pg_send_terminate", lambda _sock: calls.append("terminate"))
+    args = argparse.Namespace(timeout=1.0, retries=0, _spray_capabilities=True)
+    ctx = AuditHookContext(args, None, "localhost", 5432, AuditCredentialRun("postgres", "secret", source="provided"))
+    record = postgres_module_stage._postgres_probe_credential(ctx)
+    assert calls == ["open", "auth", "privileges", "databases", "terminate"]
+    assert record.extra["server_version"] == "16.4"
+    assert record.extra["superuser"] is True
+    assert record.extra["can_execute_commands"] is True
+    assert record.extra["can_read_tables"] is True
+    assert record.extra["database_count"] == 2
+
+
+def test_postgres_spray_capabilities_do_not_sample_table_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(postgres_module_stage.actions, "_pg_query_scalar_bool", lambda *_args: (False, None))
+    monkeypatch.setattr(
+        postgres_module_stage.actions, "_pg_query_scalar_int", lambda *_args: (None, "permission denied")
+    )
+    monkeypatch.setattr(
+        postgres_module_stage.actions,
+        "_pg_probe_readable_table_sample",
+        lambda *_args: pytest.fail("spray must not read sample table rows"),
+    )
+    result = postgres_module_stage.actions._collect_postgres_privileges(
+        _DummySocket(), probe_readable_table_sample=False
+    )
+    assert result == (False, False, None, None, "permission denied")
 
 
 def test_postgres_defcreds_are_ordered_and_deduplicated() -> None:

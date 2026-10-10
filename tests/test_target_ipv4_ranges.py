@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from redposture_core.targeting import (
     TargetParsePolicy,
+    _merge_ipv4_range,
+    _range_contains,
     parse_scan_target_specs,
     parse_target_exclusions,
     stream_scan_target_specs,
@@ -108,3 +112,17 @@ def test_eager_range_expansion_respects_existing_host_limit():
 
 def test_range_exclusion_applies_to_urls_and_explicit_ports():
     assert parse_scan_target_specs("http://10.0.0.1:8080/path,10.0.0.2:9000", exclude_targets="10.0.0.1-10.0.0.2") == []
+
+
+@given(st.lists(st.tuples(st.integers(0, 127), st.integers(0, 127)), max_size=80))
+def test_incremental_ipv4_intervals_match_independent_set_model(pairs):
+    ranges: list[tuple[int, int]] = []
+    expected: set[int] = set()
+    for left, right in pairs:
+        start, end = sorted((left, right))
+        _merge_ipv4_range(ranges, (start, end))
+        expected.update(range(start, end + 1))
+        actual = {value for range_start, range_end in ranges for value in range(range_start, range_end + 1)}
+        assert actual == expected
+        assert all(ranges[index][1] + 1 < ranges[index + 1][0] for index in range(len(ranges) - 1))
+    assert all(_range_contains(ranges, value) == (value in expected) for value in range(129))

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ....scheduler import NestedSchedulerCancelled
 from ....secret_detection import detector_names, fingerprint, mask_secret, scan_value
 from .checkpoint import CheckpointStore, InMemoryCheckpointStore
 from .inventory import collect_inventory, is_content_type
@@ -160,6 +161,8 @@ def run_discovery(
     scheduler_key: Any | None = None,
     on_chunk_findings: Callable[[ScanChunk, list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
+    if bool(getattr(nested_scheduler, "cancelled", False)):
+        raise NestedSchedulerCancelled("ClickHouse discovery cancelled")
     started = time.monotonic()
     enabled = config.detectors or detector_names()
     unknown = sorted(set(enabled) - set(detector_names()))
@@ -268,6 +271,8 @@ def run_discovery(
                 yield chunk
 
     def read_one(chunk: ScanChunk):
+        if bool(getattr(nested_scheduler, "cancelled", False)):
+            raise NestedSchedulerCancelled("ClickHouse discovery cancelled")
         if deadline is not None and time.monotonic() >= deadline:
             return ReadResult([], 0, "discover_time")
         if config.max_total_bytes is not None and inspected_bytes >= config.max_total_bytes:
@@ -282,6 +287,8 @@ def run_discovery(
         )
         current_session = session_queue.get()
         try:
+            if bool(getattr(nested_scheduler, "cancelled", False)):
+                raise NestedSchedulerCancelled("ClickHouse discovery cancelled")
             return read_chunk(current_session, query)
         finally:
             session_queue.put(current_session)

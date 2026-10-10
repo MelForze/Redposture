@@ -741,6 +741,12 @@ def _audit_mongodb_host(
                     # leaked pymongo topology/monitor threads under exceptions.
                     active_client_ref = active_client
                     active_client_owned_ref = True
+                    if version is None:
+                        try:
+                            authenticated_info = active_client.server_info()
+                            version = str(authenticated_info.get("version") or "").strip() or None
+                        except Exception:
+                            pass
                     database_names, database_error = _try_list_databases(active_client)
                     status = "weak_default_creds" if selected_credential.get("default") else "valid_credentials"
                     effective_username = selected_credential.get("username")

@@ -226,7 +226,9 @@ def test_other_modules_do_not_print_unverified_pairs_as_credential_results() -> 
         "credential_verdict": "unverified",
         "provided_credentials_ok": None,
     }
-    assert zookeeper._format_record(zoo_record, "txt") == ""
+    zoo_line = zookeeper._format_record(zoo_record, "txt")
+    assert "credential verification inconclusive" in zoo_line
+    assert "admin:secret" not in zoo_line
 
 
 def test_grpc_unknown_attempt_remains_unknown_instead_of_becoming_rejected() -> None:

@@ -47,6 +47,7 @@ from ...rendering import (
     CountColorRule,
     format_count_value,
     render_colored_marker_line,
+    render_module_marker_line,
     render_tagged_detail_line,
 )
 from ...utils import (
@@ -351,11 +352,16 @@ def _is_sasl_required_error(value: Any) -> bool:
     return "SESSIONCLOSEDREQUIRESASLAUTH" in str(value or "").upper().replace("_", "")
 
 
+def _is_explicit_digest_rejection(value: Any) -> bool:
+    return "AUTHFAILED" in str(value or "").upper().replace("_", "")
+
+
 def _collect_session_auth_probes(
     client: _ZkClient,
     paths: tuple[str, ...],
     *,
     known_root_err: int | None = None,
+    discovered_children: dict[str, list[str]] | None = None,
 ) -> tuple[dict[str, int | None], dict[str, str]]:
     """Probe a fixed path set on one session without mutating server state."""
 
@@ -366,8 +372,10 @@ def _collect_session_auth_probes(
             results[path] = int(known_root_err)
             continue
         try:
-            _children, err, _stat = client.get_children2(path)
+            children, err, _stat = client.get_children2(path)
             results[path] = int(err)
+            if discovered_children is not None and int(err) == _ZK_ERR_OK:
+                discovered_children[path] = list(children or [])
             if int(err) == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH:
                 break
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
@@ -377,6 +385,48 @@ def _collect_session_auth_probes(
             # server has done that, later reads on the same session are noise.
             if results.get("/") == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH:
                 break
+    return results, errors
+
+
+def _collect_anonymous_verifier_probes(
+    client: _ZkClient,
+    root_children: list[str] | None,
+    query_znode: str | None,
+    auth_probe_trace: tuple[str, ...] | list[str],
+    *,
+    root_err: int,
+) -> tuple[dict[str, int | None], dict[str, str]]:
+    """Find protected descendants with bounded, read-only anonymous probes."""
+
+    initial_paths = _credential_verifier_candidates(root_children, query_znode, auth_probe_trace)
+    children_by_path: dict[str, list[str]] = {}
+    results, errors = _collect_session_auth_probes(
+        client,
+        initial_paths,
+        known_root_err=root_err,
+        discovered_children=children_by_path,
+    )
+    # A protected child may live below a public root child. Reuse the child
+    # lists returned above and cap this extra search at 16 reads per target.
+    extra_paths: list[str] = []
+    for parent in initial_paths:
+        if parent.count("/") != 1 or results.get(parent) != _ZK_ERR_OK:
+            continue
+        for child in sorted(
+            str(value).strip("/") for value in children_by_path.get(parent, []) if str(value).strip("/")
+        ):
+            path = _join_znode_path(parent, child)
+            if path in results or path in extra_paths:
+                continue
+            extra_paths.append(path)
+            if len(extra_paths) == 16:
+                break
+        if len(extra_paths) == 16:
+            break
+    if extra_paths:
+        extra_results, extra_errors = _collect_session_auth_probes(client, tuple(extra_paths))
+        results.update(extra_results)
+        errors.update(extra_errors)
     return results, errors
 
 
@@ -400,35 +450,32 @@ def _credential_probe_verdict(
     """Classify digest credentials from access changes on identical paths."""
 
     protected = {_ZK_ERR_NOAUTH, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH}
-    saw_protected = False
     saw_confirmed_transition = False
-    saw_unchanged_denial = False
     saw_anonymous_readable = False
     saw_authenticated_readable = False
-    saw_authenticated_denial_after_public = False
+    saw_explicit_rejection = False
     for path, anonymous_code in anonymous_results.items():
         authenticated_code = authenticated_results.get(path)
         if anonymous_code in protected:
-            saw_protected = True
             if authenticated_code == _ZK_ERR_OK:
                 saw_confirmed_transition = True
-            elif authenticated_code in protected or authenticated_code == _ZK_ERR_AUTHFAILED:
-                saw_unchanged_denial = True
+            elif authenticated_code == _ZK_ERR_AUTHFAILED:
+                saw_explicit_rejection = True
         elif anonymous_code == _ZK_ERR_OK:
             saw_anonymous_readable = True
             if authenticated_code == _ZK_ERR_OK:
                 saw_authenticated_readable = True
-            elif authenticated_code in protected or authenticated_code == _ZK_ERR_AUTHFAILED:
-                saw_authenticated_denial_after_public = True
+            elif authenticated_code == _ZK_ERR_AUTHFAILED:
+                saw_explicit_rejection = True
 
     if saw_confirmed_transition:
         return "valid"
-    if saw_protected and saw_unchanged_denial:
-        return "rejected"
-    if saw_authenticated_denial_after_public:
+    if saw_explicit_rejection:
         return "rejected"
     if saw_anonymous_readable and saw_authenticated_readable:
         return "unverified_anonymous"
+    # A digest addAuth ACK only installs an identity. An unchanged NOAUTH can
+    # mean a valid identity without ACL rights on this particular znode.
     return "unverified"
 
 
@@ -907,10 +954,11 @@ def _audit_zookeeper_host(
                         provided_credentials_ok = None
                         credential_verdict = "unverified"
                 else:
-                    provided_credentials_ok = False
-                    credential_verdict = "rejected"
+                    explicit_rejection = _is_explicit_digest_rejection(auth_error)
+                    provided_credentials_ok = False if explicit_rejection else None
+                    credential_verdict = "rejected" if explicit_rejection else "unverified"
                 if not auth_applied_ok and not auth_error:
-                    auth_error = "authentication failed"
+                    auth_error = "digest authentication response was inconclusive"
 
                 if _is_sasl_required_error(auth_error) or (
                     authenticated_root_err == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH
@@ -1881,15 +1929,12 @@ def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
                 or getattr(ctx.args, "password", None) is not None
             )
             if auth_requested:
-                probe_paths = _credential_verifier_candidates(
+                probe_results, probe_errors = _collect_anonymous_verifier_probes(
+                    client,
                     list(root_children or []),
                     options.get("query_znode"),
                     trace,
-                )
-                probe_results, probe_errors = _collect_session_auth_probes(
-                    client,
-                    probe_paths,
-                    known_root_err=int(root_err),
+                    root_err=int(root_err),
                 )
                 state.anonymous_auth_probe_results = probe_results
                 state.anonymous_auth_probe_errors = probe_errors
@@ -2038,10 +2083,13 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
     ):
         return _unsupported_sasl()
 
-    probe_paths = (
-        (state.credential_verification_path,)
-        if state.credential_verification_path is not None
-        else tuple(anonymous_probe_results)
+    # Replay every protected path, not only the first: distinct digest users
+    # can have disjoint ACL rights. The public root is useful for diagnosis,
+    # while other public paths add requests without proving authentication.
+    probe_paths = tuple(
+        path
+        for path, code in anonymous_probe_results.items()
+        if path == "/" or code in {_ZK_ERR_NOAUTH, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH}
     )
     for attempt in range(attempts):
         client = _zookeeper_lifecycle_client(ctx, state.selected_transport_config)
@@ -2065,13 +2113,14 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
             transient_error: str | None = None
             if not auth_ok and _is_retryable_stage_error(auth_error):
                 transient_error = str(auth_error or "authentication probe failed")
-            elif (
-                auth_ok
-                and authenticated_root_err is not None
-                and authenticated_root_err != _ZK_ERR_OK
-                and _is_retryable_stage_error(_zk_error_name(authenticated_root_err))
-            ):
-                transient_error = f"root query failed: {_zk_error_name(authenticated_root_err)}"
+            elif auth_ok:
+                for path, code in authenticated_results.items():
+                    if code is None and path in authenticated_errors:
+                        transient_error = f"{path}: {authenticated_errors[path]}"
+                        break
+                    if code is not None and _is_retryable_stage_error(_zk_error_name(code)):
+                        transient_error = f"{path}: {_zk_error_name(code)}"
+                        break
             if transient_error is not None:
                 last_transient_error = transient_error
                 client.close()
@@ -2083,14 +2132,13 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
             provided_ok: bool | None
             credential_verdict: str
             result_error: str | None = None
-            probe_verdict = (
-                _credential_probe_verdict(
+            if auth_ok:
+                probe_verdict = _credential_probe_verdict(
                     anonymous_probe_results,
                     authenticated_results,
                 )
-                if auth_ok
-                else "rejected"
-            )
+            else:
+                probe_verdict = "rejected" if _is_explicit_digest_rejection(auth_error) else "unverified"
             if auth_ok and probe_verdict == "valid":
                 provided_ok = True
                 credential_verdict = "valid"
@@ -2114,7 +2162,7 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
                 credential_verdict = "unverified_anonymous"
                 status = "open_no_auth"
                 client.close()
-            elif not auth_ok or probe_verdict == "rejected":
+            elif probe_verdict == "rejected":
                 provided_ok = False
                 credential_verdict = "rejected"
                 status = "invalid_credentials_anonymous" if state.auth_required is False else "auth_required"
@@ -3022,7 +3070,19 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     prefix = _nxc_prefix(record)
     err = _clip(str(record.get("error") or "-"), 72)
     attempted_credentials = record.get("attempted_credentials")
-    has_attempt_details = isinstance(attempted_credentials, list) and len(attempted_credentials) > 1
+    has_attempt_details = isinstance(attempted_credentials, list) and bool(attempted_credentials)
+
+    if (
+        record.get("provided_credentials")
+        and not has_attempt_details
+        and record.get("provided_credentials_ok") is None
+        and record.get("credential_verdict") in {"unverified", "unverified_anonymous", "unsupported_sasl"}
+    ):
+        if record.get("credential_verdict") == "unsupported_sasl":
+            return f"{prefix} [*] digest credential verification unsupported: SASL required"
+        if _credential_attempt_denied_on_protected_nodes(record, record):
+            return f"{prefix} [-] {_credentials_label(record)} (no access to tested znodes)"
+        return f"{prefix} [*] credential verification inconclusive; see --debug/JSON"
 
     if status == "open_no_auth":
         return ""
@@ -3047,7 +3107,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         if record.get("provided_credentials"):
             credential_verdict = str(record.get("credential_verdict") or "").strip().lower()
             if credential_verdict == "unsupported_sasl":
-                return f"{prefix} [!] {_credentials_label(record)} (unsupported:SASL)"
+                return f"{prefix} [*] digest credential verification unsupported: SASL required"
             if record.get("provided_credentials_ok") is False or credential_verdict == "rejected":
                 return f"{prefix} [-] {_credentials_label(record)}"
             return ""
@@ -3062,14 +3122,25 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     return line
 
 
+def _credential_attempt_denied_on_protected_nodes(record: Mapping[str, Any], attempt: Mapping[str, Any]) -> bool:
+    anonymous = record.get("anonymous_auth_probe_results")
+    authenticated = attempt.get("credential_auth_probe_results")
+    if not isinstance(anonymous, Mapping) or not isinstance(authenticated, Mapping):
+        return False
+    protected_paths = [path for path, result in anonymous.items() if result == "noauth"]
+    return bool(protected_paths) and all(authenticated.get(path) == "noauth" for path in protected_paths)
+
+
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
     attempts = record.get("attempted_credentials")
-    if output_format == "json" or not isinstance(attempts, list) or len(attempts) < 2:
+    if output_format == "json" or not isinstance(attempts, list):
         return []
 
     prefix = _nxc_prefix(record)
     lines: list[str] = []
     credential_caps_rendered = False
+    inconclusive = 0
+    unsupported_sasl = 0
     for attempt in attempts:
         if not isinstance(attempt, dict):
             continue
@@ -3092,11 +3163,24 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             lines.append(f"{prefix} [-] {username}:{password_text}")
             continue
         if not accepted:
+            if _credential_attempt_denied_on_protected_nodes(record, attempt):
+                lines.append(f"{prefix} [-] {username}:{password_text} (no access to tested znodes)")
+            elif attempt.get("credential_verdict") == "unsupported_sasl":
+                unsupported_sasl += 1
+            else:
+                inconclusive += 1
             continue
         caps = "" if credential_caps_rendered else _credential_znode_caps_suffix(record, username=username)
         if caps:
             credential_caps_rendered = True
         lines.append(f"{prefix} [+] {username}:{password_text}{caps}")
+    if inconclusive:
+        lines.append(f"{prefix} [*] {inconclusive} credential check(s) inconclusive; see --debug/JSON")
+    if unsupported_sasl:
+        lines.append(f"{prefix} [*] digest verification unsupported: SASL required ({unsupported_sasl} pair(s))")
+    skipped = record.get("credential_attempts_skipped")
+    if isinstance(skipped, int) and skipped > 0 and record.get("credential_verification_status") != "unavailable":
+        lines.append(f"{prefix} [*] {skipped} credential pair(s) not attempted (checks stopped)")
     return lines
 
 
@@ -3109,7 +3193,9 @@ def _format_credential_verification_records(
         return []
     prefix = _nxc_prefix(record)
     reason = str(record.get("credential_verification_reason") or "no protected znode found")
-    line = f"{prefix} [!] credential verification unavailable: {reason}; use --znode <protected-path>"
+    skipped = record.get("credential_attempts_skipped")
+    skipped_note = f"; {skipped} pair(s) not attempted" if isinstance(skipped, int) and skipped > 0 else ""
+    line = f"{prefix} [*] credential verification unavailable: {reason}{skipped_note}; use --znode <protected-path>"
     return [line]
 
 
@@ -3345,6 +3431,29 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str, *,
 
 def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
     for tag in ("ZOOKEEPER", "KEEPER"):
+        if (
+            line.startswith(tag)
+            and " [*] " in line
+            and any(
+                marker in line
+                for marker in (
+                    "credential verification unavailable",
+                    "credential verification inconclusive",
+                    "credential check(s) inconclusive",
+                    "digest credential verification unsupported",
+                    "digest verification unsupported",
+                    "not attempted",
+                )
+            )
+        ):
+            payload = line.split(" [*] ", 1)[1]
+            return render_module_marker_line(
+                console,
+                line,
+                tag=tag,
+                spans=((0, len(payload), "orange"),),
+                marker_colors={"[*]": "white", "[+]": "bright_green", "[-]": "red", "[!]": "yellow"},
+            )
         literals: tuple[tuple[str, str], ...] = (
             ("(transport:plaintext)", "yellow"),
             ("(transport:tls)", "bright_green"),
@@ -3366,6 +3475,11 @@ def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
             counts=(
                 CountColorRule("znodes", "red", unknown_color="orange", zero_color="bright_green"),
                 CountColorRule("Count", "red", unknown_color="orange", zero_color="bright_green"),
+            ),
+            extra_spans=lambda marker, payload: (
+                [(0, len(payload.split(" (", 1)[0]), "true_red" if marker == "[+]" else "bright_green")]
+                if marker in {"[+]", "[-]"} and ":" in payload.split(" (", 1)[0]
+                else []
             ),
         ):
             return True

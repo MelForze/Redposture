@@ -3008,7 +3008,7 @@ def test_consul_default_plan_includes_https_and_uses_scheme_port() -> None:
     https_args._port_option_provided = False
     https_plan = consul.build_consul_plan(https_args)
     targets = [(host, port) for _idx, host, port, _spec in https_plan.iter_target_specs()]
-    assert targets == [("consul.internal", 8501)]
+    assert targets == [("consul.internal", 443)]
 
 
 @pytest.mark.parametrize("port", [8501, 18501, 28501])

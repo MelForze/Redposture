@@ -21,6 +21,9 @@ from . import actions, policy, render
 
 def build_rabbitmq_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=15672, default_ports=(15672, 15671))
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
     defaults = (
         tuple(
             AuditCredentialRun(username=user, password=password, source="default")

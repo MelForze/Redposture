@@ -174,6 +174,151 @@ def test_keeper_default_ddl_probe_uses_only_non_task_ephemeral_marker(
     assert f"(auth required:False) (ddl access:{expected}) (transport:plaintext)" in rendered
 
 
+def test_keeper_denied_ddl_path_becomes_digest_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core.modules.keeper import actions as keeper_actions
+
+    args = parse_args(["keeper", "-t", "127.0.0.1:9181", "--defcreds", "--retries", "0"])
+    spec = keeper_stage.build_keeper_spec(args)
+    assert spec.lifecycle_state_factory is not None and spec.detect is not None
+    state = spec.lifecycle_state_factory(None)
+    state.zookeeper_state.anonymous_client = object()
+    state.zookeeper_state.credential_verification_status = "unavailable"
+    monkeypatch.setattr(keeper_actions, "probe_ddl_access", lambda _client: ("Denied", None))
+    monkeypatch.setattr(
+        implementation_engine,
+        "detect_zookeeper_implementation",
+        lambda _ctx, _options: {
+            "host": "127.0.0.1",
+            "port": 9181,
+            "service": "keeper",
+            "status": "open_no_auth",
+            "is_zookeeper": True,
+            "is_keeper": True,
+            "credential_verification_requested": True,
+            "credential_verification_status": "unavailable",
+        },
+    )
+    ctx = AuditHookContext(
+        args=args,
+        logger=None,
+        host="127.0.0.1",
+        port=9181,
+        credential=AuditCredentialRun(source="anonymous"),
+        lifecycle_state=state,
+    )
+
+    payload = spec.detect(ctx).to_dict()
+
+    assert payload["credential_verification_status"] == "available"
+    assert payload["credential_verification_path"] == keeper_actions._DDL_QUEUE
+    assert state.zookeeper_state.anonymous_auth_probe_results[keeper_actions._DDL_QUEUE] == -102
+
+
+def test_keeper_digest_uses_closed_ddl_path_to_verify_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core.modules.keeper import actions as keeper_actions
+    from redposture_core.modules.zookeeper import actions as protocol_actions
+
+    args = parse_args(["keeper", "-t", "127.0.0.1:9181", "--defcreds", "--retries", "0"])
+    spec = keeper_stage.build_keeper_spec(args)
+    assert spec.lifecycle_state_factory is not None and spec.auth is not None
+    state = spec.lifecycle_state_factory(None)
+    state.fingerprint = ZkImplementationFingerprint("clickhouse-keeper", True, "confirmed")
+    verifier = state.zookeeper_state
+    verifier.root_err = 0
+    verifier.auth_required = False
+    verifier.credential_verification_status = "available"
+    verifier.credential_verification_path = keeper_actions._DDL_QUEUE
+    verifier.anonymous_auth_probe_results = {"/": 0, keeper_actions._DDL_QUEUE: -102}
+
+    class Client:
+        def connect(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        def auth_digest(self, _user: str, _password: str) -> tuple[bool, None]:
+            return True, None
+
+        def get_children2(self, path: str):
+            return [], 0 if path in {"/", keeper_actions._DDL_QUEUE} else -101, {}
+
+    monkeypatch.setattr(protocol_actions, "_zookeeper_lifecycle_client", lambda *_args, **_kwargs: Client())
+    ctx = AuditHookContext(
+        args=args,
+        logger=None,
+        host="127.0.0.1",
+        port=9181,
+        credential=AuditCredentialRun(username="known", password="secret", source="default"),
+        lifecycle_state=state,
+    )
+    detect_record = AuditRecord.from_mapping(
+        {"host": "127.0.0.1", "port": 9181, "status": "open_no_auth", "is_keeper": True},
+        module="keeper",
+        service="keeper",
+    )
+
+    record = spec.auth(ctx, detect_record).to_dict()
+
+    assert record["provided_credentials_ok"] is True
+    assert record["credential_verdict"] == "valid"
+    assert record["credential_auth_probe_results"][keeper_actions._DDL_QUEUE] == "ok"
+
+
+def test_keeper_credential_renderer_shows_every_attempt_and_skipped_count() -> None:
+    record = {
+        "module": "keeper",
+        "host": "127.0.0.1",
+        "port": 9181,
+        "credential_verification_status": "available",
+        "credential_attempts_skipped": 2,
+        "attempted_credentials": [
+            {"username": "bad", "password": "bad", "credential_verdict": "rejected"},
+            {"username": "unknown", "password": "unknown", "credential_verdict": "unverified"},
+            {"username": "good", "password": "good", "credential_verdict": "valid", "provided_credentials_ok": True},
+        ],
+    }
+    lines = keeper_stage.render._format_credential_attempts_records(record, "txt")
+    assert any("[-] bad:bad" in line for line in lines)
+    assert any("1 credential check(s) inconclusive" in line for line in lines)
+    assert any("[+] good:good" in line for line in lines)
+    assert any("2 credential pair(s) not attempted" in line for line in lines)
+    assert keeper_stage.render._format_credential_attempts_records(record, "json") == []
+
+
+def test_keeper_unknown_credential_color_and_plain_output(capsys: pytest.CaptureFixture[str]) -> None:
+    from redposture_core.console import Console
+
+    line = "KEEPER\t127.0.0.1\t9181\t [*] 1 credential check(s) inconclusive; see --debug/JSON"
+
+    class PaintedConsole:
+        def __init__(self) -> None:
+            self.colors: list[tuple[str, str]] = []
+
+        def _paint(self, text: str, color: str, _stream: object) -> str:
+            self.colors.append((text, color))
+            return text
+
+        def plain(self, _line: str) -> None:
+            return None
+
+    painted = PaintedConsole()
+    assert keeper_stage.render._render_colored_keeper_line(painted, line)
+    assert ("[*]", "white") in painted.colors
+    assert ("1 credential check(s) inconclusive; see --debug/JSON", "orange") in painted.colors
+    assert keeper_stage.render._render_colored_keeper_line(painted, "KEEPER\t127.0.0.1\t9181\t [+] admin:secret")
+    assert ("admin:secret", "true_red") in painted.colors
+    assert keeper_stage.render._render_colored_keeper_line(painted, "KEEPER\t127.0.0.1\t9181\t [-] admin:wrong")
+    assert ("admin:wrong", "bright_green") in painted.colors
+    denied_line = "KEEPER\t127.0.0.1\t9181\t [-] admin:wrong (no access to tested znodes)"
+    assert keeper_stage.render._render_colored_keeper_line(painted, denied_line)
+    assert ("admin:wrong", "bright_green") in painted.colors
+    assert keeper_stage.render._render_colored_keeper_line(Console(no_color=True), line)
+    assert keeper_stage.render._render_colored_keeper_line(Console(no_color=True), denied_line)
+    assert capsys.readouterr().out == f"{line}\n{denied_line}\n"
+    assert "\x1b[" not in denied_line
+
+
 def test_keeper_default_ddl_probe_is_not_run_on_foreign_zookeeper(monkeypatch: pytest.MonkeyPatch) -> None:
     spec, record = _detect_record(
         monkeypatch,

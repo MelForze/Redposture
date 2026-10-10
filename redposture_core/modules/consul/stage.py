@@ -29,10 +29,11 @@ _PRODUCTION_AUDIT_HOST = actions._audit_consul_host
 
 def build_consul_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
-    if plan.target_plan is not None:
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
         plan = replace(
             plan,
-            target_plan=plan.target_plan.with_scheme_default_ports({"http": 8500, "https": 8501}),
+            target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}),
         )
     return plan
 

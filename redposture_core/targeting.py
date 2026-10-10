@@ -5,7 +5,8 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
-from collections.abc import Callable, Iterable, Iterator
+from bisect import bisect_left, bisect_right
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 from urllib.parse import urlparse, urlunsplit
@@ -635,25 +636,24 @@ def _subtract_ranges(base: tuple[int, int], excluded: list[tuple[int, int]]) -> 
 
 
 def _merge_ipv4_range(ranges: list[tuple[int, int]], new_range: tuple[int, int]) -> list[tuple[int, int]]:
-    ranges.append(new_range)
-    ranges.sort()
-    merged: list[tuple[int, int]] = []
-    for start, end in ranges:
-        if not merged or start > merged[-1][1] + 1:
-            merged.append((start, end))
-            continue
-        prev_start, prev_end = merged[-1]
-        merged[-1] = (prev_start, max(prev_end, end))
-    return merged
+    """Insert into sorted disjoint ranges without re-sorting every prior IP."""
+    start, end = new_range
+    index = bisect_left(ranges, (start, -1))
+    if index and ranges[index - 1][1] + 1 >= start:
+        index -= 1
+        start = ranges[index][0]
+        end = max(end, ranges[index][1])
+    stop = index
+    while stop < len(ranges) and ranges[stop][0] <= end + 1:
+        end = max(end, ranges[stop][1])
+        stop += 1
+    ranges[index:stop] = [(start, end)]
+    return ranges
 
 
-def _range_contains(ranges: Iterable[tuple[int, int]], value: int) -> bool:
-    for start, end in ranges:
-        if value < start:
-            return False
-        if start <= value <= end:
-            return True
-    return False
+def _range_contains(ranges: Sequence[tuple[int, int]], value: int) -> bool:
+    index = bisect_right(ranges, (value, 1 << 32)) - 1
+    return index >= 0 and ranges[index][1] >= value
 
 
 def parse_target_exclusions(values: str | Iterable[str] | None) -> TargetExclusions:

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 import redposture_core.stage_zookeeper as zookeeper_stage
 from redposture_core.audit_models import AuditRecord
@@ -1271,12 +1273,12 @@ def test_audit_zookeeper_digest_on_open_target_is_unverified(monkeypatch) -> Non
     )
 
     assert calls["auth"] == 1
-    assert record["status"] == "invalid_credentials_anonymous"
-    assert record["provided_credentials_ok"] is False
-    assert record["credential_verdict"] == "rejected"
+    assert record["status"] == "open_no_auth"
+    assert record["provided_credentials_ok"] is None
+    assert record["credential_verdict"] == "unverified_anonymous"
     assert record["auth_required"] is False
     rendered = _format_record(record, "txt")
-    assert "[-] admin:admin" in rendered
+    assert "[*] credential verification inconclusive" in rendered
     assert "(auth required:False)" in zookeeper_stage._format_detect_record(record, "txt")
     assert any("/clickhouse:<Access Denied>" in line for line in _format_znodes_detail_records(record, "txt"))
 
@@ -1690,7 +1692,7 @@ def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(mo
     assert "[-] admin:wrong" in line
 
 
-def test_audit_zookeeper_auth_eof_with_required_auth_is_reported_as_auth_failure(
+def test_audit_zookeeper_auth_eof_with_required_auth_is_unverified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = {"auth": 0}
@@ -1738,10 +1740,10 @@ def test_audit_zookeeper_auth_eof_with_required_auth_is_reported_as_auth_failure
     assert calls["auth"] == 1
     assert record["status"] == "auth_required"
     assert record["auth_required"] is True
-    assert record["provided_credentials_ok"] is False
-    assert str(record["error"]).lower().startswith("authentication failed:")
+    assert record["provided_credentials_ok"] is None
+    assert str(record["error"]).lower() == "unexpected eof"
     line = _format_record(record, "txt")
-    assert "[-] admin:wrong" in line
+    assert "[*] credential verification inconclusive" in line
 
 
 def test_format_record_shows_zookeeper_password_for_valid_credentials() -> None:
@@ -1953,7 +1955,7 @@ def test_audit_zookeeper_sasl_required_after_digest_is_unsupported(monkeypatch) 
     assert record["auth_mechanism"] == "sasl"
     assert record["verification_capability"] == "unsupported"
     rendered = _format_record(record, "txt")
-    assert "[!] admin:admin (unsupported:SASL)" in rendered
+    assert "[*] digest credential verification unsupported: SASL required" in rendered
     assert "connection failed" not in rendered
 
 
@@ -2019,7 +2021,7 @@ def test_format_record_shows_single_unverified_explicit_credential() -> None:
         "credential_verdict": "unverified_anonymous",
     }
 
-    assert _format_record(record, "txt") == ""
+    assert "[*] credential verification inconclusive" in _format_record(record, "txt")
 
 
 def test_format_record_does_not_repeat_auth_required_without_credentials() -> None:
@@ -2679,9 +2681,13 @@ def test_zookeeper_verification_unavailable_is_one_aggregate_line() -> None:
     lines = lifecycle_actions._format_credential_verification_records(record, "txt")
     assert len(lines) == 1
     assert lines[0].endswith(
-        "[!] credential verification unavailable: no protected znode found; use --znode <protected-path>"
+        "[*] credential verification unavailable: no protected znode found; use --znode <protected-path>"
     )
     assert lifecycle_actions._format_credential_verification_records(record, "json") == []
+
+    record["credential_attempts_skipped"] = 27
+    skipped_line = lifecycle_actions._format_credential_verification_records(record, "txt")[0]
+    assert "27 pair(s) not attempted" in skipped_line
 
 
 def test_zookeeper_detect_finds_protected_direct_child_as_exact_verifier(
@@ -2720,6 +2726,72 @@ def test_zookeeper_detect_finds_protected_direct_child_as_exact_verifier(
     assert record["credential_verification_status"] == "available"
     assert record["credential_verification_path"] == "/protected"
     assert record["anonymous_auth_probe_results"]["/protected"] == "noauth"
+
+
+def test_zookeeper_detect_finds_protected_grandchild_without_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeClient:
+        selected_transport = "plaintext"
+
+        def connect(self) -> None:
+            return
+
+        def get_children2(self, path: str):
+            calls.append(path)
+            if path == "/":
+                return ["public"], _ZK_ERR_OK, {}
+            if path == "/public":
+                return ["secure"], _ZK_ERR_OK, {}
+            if path == "/public/secure":
+                return None, _ZK_ERR_NOAUTH, None
+            return None, _ZK_ERR_NONODE, None
+
+        def close(self) -> None:
+            return
+
+    state = lifecycle_actions.ZooKeeperLifecycleState()
+    monkeypatch.setattr(lifecycle_actions, "_zookeeper_lifecycle_client", lambda *_args, **_kwargs: FakeClient())
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(timeout=0.1, retries=0, defcreds=True, username=None, password=None),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+    )
+
+    record = lifecycle_actions.detect_zookeeper(ctx, _lifecycle_options())
+
+    assert record["credential_verification_status"] == "available"
+    assert record["credential_verification_path"] == "/public/secure"
+    assert record["anonymous_auth_probe_results"]["/public/secure"] == "noauth"
+    assert calls.count("/public/secure") == 1
+
+
+def test_zookeeper_denied_digest_pair_reports_access_not_password_validity() -> None:
+    record = {
+        "module": "zookeeper",
+        "host": "127.0.0.1",
+        "port": 2181,
+        "anonymous_auth_probe_results": {"/": "ok", "/public/secure": "noauth"},
+        "attempted_credentials": [
+            {
+                "username": "admin",
+                "password": "wrong",
+                "provided_credentials_ok": None,
+                "credential_verdict": "unverified_anonymous",
+                "credential_auth_probe_results": {"/": "ok", "/public/secure": "noauth"},
+            }
+        ],
+    }
+
+    lines = lifecycle_actions._format_credential_attempts_records(record, "txt")
+
+    assert len(lines) == 1
+    assert "[-] admin:wrong (no access to tested znodes)" in lines[0]
+    assert lifecycle_actions._format_credential_attempts_records(record, "json") == []
 
 
 def test_detail_entry_and_auth_probe_helpers() -> None:
@@ -3313,7 +3385,8 @@ def test_audit_host_additional_branches(monkeypatch: pytest.MonkeyPatch) -> None
         query_znode=None,
         max_znodes=100,
     )
-    assert rec["status"] == "fail"
+    assert rec["status"] == "auth_required"
+    assert rec["provided_credentials_ok"] is None
     assert rec["error"] == "digest transport failed"
 
     class _QueryDumpClient:
@@ -3529,12 +3602,9 @@ def test_audit_host_auth_digest_edge_branches(monkeypatch: pytest.MonkeyPatch) -
         query_znode=None,
         max_znodes=100,
     )
-    # D3 fix: anon=NOAUTH + post-auth=NOAUTH is ambiguous — could be "auth
-    # applied to a valid low-privilege principal" or "creds silently rejected".
-    # We now probe /zookeeper (world-readable on default ZK) to disambiguate.
-    # In this fake every read returns NOAUTH, so /zookeeper NOAUTH means creds
-    # were silently rejected → provided_credentials_ok=False (was True prior).
-    assert rec["provided_credentials_ok"] is False
+    # An unchanged denial cannot distinguish a wrong digest from a valid
+    # identity lacking this znode's ACL permission.
+    assert rec["provided_credentials_ok"] is None
 
     class _AuthDigestFailsWithoutErrorClient:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -3566,7 +3636,9 @@ def test_audit_host_auth_digest_edge_branches(monkeypatch: pytest.MonkeyPatch) -
         max_znodes=100,
     )
     assert rec["status"] == "auth_required"
-    assert rec["error"] == "authentication failed"
+    assert rec["provided_credentials_ok"] is None
+    assert rec["credential_verdict"] == "unverified"
+    assert rec["error"] == "digest authentication response was inconclusive"
 
 
 def test_audit_host_session_auth_policy_is_not_retried_after_digest(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3626,8 +3698,8 @@ def test_audit_host_session_auth_policy_is_not_retried_after_digest(monkeypatch:
         query_znode=None,
         max_znodes=100,
     )
-    assert rec["status"] == "auth_required"
-    assert rec["provided_credentials_ok"] is False
+    assert rec["status"] == "open_no_auth"
+    assert rec["provided_credentials_ok"] is None
     assert rec["attempts"] == 1
 
 
@@ -5288,6 +5360,52 @@ def test_lifecycle_digest_is_verified_by_non_root_access_transition(
     assert record["credential_auth_probe_results"] == {"/": "ok", "/secure": "ok"}
 
 
+def test_lifecycle_digest_retries_transient_protected_path_before_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instances: list[object] = []
+
+    class Client:
+        def __init__(self) -> None:
+            self.index = len(instances)
+            instances.append(self)
+
+        def connect(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        def auth_digest(self, _username: str, _password: str) -> tuple[bool, None]:
+            return True, None
+
+        def get_children2(self, path: str):
+            if path == "/protected" and self.index == 0:
+                raise TimeoutError("protected read timed out")
+            return [], _ZK_ERR_OK, {}
+
+    state = lifecycle_actions.ZooKeeperLifecycleState(
+        root_err=_ZK_ERR_OK,
+        auth_required=False,
+        anonymous_auth_probe_results={"/": _ZK_ERR_OK, "/protected": _ZK_ERR_NOAUTH},
+    )
+    monkeypatch.setattr(lifecycle_actions, "_zookeeper_lifecycle_client", lambda *_args, **_kwargs: Client())
+    monkeypatch.setattr(lifecycle_actions, "_retry_delay", lambda _attempt: 0)
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=1, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username="user", password="pass", source="provided"),
+    )
+
+    record = lifecycle_actions.authenticate_zookeeper(ctx, {"status": "open_no_auth"}, _lifecycle_options())
+
+    assert len(instances) == 2
+    assert record["provided_credentials_ok"] is True
+    assert record["credential_verdict"] == "valid"
+
+
 def test_lifecycle_digest_transport_failure_is_unverified_not_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5860,7 +5978,8 @@ def test_zookeeper_defcreds_checks_full_catalog_after_late_digest_success(
     rendered = lifecycle_actions._format_credential_attempts_records(record, "txt")
     assert len(rendered) == len(lifecycle_stage._DEFAULT_CREDENTIALS)
     assert any("[+] zk:zookeeper" in line for line in rendered)
-    assert any("[-] root:rootpass" in line for line in rendered)
+    assert any("[-] root:rootpass (no access to tested znodes)" in line for line in rendered)
+    assert all("[!]" not in line for line in rendered)
 
 
 def test_zookeeper_credential_attempt_renderer_distinguishes_rejected_and_unverified() -> None:
@@ -5896,8 +6015,82 @@ def test_zookeeper_credential_attempt_renderer_distinguishes_rejected_and_unveri
     rendered = lifecycle_actions._format_credential_attempts_records(record, "txt")
 
     assert any("[-] bad:secret" in line for line in rendered)
-    assert not any("sasl:secret" in line for line in rendered)
-    assert not any("network:secret" in line for line in rendered)
+    assert any("1 credential check(s) inconclusive" in line for line in rendered)
+    assert any("digest verification unsupported: SASL required (1 pair(s))" in line for line in rendered)
+    assert not any("sasl:secret" in line or "network:secret" in line for line in rendered)
+
+
+def test_single_attempt_is_visible_after_anonymous_fallback() -> None:
+    record = {
+        "module": "keeper",
+        "host": "127.0.0.1",
+        "port": 9181,
+        "status": "open_no_auth",
+        "attempted_credentials": [
+            {
+                "username": "admin",
+                "password": "admin",
+                "provided_credentials_ok": None,
+                "credential_verdict": "unverified",
+            }
+        ],
+    }
+
+    assert lifecycle_actions._format_record(record, "txt") == ""
+    assert lifecycle_actions._format_credential_attempts_records(record, "txt") == [
+        "KEEPER      \t127.0.0.1\t9181\t [*] 1 credential check(s) inconclusive; see --debug/JSON"
+    ]
+
+
+@given(
+    st.lists(
+        st.tuples(
+            st.sampled_from((_ZK_ERR_OK, _ZK_ERR_NOAUTH)),
+            st.sampled_from((_ZK_ERR_OK, _ZK_ERR_NOAUTH, None)),
+        ),
+        min_size=1,
+        max_size=24,
+    )
+)
+def test_digest_verdict_requires_access_transition_or_explicit_rejection(
+    codes: list[tuple[int, int | None]],
+) -> None:
+    anonymous = {f"/node-{index}": before for index, (before, _after) in enumerate(codes)}
+    authenticated = {f"/node-{index}": after for index, (_before, after) in enumerate(codes)}
+    verdict = lifecycle_actions._credential_probe_verdict(anonymous, authenticated)
+    expected_transition = any(before == _ZK_ERR_NOAUTH and after == _ZK_ERR_OK for before, after in codes)
+
+    assert verdict != "rejected"
+    assert (verdict == "valid") is expected_transition
+
+
+@given(st.lists(st.sampled_from(("valid", "rejected", "unverified", "unsupported_sasl")), min_size=2, max_size=40))
+def test_digest_attempts_render_definite_results_and_count_inconclusive(verdicts: list[str]) -> None:
+    attempts = [
+        {
+            "username": f"user{index}",
+            "password": f"pass{index}",
+            "status": "weak_default_creds" if verdict == "valid" else "auth_required",
+            "provided_credentials_ok": True if verdict == "valid" else False if verdict == "rejected" else None,
+            "credential_verdict": verdict,
+        }
+        for index, verdict in enumerate(verdicts)
+    ]
+    record = {"module": "zookeeper", "host": "127.0.0.1", "port": 2181, "attempted_credentials": attempts}
+    lines = lifecycle_actions._format_credential_attempts_records(record, "txt")
+
+    definite = [(index, verdict) for index, verdict in enumerate(verdicts) if verdict in {"valid", "rejected"}]
+    inconclusive = verdicts.count("unverified")
+    unsupported = verdicts.count("unsupported_sasl")
+    assert len(lines) == len(definite) + bool(inconclusive) + bool(unsupported)
+    for line, (index, verdict) in zip(lines, definite, strict=False):
+        marker = "[+]" if verdict == "valid" else "[-]"
+        assert f"{marker} user{index}:pass{index}" in line
+    if inconclusive:
+        assert any(f"{inconclusive} credential check(s) inconclusive" in line for line in lines)
+    if unsupported:
+        assert any(f"digest verification unsupported: SASL required ({unsupported} pair(s))" in line for line in lines)
+    assert all("[!]" not in line for line in lines)
 
 
 def test_zookeeper_credential_attempt_renderer_attaches_capabilities_only_to_selected_success() -> None:
@@ -5973,3 +6166,4 @@ def test_zookeeper_anonymous_access_checks_defcreds_then_uses_anonymous_data(
     assert record["status"] == "open_no_auth"
     assert record["attempted_credentials"] == []
     assert record["credential_verification_status"] == "unavailable"
+    assert record["credential_attempts_skipped"] == len(lifecycle_stage._DEFAULT_CREDENTIALS)

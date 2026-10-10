@@ -206,6 +206,36 @@ def _records(text: str) -> list[dict[str, Any]]:
     return [value for line in text.splitlines() if line.startswith("{") if isinstance(value := json.loads(line), dict)]
 
 
+def test_http_connection_reused_across_keycloak_phases(capsys: pytest.CaptureFixture[str]) -> None:
+    class KeepAliveHandler(_KeycloakHandler):
+        protocol_version = "HTTP/1.1"
+        calls: list[tuple[str, str]] = []
+        connections = 0
+
+        def setup(self) -> None:
+            super().setup()
+            type(self).connections += 1
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), KeepAliveHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        target = f"http://127.0.0.1:{server.server_port}"
+        assert main(["keycloak", "-t", target, "--token", "valid-token", "--show-realms", "--no-color"]) == 0
+        output = capsys.readouterr().out
+        assert "Keycloak (auth required:True)" in output
+        assert "Bearer token accepted" in output
+        assert "Realm Name=master" in output
+        assert len(KeepAliveHandler.calls) >= 7
+        assert KeepAliveHandler.connections == 1
+        assert not any(auth for path, auth in KeepAliveHandler.calls if "/.well-known/" in path)
+        assert any(auth == "Bearer valid-token" for path, auth in KeepAliveHandler.calls if path == "/admin/realms")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_confirmed_realm_and_token_enumeration(
     keycloak_server: tuple[str, type[_KeycloakHandler]], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -338,6 +368,11 @@ def test_keycloak_output_colors_follow_airflow_baseline() -> None:
     assert "<bright_green>clients:0</bright_green>" in console.lines[3]
     assert "<white>CVE's Enumeration</white>" in console.lines[4]
     assert "<orange>CVE-2026-11800 potentially affected" in console.lines[5]
+    console.lines.clear()
+    assert _render_colored_keycloak_line(
+        console, "KEYCLOAK\th\t8080\t [*] Keycloak (auth required:True) (realm:master) (version:-)"
+    )
+    assert "<orange>realm:master</orange>" in console.lines[0]
 
 
 def test_keycloak_settings_colors_follow_airflow_baseline() -> None:

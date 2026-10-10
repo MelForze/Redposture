@@ -30,6 +30,7 @@ from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
 from ...rendering import BooleanColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...scheduler import NestedSchedulerCancelled
 from ...stage_runtime import (
     StageTelemetryBuilder,
     format_retry_decision,
@@ -1260,6 +1261,8 @@ def _audit_proxmox_host(
 
         def fetch_nested(path: str) -> tuple[int, bytes, dict[str, str], str | None]:
             nonlocal discover_limit_reason
+            if bool(getattr(_nested_scheduler, "cancelled", False)):
+                raise NestedSchedulerCancelled("Proxmox discovery cancelled")
             with result_lock:
                 if discover_limit_reason is not None or (
                     discover_deadline is not None and time.monotonic() >= discover_deadline
@@ -1272,6 +1275,8 @@ def _audit_proxmox_host(
             if _transport_pool is not None:
                 activate_proxmox_transport(_transport_pool, _origin_state)
             try:
+                if bool(getattr(_nested_scheduler, "cancelled", False)):
+                    raise NestedSchedulerCancelled("Proxmox discovery cancelled")
                 return perform_request(path)
             finally:
                 if _transport_pool is not None:

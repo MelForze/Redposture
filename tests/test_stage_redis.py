@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +12,7 @@ from redposture_core.cli_args import parse_args
 from redposture_core.modules.redis import actions as redis_actions
 from redposture_core.modules.redis import policy as redis_policy
 from redposture_core.modules.redis import stage as redis_module_stage
-from redposture_core.stage_runtime import AuditCommandRunner
+from redposture_core.stage_runtime import AuditCommandRunner, AuditCredentialRun, AuditHookContext
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
@@ -46,6 +47,51 @@ class _DummySocket:
 
     def settimeout(self, timeout: float) -> None:
         _ = timeout
+
+
+def test_redis_spray_reads_version_and_key_count_after_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = redis_actions.RedisAuditLifecycleState(
+        host="localhost",
+        port=6379,
+        timeout=1.0,
+        retries=0,
+        debug=False,
+        debug_emit=None,
+        started=time.monotonic(),
+        sock=_DummySocket(),
+        is_redis=True,
+        auth_required=True,
+        status="auth_required",
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        redis_actions,
+        "_check_provided_credentials",
+        lambda *_args, **_kwargs: (calls.append("AUTH") or True, None),
+    )
+    monkeypatch.setattr(
+        redis_actions,
+        "_send_cmd",
+        lambda _sock, *args: (calls.append(" ".join(args)) or "bulk", "redis_version:7.2.4\r\n"),
+    )
+    monkeypatch.setattr(
+        redis_actions,
+        "_count_redis_keys",
+        lambda _sock: (calls.append("DBSIZE") or 9, None),
+    )
+    ctx = AuditHookContext(
+        SimpleNamespace(_spray_capabilities=True, enum_cve=False, defcreds=False),
+        None,
+        "localhost",
+        6379,
+        AuditCredentialRun("redis", "secret", source="provided"),
+        lifecycle_state=state,
+    )
+    authenticated = redis_actions.redis_auth_hook(ctx, AuditRecord.from_mapping({"status": "auth_required"}))
+    data = redis_actions.redis_data_hook(ctx, authenticated)
+    assert calls == ["AUTH", "INFO SERVER", "DBSIZE"]
+    assert data.extra["server_version"] == "7.2.4"
+    assert data.extra["key_count"] == 9
 
 
 class _ReadSocket(_DummySocket):

@@ -5586,6 +5586,63 @@
         "https://nvd.nist.gov/vuln/detail/CVE-2026-11800"
       ],
       "verified_at": "2026-10-05"
+    },
+    {
+      "id": "CVE-2024-23897",
+      "product": "jenkins",
+      "title": "Jenkins CLI arbitrary file read with possible controller compromise",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "file_read",
+      "affected": [
+        {"fixed": "2.426.3"},
+        {"introduced": "2.427", "fixed": "2.440.1"},
+        {"introduced": "2.441", "fixed": "2.442"}
+      ],
+      "references": [
+        "https://www.jenkins.io/security/advisory/2024-01-24/#SECURITY-3314",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-23897"
+      ],
+      "verified_at": "2026-10-08",
+      "published_at": "2024-01-24"
+    },
+    {
+      "id": "CVE-2026-53435",
+      "product": "jenkins",
+      "title": "Jenkins deserialization leading to identity impersonation and possible code execution",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {"fixed": "2.555.3"},
+        {"introduced": "2.556", "fixed": "2.568"}
+      ],
+      "references": [
+        "https://www.jenkins.io/security/advisory/2026-06-10/#SECURITY-3707",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-53435"
+      ],
+      "verified_at": "2026-10-08",
+      "published_at": "2026-06-10"
+    },
+    {
+      "id": "CVE-2026-84669",
+      "product": "jenkins_plugin_allure",
+      "title": "Jenkins Allure Plugin path traversal allowing controller file read",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "file_read",
+      "affected": [
+        {"fixed": "2.36.0"}
+      ],
+      "references": [
+        "https://www.jenkins.io/security/advisory/2026-09-02/#SECURITY-3645",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-84669"
+      ],
+      "verified_at": "2026-10-08",
+      "published_at": "2026-09-02"
     }
   ]
 }

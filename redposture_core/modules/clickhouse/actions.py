@@ -200,14 +200,16 @@ def _ch_transport_kwargs(
 
 def _ch_transport_from_context(ctx: Any) -> tuple[_ChTlsConfig | None, Any | None]:
     args = ctx.args
+    target = getattr(ctx, "target", None)
+    target_scheme = str(getattr(target, "scheme", "") or "").lower()
     tls = _ChTlsConfig(
-        enabled=bool(getattr(args, "tls", False)),
+        enabled=bool(getattr(args, "tls", False)) or target_scheme == "https",
         verify=bool(getattr(args, "tls_ca", None)),
         ca_file=getattr(args, "tls_ca", None),
         cert_file=getattr(args, "tls_cert", None),
         key_file=getattr(args, "tls_key", None),
         server_name=getattr(args, "tls_server_name", None),
-        proxy_path=infer_http_base_path(str(getattr(getattr(ctx, "target", None), "path", "") or "")),
+        proxy_path=infer_http_base_path(str(getattr(target, "path", "") or "")),
     )
     proxy = getattr(args, "_proxy_config", getattr(args, "proxy", None))
     return tls, proxy
@@ -1862,6 +1864,11 @@ def detect_clickhouse(
         return last_result, max_attempts
 
     requested_protocol = str(options["protocol"] or "native").lower()
+    target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
+    if target_scheme in {"http", "https"} and not bool(
+        getattr(ctx.args, "_clickhouse_protocol_explicit", False) or getattr(ctx.args, "http", False)
+    ):
+        requested_protocol = "http"
     protocol_order = _protocol_attempt_order(requested_protocol, int(ctx.port))
     primary_protocol = protocol_order[0]
     probe, used_attempts = _probe_protocol(primary_protocol)

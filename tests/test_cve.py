@@ -70,7 +70,7 @@ def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
 
 def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
     counts = Counter(entry["product"] for entry in load_catalog().entries)
-    assert len(load_catalog().entries) == 200
+    assert len(load_catalog().entries) == 203
     assert counts == {
         "apache_airflow": 11,
         "apache_zookeeper": 2,
@@ -86,6 +86,8 @@ def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
         "hashicorp_consul": 1,
         "kubernetes": 1,
         "keycloak": 3,
+        "jenkins": 2,
+        "jenkins_plugin_allure": 1,
         "minio": 5,
         "mongodb": 7,
         "nexus_repository": 10,
@@ -99,7 +101,7 @@ def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
         "valkey": 3,
     }
     assert Counter(entry["impact"] for entry in load_catalog().entries)["ssrf"] == 32
-    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 95, "L": 103, "H": 2}
+    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 96, "L": 105, "H": 2}
 
 
 @pytest.mark.parametrize(

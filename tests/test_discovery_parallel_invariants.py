@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pytest
@@ -107,3 +108,134 @@ def test_dynamic_discovery_followups_are_coordinator_owned_and_deterministic(wor
     assert sorted((chunk.table, chunk.start) for chunk in completed) == [
         (table, start) for table in ("fast", "slow") for start in range(0, 30, 5)
     ]
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_slow_discovery_target_does_not_block_another_target(dynamic: bool) -> None:
+    scheduler = SharedNestedScheduler(max_workers=2)
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+    fast_finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def run(items: range | list[int], worker: Callable[[int], int], key: str) -> list[tuple[int, int]]:
+        if not dynamic:
+            return list(scheduler.iter_completed(items, worker, key=key, per_key_limit=1))
+        completed: list[tuple[int, int]] = []
+        scheduler.run_dynamic(
+            items,
+            worker,
+            lambda item, result: completed.append((item, result)),
+            key=key,
+            per_key_limit=1,
+        )
+        return completed
+
+    def slow_worker(index: int) -> int:
+        if index == 0:
+            slow_started.set()
+            assert release_slow.wait(3)
+        return index
+
+    def slow_discovery() -> None:
+        try:
+            assert run(range(2), slow_worker, "slow") == [
+                (0, 0),
+                (1, 1),
+            ]
+        except BaseException as exc:  # noqa: BLE001 - return worker-thread failures to the test
+            errors.append(exc)
+
+    def fast_discovery() -> None:
+        try:
+            assert run([0], lambda value: value, "fast") == [(0, 0)]
+            fast_finished.set()
+        except BaseException as exc:  # noqa: BLE001 - return worker-thread failures to the test
+            errors.append(exc)
+
+    slow_thread = threading.Thread(target=slow_discovery)
+    fast_thread = threading.Thread(target=fast_discovery)
+    slow_thread.start()
+    try:
+        assert slow_started.wait(1), errors
+        fast_thread.start()
+        assert fast_finished.wait(0.5), "the slow target occupied both nested workers"
+    finally:
+        release_slow.set()
+        slow_thread.join(timeout=3)
+        if fast_thread.ident is not None:
+            fast_thread.join(timeout=3)
+        scheduler.close()
+    assert not slow_thread.is_alive() and not fast_thread.is_alive()
+    assert not errors
+
+
+def test_minio_live_finding_from_fast_target_arrives_while_other_target_is_stalled() -> None:
+    scheduler = SharedNestedScheduler(max_workers=16)
+    release_slow = threading.Event()
+    slow_started = threading.Event()
+    fast_finding = threading.Event()
+    errors: list[BaseException] = []
+    started_count = 0
+    started_lock = threading.Lock()
+
+    class BlockingClient(_RangeClient):
+        def get_object_range(self, bucket: str, key: str, *, start: int, length: int, signed: bool) -> MinioResponse:
+            nonlocal started_count
+            with started_lock:
+                started_count += 1
+                if started_count == 8:
+                    slow_started.set()
+            assert release_slow.wait(3)
+            assert signed is True
+            body = self.bodies[key]
+            if start >= len(body):
+                return MinioResponse(416, {}, b"", error=S3Error(416, "InvalidRange", ""))
+            return MinioResponse(206, {}, body[start : start + length])
+
+    slow_bodies = {f"{index}.env": f"password=SlowSecret-{index:02d}".encode() for index in range(16)}
+    slow_objects = [ObjectInfo(bucket="slow", key=key, size=len(body)) for key, body in slow_bodies.items()]
+    fast_body = b"password=FastSecret-2026"
+    fast_objects = [ObjectInfo(bucket="fast", key="0.env", size=len(fast_body))]
+
+    def slow_discovery() -> None:
+        try:
+            result = discover_secrets(
+                BlockingClient(slow_bodies),
+                slow_objects,
+                budget=Budget(max_total_bytes=None, chunk_size=128),
+                nested_scheduler=scheduler,
+                scheduler_key="slow",
+            )
+            assert result.objects_scanned == 16
+        except BaseException as exc:  # noqa: BLE001 - return worker-thread failures to the test
+            errors.append(exc)
+
+    def fast_discovery() -> None:
+        try:
+            result = discover_secrets(
+                _RangeClient({"0.env": fast_body}),
+                fast_objects,
+                on_finding=lambda _finding: fast_finding.set(),
+                nested_scheduler=scheduler,
+                scheduler_key="fast",
+            )
+            assert result.objects_scanned == 1
+        except BaseException as exc:  # noqa: BLE001 - return worker-thread failures to the test
+            errors.append(exc)
+
+    slow_thread = threading.Thread(target=slow_discovery)
+    fast_thread = threading.Thread(target=fast_discovery)
+    slow_thread.start()
+    try:
+        assert slow_started.wait(1), errors
+        fast_thread.start()
+        assert fast_finding.wait(0.5), "fast discovery finding was delayed by another target"
+    finally:
+        release_slow.set()
+        slow_thread.join(timeout=3)
+        if fast_thread.ident is not None:
+            fast_thread.join(timeout=3)
+        scheduler.close()
+    assert not slow_thread.is_alive() and not fast_thread.is_alive()
+    assert not errors

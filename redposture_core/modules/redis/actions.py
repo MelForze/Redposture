@@ -176,7 +176,12 @@ def _redis_server_identity(response_type: str, response_value: Any) -> tuple[str
 def _capture_redis_server_identity(state: RedisAuditLifecycleState) -> None:
     if state.sock is None:
         return
-    response_type, response_value = _send_cmd(state.sock, "INFO", "SERVER")
+    try:
+        response_type, response_value = _send_cmd(state.sock, "INFO", "SERVER")
+    except (OSError, ValueError, ConnectionError):
+        # INFO is advisory; a denied or interrupted version read must not
+        # change the result of an already verified AUTH exchange.
+        return
     implementation, version = _redis_server_identity(response_type, response_value)
     if implementation and version:
         state.implementation = implementation
@@ -734,7 +739,7 @@ def redis_detect_hook(ctx: Any) -> AuditRecord:
                 state.auth_required = False
                 state.status = "open_no_auth"
                 state.error = None
-                if bool(getattr(ctx.args, "enum_cve", False)):
+                if bool(getattr(ctx.args, "enum_cve", False)) or bool(getattr(ctx.args, "_spray_capabilities", False)):
                     _capture_redis_server_identity(state)
                 return _redis_lifecycle_record(state, include_data=False)
             if ping_type == "error":
@@ -801,7 +806,9 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
                 if default_ok:
                     state.status = "weak_default_creds"
                     state.error = None
-                    if bool(getattr(ctx.args, "enum_cve", False)):
+                    if bool(getattr(ctx.args, "enum_cve", False)) or bool(
+                        getattr(ctx.args, "_spray_capabilities", False)
+                    ):
                         _capture_redis_server_identity(state)
                     if not exhaustive_credentials:
                         state.active_username = credential.username
@@ -835,7 +842,7 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
             if provided_ok:
                 state.status = "valid_credentials"
                 state.error = None
-                if bool(getattr(ctx.args, "enum_cve", False)):
+                if bool(getattr(ctx.args, "enum_cve", False)) or bool(getattr(ctx.args, "_spray_capabilities", False)):
                     _capture_redis_server_identity(state)
                 if not exhaustive_credentials:
                     state.active_username = credential.username

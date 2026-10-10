@@ -18,6 +18,7 @@ from .cli_modules.exporters import configure_collect_parser, configure_scan_pars
 from .cli_modules.gitlab import configure_gitlab_parser
 from .cli_modules.grafana import configure_grafana_parser
 from .cli_modules.grpc import configure_grpc_parser
+from .cli_modules.jenkins import configure_jenkins_parser
 from .cli_modules.keeper import configure_keeper_parser
 from .cli_modules.keycloak import configure_keycloak_parser
 from .cli_modules.kubeapi import configure_kubeapi_parser
@@ -50,6 +51,7 @@ COMMAND_ETCD = "etcd"
 COMMAND_PROXMOX = "proxmox"
 COMMAND_GRAFANA = "grafana"
 COMMAND_KEYCLOAK = "keycloak"
+COMMAND_JENKINS = "jenkins"
 COMMAND_GITLAB = "gitlab"
 COMMAND_CONSUL = "consul"
 COMMAND_QDRANT = "qdrant"
@@ -125,6 +127,7 @@ _STAGE_RUNNER_MODULES: dict[str, str] = {
     COMMAND_PROXMOX: "redposture_core.modules.proxmox.stage",
     COMMAND_GRAFANA: "redposture_core.modules.grafana.stage",
     COMMAND_KEYCLOAK: "redposture_core.modules.keycloak.stage",
+    COMMAND_JENKINS: "redposture_core.modules.jenkins.stage",
     COMMAND_GITLAB: "redposture_core.modules.gitlab.stage",
     COMMAND_CONSUL: "redposture_core.modules.consul.stage",
     COMMAND_QDRANT: "redposture_core.modules.qdrant.stage",
@@ -286,6 +289,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Audit Keycloak realm exposure, token access, and visible clients.",
         runner_attr="run_keycloak_stage",
         configure_parser=_make_configurator(configure_keycloak_parser, _HTTP_MODULE_HELPERS),
+    ),
+    CommandSpec(
+        name=COMMAND_JENKINS,
+        help="Audit Jenkins access, jobs, builds, plugins, and CVEs.",
+        runner_attr="run_jenkins_stage",
+        configure_parser=_make_configurator(configure_jenkins_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_PROXMOX,
@@ -529,6 +538,7 @@ __all__ = [
     "COMMAND_GRAFANA",
     "COMMAND_GRPC",
     "COMMAND_KAFKA",
+    "COMMAND_JENKINS",
     "COMMAND_KUBEAPI",
     "COMMAND_LISTEN",
     "COMMAND_MINIO",

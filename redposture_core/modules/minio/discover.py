@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...clients.minio_api import MinioClient
+from ...scheduler import NestedSchedulerCancelled
 from ...secret_detection import mask_secret, scan_value
 from .enumerate import ObjectInfo
 
@@ -147,6 +148,7 @@ def _read_and_scan(
     result: DiscoverResult,
     seen: set[tuple[Any, ...]],
     on_finding: Callable[[dict[str, Any]], None] | None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> bool:
     """Read one object in ranged chunks and scan each. Large objects are read in
     `chunk_size` ranged reads up to `max_object_size` (never skipped), with overlap so
@@ -157,6 +159,8 @@ def _read_and_scan(
     carry = ""
     read_any = False
     while budget.max_object_size is None or object_read < budget.max_object_size:
+        if cancelled is not None and cancelled():
+            raise NestedSchedulerCancelled("MinIO discovery cancelled")
         if budget.expired():
             result._partial("timeout")
             return False
@@ -272,7 +276,15 @@ def discover_secrets(
     def scan_object(item: tuple[int, ObjectInfo]) -> DiscoverResult:
         _index, obj = item
         local = DiscoverResult()
-        _read_and_scan(client, obj, budget, local, set(), None)
+        _read_and_scan(
+            client,
+            obj,
+            budget,
+            local,
+            set(),
+            None,
+            cancelled=(lambda: bool(getattr(nested_scheduler, "cancelled", False))) if nested_scheduler else None,
+        )
         return local
 
     def merge(local: DiscoverResult) -> None:

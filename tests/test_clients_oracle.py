@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import os
+import socket
+import threading
 from typing import Any
+from unittest.mock import patch
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from redposture_core.clients.oracle import (
     OracleAuditClient,
@@ -21,6 +27,7 @@ from redposture_core.clients.oracle import (
     parse_listener_dump,
     parse_tns_packet,
     tns_listener_command,
+    tns_service_fingerprint,
 )
 
 
@@ -199,6 +206,89 @@ def test_tns_recv_and_listener_command_success_and_error(monkeypatch) -> None:
     assert _oracle_sql_identifier('"bad') is None
     assert _oracle_sql_identifier('"weird""name"') == '"weird""name"'
     assert _oracle_sql_identifier("bad-name") is None
+
+
+@settings(max_examples=int(os.getenv("REDPOSTURE_SPRAY_FUZZ_EXAMPLES", "250")), deadline=None)
+@given(
+    packet_type=st.integers(min_value=0, max_value=255),
+    reserved=st.integers(min_value=0, max_value=255),
+    payload=st.binary(min_size=0, max_size=256),
+    chunk_size=st.integers(min_value=1, max_value=32),
+    truncate=st.booleans(),
+)
+def test_tns_service_fingerprint_frames_are_bounded_and_specific(
+    packet_type: int, reserved: int, payload: bytes, chunk_size: int, truncate: bool
+) -> None:
+    length = len(payload) + 8
+    frame = length.to_bytes(2, "big") + b"\x00\x00" + bytes((packet_type, reserved)) + b"\x00\x00" + payload
+    if truncate and frame:
+        frame = frame[:-1]
+
+    class Socket:
+        def __init__(self) -> None:
+            self.remaining = frame
+            self.closed = False
+
+        def settimeout(self, _value: float) -> None:
+            pass
+
+        def sendall(self, data: bytes) -> None:
+            assert b"SERVICE_NAME=FREEPDB1" in data
+
+        def recv(self, size: int) -> bytes:
+            out = self.remaining[: min(size, chunk_size)]
+            self.remaining = self.remaining[len(out) :]
+            return out
+
+        def close(self) -> None:
+            self.closed = True
+
+    sock = Socket()
+    expected = packet_type in {2, 4, 5} and reserved == 0 and len(payload) >= 2 and not truncate
+    with patch("redposture_core.clients.oracle.socket.create_connection", return_value=sock):
+        assert tns_service_fingerprint("db.local", 1521, service="FREEPDB1") is expected
+    assert sock.closed
+
+
+def test_tns_service_fingerprint_rejects_invalid_target_without_connection(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.clients.oracle.socket.create_connection",
+        lambda *_a, **_k: pytest.fail("invalid descriptor must not open a socket"),
+    )
+    assert not tns_service_fingerprint("db.local", 1521, service="bad)(SERVICE_NAME=evil")
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        (b"\x00\x0c\x00\x00\x04\x00\x00\x00ERR!", True),
+        (b"HTTP/1.1 200 OK\r\n\r\n", False),
+        (b"\x00\x0c\x00\x00\x04\x00\x00\x00ERR", False),
+    ],
+)
+def test_tns_service_fingerprint_loopback_reply(reply: bytes, expected: bool) -> None:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(2)
+        port = listener.getsockname()[1]
+
+        def serve() -> None:
+            with listener.accept()[0] as connection:
+                connection.recv(4096)
+                try:
+                    for index in range(0, len(reply), 3):
+                        connection.sendall(reply[index : index + 3])
+                except OSError:
+                    pass  # A rejected foreign frame closes the client socket early.
+
+        worker = threading.Thread(target=serve)
+        worker.start()
+        try:
+            assert tns_service_fingerprint("127.0.0.1", port, service="FREEPDB1", timeout=1) is expected
+        finally:
+            worker.join(2)
+            assert not worker.is_alive()
 
 
 def test_tns_listener_command_tcps_and_recv_timeout(monkeypatch) -> None:

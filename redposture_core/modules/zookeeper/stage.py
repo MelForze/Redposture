@@ -151,7 +151,11 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
         continue_after_credential_success=exhaustive_credentials,
         continue_after_credential_error=exhaustive_credentials,
         fallback_to_anonymous_detect_record=exhaustive_credentials,
-        credential_attempt_detail_fields=("provided_credentials_ok", "credential_verdict"),
+        credential_attempt_detail_fields=(
+            "provided_credentials_ok",
+            "credential_verdict",
+            "credential_auth_probe_results",
+        ),
         suppress_undetected_records_in_text=True,
     )
 

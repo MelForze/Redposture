@@ -140,7 +140,7 @@ def test_fix_d3_marker_regression_lives_next_to_a1() -> None:
     from tests import test_code_review_regressions_abc as abc_mod
 
     assert hasattr(abc_mod, "test_zk_noauth_after_digest_does_not_become_valid_via_control_probe")
-    assert hasattr(abc_mod, "test_fix_a1d3_zk_ambiguous_noauth_pair_creds_rejected_when_zookeeper_also_denies")
+    assert hasattr(abc_mod, "test_fix_a1d3_zk_ambiguous_noauth_pair_remains_unverified_when_zookeeper_also_denies")
 
 
 # ---------------------------------------------------------------------------

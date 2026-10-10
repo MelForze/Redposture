@@ -38,8 +38,15 @@ def configure_spray_parser(
     common.add_argument("-f", "--format", dest="output_format", choices=("txt", "json"), default="txt")
     add_save_flag(common, "Write results to a private 0600 file.")
     inputs.add_argument("--pairs", metavar="file", help="One user:password per line; split on the first colon.")
-    inputs.add_argument("--users", metavar="file", help="Usernames, one per line; requires --passwords.")
-    inputs.add_argument("--passwords", metavar="file", help="Passwords, one per line; requires --users.")
+    inputs.add_argument(
+        "-u", "--users", metavar="user|file", help="Username or file (one per line; @file requires it); requires -p."
+    )
+    inputs.add_argument(
+        "-p",
+        "--passwords",
+        metavar="password|file",
+        help="Password or file (one per line; @file requires it); requires -u.",
+    )
     inputs.add_argument("--tokens", metavar="file", help="API tokens/JWTs, one per line.")
     pacing.add_argument("--origin-rate", type=_positive_float, default=2.0, metavar="per-second")
     pacing.add_argument("--account-interval", type=_positive_float, default=60.0, metavar="seconds")

@@ -12,7 +12,7 @@ def render_spray_line(console: Console, line: str, *, tag: str, spans: list[tupl
         line,
         tag=tag,
         spans=spans,
-        marker_colors={"[*]": "cyan", "[+]": "red", "[-]": "green", "[!]": "red"},
+        marker_colors={"[*]": "cyan", "[+]": "green", "[-]": "true_red", "[!]": "red"},
     )
 
 

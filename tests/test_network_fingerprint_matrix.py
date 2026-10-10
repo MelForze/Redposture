@@ -7,6 +7,7 @@ No detector, parser, is_detected predicate or transport is mocked.
 
 from __future__ import annotations
 
+import gzip
 import importlib
 import json
 import socket
@@ -36,6 +37,7 @@ HTTP_PRODUCTS = (
     "etcd",
     "gitlab",
     "grafana",
+    "jenkins",
     "keycloak",
     "kubeapi",
     "minio",
@@ -54,6 +56,7 @@ HTTP_API_SUFFIXES = {
     "etcd": "/version",
     "gitlab": "/api/v4/version",
     "grafana": "/api/health",
+    "jenkins": "/api/json",
     "keycloak": "/realms/master/.well-known/openid-configuration",
     "kubeapi": "/version",
     "minio": "/minio/health/live",
@@ -119,6 +122,17 @@ def _http_response(product: str, path: str, *, proxy_headers: bool = False, orig
         if path == "/login":
             payload = "<title>Grafana</title>"
             headers["Content-Type"] = "text/html"
+    elif product == "jenkins":
+        payload = {"name": "Jenkins"}
+        if path == "/api/json":
+            payload = {"_class": "hudson.model.Hudson", "jobs": []}
+        elif path == "/whoAmI/api/json":
+            payload = {"authenticated": False, "name": "anonymous", "authorities": ["anonymous"]}
+        elif path == "/login":
+            payload = "<form>j_username j_password Jenkins</form>"
+            headers["Content-Type"] = "text/html"
+        if not proxy_headers:
+            headers["X-Jenkins"] = "2.541.3"
     elif product == "keycloak":
         issuer = origin + "/realms/master"
         payload = {
@@ -182,6 +196,20 @@ def _http_response(product: str, path: str, *, proxy_headers: bool = False, orig
     return (
         f"HTTP/1.1 {status} {reason}\r\n" + "".join(f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
     ).encode() + body
+
+
+def _gzip_response(response: bytes) -> bytes:
+    head, separator, body = response.partition(b"\r\n\r\n")
+    assert separator
+    compressed = gzip.compress(body)
+    headers = [line for line in head.split(b"\r\n") if not line.lower().startswith(b"content-length:")]
+    return (
+        b"\r\n".join(headers)
+        + b"\r\nContent-Encoding: gzip\r\nContent-Length: "
+        + str(len(compressed)).encode()
+        + b"\r\n\r\n"
+        + compressed
+    )
 
 
 def _read_exact(sock: socket.socket, size: int) -> bytes:
@@ -339,7 +367,7 @@ class _Server(socketserver.ThreadingTCPServer):
 
 @contextmanager
 def _product_server(
-    product: str, *, proxy_headers: bool = False, prefix: str = ""
+    product: str, *, proxy_headers: bool = False, prefix: str = "", compressed: bool = False
 ) -> Iterator[tuple[int, list[bytes]]]:
     requests: list[bytes] = []
 
@@ -364,14 +392,13 @@ def _product_server(
                             b"Connection: close\r\n\r\nnot found"
                         )
                     else:
-                        self.request.sendall(
-                            _http_response(
-                                product,
-                                path[len(prefix) :] or "/",
-                                proxy_headers=proxy_headers,
-                                origin=f"http://127.0.0.1:{server.server_address[1]}{prefix}",
-                            )
+                        reply = _http_response(
+                            product,
+                            path[len(prefix) :] or "/",
+                            proxy_headers=proxy_headers,
+                            origin=f"http://127.0.0.1:{server.server_address[1]}{prefix}",
                         )
+                        self.request.sendall(_gzip_response(reply) if compressed else reply)
                 else:
                     requests.append(initial)
                     _native_response(product, self.request, initial)
@@ -432,7 +459,7 @@ def _redirect_server(
 
 
 @contextmanager
-def _fixed_http_server(status: int, body: bytes, content_type: str) -> Iterator[int]:
+def _fixed_http_server(status: int, body: bytes, content_type: str, *, compressed: bool = False) -> Iterator[int]:
     class Handler(socketserver.BaseRequestHandler):
         def handle(self) -> None:
             self.request.settimeout(0.5)
@@ -440,11 +467,12 @@ def _fixed_http_server(status: int, body: bytes, content_type: str) -> Iterator[
                 request = bytearray()
                 while b"\r\n\r\n" not in request and len(request) < 65536:
                     request.extend(self.request.recv(4096))
-                self.request.sendall(
+                reply = (
                     f"HTTP/1.1 {status} QA\r\nServer: nginx\r\nContent-Type: {content_type}\r\n"
                     f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
                     + body
                 )
+                self.request.sendall(_gzip_response(reply) if compressed else reply)
             except OSError:
                 return
 
@@ -519,7 +547,7 @@ def _detect(
 
 
 def test_wire_corpus_covers_exactly_all_audit_modules() -> None:
-    assert len(PRODUCTS) == len(set(PRODUCTS)) == 25
+    assert len(PRODUCTS) == len(set(PRODUCTS)) == 26
     assert set(PRODUCTS) == set(AUDIT_MODULE_NAMES)
 
 
@@ -534,6 +562,14 @@ def test_each_wire_fixture_has_a_real_positive_control(product: str) -> None:
 @pytest.mark.parametrize("product", HTTP_PRODUCTS)
 def test_http_product_survives_nginx_header_rewrite_on_ephemeral_port(product: str) -> None:
     with _product_server(product, proxy_headers=True) as (port, requests):
+        detected, record = _detect(product, port)
+    assert requests
+    assert detected, record
+
+
+@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+def test_http_product_detects_gzip_product_evidence(product: str) -> None:
+    with _product_server(product, proxy_headers=True, compressed=True) as (port, requests):
         detected, record = _detect(product, port)
     assert requests
     assert detected, record
@@ -688,6 +724,15 @@ def test_generic_http_and_sso_are_not_product_evidence(
     assert not detected, (module, record)
     assert record["detection_status"] in {"probable", "not_service", "transport_failure"}
     assert record["detection_signals"] == [f"{module}.probe"]
+    assert not record.get("attempted_credentials")
+    assert record["cve_enumeration"]["findings"] == []
+
+
+@pytest.mark.parametrize("module", HTTP_PRODUCTS)
+def test_gzip_generic_version_is_not_product_evidence(module: str) -> None:
+    with _fixed_http_server(200, b'{"version":"2.11.2"}', "application/json", compressed=True) as port:
+        detected, record = _detect(module, port, verify_foreign=True)
+    assert not detected, (module, record)
     assert not record.get("attempted_credentials")
     assert record["cve_enumeration"]["findings"] == []
 

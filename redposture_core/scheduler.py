@@ -20,6 +20,10 @@ _STOP = object()
 _POOL_SEQUENCE = itertools.count(1)
 
 
+class NestedSchedulerCancelled(RuntimeError):
+    """A nested audit was stopped before its active work completed."""
+
+
 @dataclass(frozen=True)
 class _Task(Generic[T]):
     index: int
@@ -258,7 +262,32 @@ class SharedNestedScheduler:
         self._limiters: dict[tuple[Any, int], threading.Semaphore] = {}
         self._lock = threading.Lock()
         self._closed = False
+        self._cancelled = threading.Event()
+        self._completions: set[queue.Queue[_Outcome[Any, Any]]] = set()
         self._budget = threading.BoundedSemaphore(self.max_workers)
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def _register_completion(self, completion: queue.Queue[_Outcome[Any, Any]]) -> None:
+        with self._lock:
+            if self._closed:
+                raise NestedSchedulerCancelled("nested scheduler is cancelled")
+            self._completions.add(completion)
+
+    def _unregister_completion(self, completion: queue.Queue[_Outcome[Any, Any]]) -> None:
+        with self._lock:
+            self._completions.discard(completion)
+
+    def _submit(self, task: _SharedTask) -> None:
+        while not self._cancelled.is_set():
+            try:
+                self._tasks.put(task, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+        raise NestedSchedulerCancelled("nested scheduler is cancelled")
 
     def _ensure_started(self) -> None:
         with self._lock:
@@ -297,24 +326,24 @@ class SharedNestedScheduler:
                 if queued is _STOP:
                     return
                 task = cast(_SharedTask, queued)
-                if task.cancelled.is_set():
+                if self._cancelled.is_set() or task.cancelled.is_set():
                     continue
                 try:
                     with self.slot():
-                        if task.cancelled.is_set():
+                        if self._cancelled.is_set() or task.cancelled.is_set():
                             continue
                         if task.limiter is None:
                             value = task.context.run(task.worker, task.item)
                         else:
                             with task.limiter:
-                                if task.cancelled.is_set():
+                                if self._cancelled.is_set() or task.cancelled.is_set():
                                     continue
                                 value = task.context.run(task.worker, task.item)
                 except BaseException as exc:  # noqa: BLE001
-                    if not task.cancelled.is_set():
+                    if not self._cancelled.is_set() and not task.cancelled.is_set():
                         task.completion.put(_Outcome(index=task.index, item=task.item, error=exc))
                 else:
-                    if not task.cancelled.is_set():
+                    if not self._cancelled.is_set() and not task.cancelled.is_set():
                         task.completion.put(_Outcome(index=task.index, item=task.item, value=value))
             finally:
                 self._tasks.task_done()
@@ -339,15 +368,17 @@ class SharedNestedScheduler:
     ) -> Iterator[tuple[T, R]]:
         self._ensure_started()
         completion: queue.Queue[_Outcome[T, R]] = queue.Queue()
+        self._register_completion(cast(queue.Queue[_Outcome[Any, Any]], completion))
         limiter = self._limiter(key, per_key_limit)
         cancelled = threading.Event()
         source = enumerate(items)
         exhausted = False
         in_flight = 0
         effective_limit = self.max_workers if per_key_limit is None else min(self.max_workers, int(per_key_limit))
-        # Bound each caller independently. A target with thousands of nested
-        # items can no longer fill the command queue ahead of every other target.
-        local_window = max(1, effective_limit) * 2
+        # Do not queue more work for a keyed target than its concurrency limit.
+        # Extra tasks would occupy pool threads while waiting on the key's
+        # semaphore, starving discovery on other targets.
+        local_window = max(1, effective_limit) if limiter is not None else self.max_workers * 2
 
         def _fill() -> None:
             nonlocal exhausted, in_flight
@@ -357,7 +388,7 @@ class SharedNestedScheduler:
                 except StopIteration:
                     exhausted = True
                     break
-                self._tasks.put(
+                self._submit(
                     _SharedTask(
                         index=index,
                         item=item,
@@ -375,6 +406,8 @@ class SharedNestedScheduler:
             while in_flight:
                 outcome = completion.get()
                 in_flight -= 1
+                if self._cancelled.is_set():
+                    raise NestedSchedulerCancelled("nested scheduler is cancelled")
                 if outcome.error is not None:
                     raise outcome.error
                 yield outcome.item, cast(R, outcome.value)
@@ -383,6 +416,7 @@ class SharedNestedScheduler:
             # Queued work from an abandoned iterator is skipped by the shared
             # workers. Active calls remain daemonized and cannot hold CLI exit.
             cancelled.set()
+            self._unregister_completion(cast(queue.Queue[_Outcome[Any, Any]], completion))
 
     def map_ordered(
         self,
@@ -422,6 +456,7 @@ class SharedNestedScheduler:
 
         self._ensure_started()
         completion: queue.Queue[_Outcome[T, R]] = queue.Queue()
+        self._register_completion(cast(queue.Queue[_Outcome[Any, Any]], completion))
         limiter = self._limiter(key, per_key_limit)
         cancelled = threading.Event()
         source = iter(items)
@@ -430,7 +465,9 @@ class SharedNestedScheduler:
         in_flight = 0
         sequence = itertools.count()
         effective_limit = self.max_workers if per_key_limit is None else min(self.max_workers, int(per_key_limit))
-        local_window = max(1, effective_limit) * 2
+        # As in iter_completed, avoid parking pool threads on one target's
+        # per-key semaphore while another target has runnable work.
+        local_window = max(1, effective_limit) if limiter is not None else self.max_workers * 2
 
         def _next_item() -> T:
             nonlocal source_exhausted
@@ -450,7 +487,7 @@ class SharedNestedScheduler:
                     item = _next_item()
                 except StopIteration:
                     break
-                self._tasks.put(
+                self._submit(
                     _SharedTask(
                         index=next(sequence),
                         item=item,
@@ -468,6 +505,8 @@ class SharedNestedScheduler:
             while in_flight:
                 outcome = completion.get()
                 in_flight -= 1
+                if self._cancelled.is_set():
+                    raise NestedSchedulerCancelled("nested scheduler is cancelled")
                 if outcome.error is not None:
                     raise outcome.error
                 generated = on_completed(outcome.item, cast(R, outcome.value))
@@ -476,6 +515,7 @@ class SharedNestedScheduler:
                 _fill()
         finally:
             cancelled.set()
+            self._unregister_completion(cast(queue.Queue[_Outcome[Any, Any]], completion))
 
     def close(self) -> None:
         with self._lock:
@@ -498,7 +538,13 @@ class SharedNestedScheduler:
             if self._closed:
                 return
             self._closed = True
+            self._cancelled.set()
             threads = list(self._threads)
+            completions = list(self._completions)
+        for completion in completions:
+            completion.put(
+                _Outcome(index=-1, item=None, error=NestedSchedulerCancelled("nested scheduler is cancelled"))
+            )
         while True:
             try:
                 queued = self._tasks.get_nowait()
@@ -517,4 +563,4 @@ class SharedNestedScheduler:
             self._limiters.clear()
 
 
-__all__ = ["BoundedScheduler", "SharedNestedScheduler"]
+__all__ = ["BoundedScheduler", "NestedSchedulerCancelled", "SharedNestedScheduler"]

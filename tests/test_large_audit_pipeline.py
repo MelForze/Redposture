@@ -145,7 +145,7 @@ def test_preflight_counts_match_executed_endpoint_stream(targets: list[str], add
     assert sum(actual.values()) == plan.target_count
 
 
-def test_scan_plan_is_shown_before_results_but_not_saved_to_txt(tmp_path: Path, capsys) -> None:
+def test_scan_plan_is_hidden_without_debug(tmp_path: Path, capsys) -> None:
     path = tmp_path / "result.txt"
 
     def detect(ctx: object) -> AuditRecord:
@@ -167,27 +167,29 @@ def test_scan_plan_is_shown_before_results_but_not_saved_to_txt(tmp_path: Path, 
     runner.run_plan(AuditCommandPlan(targets_by_port={1: ("one", "two")}, workers=2, output_path=str(path)))
 
     output = capsys.readouterr().out.splitlines()
-    assert output[0].startswith("[*] Scan plan: addresses=2 host:port=2 workers=2 nested_workers=2")
-    assert output[1] == "[*] Ports: 1=2"
+    assert len(output) == 2
+    assert all(line.startswith("PROBE") for line in output)
+    assert not any("Scan plan" in line or "Ports:" in line for line in output)
     saved = path.read_text(encoding="utf-8")
     assert "Scan plan" not in saved
     assert "\x1b" not in saved
     assert len(saved.splitlines()) == 2
 
 
-def test_json_scan_plan_stays_on_stderr(capsys) -> None:
+def test_json_scan_plan_stays_on_stderr_only_in_debug(capsys) -> None:
     def detect(ctx: object) -> AuditRecord:
         return AuditRecord(host=str(ctx.host), port=1, module="probe", service="probe", status="detected")
 
     runner = AuditCommandRunner(
-        args=SimpleNamespace(debug=False),
+        args=SimpleNamespace(debug=True),
         spec=ModuleAuditSpec(module="probe", label="PROBE", default_port=1, detect=detect, is_detected=lambda _: True),
         emit_line=lambda line: print(line),
-        console=Console(no_color=True),
+        console=Console(debug=True, no_color=True),
     )
     runner.run_plan(AuditCommandPlan(targets_by_port={1: ("one", "two")}, workers=1, output_format="json"))
 
     captured = capsys.readouterr()
     assert "Scan plan" in captured.err
+    assert "Ports:" in captured.err
     assert "Scan plan" not in captured.out
     assert json.loads(captured.out.splitlines()[0])["host"] == "one"
