@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import html
+import json
 import re
+import time
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -16,8 +18,14 @@ _VERSION = re.compile(r"^v?[0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9._-]+)?$")
 _CSRF = re.compile(r'name=["\']_csrf["\'][^>]*value=["\']([^"\']+)', re.I)
 _LOGIN_USER = re.compile(r'name=["\']username["\']', re.I)
 _LOGIN_PASSWORD = re.compile(r'name=["\']password["\']', re.I)
+_KAFBAT_TITLE = re.compile(r"<title>\s*Kafbat UI\s*</title>", re.I)
 _MAX_CLUSTERS = 20
 _MAX_TOPICS = 200
+_MAX_DUMP_TOPICS = 2_000
+_MAX_DUMP_MESSAGES = 10_000
+_MAX_DUMP_RESPONSE_BYTES = 8 * 1024 * 1024
+_MAX_DUMP_BYTES = 64 * 1024 * 1024
+_MAX_DUMP_SECONDS = 300.0
 
 
 def _json(response: HttpResponse) -> Any:
@@ -106,6 +114,105 @@ def _get(pool: HttpSessionPool, base: str, path: str, *, cookie: str = "", basic
     )
 
 
+def _parse_message_events_page(
+    response: HttpResponse, *, limit: int
+) -> tuple[list[dict[str, Any]], bool, str | None, str | None]:
+    content_type = _header(response, "content-type").lower()
+    if response.error:
+        return [], False, response.error, None
+    if response.status != 200:
+        return [], False, f"HTTP {response.status} from Kafka UI message API", None
+    if "text/event-stream" not in content_type:
+        return [], False, "Kafka UI message API did not return an event stream", None
+    messages: list[dict[str, Any]] = []
+    done = False
+    cursor: str | None = None
+    for line in response.text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip())
+        except (ValueError, UnicodeError):
+            return messages, False, "invalid Kafka UI message event", None
+        if not isinstance(event, dict):
+            return messages, False, "invalid Kafka UI message event", None
+        event_type = event.get("type")
+        if event_type == "DONE":
+            done = True
+            cursor_data = event.get("cursor")
+            if isinstance(cursor_data, dict) and isinstance(cursor_data.get("id"), str):
+                cursor = cursor_data["id"] or None
+            break
+        if event_type == "ERROR":
+            return messages, False, "Kafka UI message stream reported an error", None
+        if event_type != "MESSAGE":
+            continue
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return messages, False, "invalid Kafka UI message payload", None
+        value = message.get("value", message.get("content"))
+        if not isinstance(value, str) and value is not None:
+            return messages, False, "invalid Kafka UI message value", None
+        partition, offset = message.get("partition"), message.get("offset")
+        if not isinstance(partition, int) or not isinstance(offset, int):
+            return messages, False, "invalid Kafka UI message position", None
+        messages.append(
+            {
+                "partition": partition,
+                "offset": offset,
+                "timestamp": message.get("timestamp"),
+                "key": message.get("key"),
+                "value": value,
+                "headers": message.get("headers"),
+            }
+        )
+        if len(messages) > limit:
+            return messages[:limit], False, "Kafka UI returned more messages than requested", None
+    if response.truncated:
+        return messages, False, "Kafka UI message response exceeded 8 MiB", None
+    if not done:
+        return messages, False, "Kafka UI message stream ended without completion", None
+    return messages, True, None, cursor
+
+
+def _parse_message_events(response: HttpResponse, *, limit: int) -> tuple[list[dict[str, Any]], bool, str | None]:
+    messages, done, error, _cursor = _parse_message_events_page(response, limit=limit)
+    return messages, done, error
+
+
+def _read_ui_messages(
+    pool: HttpSessionPool,
+    base: str,
+    cluster: str,
+    topic: str,
+    *,
+    vendor: str | None,
+    cookie: str,
+    limit: int,
+    cursor: str | None = None,
+) -> tuple[list[dict[str, Any]], bool, str | None, str | None, bool]:
+    prefix = f"/api/clusters/{quote(cluster, safe='')}/topics/{quote(topic, safe='')}/messages"
+    paths = (
+        [prefix + "/v2?" + urlencode({"cursor": cursor})]
+        if cursor
+        else [prefix + f"/v2?mode=EARLIEST&limit={limit}", prefix + f"?limit={limit}"]
+    )
+    for index, path in enumerate(paths):
+        response = pool.request(
+            "GET",
+            base + path,
+            headers={"Accept": "text/event-stream", **({"Cookie": cookie} if cookie else {})},
+            response_size_cap=_MAX_DUMP_RESPONSE_BYTES,
+            allow_cross_origin_redirects=False,
+            preserve_authorization_on_cross_origin=False,
+        )
+        if index + 1 < len(paths) and response.status in {400, 404}:
+            continue
+        messages, done, error, next_cursor = _parse_message_events_page(response, limit=limit)
+        return messages, done, error, next_cursor, "/v2?" in path
+    return [], False, "Kafka UI message API unavailable", None, False
+
+
 def detect_ui(ctx: Any, state: Any) -> dict[str, Any]:
     """Confirm UI only after two independent product-specific API responses."""
     target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
@@ -156,20 +263,27 @@ def detect_ui(ctx: Any, state: Any) -> dict[str, Any]:
         if clusters is not None:
             signals.append("ui_cluster_schema")
         login_form = False
-        if info_ok and clusters is None and (mode is None or not authorization_ok):
+        branded_login = False
+        if clusters is None and (info_ok or (mode == "LOGIN_FORM" and authorization_ok)):
             login_probe = _get(pool, base, "/login")
-            if (
+            branded_login = bool(login_probe.status == 200 and _KAFBAT_TITLE.search(login_probe.text[:8192]))
+            login_form = bool(
                 login_probe.status == 200
                 and _LOGIN_USER.search(login_probe.text)
                 and _LOGIN_PASSWORD.search(login_probe.text)
-            ):
-                login_form = True
+            )
+            if branded_login:
+                brand = "kafbat"
+                signals.append("ui_kafbat_login_title")
+            if login_form:
                 if mode is None:
                     mode = "LOGIN_FORM"
                 signals.append("ui_login_form")
         confirmed = (
-            info_ok and (authorization_ok or clusters is not None or (api_mode is not None and login_form))
-        ) or (clusters is not None and api_mode is not None and authorization_ok)
+            (info_ok and (authorization_ok or clusters is not None or (api_mode is not None and login_form)))
+            or (clusters is not None and api_mode is not None and authorization_ok)
+            or (api_mode == "LOGIN_FORM" and authorization_ok and branded_login)
+        )
         if confirmed:
             state.ui_base = base
             state.ui_auth_type = mode
@@ -253,6 +367,11 @@ def authenticate_ui(ctx: Any, record: dict[str, Any], state: Any) -> dict[str, A
         verified = isinstance(user_info, dict) and user_info.get("username") == user
     if verified:
         state.ui_cookie = updated_cookie
+        info_ok, version, brand = _info(_json(_get(pool, base, "/api/info", cookie=updated_cookie)))
+        if info_ok:
+            payload["version"] = version
+            if brand:
+                payload["ui_vendor"] = brand
     status = (
         "weak_default_creds"
         if verified and ctx.credential.source == "default"
@@ -298,7 +417,8 @@ def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, 
         return payload
     cookie = state.ui_cookie if payload.get("status") in {"valid_credentials", "weak_default_creds"} else ""
     cluster_response = _get(pool, base, "/api/clusters", cookie=cookie)
-    clusters = _clusters(_json(cluster_response)) or []
+    cluster_data = _json(cluster_response)
+    clusters = _clusters(cluster_data) or []
     payload["ui_clusters"] = [
         {
             "name": c["name"],
@@ -316,20 +436,111 @@ def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, 
     payload["ui_topics"] = []
     payload["ui_brokers"] = []
     payload["ui_consumer_groups"] = []
+    dump_enabled = bool(options.get("dump"))
+    query_topic = str(options.get("query_topic") or "").strip()
+    requested_limit = (
+        int(options.get("max_messages") or 10) if options.get("max_messages_explicit") else _MAX_DUMP_MESSAGES
+    )
+    dump_limit = max(1, min(_MAX_DUMP_MESSAGES, requested_limit))
+    payload["dump"] = dump_enabled
+    payload["query_topic"] = query_topic or None
+    payload["max_messages"] = dump_limit if dump_enabled else None
+    payload["ui_dump_limit_reduced"] = dump_enabled and requested_limit > dump_limit
+    payload["ui_dump_records"] = []
+    payload["ui_dump_skipped_topics"] = 0
+    payload["ui_dump_partial"] = dump_enabled and isinstance(cluster_data, list) and len(cluster_data) > len(clusters)
+    dump_deadline = time.monotonic() + _MAX_DUMP_SECONDS
+    dump_bytes = 0
     topic_limit = options.get("show_topics_limit")
     max_topics = min(_MAX_TOPICS, int(topic_limit)) if isinstance(topic_limit, int) and topic_limit > 0 else _MAX_TOPICS
+    topic_pages_remaining = (_MAX_DUMP_TOPICS + 199) // 200
     for cluster in clusters:
         name = str(cluster["name"])
         cluster_path = "/api/clusters/" + quote(name, safe="")
-        if options.get("show_topics"):
-            response = _get(pool, base, cluster_path + "/topics?page=1&perPage=200", cookie=cookie)
-            value = _json(response)
-            items = value.get("topics") if isinstance(value, dict) else value
-            if isinstance(items, list):
+        cluster_topics: list[str] = []
+        if options.get("show_topics") or (dump_enabled and not query_topic):
+            page = 1
+            seen_names: set[str] = set()
+            while True:
+                if dump_enabled and (topic_pages_remaining <= 0 or time.monotonic() >= dump_deadline):
+                    payload["ui_dump_partial"] = True
+                    break
+                response = _get(pool, base, cluster_path + f"/topics?page={page}&perPage=200", cookie=cookie)
+                if dump_enabled:
+                    topic_pages_remaining -= 1
+                value = _json(response)
+                items = value.get("topics") if isinstance(value, dict) else value
+                if not isinstance(items, list):
+                    payload["ui_dump_partial"] = dump_enabled
+                    break
+                for item in items:
+                    topic = item.get("name") if isinstance(item, dict) else None
+                    if isinstance(topic, str) and topic not in seen_names:
+                        seen_names.add(topic)
+                        cluster_topics.append(topic)
+                if len(items) < 200:
+                    break
+                if not dump_enabled and len(cluster_topics) >= max_topics:
+                    break
+                page += 1
+            cluster_topics.sort()
+            if options.get("show_topics"):
                 payload["ui_topics"].extend(
-                    {"cluster": name, "name": item["name"]}
-                    for item in items[: max(0, max_topics - len(payload["ui_topics"]))]
-                    if isinstance(item, dict) and isinstance(item.get("name"), str)
+                    {"cluster": name, "name": topic}
+                    for topic in cluster_topics[: max(0, max_topics - len(payload["ui_topics"]))]
+                )
+        if dump_enabled:
+            dump_topics = [query_topic] if query_topic else cluster_topics
+            remaining = max(0, _MAX_DUMP_TOPICS - len(payload["ui_dump_records"]))
+            payload["ui_dump_skipped_topics"] += max(0, len(dump_topics) - remaining)
+            selected_topics = dump_topics[:remaining]
+            for index, topic in enumerate(selected_topics):
+                if dump_bytes >= _MAX_DUMP_BYTES or time.monotonic() >= dump_deadline:
+                    payload["ui_dump_partial"] = True
+                    payload["ui_dump_skipped_topics"] += len(selected_topics) - index
+                    break
+                messages: list[dict[str, Any]] = []
+                error: str | None = None
+                complete = False
+                cursor: str | None = None
+                seen_cursors: set[str] = set()
+                while len(messages) < dump_limit and dump_bytes < _MAX_DUMP_BYTES and time.monotonic() < dump_deadline:
+                    message_page, done, error, next_cursor, cursor_supported = _read_ui_messages(
+                        pool,
+                        base,
+                        name,
+                        topic,
+                        vendor=state.ui_vendor,
+                        cookie=cookie,
+                        limit=min(1_000, dump_limit - len(messages)),
+                        cursor=cursor,
+                    )
+                    message_bytes = len(json.dumps(message_page, ensure_ascii=False).encode())
+                    if next_cursor and next_cursor in seen_cursors:
+                        error = "Kafka UI repeated a message cursor"
+                        break
+                    if dump_bytes + message_bytes > _MAX_DUMP_BYTES:
+                        error = "Kafka UI dump byte budget reached"
+                        break
+                    dump_bytes += message_bytes
+                    messages.extend(message_page)
+                    if not done or error:
+                        break
+                    if next_cursor:
+                        seen_cursors.add(next_cursor)
+                        cursor = next_cursor
+                        continue
+                    complete = cursor_supported or len(message_page) < min(
+                        1_000, dump_limit - len(messages) + len(message_page)
+                    )
+                    break
+                if cursor and len(messages) >= dump_limit:
+                    complete = False
+                if len(messages) >= dump_limit and not complete:
+                    error = error or "Kafka UI message limit reached"
+                payload["ui_dump_partial"] = payload["ui_dump_partial"] or not complete
+                payload["ui_dump_records"].append(
+                    {"cluster": name, "topic": topic, "messages": messages, "complete": complete, "error": error}
                 )
         if options.get("show_brokers"):
             items = _json(_get(pool, base, cluster_path + "/brokers", cookie=cookie))
@@ -349,6 +560,7 @@ def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, 
                     if isinstance(item, dict)
                 )
     payload["topic_count"] = len(payload["ui_topics"]) if options.get("show_topics") else None
-    if any(options.get(key) for key in ("dump", "probe_write", "write_payload")):
-        payload["ui_unsupported_actions"] = "broker-only topic data and writes are unavailable through Kafka UI"
+    payload["ui_dump_partial"] = payload["ui_dump_partial"] or payload["ui_dump_skipped_topics"] > 0
+    if any(options.get(key) for key in ("probe_write", "write_payload")):
+        payload["ui_unsupported_actions"] = "topic writes are unavailable through Kafka UI"
     return payload

@@ -288,19 +288,26 @@ def _try_credentials(
             )
             raw_client = mongo.client
             mongo.hello()
-            mongo.list_database_names()
+            identity = mongo.run_command("admin", {"connectionStatus": 1}).get("authInfo")
+            users = identity.get("authenticatedUsers") if isinstance(identity, dict) else None
+            if not isinstance(users, list) or not any(
+                isinstance(item, dict) and item.get("user") == username and item.get("db") == auth_db for item in users
+            ):
+                raise ValueError("MongoDB did not confirm the authenticated identity")
             attempt = {
                 "username": username,
                 "password": password,
                 "ok": True,
                 "default": bool(candidate.get("default")),
                 "error": None,
+                "credential_state": "valid",
             }
             attempts.append(attempt)
             if selected is None:
                 selected = attempt
         except Exception as exc:
             transient = is_transient_network_error(exc) and not is_auth_error(exc)
+            rejection = getattr(exc, "code", None) == 18 or "authentication failed" in str(exc).lower()
             attempts.append(
                 {
                     "username": username,
@@ -309,6 +316,7 @@ def _try_credentials(
                     "default": bool(candidate.get("default")),
                     "error": normalize_mongodb_error(exc),
                     "transient": transient,
+                    "credential_state": "invalid" if rejection else "unverified",
                 }
             )
         finally:
@@ -586,6 +594,8 @@ def _base_record(
         "status": "fail",
         "auth_required": None,
         "provided_credentials": False,
+        "provided_credentials_ok": None,
+        "credential_state": None,
         "provided_username": None,
         "provided_password": None,
         "defcreds_enabled": False,
@@ -816,6 +826,16 @@ def _audit_mongodb_host(
                 active_client_owned_ref = False
                 active_client_ref = None
 
+            explicit_attempts = [item for item in credential_attempts if not item.get("default")]
+            credential_state = (
+                "valid"
+                if any(item.get("credential_state") == "valid" for item in explicit_attempts)
+                else "invalid"
+                if explicit_attempts and all(item.get("credential_state") == "invalid" for item in explicit_attempts)
+                else "unverified"
+                if explicit_attempts
+                else None
+            )
             record = dict(record_template)
             record.update(data)
             record.update(
@@ -834,6 +854,10 @@ def _audit_mongodb_host(
                     "defcreds_enabled": any(bool(item.get("default")) for item in credential_attempts),
                     "effective_username": effective_username,
                     "credential_attempts": credential_attempts,
+                    "provided_credentials_ok": (
+                        True if credential_state == "valid" else False if credential_state == "invalid" else None
+                    ),
+                    "credential_state": credential_state,
                     "server_version": version,
                     "hello": hello,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),

@@ -631,11 +631,17 @@ def _acl_token_self_probe(
             local = payload.get("Local")
             result["local"] = local if isinstance(local, bool) else None
             return result
-        result["ok"] = False
+        result["ok"] = None
         result["error"] = "unexpected token identity response"
         return result
-    result["ok"] = False
-    if _unauthorized_status(status):
+    # /acl/token/self requires no ACL privileges. Consul's own missing-token
+    # response is therefore proof of rejection; a generic 403 (for example
+    # from a proxy) is not. Keep the match deliberately narrow.
+    missing_token = isinstance(payload, str) and payload.strip().lower() == "token does not exist: acl not found"
+    result["ok"] = False if status == 401 or (status == 403 and missing_token) else None
+    if status == 403 and missing_token:
+        result["error"] = "Consul ACL token not found"
+    elif _unauthorized_status(status):
         result["error"] = "Unauthorized" if status == 401 else "Forbidden"
     else:
         result["error"] = f"unexpected status={status}"
@@ -697,6 +703,24 @@ def _all_scopes_ok(scopes: dict[str, Any]) -> bool:
 
 def _any_scope_ok(scopes: dict[str, Any]) -> bool:
     return any(bool((scopes.get(name) or {}).get("ok")) for name in _CONSUL_SCOPE_NAMES)
+
+
+def _basic_credential_verdict(
+    anonymous_scopes: dict[str, Any],
+    authenticated_scopes: dict[str, Any],
+    anonymous_self: dict[str, Any],
+    authenticated_self: dict[str, Any],
+) -> bool | None:
+    """A Basic pair proves access only when it opens a previously denied Consul endpoint."""
+
+    for name in _CONSUL_SCOPE_NAMES:
+        anonymous = anonymous_scopes.get(name) or {}
+        authenticated = authenticated_scopes.get(name) or {}
+        if anonymous.get("ok") is False and authenticated.get("ok") is True:
+            return True
+    if anonymous_self.get("ok") is False and authenticated_self.get("ok") is True:
+        return True
+    return None
 
 
 def _no_scopes_ok(scopes: dict[str, Any]) -> bool:
@@ -2164,7 +2188,7 @@ def _audit_consul_host_core(
                     if auth_valid is not True and auth_identity.get("error"):
                         auth_error = str(auth_identity.get("error"))
                 else:
-                    auth_valid = _any_scope_ok(auth_scopes) or bool(auth_self.get("ok"))
+                    auth_valid = _basic_credential_verdict(anonymous_scopes, auth_scopes, anonymous_self, auth_self)
                     if auth_valid is False and _no_scopes_ok(auth_scopes):
                         for name in _CONSUL_SCOPE_NAMES:
                             entry = auth_scopes.get(name) or {}
@@ -3103,7 +3127,7 @@ def _audit_consul_host(
                     if auth_valid is not True and auth_identity.get("error"):
                         auth_error = str(auth_identity.get("error"))
                 else:
-                    auth_valid = _any_scope_ok(auth_scopes) or bool(auth_self.get("ok"))
+                    auth_valid = _basic_credential_verdict(anonymous_scopes, auth_scopes, anonymous_self, auth_self)
                     if auth_valid is False and _no_scopes_ok(auth_scopes):
                         for scope_name in _CONSUL_SCOPE_NAMES:
                             scope_item = auth_scopes.get(scope_name) or {}

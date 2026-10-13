@@ -426,6 +426,15 @@ def _nested_version(payload: Mapping[str, Any], field: str, *keys: str) -> str |
 
 def resolve_products(module: str, payload: Mapping[str, Any]) -> list[DetectedProduct]:
     module = str(module).strip().lower()
+    if payload.get("surface") == "ui":
+        product_key = str(payload.get("ui_product") or "")
+        from .web_panels import UI_PRODUCTS
+
+        if product_key not in UI_PRODUCTS:
+            return []
+        ui = payload.get("ui")
+        version = ui.get("version") if isinstance(ui, Mapping) else None
+        return [_product(product_key, UI_PRODUCTS[product_key], version)]
     version_fields: dict[str, tuple[str, str, str]] = {
         "airflow": ("apache_airflow", "Apache Airflow", "version"),
         "clickhouse": ("clickhouse", "ClickHouse", "server_version"),

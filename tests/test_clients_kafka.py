@@ -634,7 +634,7 @@ def test_kafka_record_batch_and_sasl_fallback_branches() -> None:
             raise OSError("broken pipe")
 
     ok, corr, error = kafka._sasl_authenticate_plain(BrokenSendSocket(), 3, "user", "secret")
-    assert ok is False
+    assert ok is None
     assert corr == 3
     assert "broken pipe" in str(error)
 

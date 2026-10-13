@@ -222,6 +222,30 @@ def test_public_v2_does_not_verify_basic_credentials(monkeypatch: pytest.MonkeyP
     assert "anonymous" in reason
 
 
+@pytest.mark.parametrize("product", ("docker-registry", "gitlab"))
+def test_registry_forbidden_response_does_not_reject_credentials_without_identity_proof(
+    monkeypatch: pytest.MonkeyPatch, product: str
+) -> None:
+    headers = {
+        "docker-distribution-api-version": "registry/2.0",
+        "www-authenticate": 'Bearer realm="http://gitlab.example/jwt/auth",service="container_registry"',
+    }
+    monkeypatch.setattr(oci_actions, "_http_request", lambda *_args, **_kwargs: (403, b"", headers, None))
+    monkeypatch.setattr(oci_actions, "_http_request_url", lambda *_args, **_kwargs: (403, b"", {}, None))
+    verified, reason = oci_actions._verify_registry_credential(
+        product,
+        "host",
+        5000,
+        1.0,
+        "admin" if product == "docker-registry" else None,
+        "secret" if product == "docker-registry" else None,
+        "token" if product == "gitlab" else None,
+        anonymous_probe=(401, b"", headers, None),
+    )
+    assert verified is None
+    assert reason is not None and "status=403" in reason
+
+
 def test_gitlab_registry_bearer_token_requires_protected_v2_access(monkeypatch: pytest.MonkeyPatch) -> None:
     probe = (
         401,

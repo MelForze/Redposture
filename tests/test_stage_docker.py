@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 from typing import Any
 
 import pytest
 
 from redposture_core import stage_docker as docker_stage
+from redposture_core.console import Console
 from redposture_core.modules.docker import render as docker_render
 from redposture_core.stage_runtime import build_render_plan, render_with_plan
 from tests.stage_runtime_helpers import run_module_targets_for_test
@@ -691,3 +693,68 @@ def test_docker_does_not_claim_client_cert_without_complete_identity(monkeypatch
     )
     assert record["status"] == "open_no_auth"
     assert record["tls_client_cert_used"] is False
+
+
+@pytest.mark.parametrize(
+    ("anonymous_result", "expected_status", "expected_auth_required"),
+    [
+        (("version", None, False), "open_no_auth", False),
+        (("version", "Docker authorization required", True), "valid_credentials", True),
+        ((None, "tlsv13 alert certificate required", False), "valid_credentials", True),
+        ((None, "connection timeout", False), "detected", None),
+    ],
+)
+def test_docker_certificate_requires_anonymous_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+    anonymous_result: tuple[str | None, str | None, bool],
+    expected_status: str,
+    expected_auth_required: bool | None,
+) -> None:
+    version = {"Version": "25.0.5", "ApiVersion": "1.45", "Os": "linux"}
+    calls: list[bool] = []
+
+    def fake_probe(*_args, **kwargs):
+        with_certificate = bool(kwargs.get("tls_cert"))
+        calls.append(with_certificate)
+        if with_certificate:
+            return _FakeDockerClient(), version, "tls", None, False
+        marker, error, auth_required = anonymous_result
+        return (
+            _FakeDockerClient() if marker else None,
+            version if marker else None,
+            "tls" if marker else None,
+            error,
+            auth_required,
+        )
+
+    monkeypatch.setattr(docker_stage, "_probe_docker", fake_probe)
+    record = docker_stage._audit_docker_host(
+        "127.0.0.1", 2376, 1.0, 0, tls_cert="client.pem", tls_key="client.key", run_deep_checks=False
+    )
+    assert calls == [True, False]
+    assert record["status"] == expected_status
+    assert record["auth_required"] is expected_auth_required
+
+
+def test_docker_certificate_lines_keep_no_color_and_json_free_of_ansi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 2376,
+        "is_docker": True,
+        "status": "valid_credentials",
+        "auth_required": True,
+        "transport_mode": "tls",
+        "server_version": "27.5.1",
+        "tls_client_cert_used": True,
+    }
+    lines = [docker_stage._format_detect_record(record, "txt"), docker_stage._format_record(record, "txt")]
+    output = io.StringIO()
+    monkeypatch.setattr("sys.stdout", output)
+    console = Console(no_color=True)
+    for line in lines:
+        assert docker_stage._render_colored_docker_line(console, line)
+    assert "\x1b[" not in output.getvalue()
+    assert "\x1b[" not in "\n".join(lines)
+    assert "\x1b[" not in docker_stage._format_record(record, "json")

@@ -209,7 +209,7 @@ def _install_proxmox_lifecycle_request_spy(
         )
         if path == "/access/ticket":
             if form.get("password") != valid_password:
-                return 401, _json_payload({"message": "authentication failure"}), {}, None
+                return 401, _json_payload({"message": "authentication failure"}), {"Server": "pve-api-daemon"}, None
             return (
                 200,
                 _json_payload({"ticket": "PVE:ticket", "CSRFPreventionToken": "csrf"}),
@@ -372,6 +372,91 @@ def test_proxmox_lifecycle_auth_failure_preserves_requested_action_contract(
     assert records[0]["show_users"] is True
     assert records[0]["discover_creds"] is False
     assert records[0]["add_user"] is None
+
+
+def test_proxmox_token_generic_403_does_not_prove_token_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_request(_host, _port, path, _timeout, _retries, **kwargs):
+        if path == "/access" and not kwargs.get("auth_headers"):
+            return 401, _json_payload({"message": "authentication required"}), {"Server": "pve-api-daemon"}, None
+        return 403, b'{"detail":"Forbidden"}', {}, None
+
+    monkeypatch.setattr("redposture_core.modules.proxmox.actions._proxmox_request", fake_request)
+    records = _run_proxmox_lifecycle(
+        _proxmox_lifecycle_args(pve_api_token="audit@pve!scan=secret"),
+        (AuditCredentialRun(token="audit@pve!scan=secret", source="provided"),),
+    )
+    assert records[0]["status"] == "fail"
+    assert records[0].get("provided_credentials_ok") is not True
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [({"Server": "pve-api-daemon/3.0"}, "auth_failed"), ({"Server": "nginx"}, "fail")],
+)
+def test_proxmox_empty_401_token_response_needs_product_proof(
+    monkeypatch: pytest.MonkeyPatch, headers: dict[str, str], expected: str
+) -> None:
+    def fake_request(_host, _port, path, _timeout, _retries, **kwargs):
+        assert path == "/access"
+        if not kwargs.get("auth_headers"):
+            return 401, _json_payload({"message": "authentication required"}), {"Server": "pve-api-daemon"}, None
+        return 401, b"", headers, None
+
+    monkeypatch.setattr("redposture_core.modules.proxmox.actions._proxmox_request", fake_request)
+    records = _run_proxmox_lifecycle(
+        _proxmox_lifecycle_args(pve_api_token="audit@pve!scan=secret"),
+        (AuditCredentialRun(token="audit@pve!scan=secret", source="provided"),),
+    )
+    assert records[0]["status"] == expected
+
+
+def test_proxmox_second_factor_challenge_is_not_wrong_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_request(_host, _port, path, _timeout, _retries, **kwargs):
+        if path == "/access" and not kwargs.get("auth_headers"):
+            return 401, _json_payload({"message": "authentication required"}), {"Server": "pve-api-daemon"}, None
+        if path == "/access/ticket":
+            return 200, _json_payload({"NeedTFA": 1, "ticket": "PVE:tfa!challenge"}), {}, None
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.modules.proxmox.actions._proxmox_request", fake_request)
+    records = _run_proxmox_lifecycle(
+        _proxmox_lifecycle_args(username="root@pam", password="correct"),
+        (AuditCredentialRun(username="root@pam", password="correct", source="provided"),),
+    )
+    assert records[0]["status"] == "fail"
+    assert records[0].get("provided_credentials_ok") is not True
+    line = _format_record(records[0], "txt")
+    assert "credential verification unavailable" in line
+    assert "password authentication failed" not in line
+    assert "\x1b[" not in line
+    assert "\x1b[" not in _format_record(records[0], "json")
+
+
+def test_proxmox_proxy_401_does_not_reject_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_request(_host, _port, path, _timeout, _retries, **kwargs):
+        if path == "/access" and not kwargs.get("auth_headers"):
+            return 401, _json_payload({"message": "authentication required"}), {"Server": "pve-api-daemon"}, None
+        assert path == "/access/ticket"
+        return 401, b'{"message":"authentication failure"}', {"Server": "nginx"}, None
+
+    monkeypatch.setattr("redposture_core.modules.proxmox.actions._proxmox_request", fake_request)
+    records = _run_proxmox_lifecycle(
+        _proxmox_lifecycle_args(username="root@pam", password="candidate"),
+        (AuditCredentialRun(username="root@pam", password="candidate", source="provided"),),
+    )
+    assert records[0]["status"] == "fail"
+    assert records[0].get("provided_credentials_ok") is not True
+
+
+def test_proxmox_sweep_does_not_render_unverified_pair_as_invalid() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 8006,
+        "attempted_credentials": [
+            {"username": "root@pam", "password": "candidate", "status": "fail", "source": "default"}
+        ],
+    }
+    assert _format_credential_attempts_records(record, "txt") == []
 
 
 def test_proxmox_default_credentials_are_exact() -> None:
@@ -543,12 +628,12 @@ def test_audit_proxmox_defcreds_all_fail_keeps_auth_attempts_and_password_render
     ):
         _ = (use_https, insecure, proxy)
         login_calls.append((username, password))
-        return None, "authentication failure"
+        return None, "pve credential rejected: authentication failure"
 
     def fake_request(_host, _port, path, _timeout, _retries, **_kwargs):
         if path == "/access":
-            return 401, b'{"errors":"authentication failure"}', {}, None
-        return 401, b'{"errors":"permission denied"}', {}, None
+            return 401, b'{"errors":"authentication failure"}', {"Server": "pve-api-daemon"}, None
+        return 401, b'{"errors":"permission denied"}', {"Server": "pve-api-daemon"}, None
 
     monkeypatch.setattr("redposture_core.stage_proxmox._login_proxmox_password", fake_login)
     monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
@@ -613,6 +698,36 @@ def test_audit_proxmox_defcreds_login_transport_error_is_not_token_failure(monke
     line = _format_record(record, "txt")
     assert "connection failed err=connection reset by peer" in line
     assert "invalid pve api token" not in line
+
+
+def test_audit_proxmox_proxy_login_401_does_not_render_invalid_password(monkeypatch) -> None:
+    def fake_login(*_args, **_kwargs):
+        return None, "pve login response inconclusive: authentication failure"
+
+    def fake_request(_host, _port, path, _timeout, _retries, **_kwargs):
+        if path == "/access":
+            return 401, b'{"errors":"authentication required"}', {"Server": "pve-api-daemon"}, None
+        return 401, b"{}", {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._login_proxmox_password", fake_login)
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="",
+        username="root@pam",
+        password="candidate",
+        defcreds=False,
+        use_https=True,
+        insecure=True,
+        proxy=None,
+    )
+    assert record["status"] == "fail"
+    assert record["credential_verification_status"] == "unavailable"
+    assert _format_credential_attempts_records(record, "txt") == []
+    assert "credential verification unavailable" in _format_record(record, "txt")
 
 
 def test_proxmox_small_helpers_cover_auth_userid_caps_and_ssl() -> None:
@@ -1006,7 +1121,7 @@ def test_audit_proxmox_add_user_reports_acl_grant_error(monkeypatch) -> None:
 
 def test_audit_proxmox_marks_auth_failed_on_401(monkeypatch) -> None:
     def fake_request(*_args, **_kwargs):
-        return 401, b'{"errors":"permission denied"}', {}, None
+        return 401, b'{"errors":"permission denied"}', {"Server": "pve-api-daemon"}, None
 
     monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
 
@@ -1040,7 +1155,7 @@ def test_audit_proxmox_marks_insufficient_privileges_on_403(monkeypatch) -> None
     ):
         _ = (pve_api_token, use_https, insecure, proxy)
         if path == "/access":
-            return 403, b'{"errors":"permission check failed"}', {}, None
+            return 403, b'{"errors":"permission check failed"}', {"Server": "pve-api-daemon"}, None
         if path == "/access/permissions?path=/":
             return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 1, "User.Modify": 0}}}), {}, None
         if path == "/access/users":
@@ -1084,7 +1199,7 @@ def test_audit_proxmox_marks_insufficient_privileges_on_401_permission_message(m
     ):
         _ = (pve_api_token, use_https, insecure, proxy)
         if path == "/access":
-            return 401, b'{"errors":"permission check failed"}', {}, None
+            return 401, b'{"errors":"permission check failed"}', {"Server": "pve-api-daemon"}, None
         if path == "/access/permissions?path=/":
             return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 1}}}), {}, None
         return 404, b"{}", {}, None

@@ -2108,7 +2108,7 @@ def _verify_registry_credential(
                 return None, error
             if status == 200 and _registry_probe_has_fingerprint(status, body, response_headers):
                 return True, None
-            if status in {401, 403} and _registry_probe_has_fingerprint(status, body, response_headers):
+            if status == 401 and _registry_probe_has_fingerprint(status, body, response_headers):
                 return False, "GitLab Registry token rejected"
             return None, f"GitLab Registry token verification unavailable status={status}"
         realm = str(info["realm"])
@@ -2121,7 +2121,7 @@ def _verify_registry_credential(
         status, body, _headers, error = _http_request_url(url, "GET", timeout, headers=headers)
         if error:
             return None, error
-        if status in {401, 403}:
+        if status == 401:
             return False, "authentication rejected"
         if status != 200:
             return None, f"GitLab registry identity unavailable status={status}"
@@ -2141,7 +2141,7 @@ def _verify_registry_credential(
         return None, error
     if status == 200 and _registry_probe_has_fingerprint(status, body, response_headers):
         return True, None
-    if status in {401, 403} and _registry_probe_has_fingerprint(status, body, response_headers):
+    if status == 401 and _registry_probe_has_fingerprint(status, body, response_headers):
         return False, "authentication rejected"
     return None, f"registry identity unavailable status={status}"
 

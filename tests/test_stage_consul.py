@@ -2913,6 +2913,54 @@ def test_consul_leaderless_response_is_not_fingerprint_and_scoped_token_is_valid
     )
 
 
+def test_consul_basic_pair_requires_new_protected_access() -> None:
+    public = _scope_fixture(True, False, False)
+    unchanged = _scope_fixture(True, False, False)
+    unlocked = _scope_fixture(True, True, False)
+    assert consul._basic_credential_verdict(public, unchanged, {"ok": False}, {"ok": False}) is None
+    assert consul._basic_credential_verdict(public, unlocked, {"ok": False}, {"ok": False}) is True
+    assert consul._basic_credential_verdict(public, unchanged, {"ok": False}, {"ok": True}) is True
+
+
+@pytest.mark.parametrize("status", (200, 401, 403, 500))
+def test_consul_token_identity_needs_shaped_success_or_explicit_rejection(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    monkeypatch.setattr(
+        consul,
+        "_consul_get_json_any",
+        lambda *_args, **_kwargs: (status, {"unexpected": "body"}, None, True, False),
+    )
+    result = consul._acl_token_self_probe(
+        "127.0.0.1", 8500, 1.0, scheme="http", insecure=True, headers={"X-Consul-Token": "candidate"}
+    )
+    assert result["ok"] is (False if status == 401 else None)
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    (
+        (403, "token does not exist: ACL not found", False),
+        (403, "  token does not exist: ACL not found\n", False),
+        (403, "ACL not found", None),
+        (403, "Forbidden", None),
+        (403, "Permission denied", None),
+        (403, {"message": "token does not exist: ACL not found"}, None),
+        (500, "token does not exist: ACL not found", None),
+    ),
+)
+def test_consul_token_self_only_rejects_product_missing_token(
+    monkeypatch: pytest.MonkeyPatch, status: int, body: object, expected: bool | None
+) -> None:
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_args, **_kwargs: (status, body, None, True, False))
+    result = consul._acl_token_self_probe(
+        "127.0.0.1", 8500, 1.0, scheme="http", insecure=True, headers={"X-Consul-Token": "candidate"}
+    )
+    assert result["ok"] is expected
+    if expected is False:
+        assert result["error"] == "Consul ACL token not found"
+
+
 def test_consul_http_request_brackets_ipv6_and_uses_tls_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 

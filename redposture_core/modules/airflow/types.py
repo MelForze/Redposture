@@ -34,6 +34,7 @@ class CredentialResult:
     username: str | None = None
     error_code: str | None = None
     bearer_token: str | None = None  # 3.x JWT, kept in-memory only (never serialized)
+    proof_surface: str | None = None  # api | web; web login does not prove API authorization
 
 
 @dataclass(frozen=True)

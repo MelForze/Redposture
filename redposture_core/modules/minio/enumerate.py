@@ -6,7 +6,7 @@ millions of objects is never materialised in memory.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 from xml.etree import ElementTree
@@ -35,16 +35,22 @@ def _tag(elem: Any) -> str:
     return elem.tag.split("}")[-1]
 
 
-def iter_buckets(client: MinioClient, *, limit: int | None = None) -> Iterator[BucketInfo]:
+def iter_buckets(
+    client: MinioClient, *, limit: int | None = None, on_error: Callable[[str], None] | None = None
+) -> Iterator[BucketInfo]:
     """Yield buckets. `limit=None` (default) lists all of them (buckets are few)."""
     if limit is not None and limit <= 0:
         return
     resp = client.get_service_root(signed=True)
     if resp.transport_error or resp.http_status != 200:
+        if on_error is not None:
+            on_error(f"ListBuckets: {resp.transport_error or f'HTTP {resp.http_status}'}")
         return
     try:
         root = ElementTree.fromstring(resp.body or b"")
     except ElementTree.ParseError:
+        if on_error is not None:
+            on_error("ListBuckets: invalid XML response")
         return
     count = 0
     for bucket in root.iter():
@@ -101,7 +107,12 @@ def _parse_page(bucket: str, body: bytes) -> tuple[list[ObjectInfo], str | None]
 
 
 def iter_objects(
-    client: MinioClient, bucket: str, *, limit: int | None = None, page_size: int = 1000
+    client: MinioClient,
+    bucket: str,
+    *,
+    limit: int | None = None,
+    page_size: int = 1000,
+    on_error: Callable[[str], None] | None = None,
 ) -> Iterator[ObjectInfo]:
     """Stream objects with continuation-token pagination.
 
@@ -124,6 +135,8 @@ def iter_objects(
             signed=True,
         )
         if resp.transport_error or resp.http_status != 200:
+            if on_error is not None:
+                on_error(f"ListObjects {bucket}: {resp.transport_error or f'HTTP {resp.http_status}'}")
             return
         objects, token = _parse_page(bucket, resp.body or b"")
         for obj in objects:
@@ -136,7 +149,12 @@ def iter_objects(
 
 
 def iter_objects_multi(
-    client: MinioClient, buckets: Any, *, limit: int | None = None, page_size: int = 1000
+    client: MinioClient,
+    buckets: Any,
+    *,
+    limit: int | None = None,
+    page_size: int = 1000,
+    on_error: Callable[[str], None] | None = None,
 ) -> Iterator[ObjectInfo]:
     """Stream objects across several buckets.
 
@@ -146,13 +164,13 @@ def iter_objects_multi(
     """
     if limit is None:
         for bucket in buckets:
-            yield from iter_objects(client, str(bucket), limit=None, page_size=page_size)
+            yield from iter_objects(client, str(bucket), limit=None, page_size=page_size, on_error=on_error)
         return
     remaining = max(0, limit)
     for bucket in buckets:
         if remaining <= 0:
             return
-        for obj in iter_objects(client, str(bucket), limit=remaining, page_size=page_size):
+        for obj in iter_objects(client, str(bucket), limit=remaining, page_size=page_size, on_error=on_error):
             yield obj
             remaining -= 1
             if remaining <= 0:

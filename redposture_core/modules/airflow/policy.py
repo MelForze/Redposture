@@ -23,6 +23,9 @@ def validate_args(args: Any, console: Any) -> int | None:
     if username is None and password is not None:
         console.error("--username and --password must be set together: -u/--username is missing")
         return 2
+    if not getattr(args, "dump", False) and any(getattr(args, name, None) for name in ("dag", "key", "connection")):
+        console.error("--dag, --key and --connection require --dump")
+        return 2
     return validate_discovery_budget(args, console)
 
 

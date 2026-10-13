@@ -140,8 +140,14 @@ def _etcd_v3_authenticate(
             if isinstance(token, str) and token:
                 return token, None
         return None, "unexpected authenticate response"
-    if status in (401, 403):
+    if status == 401:
         return None, "invalid credentials"
+    if status == 400:
+        parsed = _load_json(body)
+        if isinstance(parsed, dict) and parsed.get("code") == 3:
+            message = str(parsed.get("message") or parsed.get("error") or "").lower()
+            if "authentication failed, invalid user id or password" in message:
+                return None, "invalid credentials"
     return None, f"authenticate returned status {status}"
 
 
@@ -151,7 +157,7 @@ def _etcd_v2_authenticate(
     timeout: float,
     username: str,
     password: str,
-) -> tuple[bool, str | None]:
+) -> tuple[bool | None, str | None]:
     status, body = _http_json_request(
         host,
         port,
@@ -162,9 +168,9 @@ def _etcd_v2_authenticate(
     )
     if status == 200 and _count_v2_keys(body) is not None:
         return True, None
-    if status in {401, 403} or _body_indicates_auth_required(body):
+    if status == 401:
         return False, "invalid credentials"
-    return False, f"v2 key probe returned status {status}"
+    return None, f"v2 key probe returned status {status}"
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -860,7 +866,13 @@ def _audit_etcd_host(
                             "source": source,
                             "api": "v3",
                             "default": is_default,
-                            "ok": candidate_token is not None,
+                            "ok": (
+                                True
+                                if candidate_token is not None
+                                else False
+                                if str(err or "").lower() in {"invalid credentials", "authentication failed"}
+                                else None
+                            ),
                             "error": err,
                         }
                     )
@@ -885,7 +897,7 @@ def _audit_etcd_host(
                     except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
                         if not defaults_enabled:
                             raise
-                        candidate_ok = False
+                        candidate_ok = None
                         err = _friendly_error_from_exception(exc)
                     credential_attempts.append(
                         {
@@ -1138,7 +1150,16 @@ def _audit_etcd_host(
                 "provided_credentials_ok": (
                     None
                     if not provided_credentials
-                    else bool(selected_credential is not None and not selected_credential.get("default"))
+                    else True
+                    if selected_credential is not None and not selected_credential.get("default")
+                    else False
+                    if any(attempt.get("source") != "default" for attempt in credential_attempts)
+                    and all(
+                        attempt.get("ok") is False
+                        for attempt in credential_attempts
+                        if attempt.get("source") != "default"
+                    )
+                    else None
                 ),
                 "defcreds_enabled": defaults_enabled,
                 "effective_username": effective_username,
@@ -1291,11 +1312,13 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
     prefix = _nxc_prefix(record)
     lines: list[str] = []
     for attempt in attempts:
+        if attempt.get("ok") is None:
+            continue
         raw_username = attempt.get("username")
         raw_password = attempt.get("password")
         username = str(raw_username or "-")
         password = "<none>" if raw_password is None else "<empty>" if raw_password == "" else str(raw_password)
-        if not bool(attempt.get("ok")):
+        if attempt.get("ok") is False:
             lines.append(f"{prefix} [-] {username}:{password}")
             continue
 

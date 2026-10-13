@@ -3336,6 +3336,67 @@ def test_mixed_detected_and_operational_failure_emits_partial_summary_and_nonzer
     assert command_result_exit_code(result) == 1
 
 
+def test_post_detect_data_timeout_preserves_detection_and_marks_partial() -> None:
+    emitted: list[str] = []
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="auth_required",
+            extra={"is_demo": True},
+        )
+
+    def auth(_ctx, prior: AuditRecord) -> AuditRecord:
+        return AuditRecord(
+            host=prior.host,
+            port=prior.port,
+            module="demo",
+            service="demo",
+            status="valid_credentials",
+            extra={"is_demo": True, "provided_credentials_ok": True},
+        )
+
+    def data(ctx, prior: AuditRecord) -> AuditRecord:
+        if ctx.host == "slow":
+            raise TimeoutError("data phase timed out")
+        return prior
+
+    result = AuditCommandRunner(
+        args=SimpleNamespace(debug=False),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            auth=auth,
+            data=data,
+            is_detected=lambda record: record.extra.get("is_demo") is True,
+        ),
+        emit_line=emitted.append,
+    ).run_plan(
+        AuditCommandPlan(
+            targets_by_port={1234: ("ok", "slow")},
+            credential_runs=(AuditCredentialRun("qa", "secret", source="provided"),),
+            output_format="json",
+            workers=2,
+        )
+    )
+
+    payloads = [json.loads(line) for line in emitted]
+    failed = next(item for item in payloads if item.get("host") == "slow")
+    assert failed["status"] == "fail"
+    assert failed["is_demo"] is True
+    assert failed["detection_preserved"] is True
+    assert failed["operational_failure"] is True
+    assert payloads[-1]["status"] == "partial"
+    assert payloads[-1]["operational_failure_count"] == 1
+    assert result.detected_count == 2
+    assert command_result_exit_code(result) == 1
+
+
 def test_mixed_detected_and_operational_failure_hides_txt_aggregate_and_keeps_nonzero() -> None:
     emitted: list[str] = []
 

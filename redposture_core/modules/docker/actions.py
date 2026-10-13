@@ -392,18 +392,45 @@ def _audit_docker_host(
         return record
 
     client_certificate_used = bool(transport == "tls" and tls_cert and tls_key)
-    status = "valid_credentials" if client_certificate_used else "open_no_auth"
+    certificate_verified = False
+    anonymous_open = not client_certificate_used
+    anonymous_probe_error: str | None = None
+    if client_certificate_used:
+        # Supplying a certificate does not mean the daemon required it. Compare
+        # the same read-only Engine probe without the certificate before
+        # describing it as an accepted credential.
+        base_path = infer_http_base_path(str(target_path or ""), ("/_ping", "/version", "/info", "/containers"))
+        anonymous_client, anonymous_version, _mode, anonymous_error, anonymous_auth_required = _probe_docker(
+            host,
+            port,
+            timeout,
+            insecure=insecure,
+            tls_ca=tls_ca,
+            tls_cert=None,
+            tls_key=None,
+            **({"base_path": base_path} if base_path else {}),
+        )
+        if anonymous_client is not None:
+            _close_docker_client(anonymous_client)
+        anonymous_open = anonymous_version is not None and anonymous_auth_required is False
+        certificate_verified = (
+            anonymous_auth_required is True or "certificate required" in str(anonymous_error or "").lower()
+        )
+        if not anonymous_open and not certificate_verified:
+            anonymous_probe_error = f"anonymous comparison inconclusive: {anonymous_error or 'unknown response'}"
+    status = "open_no_auth" if anonymous_open else "valid_credentials" if certificate_verified else "detected"
     record.update(
         {
             "is_docker": True,
             "status": status,
-            "auth_required": False,
+            "auth_required": True if certificate_verified else False if anonymous_open else None,
             "transport_mode": transport,
             "tls_required": transport == "tls",
             "api_version": version.get("ApiVersion") or version.get("APIVersion"),
             "server_version": version.get("Version"),
             "ostype": version.get("Os") or version.get("OSType"),
             "tls_client_cert_used": client_certificate_used,
+            "error": anonymous_probe_error,
         }
     )
 

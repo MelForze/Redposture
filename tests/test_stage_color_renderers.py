@@ -7,6 +7,7 @@ import pytest
 from redposture_core.console import Console
 from redposture_core.stage_clickhouse import _render_colored_clickhouse_line
 from redposture_core.stage_consul import _render_colored_consul_line
+from redposture_core.stage_docker import _render_colored_docker_line
 from redposture_core.stage_elastic import _render_colored_elastic_line
 from redposture_core.stage_etcd import _render_colored_etcd_line
 from redposture_core.stage_gitlab import _render_colored_gitlab_line
@@ -66,6 +67,7 @@ _Renderer = Callable[[_RecordingConsole, str], bool]
         (_render_colored_clickhouse_line, "CLICKHOUSE"),
         (_render_colored_qdrant_line, "QDRANT"),
         (_render_colored_consul_line, "CONSUL"),
+        (_render_colored_docker_line, "DOCKER"),
         (_render_colored_elastic_line, "ELASTIC"),
         (_render_colored_kubeapi_line, "KUBEAPI"),
         (_render_colored_grafana_line, "GRAFANA"),
@@ -101,6 +103,7 @@ def test_stage_colored_renderers_map_marker_colors(renderer: _Renderer, tag: str
         _render_colored_clickhouse_line,
         _render_colored_qdrant_line,
         _render_colored_consul_line,
+        _render_colored_docker_line,
         _render_colored_elastic_line,
         _render_colored_kubeapi_line,
         _render_colored_grafana_line,
@@ -345,6 +348,22 @@ def test_render_colored_proxmox_colors_capabilities_and_finding_payload() -> Non
         'Token Value="abc" Place="/access$.token"',
         "orange",
     )
+
+
+def test_proxmox_unverified_credential_reason_is_orange() -> None:
+    console = _RecordingConsole()
+    line = "PROXMOX\t127.0.0.1\t8006\t [*] credential verification unavailable (reason:second factor required)"
+    assert _render_colored_proxmox_line(console, line) is True
+    assert _contains_paint(console.paint_calls, "unavailable", "orange")
+    assert _contains_paint(console.paint_calls, "second factor required", "orange")
+
+
+def test_proxmox_unverified_credential_no_color_has_no_ansi(capsys: pytest.CaptureFixture[str]) -> None:
+    line = "PROXMOX\t127.0.0.1\t8006\t [*] credential verification unavailable (reason:second factor required)"
+    assert _render_colored_proxmox_line(Console(no_color=True), line) is True
+    output = capsys.readouterr().out
+    assert line in output
+    assert "\x1b[" not in output
 
 
 def test_render_colored_grpc_colors_status_and_protocol() -> None:

@@ -443,6 +443,13 @@ def _is_invalid_token_message(value: str | None) -> bool:
     return any(needle in text for needle in needles)
 
 
+def _is_invalid_password_message(value: str | None) -> bool:
+    """Only a recognizable login rejection is evidence against a password."""
+
+    text = str(value or "").strip().lower()
+    return text.startswith("pve credential rejected:")
+
+
 def _is_permission_denied_message(value: str | None) -> bool:
     text = str(value or "").strip().lower()
     if not text:
@@ -759,7 +766,7 @@ def _login_proxmox_password(
     insecure: bool,
     proxy: Any | None,
 ) -> tuple[dict[str, str] | None, str | None]:
-    status, payload, _headers, error = _proxmox_request(
+    status, payload, headers, error = _proxmox_request(
         host,
         port,
         "/access/ticket",
@@ -776,10 +783,15 @@ def _login_proxmox_password(
     if error:
         return None, error
     if status != 200:
-        return None, _extract_error_message(payload) or f"unexpected HTTP {status} from /access/ticket"
+        message = _extract_error_message(payload) or f"unexpected HTTP {status} from /access/ticket"
+        if status == 401 and _looks_like_proxmox_response(status, payload, headers):
+            return None, f"pve credential rejected: {message}"
+        return None, f"pve login response inconclusive: {message}"
     data = _extract_api_data_dict(payload)
     ticket = str(data.get("ticket") or "").strip()
     csrf = str(data.get("CSRFPreventionToken") or "").strip()
+    if data.get("NeedTFA") or ticket.startswith("PVE:tfa!"):
+        return None, "second factor required"
     if not ticket:
         return None, "missing Proxmox auth ticket"
     headers = {"Cookie": f"PVEAuthCookie={ticket}"}
@@ -825,7 +837,7 @@ def _resolve_proxmox_auth_headers(
     attempts: list[dict[str, str]] = []
     first_success: tuple[dict[str, str], str, str] | None = None
     for user, secret, source in candidates:
-        headers, _error = _login_proxmox_password(
+        headers, login_error = _login_proxmox_password(
             host,
             port,
             timeout,
@@ -836,14 +848,16 @@ def _resolve_proxmox_auth_headers(
             insecure=insecure,
             proxy=proxy,
         )
-        attempts.append(
-            {
-                "username": user,
-                "password": secret,
-                "source": source,
-                "ok": str(headers is not None),
-            }
-        )
+        attempt = {
+            "username": user,
+            "password": secret,
+            "source": source,
+            "ok": str(headers is not None),
+        }
+        if headers is None and not _is_invalid_password_message(login_error):
+            attempt["status"] = "fail"
+            attempt["verification_reason"] = str(login_error or "login response inconclusive")
+        attempts.append(attempt)
         if headers is not None and first_success is None:
             first_success = (dict(headers), user, secret)
             if not defcreds:
@@ -1334,7 +1348,15 @@ def _audit_proxmox_host(
             result["partial_error"] = None
         return result
 
-    access_status, access_payload, access_error = fetch("/access")
+    access_status, access_payload, access_headers, access_error = perform_request("/access")
+    record_response(
+        "/access",
+        method="GET",
+        status=access_status,
+        payload=access_payload,
+        response_headers=access_headers,
+        error=access_error,
+    )
     if access_error:
         result = {
             "timestamp": utc_now_iso(),
@@ -1380,7 +1402,13 @@ def _audit_proxmox_host(
 
     if access_status in {401, 403}:
         access_error_text = _extract_error_message(access_payload)
-        auth_status = _classify_auth_failure(access_status, access_error_text)
+        access_confirmed = _looks_like_proxmox_response(access_status, access_payload, access_headers)
+        inconclusive_attempts = [item for item in auth_attempts if item.get("status") == "fail"]
+        auth_status = (
+            _classify_auth_failure(access_status, access_error_text)
+            if access_confirmed and not inconclusive_attempts
+            else "fail"
+        )
 
         permissions_status, permissions_payload, permissions_error = fetch("/access/permissions?path=/")
         if permissions_error:
@@ -1417,8 +1445,16 @@ def _audit_proxmox_host(
             "timestamp": utc_now_iso(),
             "host": host,
             "port": port,
-            "is_proxmox": True,
+            "is_proxmox": access_confirmed,
             "status": auth_status,
+            "credential_verification_status": "unavailable" if auth_status == "fail" else None,
+            "credential_verification_reason": (
+                str(inconclusive_attempts[0].get("verification_reason") or "login response inconclusive")
+                if inconclusive_attempts
+                else "product response inconclusive"
+            )
+            if auth_status == "fail"
+            else None,
             "auth_method": auth_method,
             "auth_username": auth_username,
             "auth_password": auth_password,
@@ -1798,6 +1834,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             suffix_text = f" {suffix}" if suffix else ""
             return f"{prefix} [-] password authentication failed{suffix_text}"
         return f"{prefix} [-] invalid pve api token"
+    if record.get("credential_verification_status") == "unavailable":
+        reason = _clip(str(record.get("credential_verification_reason") or "product response inconclusive"), 100)
+        return f"{prefix} [*] credential verification unavailable (reason:{reason})"
     err = _clip(str(record.get("error") or "connection failed"), 90)
     return f"{prefix} [!] connection failed err={err}"
 
@@ -1829,6 +1868,8 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
                 password_text = str(password)
             label = f"{username_text}:{password_text}"
         if status:
+            if status not in success_statuses and status != "auth_failed":
+                continue
             ok = status in success_statuses
         else:
             ok = attempt.get("ok") is True or str(attempt.get("ok") or "").lower() == "true"
@@ -2128,7 +2169,13 @@ def _format_add_user_detail_records(record: dict[str, Any], output_format: str) 
 
 def _render_colored_proxmox_line(console: Console, line: str) -> bool:
     def _extra_spans(marker: str, payload: str) -> list[tuple[int, int, str]]:
-        return discovery_color_spans(marker, payload)
+        spans = discovery_color_spans(marker, payload)
+        if "credential verification unavailable" in payload:
+            spans.append((payload.index("unavailable"), payload.index("unavailable") + len("unavailable"), "orange"))
+            reason = re.search(r"\(reason:([^)]*)\)", payload)
+            if reason is not None:
+                spans.append((reason.start(1), reason.end(1), "orange"))
+        return spans
 
     if render_colored_marker_line(
         console,

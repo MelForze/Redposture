@@ -19,7 +19,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 6379
-_DEFAULT_PORTS: tuple[int, ...] | None = (6379, 16379, 26379)
+_DEFAULT_PORTS: tuple[int, ...] | None = (6379, 16379, 26379, 5540)
 _REDIS_HOST_STAGE = actions.host_stage
 _REDIS_HOST_STAGE_NAME = actions.host_stage.__name__
 _REDIS_HOST_STAGE_IMPL = getattr(actions, _REDIS_HOST_STAGE_NAME, actions.host_stage)

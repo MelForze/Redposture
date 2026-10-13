@@ -13,7 +13,7 @@ from redposture_core.cli_args import parse_args
         ("docker-registry", (5000, 15000, 25000)),
         ("harbor", (80, 443)),
         ("nexus", (8081,)),
-        ("postgres", (5432, 6432, 15432, 16432, 25432, 26432)),
+        ("postgres", (5432, 6432, 15432, 16432, 25432, 26432, 80, 443)),
         ("clickhouse", (9000, 19000, 29000)),
         ("etcd", (2379, 12379, 22379)),
         ("proxmox", (8006, 18006, 28006)),

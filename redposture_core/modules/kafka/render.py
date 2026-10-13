@@ -16,15 +16,20 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
         or "Clusters Enumeration" in line
         or "Brokers Enumeration" in line
         or "Consumer Groups Enumeration" in line
+        or "Dump Topic" in line
+        or "Dump coverage:partial" in line
     ):
         if render_colored_marker_line(
             console,
             line,
             tag="KAFKA",
-            regexes=(RegexColorRule(r"\(version:[^)]+\)", "orange"),),
+            regexes=(
+                RegexColorRule(r"\(version:[^)]+\)", "orange"),
+                RegexColorRule(r"coverage:partial", "orange"),
+            ),
             counts=tuple(
                 CountColorRule(name, "red", zero_color="bright_green")
-                for name in ("clusters", "brokers", "topics", "groups")
+                for name in ("clusters", "brokers", "topics", "groups", "messages")
             ),
             extra_spans=lambda marker, right: [(0, len(right), "red")] if marker == "[+]" and ":" in right else [],
         ):
@@ -115,6 +120,43 @@ def _format_ui_detail_records(record: dict, output_format: str) -> list[str]:
             name = str(item.get(name_field) or item.get("id") or "")
             if name:
                 lines.append(f"{prefix} {cluster + '/' if cluster else ''}{name}")
+    if record.get("dump"):
+        dumps = record.get("ui_dump_records")
+        if isinstance(dumps, list) and dumps:
+            for item in dumps:
+                if not isinstance(item, dict):
+                    continue
+                cluster, topic = str(item.get("cluster") or ""), str(item.get("topic") or "")
+                messages = item.get("messages")
+                if not isinstance(messages, list):
+                    messages = []
+                lines.append(
+                    f"{prefix} [*] Dump Topic {cluster}/{topic} "
+                    f"(messages:{len(messages)}) (max:{record.get('max_messages')})"
+                )
+                for message in messages:
+                    if not isinstance(message, dict):
+                        continue
+                    value = message.get("value")
+                    shown_value = (
+                        str(value).replace("\r", "\\r").replace("\n", "\\n") if value is not None else "<null>"
+                    )
+                    lines.append(
+                        f"{prefix} partition:{message.get('partition')} offset:{message.get('offset')} "
+                        f"value:{shown_value}"
+                    )
+                if item.get("error"):
+                    lines.append(f"{prefix} [-] {item['error']}")
+        else:
+            reason = "no accessible clusters or topics" if record.get("ui_clusters") else "no accessible clusters"
+            lines.append(f"{prefix} [-] Dump unavailable: {reason}")
+        skipped = record.get("ui_dump_skipped_topics")
+        if isinstance(skipped, int) and skipped > 0:
+            lines.append(f"{prefix} [*] Dump coverage:partial (skipped topics:{skipped})")
+        elif record.get("ui_dump_partial"):
+            lines.append(f"{prefix} [*] Dump coverage:partial")
+        if record.get("ui_dump_limit_reduced"):
+            lines.append(f"{prefix} [*] Dump capped at 1000 messages per topic")
     if record.get("ui_unsupported_actions"):
         lines.append(f"{prefix} [-] {record['ui_unsupported_actions']}")
     return lines

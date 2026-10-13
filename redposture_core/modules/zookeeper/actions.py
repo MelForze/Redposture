@@ -406,27 +406,33 @@ def _collect_anonymous_verifier_probes(
         known_root_err=root_err,
         discovered_children=children_by_path,
     )
-    # A protected child may live below a public root child. Reuse the child
-    # lists returned above and cap this extra search at 16 reads per target.
-    extra_paths: list[str] = []
-    for parent in initial_paths:
-        if parent.count("/") != 1 or results.get(parent) != _ZK_ERR_OK:
+    # Protected nodes are often nested under several public ClickHouse or
+    # application paths. Walk public children breadth-first, with a strict
+    # 32-request budget and a four-component depth limit per target.
+    pending = [path for path in initial_paths if path != "/" and results.get(path) == _ZK_ERR_OK]
+    extra_budget = 32
+    while pending and extra_budget > 0:
+        parent = pending.pop(0)
+        if parent.count("/") >= 4:
             continue
+        candidates = []
         for child in sorted(
             str(value).strip("/") for value in children_by_path.get(parent, []) if str(value).strip("/")
         ):
             path = _join_znode_path(parent, child)
-            if path in results or path in extra_paths:
-                continue
-            extra_paths.append(path)
-            if len(extra_paths) == 16:
+            if path not in results:
+                candidates.append(path)
+            if len(candidates) >= extra_budget:
                 break
-        if len(extra_paths) == 16:
-            break
-    if extra_paths:
-        extra_results, extra_errors = _collect_session_auth_probes(client, tuple(extra_paths))
+        if not candidates:
+            continue
+        extra_budget -= len(candidates)
+        extra_results, extra_errors = _collect_session_auth_probes(
+            client, tuple(candidates), discovered_children=children_by_path
+        )
         results.update(extra_results)
         errors.update(extra_errors)
+        pending.extend(path for path in candidates if results.get(path) == _ZK_ERR_OK)
     return results, errors
 
 

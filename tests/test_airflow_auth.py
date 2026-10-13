@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from redposture_core.clients.airflow_api import AirflowResponse
 from redposture_core.modules.airflow import actions
 
@@ -35,9 +37,54 @@ def test_v1_basic_restricted_on_403():
     assert r.state == "verification_unavailable"
 
 
-def test_v2_token_valid_keeps_bearer():
+def test_v1_basic_403_uses_proven_fab_identity_only():
+    body = b'{"status":403,"title":"Forbidden","detail":"Permission denied"}'
+
+    class _FabClient(_FakeClient):
+        def __init__(self, verdict):
+            super().__init__(get_status=403, get_body=body)
+            self.verdict = verdict
+
+        def verify_fab_login(self, username, password):
+            assert (username, password) == ("u", "p")
+            return self.verdict
+
+    for verdict, expected in (
+        ("valid", "valid_but_restricted"),
+        ("invalid", "invalid"),
+        ("unverified", "verification_unavailable"),
+    ):
+        result = actions.verify_credential(lambda verdict=verdict, **_kwargs: _FabClient(verdict), "v1", "u", "p")
+        assert result.state == expected
+        assert result.proof_surface == ("web" if verdict != "unverified" else None)
+
+
+def test_v1_generic_proxy_denial_can_be_resolved_only_by_fab_identity():
+    class _ProxyClient(_FakeClient):
+        def __init__(self, verdict, status):
+            super().__init__(get_status=status, get_body=b"proxy denied")
+            self.verdict = verdict
+
+        def verify_fab_login(self, username, password):
+            return self.verdict
+
+    for status in (401, 403):
+        for verdict, expected in (
+            ("valid", "valid_but_restricted"),
+            ("invalid", "invalid"),
+            ("unverified", "verification_unavailable"),
+        ):
+            result = actions.verify_credential(
+                lambda verdict=verdict, status=status, **_kwargs: _ProxyClient(verdict, status), "v1", "u", "p"
+            )
+            assert result.state == expected
+            assert result.error_code == str(status)
+
+
+@pytest.mark.parametrize("http_status", [200, 201])
+def test_v2_token_valid_keeps_bearer(http_status):
     def factory(**k):
-        return _FakeClient(post=(200, b'{"access_token":"JWT","token_type":"Bearer"}'))
+        return _FakeClient(post=(http_status, b'{"access_token":"JWT","token_type":"Bearer"}'))
 
     r = actions.verify_credential(factory, "v2", "airflow", "airflow")
     assert r.state == "valid" and r.bearer_token == "JWT"
@@ -45,7 +92,21 @@ def test_v2_token_valid_keeps_bearer():
 
 def test_v2_token_invalid_on_401():
     def factory(**k):
-        return _FakeClient(post=(401, b'{"detail":"bad"}'))
+        return _FakeClient(post=(401, b'{"detail":"Invalid credentials"}'))
 
     r = actions.verify_credential(factory, "v2", "admin", "admin")
     assert r.state == "invalid"
+
+
+def test_v2_generic_401_does_not_reject_password():
+    r = actions.verify_credential(
+        lambda **_kwargs: _FakeClient(post=(401, b'{"detail":"proxy denied"}')), "v2", "u", "p"
+    )
+    assert r.state == "verification_unavailable"
+
+
+def test_v2_token_forbidden_is_not_proof_of_invalid_password():
+    r = actions.verify_credential(
+        lambda **_kwargs: _FakeClient(post=(403, b'{"detail":"Forbidden"}')), "v2", "admin", "admin"
+    )
+    assert r.state == "verification_unavailable"

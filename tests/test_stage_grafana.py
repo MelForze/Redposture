@@ -380,7 +380,7 @@ def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.Monke
     assert cleanup_error == "temporary datasource id/uid is missing"
 
 
-def test_grafana_auth_rejects_login_page_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_grafana_auth_does_not_classify_login_page_as_invalid_password(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_grafana._http_request",
         lambda *_args, **_kwargs: (200, "<html><title>Grafana login</title></html>", {}),
@@ -389,10 +389,26 @@ def test_grafana_auth_rejects_login_page_payloads(monkeypatch: pytest.MonkeyPatc
     basic_ok, basic_error = _verify_credentials("127.0.0.1", 3000, 1.0, "admin", "admin")
     token_ok, token_error = grafana_stage._verify_apitoken("127.0.0.1", 3000, 1.0, "glsa-token")
 
-    assert basic_ok is False
+    assert basic_ok is None
     assert "invalid identity payload" in str(basic_error)
-    assert token_ok is False
+    assert token_ok is None
     assert "invalid identity payload" in str(token_error)
+
+
+def test_grafana_token_verifier_needs_two_rejections_or_valid_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    def response(_host: str, _port: int, path: str, _timeout: float, **_kwargs: object):
+        return (401, "", {}) if path == "/api/user" else (503, "", {})
+
+    monkeypatch.setattr("redposture_core.stage_grafana._http_request", response)
+    ok, error = grafana_stage._verify_apitoken("127.0.0.1", 3000, 1.0, "glsa-token")
+    assert ok is None
+    assert "unavailable status=503" in str(error)
+
+    monkeypatch.setattr(
+        "redposture_core.stage_grafana._http_request",
+        lambda *_args, **_kwargs: (401, "", {}),
+    )
+    assert grafana_stage._verify_apitoken("127.0.0.1", 3000, 1.0, "glsa-token")[0] is False
 
 
 def test_grafana_service_account_403_is_unverified(monkeypatch: pytest.MonkeyPatch) -> None:

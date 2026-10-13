@@ -29,6 +29,51 @@ from redposture_core.stage_etcd import (
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
+@pytest.mark.parametrize("status", (401, 403, 500))
+def test_etcd_auth_response_only_rejects_on_explicit_401(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    monkeypatch.setattr(etcd, "_http_json_request", lambda *_args, **_kwargs: (status, "{}"))
+    token, v3_error = etcd._etcd_v3_authenticate("127.0.0.1", 2379, 1.0, "alice", "secret")
+    v2_ok, v2_error = etcd._etcd_v2_authenticate("127.0.0.1", 2379, 1.0, "alice", "secret")
+    assert token is None
+    assert v2_ok is (False if status == 401 else None)
+    assert ("invalid credentials" in str(v3_error)) is (status == 401)
+    assert ("invalid credentials" in str(v2_error)) is (status == 401)
+
+
+@pytest.mark.parametrize(
+    ("body", "rejected"),
+    [
+        (
+            '{"error":"etcdserver: authentication failed, invalid user ID or password","code":3,"message":"etcdserver: authentication failed, invalid user ID or password"}',
+            True,
+        ),
+        ('{"code":3,"message":"permission denied"}', False),
+        ('{"code":3,"message":"authentication is not enabled"}', False),
+        ('{"error":"Bad Request"}', False),
+        ("<html>Bad Request</html>", False),
+    ],
+)
+def test_etcd_v3_real_invalid_password_shape(monkeypatch: pytest.MonkeyPatch, body: str, rejected: bool) -> None:
+    monkeypatch.setattr(etcd, "_http_json_request", lambda *_args, **_kwargs: (400, body))
+    token, error = etcd._etcd_v3_authenticate("127.0.0.1", 2379, 1.0, "root", "wrong")
+    assert token is None
+    assert (error == "invalid credentials") is rejected
+
+
+def test_etcd_unverified_attempt_is_json_only() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 2379,
+        "credential_attempts": [
+            {"username": "alice", "password": "secret", "ok": None, "error": "timeout"},
+            {"username": "bob", "password": "bad", "ok": False, "error": "invalid credentials"},
+        ],
+    }
+    lines = _format_credential_attempts_records(record, "txt")
+    assert len(lines) == 1 and "[-] bob:bad" in lines[0]
+    assert "alice:secret" not in "\n".join(lines)
+
+
 class _ConsoleCapture:
     instances: list[_ConsoleCapture] = []
 
@@ -542,7 +587,8 @@ def test_audit_etcd_authenticated_reads_propagate_token_and_render_selected_defa
     assert all(token == "token-123" for _payload, token in token_calls)
     assert _format_record(record, "txt") == ""
     rendered = _format_credential_attempts_records(record, "txt")
-    assert len(rendered) == len(etcd._ETCD_DEFAULT_CREDS)
+    assert len(rendered) == len(etcd._ETCD_DEFAULT_CREDS) - 1
+    assert not any("admin:admin" in line for line in rendered)
     selected_line = next(line for line in rendered if "[+] admin:changeme" in line)
     later_success_line = next(line for line in rendered if "[+] root:etcd" in line)
     assert selected_line.endswith("[+] admin:changeme (keys:0)")
@@ -625,8 +671,35 @@ def test_audit_etcd_without_defcreds_stops_after_first_success(monkeypatch) -> N
 
     assert attempted == [("first", "one")]
     assert record["status"] == "valid_credentials"
+    assert record["provided_credentials_ok"] is True
     assert record["effective_username"] == "first"
     assert record["effective_password"] == "one"
+
+
+def test_etcd_file_candidate_rejection_is_explicit(monkeypatch) -> None:
+    def fake_request(_host, _port, _method, path, _timeout, *, payload=None, auth_token=None):
+        if path == "/version":
+            return 200, '{"etcdserver":"3.5.14"}'
+        if path == "/v2/keys?recursive=true":
+            return 404, ""
+        if path == "/v3/auth/status":
+            return 200, '{"enabled":true}'
+        raise AssertionError(path)
+
+    monkeypatch.setattr(etcd, "_http_json_request", fake_request)
+    monkeypatch.setattr(etcd, "_etcd_v3_authenticate", lambda *_args: (None, "authentication failed"))
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+        credential_candidates=[{"username": "alice", "password": "wrong", "source": "file"}],
+    )
+    assert record["provided_credentials_ok"] is False
+    assert record["credential_attempts"][0]["ok"] is False
 
 
 def test_audit_etcd_host_marks_non_etcd_and_retries_failures(monkeypatch) -> None:

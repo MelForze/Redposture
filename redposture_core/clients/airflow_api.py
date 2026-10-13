@@ -12,12 +12,68 @@ import base64
 import json
 import zlib
 from dataclasses import dataclass
+from html.parser import HTMLParser
+from http.cookies import SimpleCookie
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode, urljoin, urlsplit
 
 if TYPE_CHECKING:
     from .http_session import HttpSessionPool
 
 _RESPONSE_CAP = 2 * 1024 * 1024
+
+
+class _FabLoginForm(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_login_form = False
+        self.action = ""
+        self.fields: dict[str, str] = {}
+        self.warning_depth = 0
+        self.invalid_login_flash = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "form" and values.get("name") == "login" and (values.get("method") or "").lower() == "post":
+            self.in_login_form = True
+            self.action = values.get("action") or ""
+            self.fields.clear()
+        elif tag == "input" and self.in_login_form:
+            name = values.get("name")
+            if name:
+                self.fields[name] = values.get("value") or ""
+        elif tag == "div":
+            if self.warning_depth:
+                self.warning_depth += 1
+            elif {"alert", "alert-warning"} <= set((values.get("class") or "").split()):
+                self.warning_depth = 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "form":
+            self.in_login_form = False
+        elif tag == "div" and self.warning_depth:
+            self.warning_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self.warning_depth and data.strip() == "Invalid login. Please try again.":
+            self.invalid_login_flash = True
+
+
+def _header(headers: dict[str, str], name: str) -> str:
+    return next((str(value) for key, value in headers.items() if key.lower() == name.lower()), "")
+
+
+def _session_cookie(headers: dict[str, str]) -> str | None:
+    raw = _header(headers, "set-cookie")
+    if not raw:
+        return None
+    try:
+        parsed = SimpleCookie()
+        parsed.load(raw)
+        morsel = parsed.get("session")
+    except Exception:  # noqa: BLE001 - malformed cookies are not proof of a login
+        return None
+    return f"session={morsel.value}" if morsel is not None and morsel.value else None
 
 
 @dataclass(frozen=True)
@@ -142,6 +198,84 @@ class AirflowClient:
     def post_json(self, path: str, payload: dict[str, Any], *, authed: bool = False) -> AirflowResponse:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         return self._request("POST", path, authed=authed, body=body, extra_headers={"Content-Type": "application/json"})
+
+    def verify_fab_login(self, username: str, password: str) -> str:
+        """Resolve an ambiguous Airflow 2.x API 403 using a local FAB login form.
+
+        Each attempt gets a fresh CSRF session. The POST is sent once, without
+        redirects or transport retries; only same-origin Airflow pages can prove
+        the result. SSO, CAPTCHA, lockout and unfamiliar forms stay unverified.
+        """
+
+        login_url = f"{self.base_url}{self.base_path}/login/"
+        try:
+            page = self._pool.request_once("GET", login_url, response_size_cap=256 * 1024)
+            if page.error or page.truncated or page.status != 200:
+                return "unverified"
+            if "text/html" not in _header(page.headers, "content-type").lower():
+                return "unverified"
+            markup = page.body.decode("utf-8", "replace")
+            if "/static/appbuilder/" not in markup:
+                return "unverified"
+            form = _FabLoginForm()
+            form.feed(markup)
+            if not {"username", "password", "csrf_token"} <= form.fields.keys() or not form.fields["csrf_token"]:
+                return "unverified"
+            cookie = _session_cookie(page.headers)
+            if cookie is None:
+                return "unverified"
+            action_url = urljoin(login_url, form.action)
+            action = urlsplit(action_url)
+            expected = urlsplit(login_url)
+            if (action.scheme, action.hostname, action.port, action.path) != (
+                expected.scheme,
+                expected.hostname,
+                expected.port,
+                expected.path,
+            ):
+                return "unverified"
+            body = urlencode({"csrf_token": form.fields["csrf_token"], "username": username, "password": password})
+            posted = self._pool.request_once(
+                "POST",
+                action_url,
+                headers={"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded"},
+                body=body.encode("utf-8"),
+                response_size_cap=64 * 1024,
+            )
+            if posted.error or posted.status not in {302, 303}:
+                return "unverified"
+            destination = urljoin(login_url, _header(posted.headers, "location"))
+            final = urlsplit(destination)
+            if (final.scheme, final.hostname, final.port) != (expected.scheme, expected.hostname, expected.port):
+                return "unverified"
+            posted_cookie = _session_cookie(posted.headers)
+            if posted_cookie is None:
+                return "unverified"
+            followed = self._pool.request_once(
+                "GET", destination, headers={"Cookie": posted_cookie}, response_size_cap=256 * 1024
+            )
+            if followed.error or followed.truncated or followed.status != 200:
+                return "unverified"
+            result_html = followed.body.decode("utf-8", "replace")
+            if (
+                final.path == f"{self.base_path}/home"
+                and posted_cookie != cookie
+                and "/logout/" in result_html
+                and "Log Out" in result_html
+            ):
+                return "valid"
+            if final.path == f"{self.base_path}/login/" and "/static/appbuilder/" in result_html:
+                failed_form = _FabLoginForm()
+                failed_form.feed(result_html)
+                if {
+                    "username",
+                    "password",
+                    "csrf_token",
+                } <= failed_form.fields.keys() and failed_form.invalid_login_flash:
+                    return "invalid"
+        except Exception:  # noqa: BLE001 - login/transport failures never prove a password verdict
+            return "unverified"
+        return "unverified"
 
 
 __all__ = ["AirflowClient", "AirflowResponse"]

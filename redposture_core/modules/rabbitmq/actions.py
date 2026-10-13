@@ -257,7 +257,7 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     )
     record.update(
         credential_state=result,
-        provided_credentials_ok=valid,
+        provided_credentials_ok=True if valid else False if result == "rejected" else None,
         credential_username=credential.username,
         credential_http_status=response.status,
         credential_error=response.error,

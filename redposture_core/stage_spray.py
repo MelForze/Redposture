@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import web_panels
 from .audit_models import AuditRecord
 from .cli_args import build_parser
 from .console import Console
@@ -37,7 +38,7 @@ from .stage_runtime import (
 )
 from .targeting import TargetParsePolicy, stream_scan_target_specs
 
-_PAIR_MODULES = frozenset(AUDIT_MODULE_NAMES) - {"docker", "keycloak", "qdrant"}
+_PAIR_MODULES = frozenset(AUDIT_MODULE_NAMES) - {"keycloak", "qdrant"}
 _TOKEN_MODULES = frozenset(
     {
         "consul",
@@ -68,6 +69,9 @@ _MODULE_CONFIG: dict[str, frozenset[str]] = {
     "proxmox": frozenset({"realm"}),
 }
 _LOCK_MARKERS = ("captcha", "account locked", "account has been locked", "too many requests", "too many login attempts")
+_PRODUCT_AUTH_SUCCESS_STATUSES = frozenset(
+    {"valid_credentials", "weak_default_creds", "auth_valid", "token_ok", "valid_token", "token_accepted"}
+)
 _SPRAY_READ_ONLY_DATA_MODULES = frozenset({"grafana", "redis"})
 _DISPLAY_NAMES = {
     "clickhouse": "ClickHouse",
@@ -374,17 +378,31 @@ def classify(record: AuditRecord, credential: AuditCredentialRun, runner: AuditC
         return "access_denied", "identity verified; resource denied"
     # A module-specific credential gate is the authoritative positive proof.
     accepted, why = runner._credential_gate(credential, record)
+    ui_product = str(payload.get("ui_product") or "") if payload.get("surface") == "ui" else ""
+    if ui_product:
+        why = f"{web_panels.UI_PRODUCTS.get(ui_product, ui_product)} UI: {why}"
+    credential_state = str(payload.get("credential_state") or "").lower()
+    if credential_state in {"unknown", "unverified", "verification_unavailable", "inconclusive"}:
+        return "inconclusive", _clean(why or credential_state)
     if accepted and (
-        record.extra.get("provided_credentials_ok") is True
-        or record.extra.get("auth_valid") is True
-        or record.extra.get("token_valid") is True
-        or status in {"valid_credentials", "auth_valid"}
+        any(
+            record.extra.get(field) is True
+            for field in (
+                "provided_credentials_ok",
+                "credential_verified",
+                "auth_valid",
+                "token_valid",
+                "credentials_valid",
+                "login_success",
+            )
+        )
+        or status in _PRODUCT_AUTH_SUCCESS_STATUSES
     ):
         return "valid", why
     if (
         record.extra.get("provided_credentials_ok") is False
         or status == "invalid_credentials"
-        or str(payload.get("credential_state") or "").lower() == "invalid"
+        or credential_state == "invalid"
     ):
         return "invalid", "credential rejected by product verifier"
     if status == "auth_required" and why == "status=auth_required":
@@ -393,15 +411,25 @@ def classify(record: AuditRecord, credential: AuditCredentialRun, runner: AuditC
 
 
 def _supported(module: str, candidate: Candidate, detection: AuditRecord) -> bool:
+    if detection.extra.get("surface") == "ui" and candidate.kind != "pair":
+        return False
     if candidate.kind == "pair":
+        if detection.extra.get("surface") == "ui" and (
+            detection.extra.get("credential_verification_status") != "available"
+        ):
+            return False
+        if module == "docker":
+            return detection.extra.get("ui_product") == "portainer"
         if module == "kubeapi":
             return detection.extra.get("credential_verification_status") == "available"
         return module in _PAIR_MODULES
     return module in _TOKEN_MODULES
 
 
-def _attempt_id(module: str, target: Any, port: int, candidate: int | None) -> str:
+def _attempt_id(module: str, target: Any, port: int, candidate: int | None, *, surface: str | None = None) -> str:
     value = f"{module}\0{target.raw or target.host}\0{port}\0{candidate}"
+    if surface is not None:
+        value += f"\0{surface}"
     return hashlib.sha256(value.encode()).hexdigest()
 
 
@@ -584,6 +612,8 @@ def _run_target(
     journal: AttemptJournal,
     gate: RateGate,
     logger: Any,
+    *,
+    _surface_id: str | None = None,
 ) -> None:
     ns = copy.copy(base_ns)
     if module == "oracle" and not _oracle_spray_preflight(host, port, ns):
@@ -594,6 +624,7 @@ def _run_target(
     anonymous = AuditCredentialRun(source="anonymous")
     context = AuditHookContext(ns, logger, host, port, anonymous, target=target, run_deep_checks=False, phase="detect")
     state = None
+    detection: AuditRecord | None = None
     try:
         if spec.lifecycle_state_factory is not None:
             state = spec.lifecycle_state_factory(context)
@@ -606,27 +637,36 @@ def _run_target(
             return
         if not runner._is_detected(detection):
             return
-        detection_key = _attempt_id(module, target, port, None)
+        detection_key = _attempt_id(module, target, port, None, surface=_surface_id)
         prior_detection = journal.get(detection_key)
         detection_version = _record_version(detection)
         if prior_detection is None or prior_detection[0] != "confirmed":
             version = detection_version or "unknown"
             auth_required = detection.auth_required
             evidence = f"auth required:{auth_required if auth_required is not None else 'unknown'}; version:{version}"
+            ui_product = detection.extra.get("ui_product")
+            if isinstance(ui_product, str) and ui_product:
+                evidence += f"; ui product:{ui_product}"
+            if _surface_id is not None:
+                evidence += f"; surface:{_surface_id}"
             journal.put(detection_key, module, host, port, None, "confirmed", _clean(evidence))
         origin = _effective_origin(detection, target, host, port)
         for index, candidate in enumerate(candidates):
-            key = _attempt_id(module, target, port, index)
+            key = _attempt_id(module, target, port, index, surface=_surface_id)
             if journal.get(key) is not None:
                 continue
             if not _supported(module, candidate, detection):
-                journal.put(
-                    key, module, host, port, index, "unsupported", "no trustworthy verifier for this credential type"
-                )
+                reason = "no trustworthy verifier for this credential type"
+                if _surface_id is not None:
+                    reason += f"; surface:{_surface_id}"
+                journal.put(key, module, host, port, index, "unsupported", reason)
                 continue
             allowed, delay_or_reason = gate.reserve(origin, candidate.account)
             if not allowed:
-                journal.put(key, module, host, port, index, "rate_limited", str(delay_or_reason))
+                reason = str(delay_or_reason)
+                if _surface_id is not None:
+                    reason += f"; surface:{_surface_id}"
+                journal.put(key, module, host, port, index, "rate_limited", reason)
                 continue
             if delay_or_reason and not gate.paused(float(delay_or_reason)):
                 return
@@ -635,7 +675,8 @@ def _run_target(
             with gate.lock:
                 stopped_reason = gate.stopped.get(origin)
             if stopped_reason:
-                journal.put(key, module, host, port, index, "rate_limited", stopped_reason)
+                reason = stopped_reason + (f"; surface:{_surface_id}" if _surface_id is not None else "")
+                journal.put(key, module, host, port, index, "rate_limited", reason)
                 continue
             credential = AuditCredentialRun(candidate.username, candidate.password, candidate.token, "provided")
             ns.username = candidate.username
@@ -643,7 +684,10 @@ def _run_target(
             for name in ("token", "api_token", "apitoken", "api_key", "pve_api_token", "_keycloak_token"):
                 if hasattr(ns, name):
                     setattr(ns, name, candidate.token)
-            journal.put(key, module, host, port, index, "started", "request begun; no automatic retry")
+            started_reason = "request begun; no automatic retry"
+            if _surface_id is not None:
+                started_reason += f"; surface:{_surface_id}"
+            journal.put(key, module, host, port, index, "started", started_reason)
             detail = ""
             try:
                 result = runner._auth(replace(context, credential=credential, phase="auth"), detection)
@@ -674,12 +718,35 @@ def _run_target(
             for secret in (candidate.password, candidate.token):
                 if secret:
                     safe_evidence = safe_evidence.replace(secret, "<redacted>")
+            if _surface_id is not None:
+                safe_evidence += f"; surface:{_surface_id}"
             journal.put(key, module, host, port, index, status, safe_evidence, detail)
             if status == "rate_limited":
                 gate.stop(origin, evidence)
     finally:
         if state is not None and spec.lifecycle_state_close is not None:
             spec.lifecycle_state_close(state)
+    if (
+        detection is not None
+        and runner._is_detected(detection)
+        and _surface_id is None
+        and module in web_panels.MODULE_PRODUCTS
+        and (getattr(target, "scheme", None) in {"http", "https"} or getattr(target, "explicit_port", None) is not None)
+        and not gate.cancelled.is_set()
+    ):
+        other_surface = "backend" if detection.extra.get("surface") == "ui" else "ui"
+        _run_target(
+            module,
+            base_ns,
+            host,
+            port,
+            replace(target, surface_hint=other_surface),
+            candidates,
+            journal,
+            gate,
+            logger,
+            _surface_id=other_surface,
+        )
 
 
 def _render_rows(
@@ -701,18 +768,25 @@ def _render_rows(
     for row in rows:
         module, host, port, index, status, evidence = row[:6]
         detail = _clean(row[6]) if len(row) == 7 else ""
+        surface = next((part.partition(":")[2] for part in evidence.split("; ") if part.startswith("surface:")), None)
         if status == "started":
             status, evidence = "inconclusive", "request began before interruption; not retried"
+            if surface:
+                evidence += f"; surface:{surface}"
         elif status == "inconclusive" and evidence == "status=auth_required":
             evidence = "credential not verified; authentication still required"
         if index is None:
             if status == "confirmed":
                 fields = dict(part.split(":", 1) for part in evidence.split("; ") if ":" in part)
-                name = _DISPLAY_NAMES.get(module, module.title())
+                ui_product = fields.get("ui product", "")
+                name = web_panels.UI_PRODUCTS.get(ui_product) if ui_product else None
+                name = name or _DISPLAY_NAMES.get(module, module.title())
                 text = f"[*] {name} (auth required:{fields.get('auth required', 'unknown')}) (version:{fields.get('version', 'unknown')})"
             else:
                 text = f"[!] {module} detection {status} (evidence:{_clean(evidence)})"
             payload = {"module": module, "host": host, "port": port, "status": status, "evidence": evidence}
+            if surface:
+                payload["surface"] = surface
         else:
             candidate = candidates[index]
             payload = {
@@ -726,9 +800,13 @@ def _render_rows(
                 "password": candidate.password,
                 "token": candidate.token,
             }
+            if surface:
+                payload["surface"] = surface
             if status == "valid" and detail:
                 payload["credential_detail"] = detail
             suffix = f" {detail}" if status == "valid" and detail else ""
+            if surface:
+                suffix += f" ({'UI' if surface == 'ui' else 'backend'})"
             diagnostic = f" (evidence:{_clean(evidence)})" if debug else ""
             text = f"{markers.get(status, '[!]')} {_clean(candidate.display)}{suffix}{diagnostic}"
         lines.append(

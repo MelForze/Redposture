@@ -226,6 +226,12 @@ class DockerEngineClient:
                         raw = response.read()
                     if len(raw) > response_size_cap:
                         raise DockerEngineError(f"docker API response exceeds {response_size_cap} bytes")
+                    remaining_length = getattr(response, "length", None)
+                    if remaining_length is not None and remaining_length > 0:
+                        raise ConnectionError(
+                            f"unexpected EOF: incomplete HTTP response body "
+                            f"({len(raw)} bytes received, {remaining_length} more expected)"
+                        )
                     normalized_headers = {str(k).lower(): str(v) for k, v in response.getheaders()}
                     last_reason = str(response.reason)
                     if bool(getattr(response, "will_close", False)):

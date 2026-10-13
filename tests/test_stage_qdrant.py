@@ -10,7 +10,47 @@ import pytest
 
 from redposture_core import stage_qdrant as qdrant
 from redposture_core.audit_models import AuditRecord
+from redposture_core.modules.qdrant import actions as qdrant_actions
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
+
+
+@pytest.mark.parametrize("anonymous_access, expected", [(False, True), (True, None), (None, None)])
+def test_qdrant_api_key_requires_protected_collection_response(
+    monkeypatch: pytest.MonkeyPatch, anonymous_access: bool | None, expected: bool | None
+) -> None:
+    monkeypatch.setattr(
+        qdrant_actions,
+        "_qdrant_get_collections",
+        lambda *_args, **_kwargs: (200, {"result": {"collections": []}}, None),
+    )
+    ctx = SimpleNamespace(
+        host="localhost",
+        port=6333,
+        args=SimpleNamespace(timeout=1),
+        credential=SimpleNamespace(token="candidate"),
+        lifecycle_state=qdrant_actions.QdrantLifecycleState(),
+    )
+    result = qdrant_actions.authenticate_qdrant(ctx, {"status": "detected", "anonymous_access": anonymous_access}, {})
+    assert result["provided_credentials_ok"] is expected
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [("Invalid API key or JWT", False), ("Forbidden", None)],
+)
+def test_qdrant_rejects_key_only_on_explicit_product_error(
+    monkeypatch: pytest.MonkeyPatch, body: str, expected: bool | None
+) -> None:
+    monkeypatch.setattr(qdrant_actions, "_qdrant_get_collections", lambda *_args, **_kwargs: (401, body, None))
+    ctx = SimpleNamespace(
+        host="localhost",
+        port=6333,
+        args=SimpleNamespace(timeout=1),
+        credential=SimpleNamespace(token="candidate"),
+        lifecycle_state=qdrant_actions.QdrantLifecycleState(),
+    )
+    result = qdrant_actions.authenticate_qdrant(ctx, {"status": "auth_required", "anonymous_access": False}, {})
+    assert result["provided_credentials_ok"] is expected
 
 
 def test_inline_and_json_compact_helpers() -> None:

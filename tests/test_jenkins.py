@@ -259,11 +259,14 @@ def test_auth_does_not_accept_public_200_or_ambiguous_403(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         actions, "_get", lambda *_args: _response(200, '{"authenticated":false,"name":"anonymous","authorities":[]}')
     )
-    assert actions.auth_record(ctx, prior)["credential_state"] == "unknown"
+    first = actions.auth_record(ctx, prior)
+    assert first["credential_state"] == "unknown" and first["provided_credentials_ok"] is None
     monkeypatch.setattr(actions, "_get", lambda *_args: _response(403, ""))
-    assert actions.auth_record(ctx, prior)["credential_state"] == "unknown"
+    second = actions.auth_record(ctx, prior)
+    assert second["credential_state"] == "unknown" and second["provided_credentials_ok"] is None
     monkeypatch.setattr(actions, "_get", lambda *_args: _response(401, ""))
-    assert actions.auth_record(ctx, prior)["credential_state"] == "invalid"
+    rejected = actions.auth_record(ctx, prior)
+    assert rejected["credential_state"] == "invalid" and rejected["provided_credentials_ok"] is False
     monkeypatch.setattr(actions, "_get", lambda *_args: _response(429, ""))
     assert actions.auth_record(ctx, prior)["status"] == "rate_limited"
 

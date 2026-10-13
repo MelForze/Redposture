@@ -24,6 +24,19 @@ def test_full_qa_lists_and_plans_independent_sections(tmp_path: Path) -> None:
     assert listed.returncode == 0
     assert "hypothesis" in listed.stdout
     assert "docker-matrix" in listed.stdout
+    assert "optional-real" in listed.stdout
+
+    default = _run(str(tmp_path / "default-plan"), "--plan")
+    assert default.returncode == 0
+    assert "section: optional-real" not in default.stdout
+
+    isolated = _run(str(tmp_path / "isolated-plan"), "--section", "optional-real", "--plan")
+    assert isolated.returncode == 0
+    assert isolated.stdout.splitlines()[-1] == "section: optional-real"
+
+    mixed = _run(str(tmp_path / "mixed-plan"), "--section", "pytest,optional-real", "--plan")
+    assert mixed.returncode == 2
+    assert "must run by itself" in mixed.stderr
 
     destination = tmp_path / "plan-only"
     planned = _run(str(destination), "--section", "hypothesis,pytest", "--section", "pytest", "--plan")

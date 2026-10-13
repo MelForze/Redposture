@@ -2690,6 +2690,30 @@ def test_zookeeper_verification_unavailable_is_one_aggregate_line() -> None:
     assert "27 pair(s) not attempted" in skipped_line
 
 
+def test_digest_verifier_finds_protected_node_below_public_grandchild() -> None:
+    children = {
+        "/a": ["b"],
+        "/a/b": ["c"],
+        "/a/b/c": ["private"],
+    }
+    visited: list[str] = []
+
+    class Client:
+        def get_children2(self, path: str):
+            visited.append(path)
+            if path == "/a/b/c/private":
+                return [], _ZK_ERR_NOAUTH, None
+            return children.get(path, []), _ZK_ERR_OK, None
+
+    results, errors = lifecycle_actions._collect_anonymous_verifier_probes(
+        cast(Any, Client()), ["a"], None, [], root_err=_ZK_ERR_OK
+    )
+    assert errors == {}
+    assert results["/a/b/c/private"] == _ZK_ERR_NOAUTH
+    assert lifecycle_actions._protected_credential_verification_path(results) == "/a/b/c/private"
+    assert len(visited) <= 33
+
+
 def test_zookeeper_detect_finds_protected_direct_child_as_exact_verifier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

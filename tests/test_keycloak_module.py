@@ -19,6 +19,7 @@ from hypothesis import strategies as st
 from redposture_core.cli import main
 from redposture_core.clients.http_api import HttpResponse
 from redposture_core.cve import enumerate_record, load_catalog
+from redposture_core.modules.keycloak import actions as keycloak_actions
 from redposture_core.modules.keycloak.actions import (
     _client_settings,
     _endpoint_values,
@@ -30,6 +31,39 @@ from redposture_core.modules.keycloak.actions import (
 )
 from redposture_core.modules.keycloak.policy import validate_args
 from redposture_core.modules.keycloak.render import _render_colored_keycloak_line
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected_state", "expected_ok"),
+    [
+        ((401, 401, 401), "invalid", False),
+        ((403, 403, 403), "unknown", None),
+        ((503, 503, 503), "unknown", None),
+        ((403, 403, 200), "valid", True),
+    ],
+)
+def test_keycloak_token_verdict_requires_identity_or_explicit_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+    statuses: tuple[int, int, int],
+    expected_state: str,
+    expected_ok: bool | None,
+) -> None:
+    monkeypatch.setattr(keycloak_actions, "_client", lambda _ctx: object())
+
+    def fake_get(_client: object, url: str, _token: str) -> HttpResponse:
+        position = 0 if url.endswith("/admin/serverinfo") else 1 if url.endswith("/admin/realms") else 2
+        status = statuses[position]
+        body = b'{"sub":"test-user"}' if position == 2 and status == 200 else b'{"error":"denied"}'
+        return HttpResponse(status, body, {"Content-Type": "application/json"})
+
+    monkeypatch.setattr(keycloak_actions, "_get", fake_get)
+    context = SimpleNamespace(args=SimpleNamespace(_keycloak_token=None), credential=SimpleNamespace(token="candidate"))
+    result = keycloak_actions.auth_record(
+        context,
+        {"api_endpoint": "http://keycloak.example", "auth_required": True, "detected_realm": "master"},
+    )
+    assert result["credential_state"] == expected_state
+    assert result["provided_credentials_ok"] is expected_ok
 
 
 @pytest.mark.parametrize(

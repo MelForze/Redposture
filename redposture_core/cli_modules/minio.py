@@ -109,13 +109,13 @@ def configure_minio_parser(
         "--dump",
         dest="dump",
         action="store_true",
-        help="Print object content to stdout: one --object, or the whole --bucket.",
+        help="Print object content: one --object, the whole --bucket, or all accessible buckets.",
     )
     enum.add_argument(
         "--download",
         dest="download",
         action="store_true",
-        help="Download objects to ./<bucket>/<key>: one --object, or the whole --bucket.",
+        help="Download objects to ./<bucket>/<key>: one --object, one --bucket, or all accessible buckets.",
     )
     enum.add_argument(
         "--discover",

@@ -88,6 +88,23 @@ In HTTP audit modules, a URL without a port uses 80 for `http` or 443 for
 `--port` overrides the scheme default. ClickHouse treats an HTTP(S) URL as an
 HTTP target unless `--protocol` was explicitly selected.
 
+The `minio`, `docker`, `mongodb`, `elastic`, `redis`, and `postgres` commands
+also recognize MinIO Console, Portainer, mongo-express, Kibana/OpenSearch
+Dashboards, Redis Insight, and pgAdmin 4 on explicit HTTP targets. Bare-host
+scans include their common UI ports. A UI login verifies only UI access, never
+backend credentials. Existing inventory flags use bounded, read-only UI APIs
+where available; unavailable backend connections are reported explicitly.
+The UI adapters can read MinIO Console objects, mongo-express documents,
+Redis Insight key values, Portainer environment details, and cluster data
+through Kibana/OpenSearch Dashboards Dev Tools when those APIs allow it.
+For pgAdmin, `--pgadmin-server-password` connects a saved PostgreSQL server
+for inventory and read-only `--dump` without storing that password in pgAdmin.
+With no bucket, collection, or table filter, `--dump` walks all accessible
+MinIO objects, mongo-express collections, or pgAdmin tables. The UI dump is
+bounded by 10,000 records, 64 MiB, and five minutes per target; `partial` in
+JSON marks any incomplete traversal. UI credentials remain separate from
+backend credentials.
+
 `spray` checks supplied pairs or tokens only after a module confirms the product.
 It does not run inventory, discovery, or CVE checks. A bare host uses the selected
 modules' normal ports; a URL or `host:port` keeps its explicit port.
@@ -111,8 +128,8 @@ files are mode `0600`. A begun attempt interrupted before its result becomes
 `inconclusive` on resume and is not retried. `--module-config` accepts only
 auth/transport settings, such as `{"keeper":{"znode":"/protected"}}` or
 `{"keycloak":{"realm":"master"}}`; action flags are rejected. Docker Engine
-pairs and Keycloak pairs report `unsupported` because those modules cannot
-verify them. `redposture spray -h` lists all options.
+pairs (unlike Portainer UI pairs) and Keycloak pairs report `unsupported`
+because those modules cannot verify them. `redposture spray -h` lists all options.
 
 ## Default credentials checked by `--defcreds`
 
@@ -141,6 +158,19 @@ verify them. `redposture spray -h` lists all options.
 | KubeAPI | `admin:admin`, `admin:password`, `root:root`, `root:password`, `kubeadmin:kubeadmin`, `kubernetes:kubernetes`, `user:user`, `test:test`, `admin:12345678` |
 | RabbitMQ | `admin:admin`, `admin:changeme`, `admin:password`, `admin:rabbitmq`, `guest:guest`, `guest:password`, `rabbitmq:admin`, `rabbitmq:password`, `rabbitmq:rabbitmq`, `root:password`, `root:root`, `service:password`, `service:service`, `test:test`, `user:password`, `user:user`, `admin:12345678` |
 
+For confirmed UI surfaces, `--defcreds` also considers these weak pairs, with
+duplicates removed from the module catalog:
+
+| UI | Additional pairs |
+| --- | --- |
+| Portainer | `admin:admin`, `admin:password`, `admin:12345678` |
+| mongo-express | `admin:pass`, `admin:admin`, `admin:password` |
+| Kibana | `elastic:changeme`, `elastic:elastic`, `kibana:kibana` |
+| OpenSearch Dashboards | `admin:admin`, `admin:password` |
+| MinIO Console | `minioadmin:minioadmin`, `admin:admin` |
+| pgAdmin 4 | `admin@example.com:admin`, `admin@admin.com:admin` |
+| Redis Insight | No native UI password. `redis:password`, `admin:admin` apply only if a confirmed reverse proxy Basic challenge protects the UI. |
+
 These are weak-password candidates, not universal factory passwords: [Harbor](https://goharbor.io/docs/edge/install-config/run-installer-script/)
 documents `admin:Harbor12345`, while [GitLab](https://docs.gitlab.com/install/next_steps/)
 and [Nexus](https://help.sonatype.com/en/install-nexus-repository.html) generate installation-specific
@@ -162,11 +192,16 @@ are omitted.
 ```bash
 redposture airflow -t targets.txt --enum-cve
 redposture airflow -t targets.txt --defcreds
-redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --show-keys --show-connections --discover
+redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --show-dags --show-keys --show-connections --discover
+redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --dump
+redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --dump --dag example --key warehouse_password --connection warehouse
 ```
 
 Airflow reports anonymous `Dags/Keys/Connections allowed` separately from access
-after login; live output follows service → credentials → CVE → keys → connections → discovery.
+after login. `--dump` reads DAG metadata/source, Variable values and Connection
+objects; without selectors it walks all three, with repeatable selectors it reads
+only those IDs. Output can contain secrets. A partial result is marked as such;
+the default dump budget is 50 MiB and five minutes per target.
 
 ### ClickHouse
 
@@ -289,7 +324,7 @@ redposture kafka -t kafka.example -u producer -p 'password' --topic audit.events
 redposture kafka -t http://kafka-ui.example:8080 -u auditor -p 'password' --show-clusters --show-topics --show-brokers --show-consumer-groups
 ```
 
-Kafka detects broker listeners and Kafbat/Provectus Kafka UI on explicit `host:port` targets automatically. Bare hosts also scan common UI ports. UI logins are verified through the UI identity API; broker SASL credentials are checked only against brokers. A UI login or generic HTTP response alone does not confirm the product. UI inventory is read-only; topic dumps and writes require a broker listener.
+Kafka detects broker listeners and Kafbat/Provectus Kafka UI on explicit `host:port` targets automatically. Bare hosts also scan common UI ports. UI logins are verified through the UI identity API; broker SASL credentials are checked only against brokers. A UI login or generic HTTP response alone does not confirm the product. UI `--dump` without `--topic` walks all visible topic pages, up to 2,000 topics and 64 MiB per target; incomplete reads are marked `partial`. Topic writes require a broker listener.
 
 `--probe-write` works alone or with `--topic NAME`; it appends one audit marker to each probed topic. An inconclusive result is shown as `write:unknown`.
 `--write-message` sends one UTF-8 record; `--write-file` sends one binary record (up to 1 MiB). Both require `--topic`, and `--write-key` is optional. A lost broker acknowledgment is reported as unconfirmed and never retried, because the record may already be present.

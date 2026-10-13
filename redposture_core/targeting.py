@@ -66,6 +66,9 @@ class ScanTargetSpec:
     fragment: str = ""
     source: str | None = field(default=None, compare=False)
     normalized_key: str | None = field(default=None, compare=False)
+    # Internal lifecycle selector when an explicit HTTP endpoint exposes both
+    # the management UI and the underlying service on one origin.
+    surface_hint: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

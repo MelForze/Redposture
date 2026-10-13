@@ -404,16 +404,17 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         username = whoami.get("username")
         if isinstance(username, str) and username:
             result["whoami_username"] = username
-    result["provided_credentials_ok"] = confirmed
-    if confirmed:
-        result["status"] = "valid_credentials"
-    result["credential_state"] = (
+    credential_state = (
         "valid"
         if confirmed
         else "invalid"
         if server.status == realms.status == identity_response.status == 401
         else "unknown"
     )
+    result["provided_credentials_ok"] = True if confirmed else False if credential_state == "invalid" else None
+    if confirmed:
+        result["status"] = "valid_credentials"
+    result["credential_state"] = credential_state
     result["token_access"] = (
         "allowed" if confirmed else "denied" if result["credential_state"] == "invalid" else "unknown"
     )

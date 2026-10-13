@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import gzip
 import hashlib
 import shutil
 import ssl
@@ -173,6 +174,24 @@ def test_transports_follow_host_port_and_scheme_changes(kind, status, schemes, t
             assert received[0][2]["host"] == urlsplit(destination).netloc
             if not kind.startswith("exporter") and kind != "scanner":
                 assert all(received[0][2][k.lower()] == v for k, v in _AUTH.items())
+
+
+@pytest.mark.parametrize("kind", ("api", "pool", "kube", "elastic"))
+@pytest.mark.parametrize("status", (302, 307))
+def test_redirect_to_tls_proxy_gzip_keeps_json_and_final_origin(kind, status, tls_material):
+    server_context, cert = tls_material
+    raw = b'{"build":{"version":"1.3.0","commitId":"abc123"},"authType":"LOGIN_FORM"}'
+    with _serve(
+        lambda *_: (200, {"Content-Type": "application/json", "Content-Encoding": "GZip"}, gzip.compress(raw)),
+        server_context,
+    ) as (destination, received):
+        with _serve(lambda *_: (status, {"Location": destination + "/prefix/api/info"}, b"")) as (source, sent):
+            response = _request(kind, source + "/start", headers=_AUTH, ca_file=cert)
+            assert response.error is None and response.status == 200
+            assert response.json() == {"build": {"version": "1.3.0", "commitId": "abc123"}, "authType": "LOGIN_FORM"}
+            assert response.final_url == destination + "/prefix/api/info"
+            assert len(sent) == len(received) == 1
+            assert received[0][1] == "/prefix/api/info"
 
 
 @pytest.mark.parametrize("kind", ["pool", "api", "kube", "elastic", "docker"])

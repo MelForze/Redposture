@@ -240,6 +240,147 @@ def list_connections(client: AirflowClient, generation: str, *, limit: int | Non
     }
 
 
+def list_dag_ids(client: AirflowClient, generation: str, *, limit: int | None = None) -> dict[str, Any]:
+    """List DAG IDs through the API without treating an incomplete page as empty."""
+    prefix = "/api/v2" if generation == "v2" else "/api/v1"
+    result = _collection(client, f"{prefix}/dags", "dags", limit, None)
+    dag_ids = [str(item["dag_id"]) for item in result.items if isinstance(item.get("dag_id"), str)]
+    return {
+        "dags": dag_ids,
+        "count": len(dag_ids),
+        "total": result.total if result.total is not None else len(dag_ids),
+        "truncated": not result.complete,
+        "error": result.error,
+    }
+
+
+def dump_airflow(
+    client: AirflowClient,
+    generation: str,
+    *,
+    dags: list[str] | None = None,
+    keys: list[str] | None = None,
+    connections: list[str] | None = None,
+    max_bytes: int = 50 * 1024 * 1024,
+    max_seconds: float = 300.0,
+    max_items: int = 10_000,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Read the selected API objects, or all three collections when unfiltered.
+
+    The API's own authorization and masking determine which fields are present.
+    A failed object read, incomplete listing, or exhausted budget is explicit.
+    """
+    prefix = "/api/v2" if generation == "v2" else "/api/v1"
+    deadline = time.monotonic() + max_seconds
+    selected = any((dags, keys, connections))
+    requested: dict[str, list[tuple[str, dict[str, Any] | None]]] = {}
+    reasons: list[str] = []
+    records: list[dict[str, Any]] = []
+    bytes_used = 0
+
+    def add_reason(reason: str) -> None:
+        if reason not in reasons:
+            reasons.append(reason)
+
+    for kind, names, endpoint, item_key, id_key in (
+        ("dag", dags, "dags", "dags", "dag_id"),
+        ("variable", keys, "variables", "variables", "key"),
+        ("connection", connections, "connections", "connections", "connection_id"),
+    ):
+        if selected and not names:
+            continue
+        if names:
+            requested[kind] = [(name, None) for name in dict.fromkeys(names)]
+            continue
+        collection = _collection(
+            client,
+            f"{prefix}/{endpoint}",
+            item_key,
+            max_items,
+            deadline,
+            cancelled=cancelled,
+        )
+        requested[kind] = [(str(item[id_key]), item) for item in collection.items if isinstance(item.get(id_key), str)]
+        if not collection.complete:
+            add_reason(f"{kind}_list:{collection.error or 'item_limit'}")
+
+    for kind, entries in requested.items():
+        for object_id, listed in entries:
+            if cancelled is not None and cancelled():
+                raise NestedSchedulerCancelled("Airflow dump cancelled")
+            if len(records) >= max_items or bytes_used >= max_bytes or time.monotonic() >= deadline:
+                add_reason(
+                    "item_limit"
+                    if len(records) >= max_items
+                    else "max_bytes"
+                    if bytes_used >= max_bytes
+                    else "max_time"
+                )
+                break
+            endpoint = "dags" if kind == "dag" else "variables" if kind == "variable" else "connections"
+            path = f"{prefix}/{endpoint}/{_component(object_id)}"
+            response = client.get(path, response_size_cap=min(2 * 1024 * 1024, max_bytes - bytes_used))
+            if response.transport_error or response.http_status != 200 or response.truncated:
+                add_reason(
+                    f"{kind}:{object_id}:{'transport_error' if response.transport_error else 'response_truncated' if response.truncated else f'http_{response.http_status}'}"
+                )
+                continue
+            data = response.json()
+            if not isinstance(data, dict):
+                add_reason(f"{kind}:{object_id}:invalid_object")
+                continue
+            record: dict[str, Any] = {"kind": kind, "id": object_id, "data": data}
+            if kind == "variable" and "value" not in data:
+                add_reason(f"variable:{object_id}:value_unavailable")
+            if kind == "dag":
+                source_id = (
+                    object_id if generation == "v2" else data.get("file_token") or (listed or {}).get("file_token")
+                )
+                if generation == "v1" and (not isinstance(source_id, str) or not source_id):
+                    details = client.get(f"{path}/details")
+                    detail_data = details.json() if details.http_status == 200 and not details.truncated else None
+                    if isinstance(detail_data, dict):
+                        source_id = detail_data.get("file_token")
+                        record["details"] = detail_data
+                if not isinstance(source_id, str) or not source_id:
+                    add_reason(f"dag:{object_id}:source_unavailable")
+                else:
+                    source = client.get(
+                        f"{prefix}/dagSources/{_component(source_id)}",
+                        extra_headers={"Accept": "application/json"},
+                        response_size_cap=min(2 * 1024 * 1024, max_bytes - bytes_used),
+                    )
+                    if source.transport_error or source.http_status != 200 or source.truncated:
+                        add_reason(f"dag:{object_id}:source_unavailable")
+                    else:
+                        source_json = source.json()
+                        if isinstance(source_json, dict) and isinstance(source_json.get("content"), str):
+                            record["source"] = source_json["content"]
+                        elif "text/plain" in next(
+                            (value.lower() for key, value in source.headers.items() if key.lower() == "content-type"),
+                            "",
+                        ):
+                            record["source"] = source.body.decode("utf-8", "replace")
+                        else:
+                            add_reason(f"dag:{object_id}:invalid_source")
+            encoded_size = len(json.dumps(record, ensure_ascii=False, default=str).encode("utf-8"))
+            if bytes_used + encoded_size > max_bytes:
+                add_reason("max_bytes")
+                break
+            records.append(record)
+            bytes_used += encoded_size
+        if "item_limit" in reasons or "max_bytes" in reasons or "max_time" in reasons:
+            break
+    return {
+        "status": "partial" if reasons else "complete",
+        "count": len(records),
+        "records": records,
+        "bytes_read": bytes_used,
+        "partial_reasons": reasons,
+    }
+
+
 def discover_task_logs(
     client: AirflowClient,
     generation: str,

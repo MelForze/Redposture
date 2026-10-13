@@ -12,8 +12,16 @@ import pytest
 from redposture_core.cli_args import parse_args
 from redposture_core.clients.airflow_api import AirflowClient, AirflowResponse
 from redposture_core.modules.airflow import actions, policy, render
-from redposture_core.modules.airflow.discover import DiscoverConfig, _collection, _read_log, discover_task_logs
+from redposture_core.modules.airflow.discover import (
+    DiscoverConfig,
+    _collection,
+    _read_log,
+    discover_task_logs,
+    dump_airflow,
+    list_dag_ids,
+)
 from redposture_core.modules.airflow.stage import build_airflow_plan, build_airflow_spec
+from redposture_core.scheduler import NestedSchedulerCancelled
 from redposture_core.stage_runtime import AuditCommandRunner
 
 
@@ -35,6 +43,156 @@ class _FakeClient:
     def get(self, path: str, **kwargs: object) -> AirflowResponse:
         self.calls.append((path, kwargs))
         return self.responses.get(path, _response({"detail": "missing"}, 404))
+
+
+def test_show_dags_lists_ids_without_exposing_other_fields() -> None:
+    client = _FakeClient(
+        {
+            "/api/v1/dags?limit=2&offset=0": _response(
+                {"dags": [{"dag_id": "one", "file_token": "private"}, {"dag_id": "two"}], "total_entries": 3}
+            )
+        }
+    )
+    assert list_dag_ids(client, "v1", limit=2) == {
+        "dags": ["one", "two"],
+        "count": 2,
+        "total": 3,
+        "truncated": True,
+        "error": None,
+    }
+
+
+def test_dump_reads_all_three_airflow_collections_and_dag_source() -> None:
+    client = _FakeClient(
+        {
+            "/api/v1/dags?limit=100&offset=0": _response(
+                {"dags": [{"dag_id": "qa", "file_token": "source-token"}], "total_entries": 1}
+            ),
+            "/api/v1/variables?limit=100&offset=0": _response({"variables": [{"key": "secret"}], "total_entries": 1}),
+            "/api/v1/connections?limit=100&offset=0": _response(
+                {"connections": [{"connection_id": "warehouse"}], "total_entries": 1}
+            ),
+            "/api/v1/dags/qa": _response({"dag_id": "qa", "file_token": "source-token"}),
+            "/api/v1/dagSources/source-token": _response({"content": "DAG source"}),
+            "/api/v1/variables/secret": _response({"key": "secret", "value": "private-value"}),
+            "/api/v1/connections/warehouse": _response(
+                {"connection_id": "warehouse", "host": "db", "password": "private-password"}
+            ),
+        }
+    )
+    report = dump_airflow(client, "v1")
+    assert report["status"] == "complete"
+    assert report["count"] == 3
+    assert [(entry["kind"], entry["id"]) for entry in report["records"]] == [
+        ("dag", "qa"),
+        ("variable", "secret"),
+        ("connection", "warehouse"),
+    ]
+    assert report["records"][0]["source"] == "DAG source"
+    assert next(kwargs for path, kwargs in client.calls if path == "/api/v1/dagSources/source-token")[
+        "extra_headers"
+    ] == {"Accept": "application/json"}
+    assert report["records"][1]["data"]["value"] == "private-value"
+    assert report["records"][2]["data"]["password"] == "private-password"
+
+
+def test_dump_selectors_use_direct_v2_gets_and_keep_failures_partial() -> None:
+    client = _FakeClient(
+        {
+            "/api/v2/dags/qa%2Fone": _response({"dag_id": "qa/one"}),
+            "/api/v2/dagSources/qa%2Fone": _response({"content": "source"}),
+            "/api/v2/variables/a%20b": _response({"key": "a b", "value": "value"}),
+            "/api/v2/connections/missing": _response({"detail": "forbidden"}, 403),
+        }
+    )
+    report = dump_airflow(client, "v2", dags=["qa/one", "qa/one"], keys=["a b"], connections=["missing"])
+    assert report["status"] == "partial"
+    assert report["count"] == 2
+    assert any("connection:missing:http_403" in item for item in report["partial_reasons"])
+    assert not any("?limit=" in path for path, _ in client.calls)
+    assert [path for path, _ in client.calls].count("/api/v2/dags/qa%2Fone") == 1
+
+
+def test_dump_marks_missing_variable_value_and_byte_budget_partial() -> None:
+    client = _FakeClient({"/api/v1/variables/secret": _response({"key": "secret"})})
+    report = dump_airflow(client, "v1", keys=["secret"])
+    assert report["status"] == "partial"
+    assert "variable:secret:value_unavailable" in report["partial_reasons"]
+    limited = dump_airflow(client, "v1", keys=["secret"], max_bytes=4)
+    assert limited["status"] == "partial"
+    assert limited["count"] == 0
+    assert "max_bytes" in limited["partial_reasons"]
+
+
+def test_dump_v1_uses_dag_details_token_and_plaintext_source() -> None:
+    source = b"from airflow import DAG\npassword = 'qa-secret'\n"
+    client = _FakeClient(
+        {
+            "/api/v1/dags/qa": _response({"dag_id": "qa"}),
+            "/api/v1/dags/qa/details": _response({"file_token": "worker/source.py"}),
+            "/api/v1/dagSources/worker%2Fsource.py": AirflowResponse(
+                http_status=200,
+                headers={"Content-Type": "text/plain"},
+                body=source,
+            ),
+        }
+    )
+    report = dump_airflow(client, "v1", dags=["qa"])
+    assert report["status"] == "complete"
+    assert report["records"][0]["details"]["file_token"] == "worker/source.py"
+    assert report["records"][0]["source"] == source.decode()
+    assert [path for path, _ in client.calls] == [
+        "/api/v1/dags/qa",
+        "/api/v1/dags/qa/details",
+        "/api/v1/dagSources/worker%2Fsource.py",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("response", "reason"),
+    (
+        (_response(["not an object"]), "dag:qa:invalid_object"),
+        (_response({"dag_id": "qa"}), "dag:qa:source_unavailable"),
+        (_response({"dag_id": "qa", "file_token": "source"}), "dag:qa:source_unavailable"),
+    ),
+)
+def test_dump_reports_unavailable_dag_data_without_claiming_complete(response: AirflowResponse, reason: str) -> None:
+    client = _FakeClient({"/api/v1/dags/qa": response})
+    report = dump_airflow(client, "v1", dags=["qa"])
+    assert report["status"] == "partial"
+    assert reason in report["partial_reasons"]
+
+
+def test_dump_limit_and_cancellation_do_not_silently_skip_selected_items() -> None:
+    client = _FakeClient({"/api/v2/variables/a": _response({"key": "a", "value": "one"})})
+    limited = dump_airflow(client, "v2", keys=["a", "b"], max_items=1)
+    assert limited["count"] == 1
+    assert limited["partial_reasons"] == ["item_limit"]
+    assert [path for path, _ in client.calls] == ["/api/v2/variables/a"]
+    with pytest.raises(NestedSchedulerCancelled, match="Airflow dump cancelled"):
+        dump_airflow(client, "v2", keys=["a"], cancelled=lambda: True)
+
+
+def test_dump_selectors_require_dump_flag() -> None:
+    for selector in ("--dag", "--key", "--connection"):
+        args = parse_args(["airflow", "-t", "127.0.0.1:8080", selector, "qa"])
+        messages: list[str] = []
+        assert policy.validate_args(args, SimpleNamespace(error=messages.append)) == 2
+        assert "require --dump" in messages[0]
+
+
+def test_airflow_dump_refuses_closed_api_without_verified_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _FakeClient({})
+    monkeypatch.setattr(actions, "_client_for", lambda _ctx, **_kwargs: client)
+    args = parse_args(["airflow", "-t", "127.0.0.1:8080", "--show-dags", "--dump"])
+    ctx = SimpleNamespace(args=args, credential=SimpleNamespace(username=None, password=None), lifecycle_state=None)
+    result = actions.discover_record(
+        ctx, {"detection_status": "confirmed", "api_generation": "v1", "auth_required": True}
+    )
+    assert result["dump_report"]["status"] == "unavailable"
+    assert result["dump_report"]["partial_reasons"] == ["authentication_required"]
+    assert result["dag_ids_error"] == "authentication_required"
+    assert client.calls == []
 
 
 def _paths(prefix: str, dag: str = "example", run: str = "manual__2026-09-13") -> tuple[str, str, str]:

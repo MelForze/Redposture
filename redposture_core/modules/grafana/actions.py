@@ -324,7 +324,7 @@ def _verify_credentials(
     if status == 200 and _looks_like_grafana_user(body):
         return True, None
     if status == 200:
-        return False, "/api/user returned an invalid identity payload"
+        return None, "/api/user returned an invalid identity payload"
     if status == 401:
         return False, "invalid credentials"
     if status == 403:
@@ -362,7 +362,7 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
             return True, None
         if capability_status == 403:
             return None, "datasource access denied without token evidence"
-        return False, "/api/user returned an invalid identity payload"
+        return None, "/api/user returned an invalid identity payload"
     if status == 403:
         return None, "identity access denied without token evidence"
     if status == 401:
@@ -376,10 +376,12 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
         if capability_status == 200 and _load_json_list(capability_body) is not None:
             return True, None
         if capability_status == 200:
-            return False, "/api/datasources returned an invalid capability payload"
+            return None, "/api/datasources returned an invalid capability payload"
         if capability_status == 403:
             return None, "datasource access denied without token evidence"
-        return False, "invalid api token"
+        if capability_status == 401:
+            return False, "invalid api token"
+        return None, f"datasource verification unavailable status={capability_status}"
     return None, f"/api/user returned status {status}"
 
 

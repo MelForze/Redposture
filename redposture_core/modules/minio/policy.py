@@ -31,9 +31,6 @@ def validate_args(args: Any, console: Any) -> int | None:
     if bucket and obj:
         console.error("--bucket and --object are mutually exclusive; specify one")
         return 2
-    if (getattr(args, "dump", False) or getattr(args, "download", False)) and not (bucket or obj):
-        console.error("--dump/--download require --object bucket/key or --bucket name")
-        return 2
     return validate_discovery_budget(args, console)
 
 

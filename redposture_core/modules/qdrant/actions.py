@@ -1012,6 +1012,7 @@ def _audit_qdrant_host(
             collections: list[str] | None = None
             collections_source: str | None = None
             api_key_access: bool | None = None
+            credential_state: str | None = None
             action_headers: dict[str, str] | None = None
             action_source: str | None = None
 
@@ -1036,10 +1037,13 @@ def _audit_qdrant_host(
                     if auth_col_error:
                         api_key_access = False
                         record["collections_list_error"] = auth_col_error
+                        if "invalid api key or jwt" in str(auth_col_error).lower():
+                            credential_state = "invalid"
                     else:
                         auth_names = _qdrant_collections_from_payload(auth_col_payload)
                         if auth_col_status == 200 and isinstance(auth_names, list):
                             api_key_access = True
+                            credential_state = "valid"
                             collections = list(auth_names)
                             collections_source = "api_key"
                             action_headers = auth_headers
@@ -1050,6 +1054,8 @@ def _audit_qdrant_host(
                             record["collections_list_error"] = _qdrant_error_text(
                                 auth_col_payload, fallback_status=auth_col_status
                             )
+                            if "invalid api key or jwt" in str(record["collections_list_error"]).lower():
+                                credential_state = "invalid"
                         else:
                             api_key_access = False
                             record["collections_list_error"] = _qdrant_error_text(
@@ -1064,10 +1070,13 @@ def _audit_qdrant_host(
                     )
                     if auth_col_error:
                         api_key_access = False
+                        if "invalid api key or jwt" in str(auth_col_error).lower():
+                            credential_state = "invalid"
                     else:
                         auth_names = _qdrant_collections_from_payload(auth_col_payload)
                         if auth_col_status == 200 and isinstance(auth_names, list):
                             api_key_access = True
+                            credential_state = "valid"
                             collections = list(auth_names)
                             collections_source = "api_key"
                             action_headers = auth_headers
@@ -1080,6 +1089,8 @@ def _audit_qdrant_host(
                             record["collections_list_error"] = _qdrant_error_text(
                                 auth_col_payload, fallback_status=auth_col_status
                             )
+                            if "invalid api key or jwt" in str(record["collections_list_error"]).lower():
+                                credential_state = "invalid"
                         else:
                             api_key_access = False
                             record["collections_list_error"] = _qdrant_error_text(
@@ -1089,6 +1100,10 @@ def _audit_qdrant_host(
             record["anonymous_access"] = anonymous_access
             record["auth_required"] = auth_required
             record["api_key_access"] = api_key_access
+            record["credential_state"] = credential_state if auth_headers else None
+            record["provided_credentials_ok"] = (
+                True if credential_state == "valid" else False if credential_state == "invalid" else None
+            )
             record["collections"] = collections
             record["collections_source"] = collections_source
             record["collections_count"] = len(collections) if isinstance(collections, list) else None
@@ -1717,11 +1732,25 @@ def authenticate_qdrant(ctx: Any, detect_record: Any, _options: dict[str, Any]) 
     )
     names = _qdrant_collections_from_payload(payload) if error is None else None
     ok = status == 200 and isinstance(names, list)
+    rejected = (
+        status in {401, 403}
+        and "invalid api key or jwt" in str(error or _qdrant_error_text(payload, fallback_status=status)).lower()
+    )
     record.update(
         {
             "timestamp": utc_now_iso(),
             "api_key_provided": True,
             "api_key_access": bool(ok),
+            # A public collection list is no evidence that the supplied key
+            # was checked. A shaped response after anonymous denial is.
+            "provided_credentials_ok": (
+                True if ok and record.get("anonymous_access") is False else False if rejected else None
+            ),
+            "credential_state": "valid"
+            if ok and record.get("anonymous_access") is False
+            else "invalid"
+            if rejected
+            else "unverified",
         }
     )
     if ok:

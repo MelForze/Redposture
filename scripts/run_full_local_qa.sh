@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 SECTIONS=(fixtures pytest mutation cli-fuzz hypothesis stress focused-services proxy docker-matrix optional-real)
+DEFAULT_SECTIONS=(fixtures pytest mutation cli-fuzz hypothesis stress focused-services proxy docker-matrix)
 REQUESTED=()
 ARTIFACT_DIR=""
 LIST_ONLY=0
@@ -15,9 +16,9 @@ usage() {
 Usage: scripts/run_full_local_qa.sh [artifact_dir] [--section NAME[,NAME...]] [--plan]
        scripts/run_full_local_qa.sh --list
 
-Without --section, run every QA section. Repeat --section or separate names with
-commas to run only changed areas. Use a fresh artifact directory for each run;
-each section writes its own log and summary entry.
+Without --section, run all standard QA sections. The heavy optional-real section
+must be selected alone. Repeat --section or separate names with commas to run
+only changed areas. Use a fresh artifact directory for each run.
 EOF
 }
 
@@ -32,7 +33,7 @@ stress            Output, load, SIGINT, and FD/thread soak
 focused-services  MinIO/KubeAPI, auth, and CVE Docker matrices
 proxy             Proxy end-to-end tests
 docker-matrix     Complete extended Docker service matrix
-optional-real     Optional real-product fixtures
+optional-real     Exclusive real Proxmox Docker/KVM stand (opt-in)
 EOF
 }
 
@@ -91,7 +92,7 @@ fi
 
 ARTIFACT_DIR="${ARTIFACT_DIR:-/tmp/redposture_full_qa_$(date +%Y%m%d_%H%M%S)}"
 if [[ ${#REQUESTED[@]} -eq 0 ]]; then
-  REQUESTED=("${SECTIONS[@]}")
+  REQUESTED=("${DEFAULT_SECTIONS[@]}")
 fi
 SELECTED=()
 for section in "${REQUESTED[@]}"; do
@@ -104,6 +105,10 @@ for section in "${REQUESTED[@]}"; do
     SELECTED+=("$section")
   fi
 done
+if [[ " ${SELECTED[*]} " == *" optional-real "* && ${#SELECTED[@]} -ne 1 ]]; then
+  echo "[error] optional-real Proxmox QA must run by itself" >&2
+  exit 2
+fi
 
 if [[ "$PLAN_ONLY" -eq 1 ]]; then
   echo "artifact directory: ${ARTIFACT_DIR}"
@@ -127,7 +132,7 @@ for section in "${SELECTED[@]}"; do
         "${REDPOSTURE_QA_PROJECT_PREFIX}-minio-kubeapi" "${REDPOSTURE_QA_PROJECT_PREFIX}-cve-matrix")
       ;;
     docker-matrix) DOCKER_PROJECTS+=("${COMPOSE_PROJECT_NAME}") ;;
-    optional-real) DOCKER_PROJECTS+=("${REDPOSTURE_QA_PROJECT_PREFIX}-optional-real") ;;
+    optional-real) DOCKER_PROJECTS+=("redposture-proxmox-real-qa") ;;
   esac
 done
 if [[ ${#DOCKER_PROJECTS[@]} -gt 0 ]]; then
@@ -191,7 +196,7 @@ execute_section() {
         ./scripts/run_lab_matrix_sequential.sh "${ARTIFACT_DIR}/service-matrix"
       ;;
     optional-real)
-      "${PYTHON_BIN}" lab/services/run_optional_real_qa.py "${ARTIFACT_DIR}/optional-real" proxmox-real
+      "${PYTHON_BIN}" scripts/run_proxmox_real_qa.py "${ARTIFACT_DIR}/optional-real"
       ;;
   esac
 }

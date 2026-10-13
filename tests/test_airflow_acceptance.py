@@ -219,15 +219,15 @@ def test_v2_empty_token_is_transient():
     assert actions.verify_credential(lambda **k: client, "v2", "u", "p").state == "transient_failure"
 
 
-def test_v2_non_string_token_coerced():
+def test_v2_non_string_token_does_not_prove_login():
     client = FakeClient({"/auth/token": (200, b'{"access_token":12345}')})
     result = actions.verify_credential(lambda **k: client, "v2", "u", "p")
-    assert result.state == "valid" and result.bearer_token == "12345"
+    assert result.state == "transient_failure" and result.bearer_token is None
 
 
-def test_v2_403_is_invalid():
+def test_v2_403_without_explicit_rejection_is_unverified():
     client = FakeClient({"/auth/token": (403, b"")})
-    assert actions.verify_credential(lambda **k: client, "v2", "u", "p").state == "invalid"
+    assert actions.verify_credential(lambda **k: client, "v2", "u", "p").state == "verification_unavailable"
 
 
 def test_v2_transport_is_transient():
@@ -492,6 +492,33 @@ def test_auth_record_restricted_counts_as_ok(monkeypatch):
     ctx = SimpleNamespace(credential=_cred("u", "p"), lifecycle_state=None)
     out = actions.auth_record(ctx, {"api_generation": "v1"})
     assert out["provided_credentials_ok"] is True and out["credential_password"] == "p"
+
+
+def test_web_login_proves_pair_without_claiming_api_access(monkeypatch):
+    monkeypatch.setattr(
+        actions,
+        "verify_credential",
+        lambda *a, **k: CredentialResult(
+            state="valid_but_restricted", username="u", error_code="403", proof_surface="web"
+        ),
+    )
+    monkeypatch.setattr(actions, "_client_for", lambda *a, **k: FakeClient())
+    ctx = SimpleNamespace(
+        credential=_cred("u", "p"),
+        lifecycle_state=None,
+        args=SimpleNamespace(discover=True, show_keys=True, show_connections=True),
+    )
+    prior = {"api_generation": "v1", "detection_status": "confirmed", "auth_required": True}
+    authenticated = actions.auth_record(ctx, prior)
+    assert authenticated["provided_credentials_ok"] is True
+    assert authenticated["credential_proof_surface"] == "web"
+    assert authenticated["_credential_capabilities_pending"] is False
+    capabilities = actions.capabilities_record(ctx, authenticated)
+    discovered = actions.discover_record(ctx, capabilities)
+    assert "authenticated_dags_access" not in discovered
+    assert discovered["variable_keys_error"] == "api_credentials_unverified"
+    assert discovered["connections_error"] == "api_credentials_unverified"
+    assert discovered["discover_report"]["partial_reasons"] == ["api_credentials_unverified"]
 
 
 # --- capabilities_record shaping -------------------------------------------

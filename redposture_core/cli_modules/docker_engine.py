@@ -25,7 +25,7 @@ def configure_docker_parser(
         type=port_type,
         default=None,
         metavar="port",
-        help="Docker Engine API port. If omitted, scans 2375, 2376, 4243, 12375, 12376.",
+        help="Docker Engine and Portainer port. If omitted, scans 2375, 2376, 4243, 12375, 12376, 9443, 9000.",
     )
     add_multi_ports_flag(common)
     # F9 fix: align --save alias with every other module.
@@ -40,6 +40,11 @@ def configure_docker_parser(
     )
     add_log_flag(common)
     add_output_flags(common, short=False)
+
+    ui_auth = parser.add_argument_group("Portainer UI auth")
+    ui_auth.add_argument("-u", "--username", metavar="name", help="Portainer username on a confirmed UI target.")
+    ui_auth.add_argument("-p", "--password", metavar="value", help="Portainer password on a confirmed UI target.")
+    ui_auth.add_argument("--defcreds", action="store_true", help="Try weak pairs on a confirmed Portainer UI.")
 
     tls = parser.add_argument_group("TLS")
     tls.add_argument("--tls-ca", dest="tls_ca", default=None, metavar="file", help="CA certificate for Docker TLS API.")

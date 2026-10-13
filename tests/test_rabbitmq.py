@@ -313,7 +313,7 @@ def test_auth_does_not_accept_http_errors(monkeypatch, status):
     monkeypatch.setattr(actions, "HttpSessionPool", lambda **kwargs: pool)
     ctx.lifecycle_state = actions.RabbitMQLifecycleState(ctx)
     record = actions.auth_record(ctx, {})
-    assert record["provided_credentials_ok"] is False
+    assert record["provided_credentials_ok"] is None
     assert record["credential_state"] == ("denied" if status == 403 else "unverified")
 
 

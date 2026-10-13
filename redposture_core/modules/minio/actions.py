@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from typing import Any
 from urllib.parse import urlsplit
@@ -776,8 +778,14 @@ def _split_object_ref(ref: Any) -> tuple[str | None, str | None]:
 
 
 def _object_op_targets(
-    client: MinioClient, merged: dict[str, Any], *, object_ref: Any, bucket: Any
-) -> list[tuple[str, str]] | None:
+    client: MinioClient,
+    merged: dict[str, Any],
+    *,
+    object_ref: Any,
+    bucket: Any,
+    all_buckets: bool = False,
+    on_list_error: Callable[[str], None] | None = None,
+) -> Iterable[tuple[str, str]] | None:
     """Resolve the (bucket, key) targets for --dump/--download.
 
     Exactly one source is expected (the CLI already rejects both): ``--object``
@@ -792,7 +800,14 @@ def _object_op_targets(
             return None
         return [(o_bucket, o_key)]
     if bucket:
-        return [(str(obj.bucket), str(obj.key)) for obj in _enum.iter_objects(client, str(bucket))]
+        return (
+            (str(obj.bucket), str(obj.key)) for obj in _enum.iter_objects(client, str(bucket), on_error=on_list_error)
+        )
+    if all_buckets:
+        names = (item.name for item in _enum.iter_buckets(client, on_error=on_list_error))
+        return (
+            (str(obj.bucket), str(obj.key)) for obj in _enum.iter_objects_multi(client, names, on_error=on_list_error)
+        )
     merged["object_op_error"] = "specify --object bucket/key or --bucket name for --dump/--download"
     return None
 
@@ -813,18 +828,33 @@ def _run_object_op(
     ``./<bucket>/<key>`` (the bucket folder is created if missing)."""
     import os
 
-    targets = _object_op_targets(client, merged, object_ref=object_ref, bucket=bucket)
+    errors: list[str] = []
+    targets = _object_op_targets(
+        client,
+        merged,
+        object_ref=object_ref,
+        bucket=bucket,
+        all_buckets=(want_dump or want_download) and not object_ref and not bucket,
+        on_list_error=errors.append,
+    )
     if targets is None:
         return
     # A bucket-wide dump prefixes each object with a `=== bucket/key ===` header so
     # the concatenated content stays legible; a single --object dump does not.
-    labeled = bool(bucket) and not object_ref
+    labeled = not object_ref
 
     dumps: list[dict[str, Any]] = []
     downloads: list[dict[str, Any]] = []
-    errors: list[str] = []
+    bytes_used = 0
+    deadline = time.monotonic() + 300.0
+    partial = False
+    count = 0
     for o_bucket, o_key in targets:
-        resp = client.get_object(o_bucket, o_key, max_bytes=max_bytes)
+        if count >= 10_000 or bytes_used >= 64 * 1024 * 1024 or time.monotonic() >= deadline:
+            partial = True
+            break
+        count += 1
+        resp = client.get_object(o_bucket, o_key, max_bytes=min(max_bytes, 64 * 1024 * 1024 - bytes_used))
         if resp.transport_error:
             errors.append(f"{o_bucket}/{o_key}: transport error")
             continue
@@ -833,13 +863,25 @@ def _run_object_op(
             errors.append(f"{o_bucket}/{o_key}: {code}")
             continue
         body = resp.body or b""
+        bytes_used += len(body)
+        if getattr(resp, "truncated", False):
+            errors.append(f"{o_bucket}/{o_key}: object exceeds dump byte limit")
+            partial = True
+            continue
         if want_dump:
+            try:
+                content = body.decode("utf-8")
+                if "\x00" in content:
+                    raise UnicodeDecodeError("utf-8", body, 0, 1, "binary NUL")
+                value: dict[str, Any] = {"content": content}
+            except UnicodeDecodeError:
+                value = {"base64": base64.b64encode(body).decode()}
             dumps.append(
                 {
                     "bucket": o_bucket,
                     "key": o_key,
                     "size": len(body),
-                    "content": body.decode("utf-8", errors="replace"),
+                    **value,
                 }
             )
         if want_download:
@@ -865,6 +907,8 @@ def _run_object_op(
         merged["object_op_error"] = errors[0]
         if len(errors) > 1:
             merged["object_op_errors"] = errors
+    if partial or errors:
+        merged["object_dump_partial"] = True
 
 
 def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:

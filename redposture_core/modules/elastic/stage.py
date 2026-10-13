@@ -24,7 +24,7 @@ from ...utils import parse_username_password_credential_file
 from . import actions, policy, render
 
 _DEFAULT_PORT = 9200
-_DEFAULT_PORTS: tuple[int, ...] | None = (9200, 19200, 29200)
+_DEFAULT_PORTS: tuple[int, ...] | None = (9200, 19200, 29200, 5601)
 _MASS_PROFILE_MIN_ENDPOINTS = 10_000
 _MASS_PROFILE_MAX_WORKERS = 200
 _MASS_PROFILE_PROXY_MAX_WORKERS = 64

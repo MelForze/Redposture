@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from . import audit_models as _audit_models
+from . import web_panels
 from .audit_config import AuditConfig
 from .audit_models import StageTrace
 from .clients.tls_cache import tls_context_cache_stats
@@ -798,6 +799,7 @@ class _AuditPipelineOutcome:
     detected: bool
     deep_candidate: bool
     deep_processed: bool
+    additional_records: tuple[AuditRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2006,14 +2008,26 @@ class AuditCommandRunner:
         if emit_line is not None:
             self.emit_line = emit_line
         elif console is not None:
-            self.emit_line = _build_colored_emit(console, spec.colorize)
+            colorize = spec.colorize
+            if spec.module in web_panels.MODULE_PRODUCTS:
+
+                def _colorize_with_ui(output_console: Any, line: str) -> bool:
+                    return web_panels.colorize_panel_line(output_console, line, spec.label) or (
+                        colorize(output_console, line) if colorize is not None else False
+                    )
+
+                self.emit_line = _build_colored_emit(console, _colorize_with_ui)
+            else:
+                self.emit_line = _build_colored_emit(console, colorize)
         else:
             self.emit_line = print
 
     def _render_record(
         self, record: AuditRecord, render_plan: RenderPlan | None, output_format: str, debug: bool
     ) -> list[str]:
-        if self.spec.render is not None:
+        if record.extra.get("surface") == "ui":
+            lines = web_panels.render_panel(record.to_dict(), self.spec.label) if output_format == "txt" else []
+        elif self.spec.render is not None:
             lines = [line for line in self.spec.render(record) if line]
         elif render_plan is not None:
             lines = render_with_plan(render_plan, record.to_dict(), output_format, debug=debug)
@@ -2058,21 +2072,24 @@ class AuditCommandRunner:
 
         if not self._cve_explicit_credentials_requested():
             return False
-        if any(
-            payload.get(field) is True
-            for field in (
-                "provided_credentials_ok",
-                "auth_valid",
-                "credential_accepted",
-                "credentials_valid",
-                "login_success",
-            )
-        ):
-            return True
+        proof_fields = (
+            "provided_credentials_ok",
+            "credential_verified",
+            "auth_valid",
+            "token_valid",
+            "credentials_valid",
+            "login_success",
+        )
+        if any(payload.get(field) is False for field in proof_fields):
+            return False
         credential_state = str(payload.get("credential_state") or "").strip().lower()
+        if credential_state in {"invalid", "unknown", "unverified", "verification_unavailable", "inconclusive"}:
+            return False
+        if any(payload.get(field) is True for field in (*proof_fields, "credential_accepted")):
+            return True
         if credential_state in {"valid", "valid_but_restricted", "authenticated"}:
             return True
-        return str(payload.get("status") or "").strip().lower() in {"auth_valid", "authenticated"}
+        return False
 
     def _mark_cve_credentials_verified(
         self,
@@ -2314,7 +2331,12 @@ class AuditCommandRunner:
                         f"reason={cve_result.get('reason') or '-'}"
                     )
             record_count += 1
-            operational_failure_count += int(is_pre_detect_operational_failure(record))
+            # A confirmed product can still fail operationally in auth/data.
+            # Keep its detection evidence, but count the explicit failure so
+            # the run is partial and exits nonzero.
+            operational_failure_count += int(
+                record.extra.get("operational_failure") is True or is_pre_detect_operational_failure(record)
+            )
             status = str(record.status or "")
             status_counts[status] = status_counts.get(status, 0) + 1
             if retain_records:
@@ -2349,6 +2371,8 @@ class AuditCommandRunner:
                     progress.add_total(1)
                     progress.advance(1)
                 _finalize_record(outcome.record)
+                for surface_record in outcome.additional_records:
+                    _finalize_record(surface_record)
         except BaseException:
             cancelled.set()
             raise
@@ -2720,11 +2744,36 @@ class AuditCommandRunner:
                     mode="pipeline",
                 )
             )
+        additional_records: tuple[AuditRecord, ...] = ()
+        if (
+            self.spec.module in web_panels.MODULE_PRODUCTS
+            and target is not None
+            and target.surface_hint is None
+            and (target.scheme in {"http", "https"} or target.explicit_port is not None)
+        ):
+            other_surface = "backend" if detect_record.extra.get("surface") == "ui" else "ui"
+            # An explicit HTTP URL and a known UI port probe the panel first.
+            # A backend result here already implies that UI detection failed;
+            # probing it again repeats safe requests on the same origin.
+            ui_already_checked = other_surface == "ui" and (
+                target.scheme in {"http", "https"} or int(port) in web_panels.UI_PORTS[self.spec.module]
+            )
+            if not ui_already_checked:
+                other = self._run_target_pipeline(
+                    host,
+                    port,
+                    replace(target, surface_hint=other_surface),
+                    credential_runs,
+                    debug_emit,
+                )
+                if other.detected:
+                    additional_records = (other.record,)
         return _AuditPipelineOutcome(
             record=final_record,
             detected=True,
             deep_candidate=deep_candidate,
             deep_processed=deep_processed,
+            additional_records=additional_records,
         )
 
     def _run_deep_and_close_state(
@@ -2858,9 +2907,15 @@ class AuditCommandRunner:
 
         auth_records: list[tuple[AuditCredentialRun, AuditRecord]] = []
         candidates = credential_runs or (AuditCredentialRun(source="anonymous"),)
+        if bool(getattr(self.args, "defcreds", False)) and detect_record.extra.get("surface") == "ui":
+            extra_defaults = (
+                AuditCredentialRun(username=user, password=password, source="default")
+                for user, password in web_panels.default_pairs(str(detect_record.extra.get("ui_product") or ""))
+            )
+            candidates = merge_audit_credential_runs(candidates, tuple(extra_defaults))
         retain_all_attempts = self.spec.record_all_credential_attempts or self.spec.continue_after_credential_success
         verifier_unavailable = bool(
-            self.spec.skip_credentials_without_verifier
+            (self.spec.skip_credentials_without_verifier or detect_record.extra.get("surface") == "ui")
             and detect_record.extra.get("credential_verification_status") == "unavailable"
         )
         if self._should_keep_anonymous_detect_record(detect_record) or verifier_unavailable:
@@ -3117,6 +3172,21 @@ class AuditCommandRunner:
         """
 
         candidates = credential_runs or (AuditCredentialRun(source="anonymous"),)
+        if self.spec.module == "docker" and detect_record.extra.get("surface") != "ui":
+            # Docker Engine has no username/password verifier. Portainer is a
+            # separate product and receives these candidates only when proven.
+            candidates = (AuditCredentialRun(source="anonymous"),)
+        if bool(getattr(self.args, "defcreds", False)) and detect_record.extra.get("surface") == "ui":
+            extra_defaults = (
+                AuditCredentialRun(username=user, password=password, source="default")
+                for user, password in web_panels.default_pairs(str(detect_record.extra.get("ui_product") or ""))
+            )
+            candidates = merge_audit_credential_runs(candidates, tuple(extra_defaults))
+        if (
+            detect_record.extra.get("surface") == "ui"
+            and detect_record.extra.get("credential_verification_status") == "unavailable"
+        ):
+            candidates = (AuditCredentialRun(source="anonymous"),)
         has_application_credentials = any(
             candidate.username is not None or candidate.password is not None or candidate.token is not None
             for candidate in candidates
@@ -3202,6 +3272,11 @@ class AuditCommandRunner:
             if phase_emit is not None:
                 phase_emit(record, False)
             if bool(getattr(self.args, "defcreds", False)) and _credential_attempt_rate_limited(record):
+                break
+            # A monolithic adapter has already completed anonymous data
+            # actions despite the rejected pair; repeating the same public
+            # actions for every candidate adds no evidence.
+            if str(record.status or "") == "invalid_credentials_anonymous" and self._deep_gate(record)[0]:
                 break
             if gate[0]:
                 if debug_emit is not None:
@@ -3334,6 +3409,7 @@ class AuditCommandRunner:
                         "deep_error": message,
                         "detected_status": str(prior_record.status),
                         "detection_preserved": True,
+                        "operational_failure": True,
                         f"is_{self.spec.module}": True,
                     }
                 )
@@ -3354,6 +3430,40 @@ class AuditCommandRunner:
     def _host_stage(self, ctx: AuditHookContext, *, run_deep_checks: bool) -> AuditRecord:
         if self.spec.host_stage is None:
             raise TypeError(f"{self.spec.module} spec exposes neither hook overrides nor host_stage")
+        forced_surface = getattr(ctx.target, "surface_hint", None)
+        ui_first = forced_surface == "ui" or (forced_surface != "backend" and (self._ui_first(ctx) or run_deep_checks))
+        native_record: AuditRecord | None = None
+        if self.spec.module in web_panels.MODULE_PRODUCTS and not ui_first:
+            native_record = _invoke_host_stage(
+                self.spec.host_stage,
+                module=self.spec.module,
+                ctx=ctx,
+                run_deep_checks=False,
+                strict_binding=self._strict_host_stage_binding,
+            )
+            if self._is_detected(native_record):
+                return native_record
+        if self.spec.module in web_panels.MODULE_PRODUCTS and forced_surface != "backend":
+            panel = web_panels.detect_panel(self.spec.module, ctx)
+            if panel is not None:
+                if (
+                    ctx.credential.username is not None
+                    and ctx.credential.password is not None
+                    and panel.get("credential_verification_status") == "available"
+                ):
+                    panel = web_panels.authenticate_panel(ctx, panel)
+                if run_deep_checks and panel.get("status") in {"open_no_auth", "valid_credentials"}:
+                    panel = web_panels.enumerate_panel(ctx, panel)
+                panel["provided_username"] = ctx.credential.username
+                panel["provided_password"] = ctx.credential.password
+                panel_ui = panel.get("ui")
+                if isinstance(panel_ui, dict):
+                    panel_ui.pop("session_cookie", None)
+                    panel_ui.pop("session_token", None)
+                    panel_ui.pop("session_authorization", None)
+                return AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
+        if native_record is not None:
+            return native_record
         return _invoke_host_stage(
             self.spec.host_stage,
             module=self.spec.module,
@@ -3362,7 +3472,56 @@ class AuditCommandRunner:
             strict_binding=self._strict_host_stage_binding,
         )
 
+    def _ui_first(self, ctx: AuditHookContext) -> bool:
+        if getattr(ctx.target, "surface_hint", None) == "ui":
+            return True
+        if getattr(ctx.target, "surface_hint", None) == "backend":
+            return False
+        scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
+        return scheme in {"http", "https"} or int(ctx.port) in web_panels.UI_PORTS.get(self.spec.module, ())
+
     def _detect(self, ctx: AuditHookContext) -> AuditRecord:
+        forced_surface = getattr(ctx.target, "surface_hint", None)
+        if self.spec.module in web_panels.MODULE_PRODUCTS:
+            if forced_surface == "ui":
+                panel = web_panels.detect_panel(self.spec.module, ctx)
+                if panel is not None:
+                    return AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
+                return AuditRecord(
+                    host=str(ctx.host),
+                    port=int(ctx.port),
+                    module=self.spec.module,
+                    service=self.spec.module,
+                    status="not_service",
+                    extra={f"is_{self.spec.module}": False},
+                )
+            if (forced_surface == "backend" or not self._ui_first(ctx)) and self.spec.detect is not None:
+                backend = _record_to_model(self.spec.detect(ctx))
+                if self.spec.module == "minio" and backend.extra.get("detection_status") == "console":
+                    if forced_surface != "backend":
+                        panel = web_panels.detect_panel(self.spec.module, ctx)
+                        if panel is not None:
+                            return AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
+                    return AuditRecord(
+                        host=str(ctx.host),
+                        port=int(ctx.port),
+                        module="minio",
+                        service="minio",
+                        status="probable",
+                        extra={"is_minio": False, "detection_status": "probable"},
+                    )
+                if forced_surface == "backend" or self._is_detected(backend):
+                    return backend
+                panel = web_panels.detect_panel(self.spec.module, ctx)
+                return (
+                    AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
+                    if panel
+                    else backend
+                )
+            if forced_surface != "backend":
+                panel = web_panels.detect_panel(self.spec.module, ctx)
+                if panel is not None:
+                    return AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
         if self.spec.detect is not None:
             return _record_to_model(self.spec.detect(ctx))
         if self.spec.host_stage is not None:
@@ -3370,6 +3529,24 @@ class AuditCommandRunner:
         raise TypeError(f"{self.spec.module} spec requires either detect or host_stage")
 
     def _auth(self, ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRecord:
+        if detect_record.extra.get("surface") == "ui":
+            if ctx.credential.username is None or ctx.credential.password is None:
+                return detect_record
+            if detect_record.extra.get("credential_verification_status") != "available":
+                return detect_record
+            panel = web_panels.authenticate_panel(ctx, detect_record.to_dict())
+            panel["provided_username"] = ctx.credential.username
+            panel["provided_password"] = ctx.credential.password
+            ui = panel.get("ui")
+            if isinstance(ui, dict):
+                cookie = ui.pop("session_cookie", None)
+                token = ui.pop("session_token", None)
+                authorization = ui.pop("session_authorization", None)
+                if ctx.lifecycle_state is not None:
+                    ctx.lifecycle_state.ui_session_cookie = cookie
+                    ctx.lifecycle_state.ui_session_token = token
+                    ctx.lifecycle_state.ui_session_authorization = authorization
+            return AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
         if self.spec.auth is not None:
             return _record_to_model(self.spec.auth(ctx, detect_record))
         if self.spec.host_stage is not None:
@@ -3379,11 +3556,32 @@ class AuditCommandRunner:
         return detect_record
 
     def _capabilities(self, ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        if record.extra.get("surface") == "ui":
+            return record
         if self.spec.capabilities is not None:
             return _record_to_model(self.spec.capabilities(ctx, record))
         return record
 
     def _data(self, ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        if record.extra.get("surface") == "ui":
+            if record.status not in {"open_no_auth", "valid_credentials"}:
+                return record
+            panel = record.to_dict()
+            ui = panel.get("ui")
+            if isinstance(ui, dict) and ctx.lifecycle_state is not None:
+                if cookie := getattr(ctx.lifecycle_state, "ui_session_cookie", None):
+                    ui["session_cookie"] = cookie
+                if token := getattr(ctx.lifecycle_state, "ui_session_token", None):
+                    ui["session_token"] = token
+                if authorization := getattr(ctx.lifecycle_state, "ui_session_authorization", None):
+                    ui["session_authorization"] = authorization
+            panel = web_panels.enumerate_panel(ctx, panel)
+            panel_ui = panel.get("ui")
+            if isinstance(panel_ui, dict):
+                panel_ui.pop("session_cookie", None)
+                panel_ui.pop("session_token", None)
+                panel_ui.pop("session_authorization", None)
+            return AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
         if self.spec.data is not None:
             return _record_to_model(self.spec.data(ctx, record))
         if self.spec.host_stage is not None:
@@ -3445,8 +3643,47 @@ class AuditCommandRunner:
         credential: AuditCredentialRun,
         record: AuditRecord,
     ) -> tuple[bool, str]:
+        if record.extra.get("surface") == "ui":
+            state = str(record.extra.get("credential_state") or "")
+            return state == "valid", f"UI credential {state or 'unverified'}"
+        supplied = any(value is not None for value in (credential.username, credential.password, credential.token))
+        proof_fields: tuple[str, ...] = (
+            "provided_credentials_ok",
+            "credential_verified",
+            "auth_valid",
+            "token_valid",
+            "credentials_valid",
+            "login_success",
+        )
+        # Exhaustive sweeps may retain the explicit pair's verdict after a
+        # later default candidate succeeds. Proof must be candidate-specific.
+        if credential.source == "default":
+            proof_fields = tuple(field for field in proof_fields if field != "provided_credentials_ok")
+        credential_state = str(record.extra.get("credential_state") or "").lower()
+        if supplied and (
+            any(record.extra.get(field) is False for field in proof_fields)
+            or credential_state in {"invalid", "unknown", "unverified", "verification_unavailable", "inconclusive"}
+        ):
+            return False, "credential rejected or unverified"
         if self.spec.credential_gate is not None:
             return self.spec.credential_gate(credential, record)
+        if supplied:
+            if any(record.extra.get(field) is True for field in proof_fields):
+                return True, "credential verified by product"
+            status = str(record.status or "")
+            # Legacy native-protocol adapters report a successful handshake
+            # with one of these statuses. A public/anonymous response, generic
+            # HTTP success, or a denied resource never verifies a credential.
+            if status in {
+                "valid_credentials",
+                "weak_default_creds",
+                "auth_valid",
+                "token_ok",
+                "valid_token",
+                "token_accepted",
+            }:
+                return True, f"status={status}"
+            return False, "credential unverified"
         return self._deep_gate(record)
 
     def _with_attempted_credentials(
@@ -3482,6 +3719,8 @@ class AuditCommandRunner:
         )
 
     def _is_detected(self, record: AuditRecord) -> bool:
+        if self.spec.module in web_panels.MODULE_PRODUCTS and record.extra.get("is_ui") is True:
+            return True
         if self.spec.is_detected is not None:
             return bool(self.spec.is_detected(record))
         marker = f"is_{self.spec.module}"

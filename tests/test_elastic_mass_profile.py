@@ -41,11 +41,12 @@ def test_parse_args_tracks_explicit_network_option_provenance() -> None:
 
 def test_elastic_bare_defaults_and_explicit_additive_ports_are_preserved() -> None:
     bare_plan = elastic_stage.build_elastic_plan(parse_args(["elastic", "-t", "192.0.2.10"]))
-    assert bare_plan.ports == (9200, 19200, 29200)
+    assert bare_plan.ports == (9200, 19200, 29200, 5601)
     assert [(host, port) for _idx, host, port in bare_plan.iter_targets()] == [
         ("192.0.2.10", 9200),
         ("192.0.2.10", 19200),
         ("192.0.2.10", 29200),
+        ("192.0.2.10", 5601),
     ]
 
     target_port_plan = elastic_stage.build_elastic_plan(parse_args(["elastic", "-t", "192.0.2.10:29200"]))

@@ -251,8 +251,37 @@ def test_kafka_modern_sasl_auth_identity_result(monkeypatch: pytest.MonkeyPatch,
     payload = struct.pack(">ihh", 9, code, -1) + struct.pack(">i", -1)
     monkeypatch.setattr(kafka, "_send_kafka_request", lambda *_args, **_kwargs: payload)
     result, next_id, _error = kafka._sasl_authenticate_plain(object(), 9, "alice", "secret")
-    assert result is (code == 0)
+    assert result is (True if code == 0 else None)
     assert next_id == 10
+
+
+def test_kafka_sasl_identity_survives_metadata_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Socket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(kafka, "_open_kafka_socket_configured", lambda *_args, **_kwargs: (Socket(), "plaintext"))
+    monkeypatch.setattr(kafka, "_bootstrap_known_kafka_session", lambda *_args, **_kwargs: (True, 2, None))
+    monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (True, 3, None))
+    monkeypatch.setattr(kafka, "_sasl_authenticate_plain", lambda *_args, **_kwargs: (True, 4, None))
+    monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: (None, "metadata timeout"))
+    accepted, metadata, error, _transport = kafka._authenticate_and_fetch_metadata(
+        "localhost", 9092, 1.0, "alice", "secret", known_kafka=True
+    )
+    assert accepted is True and metadata is None and error == "metadata timeout"
+
+
+def test_kafka_sasl_transport_failure_is_not_invalid_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        kafka, "_open_kafka_socket_configured", lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError())
+    )
+    accepted, metadata, _error, _transport = kafka._authenticate_and_fetch_metadata(
+        "localhost", 9092, 1.0, "alice", "secret", known_kafka=True
+    )
+    assert accepted is None and metadata is None
 
 
 def test_kafka_leader_pool_reuses_identity_and_closes_evicted_sessions(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -16,7 +16,14 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...discovery_rendering import format_discovery_finding_line
-from .discover import DiscoverConfig, discover_task_logs, list_connections, list_variable_keys
+from .discover import (
+    DiscoverConfig,
+    discover_task_logs,
+    dump_airflow,
+    list_connections,
+    list_dag_ids,
+    list_variable_keys,
+)
 from .types import AirflowCapabilities, AirflowDetection, AnonymousResult, CredentialResult, ResourceAccess
 
 # Модуль использует detect/auth хуки, а не монолитный host_stage; None корректно и
@@ -231,6 +238,15 @@ def _looks_like_airflow_problem(resp: AirflowResponse, status: int, *, require_p
     )
 
 
+def _looks_like_airflow_token_rejection(resp: AirflowResponse) -> bool:
+    """A proxy's bare 401 is not evidence that Airflow checked the pair."""
+
+    data = resp.json()
+    return (
+        isinstance(data, dict) and data.get("detail") == "Invalid credentials" and set(data) == {"detail"}
+    ) or _looks_like_airflow_problem(resp, 401, require_product_type=True)
+
+
 # --- anonymous access ------------------------------------------------------
 
 
@@ -302,7 +318,7 @@ def verify_credential(pool_client_factory: Any, generation: str, username: str, 
     """Verify one credential for the pinned generation.
 
     2.x: HTTP Basic against the DAG collection (200 valid / 401 invalid / 403
-    needs independent identity proof). 3.x: POST /auth/token (200 + access_token valid / 401
+    needs independent identity proof). 3.x: POST /auth/token (200/201 + access_token valid / 401
     invalid); the issued JWT is kept for the resource-access probes.
     """
     if generation == "v2":
@@ -310,11 +326,17 @@ def verify_credential(pool_client_factory: Any, generation: str, username: str, 
         resp = client.post_json(_AUTH_TOKEN_PATH, {"username": username, "password": password})
         if resp.transport_error:
             return CredentialResult(state="transient_failure", username=username)
-        if resp.http_status in {401, 403}:
-            return CredentialResult(state="invalid", username=username, error_code=str(resp.http_status))
+        if resp.http_status == 401:
+            return CredentialResult(
+                state="invalid" if _looks_like_airflow_token_rejection(resp) else "verification_unavailable",
+                username=username,
+                error_code=str(resp.http_status),
+            )
+        if resp.http_status == 403:
+            return CredentialResult(state="verification_unavailable", username=username, error_code="403")
         data = resp.json()
         token = data.get("access_token") if isinstance(data, dict) else None
-        if resp.http_status == 200 and token:
+        if resp.http_status in {200, 201} and isinstance(token, str) and token:
             return CredentialResult(state="valid", username=username, bearer_token=str(token))
         return CredentialResult(state="transient_failure", username=username, error_code=str(resp.http_status))
 
@@ -324,18 +346,33 @@ def verify_credential(pool_client_factory: Any, generation: str, username: str, 
         return CredentialResult(state="transient_failure", username=username)
     if resp.http_status == 401 and _looks_like_airflow_problem(resp, 401):
         return CredentialResult(state="invalid", username=username, error_code="401")
-    if resp.http_status == 403 and _looks_like_airflow_problem(resp, 403):
-        for path, collection in (
-            (_ENDPOINTS["v1"]["keys"], "variables"),
-            (_ENDPOINTS["v1"]["connections"], "connections"),
-        ):
-            authenticated = _resource_access(client, path, collection)
-            if authenticated.status != "allowed":
-                continue
-            anonymous = _resource_access(pool_client_factory(), path, collection, authed=False)
-            if anonymous.status == "denied":
-                return CredentialResult(state="valid_but_restricted", username=username, error_code="403")
-        return CredentialResult(state="verification_unavailable", username=username, error_code="403")
+    if resp.http_status in {401, 403}:
+        if resp.http_status == 403 and _looks_like_airflow_problem(resp, 403):
+            for path, collection in (
+                (_ENDPOINTS["v1"]["keys"], "variables"),
+                (_ENDPOINTS["v1"]["connections"], "connections"),
+            ):
+                authenticated = _resource_access(client, path, collection)
+                if authenticated.status != "allowed":
+                    continue
+                anonymous = _resource_access(pool_client_factory(), path, collection, authed=False)
+                if anonymous.status == "denied":
+                    return CredentialResult(state="valid_but_restricted", username=username, error_code="403")
+        fab_login = getattr(client, "verify_fab_login", None)
+        if callable(fab_login):
+            fab_verdict = fab_login(username, password)
+            if fab_verdict == "valid":
+                return CredentialResult(
+                    state="valid_but_restricted",
+                    username=username,
+                    error_code=str(resp.http_status),
+                    proof_surface="web",
+                )
+            if fab_verdict == "invalid":
+                return CredentialResult(
+                    state="invalid", username=username, error_code=str(resp.http_status), proof_surface="web"
+                )
+        return CredentialResult(state="verification_unavailable", username=username, error_code=str(resp.http_status))
     if resp.http_status == 200 and _looks_like_dag_collection(resp):
         return CredentialResult(state="valid", username=username)
     return CredentialResult(state="verification_unavailable", username=username, error_code=str(resp.http_status))
@@ -611,8 +648,12 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         credential_state = "verification_unavailable"
         error_code = "anonymous_access_already_succeeded"
     merged["credential_state"] = credential_state
+    if result.proof_surface:
+        merged["credential_proof_surface"] = result.proof_surface
     merged["credential_results"] = [{"username": result.username, "state": credential_state, "error_code": error_code}]
-    merged["_credential_capabilities_pending"] = credential_state in {"valid", "valid_but_restricted"}
+    merged["_credential_capabilities_pending"] = (
+        credential_state in {"valid", "valid_but_restricted"} and result.proof_surface != "web"
+    )
     # Used only by TXT renderers; the stage spec redacts it from JSON output.
     merged["credential_password"] = str(password)
     merged["provided_credentials_ok"] = (
@@ -628,7 +669,10 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
 
 def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     merged = dict(prior)
-    if str(prior.get("credential_state") or "") not in {"valid", "valid_but_restricted"}:
+    if prior.get("credential_proof_surface") == "web" or str(prior.get("credential_state") or "") not in {
+        "valid",
+        "valid_but_restricted",
+    }:
         merged.pop("_credential_capabilities_pending", None)
         return merged
     generation = str(prior.get("api_generation") or "v1")
@@ -663,20 +707,51 @@ def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
 def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     merged = dict(prior)
     discover_requested = bool(getattr(ctx.args, "discover", False))
+    dump_requested = bool(getattr(ctx.args, "dump", False))
+    show_dags_value = getattr(ctx.args, "show_dags", False)
+    show_dags_requested = bool(show_dags_value)
     show_keys_value = getattr(ctx.args, "show_keys", False)
     show_keys_requested = bool(show_keys_value)
     show_connections_value = getattr(ctx.args, "show_connections", False)
     show_connections_requested = bool(show_connections_value)
-    if not discover_requested and not show_keys_requested and not show_connections_requested:
+    if not any(
+        (discover_requested, dump_requested, show_dags_requested, show_keys_requested, show_connections_requested)
+    ):
         return merged
     if discover_requested:
         merged["discover_requested"] = True
+    if dump_requested:
+        merged["dump_requested"] = True
+    if show_dags_requested:
+        merged["show_dags_requested"] = True
     if show_keys_requested:
         merged["show_keys_requested"] = True
     if show_connections_requested:
         merged["show_connections_requested"] = True
     generation = str(prior.get("api_generation") or "")
     if prior.get("detection_status") != "confirmed" or generation not in {"v1", "v2"}:
+        return merged
+    if prior.get("credential_proof_surface") == "web" and prior.get("auth_required") is True:
+        if show_dags_requested:
+            merged["dag_ids_error"] = "api_credentials_unverified"
+        if show_keys_requested:
+            merged["variable_keys_error"] = "api_credentials_unverified"
+        if show_connections_requested:
+            merged["connections_error"] = "api_credentials_unverified"
+        if discover_requested:
+            merged["discover_report"] = {
+                "status": "unavailable",
+                "finding_count": 0,
+                "findings": [],
+                "partial_reasons": ["api_credentials_unverified"],
+            }
+        if dump_requested:
+            merged["dump_report"] = {
+                "status": "unavailable",
+                "count": 0,
+                "records": [],
+                "partial_reasons": ["api_credentials_unverified"],
+            }
         return merged
     credential = ctx.credential
     credential_ok = prior.get("provided_credentials_ok") is True
@@ -688,12 +763,20 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             else None
         )
         if credential_ok and token is None:
-            merged["discover_report"] = {
-                "status": "unavailable",
-                "finding_count": 0,
-                "findings": [],
-                "partial_reasons": ["bearer_token_unavailable"],
-            }
+            if discover_requested:
+                merged["discover_report"] = {
+                    "status": "unavailable",
+                    "finding_count": 0,
+                    "findings": [],
+                    "partial_reasons": ["bearer_token_unavailable"],
+                }
+            if dump_requested:
+                merged["dump_report"] = {
+                    "status": "unavailable",
+                    "count": 0,
+                    "records": [],
+                    "partial_reasons": ["bearer_token_unavailable"],
+                }
             return merged
         client = _client_for(ctx, bearer_token=token)
     else:
@@ -703,6 +786,9 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             basic_password=str(credential.password) if credential_ok else None,
         )
 
+    show_dags_limit = (
+        int(show_dags_value) if isinstance(show_dags_value, int) and not isinstance(show_dags_value, bool) else None
+    )
     show_keys_limit = (
         int(show_keys_value) if isinstance(show_keys_value, int) and not isinstance(show_keys_value, bool) else None
     )
@@ -715,6 +801,17 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     # the live output. Do not issue their requests when an authenticated API is
     # known to be closed and no credential has been verified.
     can_read = credential_ok or prior.get("auth_required") is not True
+    if show_dags_requested:
+        if can_read:
+            dags = list_dag_ids(client, generation, limit=show_dags_limit)
+            merged["dag_ids"] = dags["dags"]
+            merged["dag_ids_count"] = dags["count"]
+            merged["dag_ids_total"] = dags["total"]
+            merged["dag_ids_truncated"] = dags["truncated"]
+            if dags.get("error"):
+                merged["dag_ids_error"] = dags["error"]
+        elif prior.get("auth_required") is True:
+            merged["dag_ids_error"] = "authentication_required"
     if show_keys_requested:
         if can_read:
             keys = list_variable_keys(client, generation, limit=show_keys_limit)
@@ -737,6 +834,28 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 merged["connections_error"] = connections["error"]
         elif prior.get("auth_required") is True:
             merged["connections_error"] = "authentication_required"
+    if dump_requested:
+        if can_read:
+            nested_scheduler = getattr(ctx, "nested_scheduler", None)
+            merged["dump_report"] = dump_airflow(
+                client,
+                generation,
+                dags=getattr(ctx.args, "dag", None),
+                keys=getattr(ctx.args, "key", None),
+                connections=getattr(ctx.args, "connection", None),
+                max_bytes=int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024)),
+                max_seconds=float(getattr(ctx.args, "discover_time", None) or 300.0),
+                cancelled=(lambda: bool(getattr(nested_scheduler, "cancelled", False)))
+                if nested_scheduler is not None
+                else None,
+            )
+        else:
+            merged["dump_report"] = {
+                "status": "unavailable",
+                "count": 0,
+                "records": [],
+                "partial_reasons": ["authentication_required"],
+            }
     if not discover_requested:
         return merged
 

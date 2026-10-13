@@ -155,7 +155,10 @@ def test_http_tls_required_upgrades_to_self_signed_https_for_defcreds(
         assert "minioadmin:minioadmin" in result.stdout
         assert "S3 API:unverified" not in result.stdout
         assert "credential verification unavailable" not in result.stdout
-        assert server.plaintext_requests == 1
+        # Explicit HTTP URLs check Console as an independent surface (two
+        # read-only probes) before the S3 API transport upgrade. A failed UI
+        # fingerprint must not be retried after S3 detection.
+        assert server.plaintext_requests == 3
         assert any(authorization for _path, authorization in server.tls_requests)
         assert any("Credential=minioadmin/" in authorization for _path, authorization in server.tls_requests)
     finally:

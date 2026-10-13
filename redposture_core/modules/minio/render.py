@@ -290,7 +290,10 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
             else:
                 lines.append(f"{prefix} [*] Dump {b}/{k} (size:{size})")
             # Raw object content, one line per line, without the MINIO tag prefix.
-            lines.extend(str(dump.get("content") or "").splitlines())
+            if "base64" in dump:
+                lines.append(f"base64:{dump['base64']}")
+            else:
+                lines.extend(str(dump.get("content") or "").splitlines())
     downloads = record.get("object_downloads")
     if isinstance(downloads, list):
         for download in downloads:
@@ -306,6 +309,8 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
     for extra_error in record.get("object_op_errors") or []:
         if extra_error != op_error:
             lines.append(f"{prefix} [!] object error: {extra_error}")
+    if record.get("object_dump_partial"):
+        lines.append(f"{prefix} [*] Dump coverage:partial")
     return lines
 
 
@@ -315,6 +320,9 @@ _DISCOVER_FINDINGS_RE = re.compile(r"\(findings:(\d+)\)")
 
 
 def _minio_extra_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
+    if "Dump coverage:partial" in payload:
+        start = payload.index("coverage:partial")
+        return [(start, start + len("coverage:partial"), "orange")]
     shared = discovery_color_spans(_marker, payload)
     if shared:
         return shared

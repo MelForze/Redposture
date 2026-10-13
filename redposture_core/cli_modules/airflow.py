@@ -75,6 +75,12 @@ def configure_airflow_parser(
         help="Search DAG sources, Variables, Connections and task-instance logs for secrets (read-only).",
     )
     discover.add_argument(
+        "--show-dags",
+        **optional_show_count_kwargs(
+            "Show Airflow DAG IDs after successful access/auth. Optional count limits output."
+        ),
+    )
+    discover.add_argument(
         "--show-keys",
         **optional_show_count_kwargs(
             "Show Airflow Variable keys after successful access/auth. Optional count limits output."
@@ -86,6 +92,16 @@ def configure_airflow_parser(
             "Show Airflow Connection objects and their contents after successful access/auth. "
             "Optional count limits output."
         ),
+    )
+    discover.add_argument(
+        "--dump",
+        action="store_true",
+        help="Read DAG metadata/source, Variable values and Connection objects; without selectors, walk all accessible items.",
+    )
+    discover.add_argument("--dag", action="append", metavar="dag_id", help="Select a DAG for --dump; repeatable.")
+    discover.add_argument("--key", action="append", metavar="key", help="Select a Variable for --dump; repeatable.")
+    discover.add_argument(
+        "--connection", action="append", metavar="connection_id", help="Select a Connection for --dump; repeatable."
     )
     add_discovery_budget_flags(discover, default_time=None, default_bytes=50 * 1024 * 1024)
     # Transport is automatic (scheme probed per target; TLS certificates always

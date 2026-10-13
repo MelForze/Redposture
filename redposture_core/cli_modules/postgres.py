@@ -65,6 +65,14 @@ def configure_postgres_parser(
     discovery = postgres_parser.add_argument_group("Discovery / Dump")
     exec_group = postgres_parser.add_argument_group("Execute / Shell")
 
+    discovery.add_argument(
+        "--pgadmin-server-password",
+        dest="pgadmin_server_password",
+        default=None,
+        metavar="value",
+        help="Password for a saved PostgreSQL server in pgAdmin; never saved by the UI adapter.",
+    )
+
     auth.add_argument(
         "-u",
         "--username",

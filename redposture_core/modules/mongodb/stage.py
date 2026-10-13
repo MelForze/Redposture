@@ -20,7 +20,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 27017
-_DEFAULT_PORTS: tuple[int, ...] | None = (27017, 27018, 27019)
+_DEFAULT_PORTS: tuple[int, ...] | None = (27017, 27018, 27019, 8081)
 
 
 def build_mongodb_plan(args: Any) -> AuditCommandPlan:

@@ -201,6 +201,12 @@ class KubeApiHttpSession:
             cap = max(0, int(response_size_cap))
             payload = response.read(cap + 1)
             truncated = len(payload) > cap
+            remaining_length = getattr(response, "length", None)
+            if not truncated and remaining_length is not None and remaining_length > 0:
+                raise ConnectionError(
+                    f"unexpected EOF: incomplete HTTP response body "
+                    f"({len(payload)} bytes received, {remaining_length} more expected)"
+                )
             if truncated:
                 payload = payload[:cap]
             result = HttpResponse(

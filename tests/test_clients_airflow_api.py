@@ -33,6 +33,105 @@ class _Resp:
         self.error = None
 
 
+_FAB_FORM = (
+    b'<link href="/static/appbuilder/css/ab.css" rel="stylesheet">'
+    b'<form name="login" method="post" action="">'
+    b'<input name="csrf_token" value="csrf123">'
+    b'<input name="username"><input name="password" type="password"></form>'
+)
+
+
+class _FabPool:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def request_once(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return self.responses.pop(0)
+
+
+def _fab_response(status, body=b"", headers=None):
+    response = _Resp(status, body, headers or {})
+    response.truncated = False
+    return response
+
+
+def test_fab_login_proves_identity_or_explicit_rejection_without_post_replay():
+    first = _fab_response(200, _FAB_FORM, {"Content-Type": "text/html", "Set-Cookie": "session=one; HttpOnly"})
+    for destination, page, expected in (
+        ("/airflow/home", b'<a href="/logout/">Log Out</a>', "valid"),
+        (
+            "/airflow/login/?next=%2Fhome",
+            _FAB_FORM + b'<div class="alert alert-warning">Invalid login. Please try again.</div>',
+            "invalid",
+        ),
+    ):
+        pool = _FabPool(
+            [
+                first,
+                _fab_response(302, headers={"Location": destination, "Set-Cookie": "session=two; HttpOnly"}),
+                _fab_response(200, page),
+            ]
+        )
+        client = airflow_api.AirflowClient(
+            pool, scheme="https", host="airflow.example", port=8443, base_path="/airflow"
+        )
+        assert client.verify_fab_login("admin", "p&ss") == expected
+        assert [call[0] for call in pool.calls] == ["GET", "POST", "GET"]
+        assert pool.calls[1][2]["headers"]["Cookie"] == "session=one"
+        assert b"password=p%26ss" in pool.calls[1][2]["body"]
+        assert pool.calls[2][2]["headers"]["Cookie"] == "session=two"
+
+
+def test_fab_login_rejects_sso_and_cross_origin_action_without_post():
+    for body in (
+        b'<form name="login" method="post"><input name="csrf_token" value="csrf123"></form>',
+        _FAB_FORM.replace(b'action=""', b'action="https://idp.example/login"'),
+    ):
+        pool = _FabPool([_fab_response(200, body, {"Content-Type": "text/html", "Set-Cookie": "session=one"})])
+        client = airflow_api.AirflowClient(pool, scheme="http", host="airflow.example", port=8080)
+        assert client.verify_fab_login("admin", "pass") == "unverified"
+        assert [call[0] for call in pool.calls] == ["GET"]
+
+
+def test_fab_login_does_not_treat_generic_redirect_as_success_or_failure():
+    pool = _FabPool(
+        [
+            _fab_response(200, _FAB_FORM, {"Content-Type": "text/html", "Set-Cookie": "session=one"}),
+            _fab_response(302, headers={"Location": "https://idp.example/home"}),
+        ]
+    )
+    client = airflow_api.AirflowClient(pool, scheme="http", host="airflow.example", port=8080)
+    assert client.verify_fab_login("admin", "pass") == "unverified"
+    assert [call[0] for call in pool.calls] == ["GET", "POST"]
+
+
+def test_fab_login_does_not_inherit_public_home_or_stale_session():
+    for post_headers in ({"Location": "/home/"}, {"Location": "/home", "Set-Cookie": "session=one"}):
+        pool = _FabPool(
+            [
+                _fab_response(200, _FAB_FORM, {"Content-Type": "text/html", "Set-Cookie": "session=one"}),
+                _fab_response(302, headers=post_headers),
+                _fab_response(200, b'<a href="/logout/">Log Out</a>'),
+            ]
+        )
+        client = airflow_api.AirflowClient(pool, scheme="http", host="airflow.example", port=8080)
+        assert client.verify_fab_login("admin", "pass") == "unverified"
+
+
+def test_fab_login_requires_rejection_flash_not_static_copy():
+    pool = _FabPool(
+        [
+            _fab_response(200, _FAB_FORM, {"Content-Type": "text/html", "Set-Cookie": "session=one"}),
+            _fab_response(302, headers={"Location": "/login/"}),
+            _fab_response(200, _FAB_FORM + b"Invalid login. Please try again."),
+        ]
+    )
+    client = airflow_api.AirflowClient(pool, scheme="http", host="airflow.example", port=8080)
+    assert client.verify_fab_login("admin", "pass") == "unverified"
+
+
 def test_get_unauthenticated_has_no_auth_header():
     pool = _FakePool(200, b'{"version":"2.9.3"}')
     client = airflow_api.AirflowClient(pool, scheme="http", host="h", port=8080)

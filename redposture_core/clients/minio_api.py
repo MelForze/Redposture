@@ -41,6 +41,7 @@ class MinioResponse:
     request_url: str | None = None
     final_url: str | None = None
     redirect_history: tuple[str, ...] = ()
+    truncated: bool = False
 
 
 def _parse_s3_error(status: int, body: bytes) -> S3Error | None:
@@ -194,6 +195,7 @@ class MinioClient:
             request_url=getattr(resp, "request_url", None),
             final_url=getattr(resp, "final_url", None),
             redirect_history=tuple(getattr(resp, "redirect_history", ()) or ()),
+            truncated=bool(getattr(resp, "truncated", False)),
         )
 
     def get_service_root(self, *, signed: bool) -> MinioResponse:

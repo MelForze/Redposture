@@ -391,6 +391,34 @@ def test_classification_evidence_matrix(fields: dict[str, object], expected: str
     assert classify(record, AuditCredentialRun("u", "p"), Runner())[0] == expected
 
 
+@pytest.mark.parametrize("state", ("unknown", "unverified", "verification_unavailable", "inconclusive"))
+def test_ambiguous_product_verdict_cannot_become_invalid_in_spray(state: str) -> None:
+    class Runner:
+        def _credential_gate(self, _credential: object, _record: object) -> tuple[bool, str]:
+            return False, "identity not proven"
+
+    record = AuditRecord.from_mapping(
+        {
+            "host": "localhost",
+            "port": 8080,
+            "status": "auth_required",
+            "credential_state": state,
+            "provided_credentials_ok": False,
+        }
+    )
+    assert classify(record, AuditCredentialRun("u", "p"), Runner())[0] == "inconclusive"
+
+
+@pytest.mark.parametrize("status", ("valid_credentials", "weak_default_creds", "token_ok", "auth_valid"))
+def test_product_credential_gate_is_the_positive_spray_proof(status: str) -> None:
+    class Runner:
+        def _credential_gate(self, _credential: object, _record: object) -> tuple[bool, str]:
+            return True, "authenticated product identity"
+
+    record = AuditRecord.from_mapping({"host": "localhost", "port": 1, "status": status})
+    assert classify(record, AuditCredentialRun("u", "p"), Runner())[0] == "valid"
+
+
 def test_mongodb_auth_required_is_not_mistaken_for_proven_invalid_credentials() -> None:
     class Runner:
         def _credential_gate(self, _credential: object, _record: object) -> tuple[bool, str]:
@@ -512,6 +540,77 @@ def test_rate_limit_stops_remaining_candidates(monkeypatch: pytest.MonkeyPatch, 
         )
         assert calls == ["p1"]
         assert [row[4] for row in journal.rows()] == ["confirmed", "rate_limited", "rate_limited"]
+    finally:
+        journal.close()
+
+
+def test_spray_separates_ui_and_backend_on_one_explicit_origin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import redposture_core.stage_spray as spray
+
+    def backend(ctx: AuditHookContext) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            {"host": ctx.host, "port": ctx.port, "status": "open_no_auth", "is_docker": True},
+            module="docker",
+            service="docker",
+        )
+
+    spec = ModuleAuditSpec(
+        module="docker",
+        label="DOCKER",
+        default_port=2375,
+        detect=backend,
+        is_detected=lambda record: record.extra.get("is_docker") is True,
+    )
+    monkeypatch.setattr(
+        spray.importlib, "import_module", lambda _name: SimpleNamespace(build_docker_spec=lambda _args: spec)
+    )
+    monkeypatch.setattr(
+        spray.web_panels,
+        "detect_panel",
+        lambda _module, _ctx: {
+            "host": "qa",
+            "port": 9443,
+            "status": "auth_required",
+            "auth_required": True,
+            "surface": "ui",
+            "is_ui": True,
+            "ui_product": "portainer",
+            "ui": {"endpoint": "https://qa:9443", "auth_required": True},
+            "credential_verification_status": "available",
+        },
+    )
+    monkeypatch.setattr(
+        spray.web_panels,
+        "authenticate_panel",
+        lambda _ctx, record: {
+            **record,
+            "status": "valid_credentials",
+            "credential_state": "valid",
+            "provided_credentials_ok": True,
+        },
+    )
+    journal = AttemptJournal(str(tmp_path / "journal.sqlite3"), "same", False)
+    try:
+        _run_target(
+            "docker",
+            Namespace(),
+            "qa",
+            9443,
+            ScanTargetSpec("qa", scheme="https", explicit_port=9443, raw="https://qa:9443"),
+            (Candidate("pair", "admin", "secret"),),
+            journal,
+            RateGate(1000, 0.001),
+            None,
+        )
+        rows = journal.rows()
+        assert [row[4] for row in rows] == ["confirmed", "valid", "confirmed", "unsupported"]
+        assert "ui product:portainer" in rows[0][5]
+        assert "surface:backend" in rows[2][5]
+        assert "surface:backend" in rows[3][5]
+        rendered = _render_rows(rows, (Candidate("pair", "admin", "secret"),), "txt")
+        assert "Portainer" in rendered[0]
+        assert "Docker Engine" in rendered[2]
+        assert rendered[3].endswith("(backend)")
     finally:
         journal.close()
 

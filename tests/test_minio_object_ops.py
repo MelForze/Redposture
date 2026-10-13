@@ -62,9 +62,19 @@ def _fake_bucket_objects(monkeypatch, *keys):
 def test_data_record_dump_single_object(monkeypatch):
     client = _install_client(monkeypatch, MinioResponse(http_status=200, headers={}, body=b"hello\nworld"))
     out = actions.data_record(_ctx(object="bulk/creds.env", dump=True), {"detection_status": "confirmed"})
-    assert client.calls == [("bulk", "creds.env", 100 * 1024 * 1024)]
+    assert client.calls == [("bulk", "creds.env", 64 * 1024 * 1024)]
     assert out["object_dumps"] == [{"bucket": "bulk", "key": "creds.env", "size": 11, "content": "hello\nworld"}]
     assert out["object_dumps_labeled"] is False  # single object -> no === header
+
+
+def test_data_record_dump_binary_object_is_lossless_base64(monkeypatch):
+    _install_client(monkeypatch, MinioResponse(http_status=200, headers={}, body=b"\xff\x00qa"))
+    out = actions.data_record(_ctx(object="bulk/blob.bin", dump=True), {"detection_status": "confirmed"})
+    assert out["object_dumps"][0]["base64"] == "/wBxYQ=="
+    assert "content" not in out["object_dumps"][0]
+    assert "base64:/wBxYQ==" in "\n".join(
+        render._format_minio_detail_records(out | {"host": "qa", "port": 9000}, "txt")
+    )
 
 
 def test_data_record_dump_whole_bucket(monkeypatch):
@@ -115,10 +125,49 @@ def test_data_record_object_access_denied(monkeypatch):
     assert "object_dumps" not in out
 
 
-def test_data_record_dump_without_target_errors(monkeypatch):
-    _install_client(monkeypatch, MinioResponse(http_status=200, headers={}, body=b"x"))
+def test_data_record_dump_without_target_walks_all_buckets(monkeypatch):
+    client = _install_client(monkeypatch, MinioResponse(http_status=200, headers={}, body=b"x"))
+    monkeypatch.setattr(
+        minio_enum,
+        "iter_buckets",
+        lambda _client, **_kw: iter((minio_enum.BucketInfo("one"), minio_enum.BucketInfo("two"))),
+    )
+    monkeypatch.setattr(
+        minio_enum,
+        "iter_objects_multi",
+        lambda _client, buckets, **_kw: (minio_enum.ObjectInfo(bucket=name, key="a.txt", size=1) for name in buckets),
+    )
     out = actions.data_record(_ctx(dump=True), {"detection_status": "confirmed"})
-    assert "--object" in out["object_op_error"] or "--bucket" in out["object_op_error"]
+    assert [item["bucket"] for item in out["object_dumps"]] == ["one", "two"]
+    assert [(bucket, key) for bucket, key, _ in client.calls] == [("one", "a.txt"), ("two", "a.txt")]
+
+
+def test_data_record_download_without_target_walks_all_buckets(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    _install_client(monkeypatch, MinioResponse(http_status=200, headers={}, body=b"file"))
+    monkeypatch.setattr(
+        minio_enum,
+        "iter_buckets",
+        lambda _client, **_kw: iter((minio_enum.BucketInfo("one"), minio_enum.BucketInfo("two"))),
+    )
+    monkeypatch.setattr(
+        minio_enum,
+        "iter_objects_multi",
+        lambda _client, buckets, **_kw: (minio_enum.ObjectInfo(bucket=name, key="a.txt", size=4) for name in buckets),
+    )
+    out = actions.data_record(_ctx(download=True), {"detection_status": "confirmed"})
+    assert [item["bucket"] for item in out["object_downloads"]] == ["one", "two"]
+    assert (tmp_path / "one" / "a.txt").read_bytes() == b"file"
+    assert (tmp_path / "two" / "a.txt").read_bytes() == b"file"
+
+
+def test_data_record_dump_reports_inaccessible_bucket_listing(monkeypatch):
+    client = _install_client(monkeypatch, MinioResponse(http_status=200, headers={}, body=b"x"))
+    client.get_service_root = lambda **_kw: MinioResponse(http_status=403, headers={}, body=b"")
+    out = actions.data_record(_ctx(dump=True), {"detection_status": "confirmed"})
+    assert out["object_dump_partial"] is True
+    assert out["object_op_error"] == "ListBuckets: HTTP 403"
+    assert "object_dumps" not in out
 
 
 # --- render ------------------------------------------------------------------

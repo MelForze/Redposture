@@ -199,6 +199,26 @@ def _format_show_keys_records(record: dict[str, Any], output_format: str) -> lis
     return lines
 
 
+def _format_show_dags_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format != "txt" or not record.get("show_dags_requested"):
+        return []
+    prefix = _prefix(record)
+    raw_dags = record.get("dag_ids")
+    error = record.get("dag_ids_error")
+    if not isinstance(raw_dags, list) and not error:
+        return []
+    dags = [str(item) for item in raw_dags] if isinstance(raw_dags, list) else []
+    if error and not dags:
+        if str(error) in {"http_401", "http_403", "authentication_required"} and record.get("auth_required") is True:
+            return []
+        return [f"{prefix} [-] Airflow DAGs unavailable: {error}"]
+    lines = [f"{prefix} [*] Airflow DAGs (dags:{len(dags)})"]
+    lines.extend(f"{prefix} [+] DAG Id={json.dumps(dag, ensure_ascii=False)}" for dag in dags)
+    if error or record.get("dag_ids_truncated"):
+        lines.append(f"{prefix} [*] Airflow DAGs coverage:partial")
+    return lines
+
+
 def _format_show_connections_records(record: dict[str, Any], output_format: str) -> list[str]:
     if (
         output_format != "txt"
@@ -224,6 +244,28 @@ def _format_show_connections_records(record: dict[str, Any], output_format: str)
         encoded_id = json.dumps(str(connection_id), ensure_ascii=False)
         encoded_value = json.dumps(connection, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
         lines.append(f"{prefix} [+] Connection Id={encoded_id} Value={encoded_value}")
+    return lines
+
+
+def _format_dump_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format != "txt" or not record.get("dump_requested"):
+        return []
+    report = record.get("dump_report")
+    if not isinstance(report, dict):
+        return []
+    prefix = _prefix(record)
+    records = report.get("records")
+    entries = [item for item in records if isinstance(item, dict)] if isinstance(records, list) else []
+    status = str(report.get("status") or "unavailable")
+    lines = [f"{prefix} [*] Airflow Dump (status:{status}) (records:{len(entries)})"]
+    for entry in entries:
+        kind = str(entry.get("kind") or "unknown")
+        object_id = json.dumps(str(entry.get("id") or ""), ensure_ascii=False)
+        value = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        lines.append(f"{prefix} [+] {kind} Id={object_id} Value={value}")
+    reasons = report.get("partial_reasons")
+    if isinstance(reasons, list) and reasons:
+        lines.append(f"{prefix} [*] Airflow Dump coverage:partial reasons={json.dumps(reasons, ensure_ascii=False)}")
     return lines
 
 
@@ -261,6 +303,12 @@ def _render_colored_airflow_line(console: Console, line: str) -> bool:
             RegexColorRule(r"\(keys:[1-9]\d*\)", "true_red"),
             RegexColorRule(r"\(connections:0\)", "bright_green"),
             RegexColorRule(r"\(connections:[1-9]\d*\)", "true_red"),
+            RegexColorRule(r"\(dags:0\)", "bright_green"),
+            RegexColorRule(r"\(dags:[1-9]\d*\)", "true_red"),
+            RegexColorRule(r"\(records:0\)", "bright_green"),
+            RegexColorRule(r"\(records:[1-9]\d*\)", "true_red"),
+            RegexColorRule(r"\(status:(?:partial|unavailable)\)", "orange"),
+            RegexColorRule(r"coverage:partial", "orange"),
             *(
                 rule
                 for resource in _AUTHENTICATED_RESOURCES
@@ -275,7 +323,10 @@ def _render_colored_airflow_line(console: Console, line: str) -> bool:
             *discovery_color_spans(marker, payload),
             *(
                 [(0, len(payload), "orange")]
-                if marker == "[+]" and payload.startswith(("Variable Name=", "Connection Id="))
+                if marker == "[+]"
+                and payload.startswith(
+                    ("Variable Name=", "Connection Id=", "DAG Id=", "dag Id=", "variable Id=", "connection Id=")
+                )
                 else []
             ),
         ],
@@ -290,8 +341,10 @@ __all__ = [
     "_format_detect_record",
     "_format_record",
     "_format_credential_attempts_records",
+    "_format_show_dags_records",
     "_format_show_keys_records",
     "_format_show_connections_records",
+    "_format_dump_records",
     "_format_discover_records",
     "_render_colored_airflow_line",
 ]

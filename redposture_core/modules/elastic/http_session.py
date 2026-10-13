@@ -16,7 +16,13 @@ import urllib.parse
 from collections.abc import Mapping
 from types import TracebackType
 
-from ...clients.http_api import HttpResponse, join_http_target_path, normalize_http_error, pin_http_redirect_path
+from ...clients.http_api import (
+    HttpResponse,
+    decode_http_content,
+    join_http_target_path,
+    normalize_http_error,
+    pin_http_redirect_path,
+)
 from ...clients.http_redirects import follow_redirects, http_origin
 from ...clients.tls_cache import shared_client_ssl_context
 
@@ -210,6 +216,12 @@ class ElasticHttpSession:
             response = connection.getresponse()
             payload = response.read(self.response_cap + 1)
             truncated = len(payload) > self.response_cap
+            remaining_length = getattr(response, "length", None)
+            if not truncated and remaining_length is not None and remaining_length > 0:
+                raise ConnectionError(
+                    f"unexpected EOF: incomplete HTTP response body "
+                    f"({len(payload)} bytes received, {remaining_length} more expected)"
+                )
             if truncated:
                 payload = payload[: self.response_cap]
             normalized_headers = {str(key): str(value) for key, value in response.getheaders()}
@@ -304,6 +316,7 @@ class ElasticHttpSession:
 
         url = f"{normalized_scheme}://{self._authority(normalized_scheme)}{normalized_path}"
         response = follow_redirects(send, normalized_method, url, headers=normalized_headers, body=body)
+        response = decode_http_content(response, max_bytes=self.response_cap)
         pin_http_redirect_path(response, method=normalized_method)
         return response
 

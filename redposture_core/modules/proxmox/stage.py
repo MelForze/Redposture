@@ -382,7 +382,7 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
 
     if token:
         auth_headers = actions._proxmox_auth_headers(token)
-        status, token_payload, _headers, token_error = actions._proxmox_request(
+        status, token_payload, token_headers, token_error = actions._proxmox_request(
             ctx.host,
             ctx.port,
             "/access",
@@ -396,16 +396,41 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
         )
         payload["use_https"] = _proxmox_use_https(ctx)
         error_message = token_error or actions._extract_error_message(token_payload)
+        product_rejection = actions._looks_like_proxmox_response(status, token_payload, token_headers)
         if status not in {200, 403}:
+            rejected = status == 401 and product_rejection
             payload.update(
                 {
-                    "status": "auth_failed",
+                    "status": "auth_failed" if rejected else "fail",
                     "auth_required": True,
                     "auth_method": "pveapitoken",
                     "auth_username": None,
                     "auth_password": None,
                     "auth_attempts": [],
                     "error": error_message or f"unexpected HTTP {status} from /access",
+                    "credential_verification_status": "rejected" if rejected else "unavailable",
+                    "credential_verification_reason": None
+                    if rejected
+                    else f"token verification inconclusive: {error_message or f'HTTP {status}'}",
+                }
+            )
+            return _proxmox_record(payload)
+        permission_proof = any(
+            marker in str(error_message or "").lower()
+            for marker in ("permission check failed", "insufficient privileges", "insufficient permission")
+        )
+        if status == 403 and not (permission_proof and product_rejection):
+            payload.update(
+                {
+                    "status": "fail",
+                    "auth_required": True,
+                    "auth_method": "pveapitoken",
+                    "auth_username": None,
+                    "auth_password": None,
+                    "auth_attempts": [],
+                    "error": f"token verification inconclusive: {error_message or 'HTTP 403'}",
+                    "credential_verification_status": "unavailable",
+                    "credential_verification_reason": error_message or "HTTP 403",
                 }
             )
             return _proxmox_record(payload)
@@ -436,7 +461,7 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
     if username is None or password is None:
         payload.update(
             {
-                "status": "auth_failed",
+                "status": "fail",
                 "auth_required": True,
                 "auth_method": "password",
                 "auth_username": username,
@@ -467,15 +492,22 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
     auth_attempts = state.auth_attempts if state is not None else []
     auth_attempts.append(attempt)
     if headers is None:
+        explicit_password_rejection = bool(login_error and actions._is_invalid_password_message(login_error))
+        verification_unavailable = bool(
+            login_error
+            and (login_error.startswith("pve login response inconclusive:") or login_error == "second factor required")
+        )
         payload.update(
             {
-                "status": "auth_failed",
+                "status": "auth_failed" if explicit_password_rejection else "fail",
                 "auth_required": True,
                 "auth_method": "password",
                 "auth_username": username,
                 "auth_password": password,
                 "auth_attempts": [dict(item) for item in auth_attempts],
                 "error": login_error or "authentication failed",
+                "credential_verification_status": "unavailable" if verification_unavailable else None,
+                "credential_verification_reason": login_error if verification_unavailable else None,
             }
         )
         return _proxmox_record(payload)

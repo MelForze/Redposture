@@ -77,6 +77,16 @@ class _FakeDb:
 
     def command(self, command: str):
         if isinstance(command, dict):
+            if command.get("connectionStatus") == 1:
+                self.raw._check_auth()
+                return {
+                    "ok": 1,
+                    "authInfo": {
+                        "authenticatedUsers": [{"user": self.raw.username, "db": self.name}]
+                        if self.raw.username
+                        else []
+                    },
+                }
             return {"ok": 1, "database": self.name, "command": command}
         assert command in {"hello", "isMaster"}
         return {
@@ -799,6 +809,54 @@ def test_try_credentials_checks_every_candidate_and_keeps_first_success(
         ("root", True),
         ("dev", False),
     ]
+
+
+def test_credentials_use_identity_not_database_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RestrictedClient:
+        client = None
+
+        def hello(self) -> dict[str, object]:
+            return {"isWritablePrimary": True, "maxWireVersion": 21}
+
+        def run_command(self, _database: str, _command: dict[str, object]) -> dict[str, object]:
+            return {"authInfo": {"authenticatedUsers": [{"user": "reader", "db": "admin"}]}}
+
+        def list_database_names(self) -> list[str]:
+            raise RuntimeError("not authorized code 13")
+
+    monkeypatch.setattr(mongodb_actions, "_open_client", lambda *_args, **_kwargs: RestrictedClient())
+    selected, attempts = mongodb_actions._try_credentials(
+        "127.0.0.1",
+        27017,
+        1.0,
+        auth_db="admin",
+        credential_candidates=[{"username": "reader", "password": "secret", "default": False}],
+    )
+    assert selected is not None
+    assert attempts[0]["credential_state"] == "valid"
+
+
+@pytest.mark.parametrize("code, expected", [(18, "invalid"), (13, "unverified")])
+def test_mongodb_credential_rejection_requires_authentication_error(
+    monkeypatch: pytest.MonkeyPatch, code: int, expected: str
+) -> None:
+    class MongoError(Exception):
+        def __init__(self) -> None:
+            super().__init__("operation denied")
+            self.code = code
+
+    def deny(*_args: object, **_kwargs: object) -> None:
+        raise MongoError()
+
+    monkeypatch.setattr(mongodb_actions, "_open_client", deny)
+    _, attempts = mongodb_actions._try_credentials(
+        "127.0.0.1",
+        27017,
+        1.0,
+        auth_db="admin",
+        credential_candidates=[{"username": "reader", "password": "secret", "default": False}],
+    )
+    assert attempts[0]["credential_state"] == expected
 
 
 def test_mongodb_formatters_cover_txt_and_json_branches() -> None:

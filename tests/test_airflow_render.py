@@ -11,6 +11,35 @@ def _record(**over):
     return base
 
 
+def test_show_dags_and_dump_render_values_and_partial_status() -> None:
+    record = _record(
+        show_dags_requested=True,
+        dag_ids=["qa"],
+        dump_requested=True,
+        dump_report={
+            "status": "partial",
+            "records": [{"kind": "variable", "id": "secret", "data": {"key": "secret", "value": "private"}}],
+            "partial_reasons": ["connection:missing:http_403"],
+        },
+    )
+    dag_lines = render._format_show_dags_records(record, "txt")
+    dump_lines = render._format_dump_records(record, "txt")
+    assert dag_lines == [f"{_PFX} [*] Airflow DAGs (dags:1)", f'{_PFX} [+] DAG Id="qa"']
+    assert "private" in dump_lines[1]
+    assert "coverage:partial" in dump_lines[-1]
+    assert render._format_dump_records(record, "json") == []
+    assert "\x1b[" not in "\n".join(dag_lines + dump_lines)
+    console = _Console()
+    assert render._render_colored_airflow_line(console, dump_lines[0])
+    assert any("records:1" in value and "true_red" in value for value in console.lines)
+    console.lines.clear()
+    assert render._render_colored_airflow_line(console, dag_lines[1])
+    assert any("DAG Id=" in value and "orange" in value for value in console.lines)
+    console.lines.clear()
+    assert render._render_colored_airflow_line(console, dump_lines[1])
+    assert any("private" in value and "orange" in value for value in console.lines)
+
+
 class _Console:
     def __init__(self):
         self.lines = []

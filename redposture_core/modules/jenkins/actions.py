@@ -216,8 +216,8 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     verified = (
         _whoami(data) and data is not None and data.get("authenticated") is True and data.get("name") != "anonymous"
     )
-    result["provided_credentials_ok"] = verified
     result["credential_state"] = "valid" if verified else "invalid" if identity.status == 401 else "unknown"
+    result["provided_credentials_ok"] = True if verified else False if identity.status == 401 else None
     result["status"] = (
         "valid_credentials"
         if verified

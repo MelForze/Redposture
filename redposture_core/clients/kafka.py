@@ -2616,7 +2616,7 @@ def _sasl_authenticate_plain(
         reader = _KafkaReader(payload)
         response_corr = reader.read_i32()
         if response_corr != correlation_id:
-            return False, correlation_id + 1, f"unexpected correlation id {response_corr} (expected {correlation_id})"
+            return None, correlation_id + 1, f"unexpected correlation id {response_corr} (expected {correlation_id})"
         error_code = reader.read_i16()
         error_message = reader.read_string(nullable=True)
         _ = reader.read_bytes(nullable=True)
@@ -2630,7 +2630,7 @@ def _sasl_authenticate_plain(
                 if isinstance(error_message, str) and error_message.strip()
                 else _kafka_error_name(int(error_code))
             )
-            return False, correlation_id + 1, f"SASL auth failed: {detail}"
+            return (False if error_code == 58 else None), correlation_id + 1, f"SASL auth failed: {detail}"
     except (TimeoutError, ValueError, struct.error, ConnectionError, OSError):
         pass
 
@@ -2638,7 +2638,7 @@ def _sasl_authenticate_plain(
     try:
         sock.sendall(struct.pack(">i", len(auth_bytes)) + auth_bytes)
     except OSError as exc:
-        return False, correlation_id, _friendly_error_from_exception(exc)
+        return None, correlation_id, _friendly_error_from_exception(exc)
 
     previous_timeout = sock.gettimeout()
     probe_timeout = min(float(previous_timeout or 1.0), 0.40)
@@ -2704,18 +2704,18 @@ def _authenticate_and_fetch_metadata(
                     api_versions_out=api_versions,
                 )
                 if not bootstrapped:
-                    return False, None, bootstrap_error or "Kafka bootstrap failed", transport_mode
+                    return None, None, bootstrap_error or "Kafka bootstrap failed", transport_mode
             else:
                 api_probe = _probe_apiversions(sock, correlation)
                 is_kafka, _api_error_code, api_error = api_probe
                 api_versions.update(getattr(api_probe, "versions", {}) or {})
                 correlation += 1
                 if not is_kafka:
-                    return False, None, api_error or "service is not kafka", transport_mode
+                    return None, None, api_error or "service is not kafka", transport_mode
 
             hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
             if not hs_ok:
-                return False, None, hs_error or "SASL handshake failed", transport_mode
+                return None, None, hs_error or "SASL handshake failed", transport_mode
 
             auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
             if auth_ok is None:
@@ -2725,15 +2725,15 @@ def _authenticate_and_fetch_metadata(
 
             metadata, metadata_error = _fetch_metadata(sock, correlation, topics=None)
             if metadata is None:
-                return False, None, metadata_error or "metadata request failed after auth", transport_mode
+                return True, None, metadata_error or "metadata request failed after auth", transport_mode
             if bool(metadata.get("auth_required")):
-                return False, None, "authentication failed", transport_mode
+                return True, metadata, "metadata access denied after authentication", transport_mode
             if api_versions:
                 metadata["api_versions"] = api_versions
             return True, metadata, None, transport_mode
     except _TlsProbeError:
         if use_tls is True:
-            return False, None, "plaintext read returned TLS record prelude", "tls"
+            return None, None, "plaintext read returned TLS record prelude", "tls"
         return _authenticate_and_fetch_metadata(
             host,
             port,
@@ -2747,7 +2747,7 @@ def _authenticate_and_fetch_metadata(
         )
     except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
         return (
-            False,
+            None,
             None,
             _friendly_error_from_exception(exc),
             "plaintext" if use_tls is not True else "tls",

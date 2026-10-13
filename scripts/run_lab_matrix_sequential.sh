@@ -490,10 +490,11 @@ run_negative_cli_cases() {
   run_raw_case gitlab fuzz_gitlab_missing_targets 2 gitlab -ot excluded.invalid
   run_raw_case consul fuzz_consul_missing_targets 2 consul -ot excluded.invalid --keys --tls --tls-cert /nonexistent/consul-client.crt --tls-key /nonexistent/consul-client.key
   run_raw_case kubeapi fuzz_kubeapi_missing_targets 2 kubeapi -ot excluded.invalid --namespaces
-  run_raw_case postgres fuzz_postgres_missing_targets 2 postgres -ot excluded.invalid --show-databases --sslmode verify-full --ssl-ca /nonexistent/postgres-ca.crt --ssl-cert /nonexistent/postgres-client.crt --ssl-key /nonexistent/postgres-client.key --ssl-server-name postgres.internal
+  run_raw_case postgres fuzz_postgres_missing_targets 2 postgres -ot excluded.invalid --show-databases --pgadmin-server-password qa-only --sslmode verify-full --ssl-ca /nonexistent/postgres-ca.crt --ssl-cert /nonexistent/postgres-client.crt --ssl-key /nonexistent/postgres-client.key --ssl-server-name postgres.internal
   run_raw_case mongodb fuzz_mongodb_missing_targets 2 mongodb -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/mongodb-ca.crt --tls-cert-key /nonexistent/mongodb-client.pem
   run_raw_case oracle fuzz_oracle_missing_targets 2 oracle -ot excluded.invalid --service FREEPDB1
-  run_raw_case docker fuzz_docker_missing_targets 2 docker -ot excluded.invalid --containers
+  run_raw_case docker fuzz_docker_missing_targets 2 docker -ot excluded.invalid -u qa -p qa --defcreds --containers
+  run_raw_case airflow fuzz_airflow_missing_targets 2 airflow -ot excluded.invalid --show-dags --dump --dag qa --key qa --connection qa
   run_raw_case clickhouse fuzz_clickhouse_missing_targets 2 clickhouse -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/clickhouse-ca.crt --tls-cert /nonexistent/clickhouse-client.crt --tls-key /nonexistent/clickhouse-client.key --tls-server-name clickhouse.internal
   run_raw_case redis fuzz_redis_missing_targets 2 redis -ot excluded.invalid --show-keys --tls --tls-ca /nonexistent/redis-ca.crt --tls-cert /nonexistent/redis-client.crt --tls-key /nonexistent/redis-client.key
   run_raw_case etcd fuzz_etcd_missing_targets 2 etcd -ot excluded.invalid --show-keys
