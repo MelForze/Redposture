@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import html
 import json
 import re
 import secrets
@@ -117,6 +118,7 @@ _NON_SECRET_LITERALS = {
 _TEXT_SECRET_RE = re.compile(
     r"(?i)([A-Za-z_][A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|credential))\s*[:=]\s*(?:\"([^\"]{1,512})\"|'([^']{1,512})'|([^\s,;{}\[\]\"']{1,512}))"
 )
+_XML_SECRET_RE = re.compile(r"(?is)<([A-Za-z][\w:.-]{0,79})\b[^>]{0,2048}>([^<>]{4,4096})</\1\s*>")
 _URL_BASIC_AUTH_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]+:([^@\s/]+)@")
 _AUTH_BASIC_RE = re.compile(r"(?i)\bauthorization\s*[:=]\s*basic\s+[A-Za-z0-9+/=]{8,}")
 _AUTH_BEARER_RE = re.compile(r"(?i)\bauthorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/-]{10,}")
@@ -125,6 +127,8 @@ _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]
 _OPAQUE_TOKEN_RE = re.compile(
     r"\b(?:glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|ya29\.[A-Za-z0-9._-]{20,}|[A-Fa-f0-9]{32,64})\b"
 )
+_PVE_VM_CONFIG_PATH_RE = re.compile(r"^/nodes/[^/]+/(?:qemu|lxc)/\d+/config(?:\?.*)?$")
+_PVE_CONFIG_DIGEST_RE = re.compile(r"^[A-Fa-f0-9]{40}$")
 _BASE64_TEXT_RE = re.compile(r"\b[A-Za-z0-9+/]{20,}={0,2}\b")
 _PEM_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 _PERMISSION_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z][A-Za-z0-9_.-]*$")
@@ -930,6 +934,23 @@ def _collect_text_findings(
         )
         added += 1
 
+    for match in _XML_SECRET_RE.finditer(text):
+        if limit is not None and added >= limit:
+            break
+        key = str(match.group(1) or "")
+        value = html.unescape(str(match.group(2) or "").strip())
+        if not _key_looks_sensitive(key) or not _value_looks_secret(value):
+            continue
+        _add_finding(
+            findings,
+            seen,
+            endpoint=endpoint,
+            reason=f"xml_{key.lower()}",
+            path=path,
+            sample=f"{key}={value}",
+        )
+        added += 1
+
     uri_auth_match = _URI_WITH_AUTH_RE.search(text)
     if uri_auth_match:
         _add_finding(
@@ -1073,6 +1094,15 @@ def _scan_endpoint_payload(
     seen: set[tuple[str, str, str, str]],
 ) -> None:
     text = _decode_body_text(payload)
+    parsed = _parse_json_payload(payload)
+    data = _unwrap_api_data(parsed) if parsed is not None else None
+    if _PVE_VM_CONFIG_PATH_RE.fullmatch(endpoint) and isinstance(data, dict):
+        digest = data.get("digest")
+        if isinstance(digest, str) and _PVE_CONFIG_DIGEST_RE.fullmatch(digest):
+            # pmxcfs inserts this SHA1 checksum into every VM/LXC config. Scan
+            # the remaining JSON for both text and structured secrets.
+            data = {key: value for key, value in data.items() if key != "digest"}
+            text = json.dumps(data, ensure_ascii=False)
     _collect_text_findings(
         text,
         endpoint,
@@ -1082,10 +1112,8 @@ def _scan_endpoint_payload(
         limit=None,
     )
 
-    parsed = _parse_json_payload(payload)
     if parsed is None:
         return
-    data = _unwrap_api_data(parsed)
     _collect_json_findings(data, endpoint, findings, seen)
 
 

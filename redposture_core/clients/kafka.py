@@ -1454,10 +1454,10 @@ def _authenticate_or_probe(
     """
     if sasl_first:
         if username is None or password is None:
-            return False, correlation, "SASL authentication requires credentials"
+            return None, correlation, "SASL authentication requires credentials"
         hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
         if not hs_ok:
-            return False, correlation, hs_error or "SASL handshake failed"
+            return None, correlation, hs_error or "SASL handshake failed"
         auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
         if auth_ok is None:
             return None, correlation, auth_error or "SASL authentication response unavailable"
@@ -1466,7 +1466,7 @@ def _authenticate_or_probe(
         api_probe = _probe_apiversions(sock, correlation)
         correlation += 1
         if not api_probe.ok:
-            return False, correlation, api_probe.error or "ApiVersions failed after SASL authentication"
+            return True, correlation, api_probe.error or "ApiVersions failed after SASL authentication"
         if api_versions_out is not None:
             api_versions_out.update(api_probe.versions)
         return True, correlation, None
@@ -1478,7 +1478,7 @@ def _authenticate_or_probe(
             api_versions_out=api_versions_out,
         )
         if not bootstrapped:
-            return False, correlation, bootstrap_error or "Kafka bootstrap failed"
+            return None, correlation, bootstrap_error or "Kafka bootstrap failed"
     else:
         api_probe = _probe_apiversions(sock, correlation)
         is_kafka, _api_error_code, api_error = api_probe
@@ -1486,11 +1486,11 @@ def _authenticate_or_probe(
             api_versions_out.update(getattr(api_probe, "versions", {}) or {})
         correlation += 1
         if not is_kafka:
-            return False, correlation, api_error or "service is not kafka"
+            return None, correlation, api_error or "service is not kafka"
     if username is not None and password is not None:
         hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
         if not hs_ok:
-            return False, correlation, hs_error or "SASL handshake failed"
+            return None, correlation, hs_error or "SASL handshake failed"
         auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
         if auth_ok is None:
             return None, correlation, auth_error or "SASL authentication response unavailable"

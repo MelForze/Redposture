@@ -423,7 +423,8 @@ def test_postgres_dump_without_value_means_unlimited_dump() -> None:
 def test_postgres_help_shows_defaults_only_for_selected_flags() -> None:
     help_text = _command_help("postgres")
 
-    assert "Network timeout in seconds. (default: 3.0)" in help_text
+    assert "Timeout in seconds for one network operation;" in help_text
+    assert "detection of a target can take longer. (default: 3.0)" in help_text
     assert "Worker threads used for parallel network checks." in help_text
     assert "(default: 50)" in help_text
     assert "Retry attempts for network requests (with exponential" in help_text
@@ -2166,7 +2167,8 @@ def test_zookeeper_default_timeout_is_five_seconds() -> None:
 
 def test_zookeeper_help_timeout_default_is_five_seconds() -> None:
     help_text = _command_help("zookeeper")
-    assert "Network timeout in seconds. (default: 5.0)" in help_text
+    assert "Timeout in seconds for one network operation;" in help_text
+    assert "detection of a target can take longer. (default: 5.0)" in help_text
 
 
 def test_elastic_flags_are_parsed() -> None:

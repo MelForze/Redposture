@@ -1276,6 +1276,60 @@ def test_oracle_credential_attempt_renderer_outputs_full_sweep_without_winner_du
     assert "[-] dev:dev" in lines[2]
 
 
+def test_oracle_transport_and_service_errors_do_not_reject_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    errors = {
+        "bad": oracle.OracleAuthError("invalid credentials"),
+        "unknown": oracle.OracleServiceError("listener does not know service"),
+        "slow": oracle.OracleClientError("connection timeout"),
+    }
+
+    def fake_open(_host: str, _port: int, **kwargs: Any) -> _FakeOracleClient:
+        raise errors[str(kwargs["username"])]
+
+    monkeypatch.setattr(oracle, "_open_client", fake_open)
+    winner, attempts, _terminal = oracle._try_credentials(
+        "127.0.0.1",
+        1521,
+        1.0,
+        protocol="tcp",
+        service="FREEPDB1",
+        sid=None,
+        wallet=None,
+        ssl_server_dn=None,
+        insecure=False,
+        as_sysdba=False,
+        credential_candidates=[
+            {"username": "bad", "password": "bad"},
+            {"username": "unknown", "password": "unknown"},
+            {"username": "slow", "password": "slow"},
+        ],
+    )
+    assert winner is None
+    assert [item["credential_state"] for item in attempts] == ["invalid", "unverified", "unverified"]
+    record = {"host": "127.0.0.1", "port": 1521, "credential_attempts": attempts}
+    lines = oracle._format_credential_attempts_records(record, "txt")
+    assert len(lines) == 2
+    assert "[-] bad:bad" in lines[0]
+    assert "2 credential check(s) inconclusive" in lines[1]
+    assert "unknown:unknown" not in "\n".join(lines)
+    assert "slow:slow" not in "\n".join(lines)
+
+
+def test_oracle_single_explicit_rejection_prints_tested_pair() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 1521,
+        "status": "invalid_credentials",
+        "credential_attempts": [
+            {"username": "system", "password": "wrong", "ok": False, "credential_state": "invalid"}
+        ],
+    }
+    assert oracle._format_record(record, "txt") == ""
+    assert oracle._format_credential_attempts_records(record, "txt") == [
+        f"{oracle._nxc_prefix(record)} [-] system:wrong"
+    ]
+
+
 def test_oracle_sidecar_artifacts_are_written(tmp_path: Path) -> None:
     output = tmp_path / "oracle.txt"
     record = {

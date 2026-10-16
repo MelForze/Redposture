@@ -77,13 +77,19 @@ def _scan_rows(
             coverage_item = coverage[_coverage_key(chunk.database, chunk.table, column)]
             coverage_item["rows_scanned"] += 1
             coverage_item["bytes_scanned"] += len(str(raw_value).encode("utf-8", errors="replace"))
-            for match in scan_value(raw_value, object_path="$", enabled=enabled):
+            matches = scan_value(raw_value, object_path="$", enabled=enabled)
+            if not matches:
+                # Re-key scalar plaintext only when the value itself has no
+                # recognizable shape; preserve legacy paths for structured data.
+                matches = scan_value({column: raw_value}, object_path="$", enabled=enabled)
+            for match in matches:
+                object_path = "$" if match.object_path == f"$.{column}" else match.object_path
                 key = _finding_key(match.detector, match.value)
                 location = {
                     "database": chunk.database,
                     "table": chunk.table,
                     "column": column,
-                    "object_path": match.object_path,
+                    "object_path": object_path,
                     **locator,
                 }
                 now = time.time()
@@ -95,7 +101,7 @@ def _scan_rows(
                         "database": chunk.database,
                         "table": chunk.table,
                         "column": column,
-                        "object_path": match.object_path,
+                        "object_path": object_path,
                         "partition": chunk.partition_id,
                         "range": {"offset": chunk.offset, "limit": chunk.limit},
                         "fingerprint": fingerprint(match.value),

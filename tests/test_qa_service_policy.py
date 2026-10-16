@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.check_compose_readiness import fatal_readiness_issues
+from scripts.check_compose_readiness import fatal_readiness_issues, readiness_issues
 from scripts.qa_service_policy import startup_timeout
 
 
@@ -59,3 +59,28 @@ def test_failed_seed_is_fatal_but_successful_seed_and_transient_health_are_not()
         fatal_readiness_issues([{"Name": "/gitlab", "State": {"Status": "running", "Health": {"Status": "starting"}}}])
         == []
     )
+
+
+def test_seed_readiness_uses_compose_service_after_container_name_is_isolated() -> None:
+    seed = {
+        "Name": "/qa-123-redposture-module-redis-seed",
+        "Config": {"Labels": {"com.docker.compose.service": "redis-seed"}},
+        "State": {"Status": "exited", "ExitCode": 0},
+    }
+    allowed = frozenset({"redis-seed"})
+    assert readiness_issues([seed], allowed_completed_services=allowed) == []
+    assert readiness_issues([seed])
+    seed["State"]["ExitCode"] = 1
+    assert fatal_readiness_issues([seed], allowed_completed_services=allowed)
+    seed["State"]["ExitCode"] = 0
+    seed["Config"]["Labels"]["com.docker.compose.service"] = "unrelated"
+    assert readiness_issues([seed], allowed_completed_services=allowed)
+
+
+def test_malformed_compose_label_cannot_whitelist_completed_container() -> None:
+    container = {
+        "Name": "/unrelated",
+        "Config": {"Labels": {"com.docker.compose.service": {"unexpected": "object"}}},
+        "State": {"Status": "exited", "ExitCode": 0},
+    }
+    assert readiness_issues([container], allowed_completed_services=frozenset({"redis-seed"}))

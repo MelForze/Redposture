@@ -5,6 +5,9 @@ from collections.abc import Callable
 import pytest
 
 from redposture_core.console import Console
+from redposture_core.modules.kafka.actions import _render_colored_kafka_line as _render_colored_kafka_broker_line
+from redposture_core.modules.mongodb.actions import _render_colored_mongodb_line
+from redposture_core.modules.oracle.actions import _render_colored_oracle_line
 from redposture_core.stage_clickhouse import _render_colored_clickhouse_line
 from redposture_core.stage_consul import _render_colored_consul_line
 from redposture_core.stage_docker import _render_colored_docker_line
@@ -129,6 +132,15 @@ def test_render_colored_redis_colors_auth_false_and_keys() -> None:
     _assert_parentheses_are_not_colored(console.paint_calls)
 
 
+def test_legacy_mongodb_verifier_unavailable_uses_orange_value() -> None:
+    console = _RecordingConsole()
+    line = "MONGODB\t127.0.0.1\t27036\t [*] credential verification unavailable (reason:legacy MongoDB wire protocol)"
+    assert _render_colored_mongodb_line(console, line) is True
+    assert _contains_paint(console.paint_calls, "legacy MongoDB wire protocol", "orange")
+    assert "\x1b" not in line
+    _assert_parentheses_are_not_colored(console.paint_calls)
+
+
 def test_render_colored_etcd_colors_auth_unknown_yellow() -> None:
     console = _RecordingConsole()
     line = "ETCD\t127.0.0.1\t2379\t [*] etcd Database (auth required:unknown)"
@@ -141,6 +153,26 @@ def test_render_colored_kafka_colors_topics_red() -> None:
     line = "KAFKA\t127.0.0.1\t9092\t [+] anonymous access (topics:3)"
     assert _render_colored_kafka_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(topics:3)", "red")
+
+
+@pytest.mark.parametrize(
+    ("renderer", "tag"),
+    [
+        (_render_colored_mongodb_line, "MONGODB"),
+        (_render_colored_oracle_line, "ORACLE"),
+        (_render_colored_kafka_broker_line, "KAFKA"),
+    ],
+)
+def test_ambiguous_credential_summary_is_orange_and_plain_output_has_no_ansi(
+    renderer: _Renderer, tag: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    line = f"{tag}\t127.0.0.1\t9999\t [*] 1 credential check(s) inconclusive; see --debug/JSON"
+    console = _RecordingConsole()
+    assert renderer(console, line)
+    assert _contains_paint(console.paint_calls, "1 credential check(s) inconclusive", "orange")
+    assert renderer(Console(no_color=True), line)
+    assert capsys.readouterr().out == line + "\n"
+    assert "\x1b[" not in line
 
 
 def test_render_colored_zookeeper_colors_znodes_red() -> None:

@@ -139,6 +139,63 @@ def test_missing_target_fuzz_case_is_not_masked_by_unrelated_tls_file_errors() -
     assert "--tls-key" not in callback_line
 
 
+def test_every_raw_negative_fuzz_case_has_a_required_output_contract() -> None:
+    import re
+
+    verifier = _load_postrun_verifier()
+    script = (ROOT / "scripts" / "run_lab_matrix_sequential.sh").read_text(encoding="utf-8")
+    labels = set(re.findall(r"\brun_raw_case\s+\S+\s+(fuzz_[\w-]+)\s+[12]\b", script))
+
+    assert labels
+    assert labels <= set(verifier._EXTENDED_EXPECTED_LABELS)
+    assert labels <= set(verifier._EXPECTED_FAILURE_OUTPUT_SUBSTRINGS)
+
+
+def test_airflow_missing_targets_fuzz_error_matches_qa_contract(tmp_path: Path) -> None:
+    verifier = _load_postrun_verifier()
+    log = tmp_path / "airflow-missing-targets.log"
+    log.write_text("[!] targets are required\n", encoding="utf-8")
+
+    verifier._validate_expected_failure_outputs(
+        [
+            {
+                "label": "fuzz_airflow_missing_targets",
+                "expected_exit": "2",
+                "log_path": str(log),
+                "json_path": "-",
+            }
+        ]
+    )
+
+
+def test_consul_open_api_basic_auth_is_explicitly_ambiguous(tmp_path: Path) -> None:
+    verifier = _load_postrun_verifier()
+    artifact = tmp_path / "consul.jsonl"
+    row = {
+        "module": "consul",
+        "label": "consul_extended_ports_basic_auth",
+        "exit_code": "0",
+        "json_path": str(artifact),
+        "log_path": "-",
+    }
+    record = {
+        "host": "127.0.0.1",
+        "port": 8500,
+        "module": "consul",
+        "is_consul": True,
+        "status": "unknown_auth",
+        "auth_mode": "basic",
+        "auth_valid": None,
+    }
+    artifact.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    verifier._validate_meaningful_outcomes([row])
+
+    record["auth_valid"] = True
+    artifact.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="did not preserve ambiguous Basic auth"):
+        verifier._validate_meaningful_outcomes([row])
+
+
 def test_clickhouse_invalid_port_case_is_not_masked_by_removed_flags() -> None:
     script = (ROOT / "scripts" / "run_lab_matrix_sequential.sh").read_text(encoding="utf-8")
     line = next(value for value in script.splitlines() if "fuzz_clickhouse_invalid_port" in value)

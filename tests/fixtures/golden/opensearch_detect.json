@@ -45,7 +45,8 @@
         "scheme": "http",
         "signal_kind": "hard_positive",
         "signals": [
-          "vendor_opensearch_tagline"
+          "vendor_opensearch_tagline",
+          "vendor_opensearch_version_distribution"
         ],
         "status": 200,
         "transport_error": null,
@@ -53,7 +54,8 @@
       }
     ],
     "detect_signals": [
-      "vendor_opensearch_tagline"
+      "vendor_opensearch_tagline",
+      "vendor_opensearch_version_distribution"
     ],
     "detection_signals": [
       "elastic.probe",

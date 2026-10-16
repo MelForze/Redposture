@@ -16,6 +16,32 @@ if str(ROOT) not in sys.path:
 from scripts.run_extended_version_matrix import _record  # noqa: E402
 
 
+def verify_unknown_version_findings(enumeration: dict[str, object]) -> None:
+    assert enumeration["status"] == "version_unknown"
+    findings = enumeration["findings"]
+    assert isinstance(findings, list)
+    assert all(
+        isinstance(item, dict)
+        and item.get("product") == "gitlab"
+        and item.get("detected_version") is None
+        and item.get("version_assessment") == "unknown"
+        and item.get("privileges_required") == "N"
+        and item.get("access_basis") == "network"
+        for item in findings
+    )
+
+
+def verify_rendered_findings(enumeration: dict[str, object], output: str) -> None:
+    findings = enumeration["findings"]
+    assert isinstance(findings, list)
+    for item in findings:
+        assert isinstance(item, dict)
+        identifier = item.get("id")
+        assert isinstance(identifier, str)
+        expected = f"Possibly {identifier}" if enumeration["status"] == "version_unknown" else identifier
+        assert expected in output
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact_dir", type=Path)
@@ -57,8 +83,7 @@ def main() -> int:
         else:
             if name == "invalid":
                 assert record.get("token_valid") is False
-            assert enumeration["status"] == "version_unknown"
-            assert not enumeration["findings"]
+            verify_unknown_version_findings(enumeration)
         assert not any(item.get("privileges_required") == "L" for item in enumeration["findings"]) or name in {
             "root",
             "reporter",
@@ -75,7 +100,7 @@ def main() -> int:
                 timeout=180,
             )
             (output / f"{name}-{mode}.log").write_text(run.stdout + run.stderr)
-            assert "CVE's Enumeration" not in run.stdout or "potentially affected" in run.stdout
+            verify_rendered_findings(enumeration, run.stdout)
             assert "\x1b" not in target.read_text()
             assert all(len(line.split("\t")) == 4 for line in target.read_text().splitlines())
         results.append({"case": name, "status": "passed", "cve_status": enumeration["status"]})

@@ -1,9 +1,18 @@
 [
   {
+    "acl_inventory": {
+      "count": 0,
+      "errors": {},
+      "limit_per_class": 200,
+      "partial": false,
+      "records": [],
+      "truncated": []
+    },
     "auth_database": "postgres",
     "auth_method": "scram-sha-256",
     "auth_required": true,
     "can_execute_commands": true,
+    "can_read_data": true,
     "can_read_tables": true,
     "database": "postgres",
     "database_count": 1,

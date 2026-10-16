@@ -2048,46 +2048,13 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
     if not anonymous_probe_results and state.root_err is not None:
         anonymous_probe_results["/"] = int(state.root_err)
 
-    def _unsupported_sasl(
-        authenticated_results: Mapping[str, int | None] | None = None,
-        authenticated_errors: Mapping[str, str] | None = None,
-    ) -> dict[str, Any]:
-        unsupported_error = "server requires SASL; digest authentication is unsupported"
-        state.auth_required = True
-        state.digest_auth_unsupported = True
-        _zookeeper_update_lifecycle_payload(
-            payload,
-            _zookeeper_lifecycle_payload(
-                ctx,
-                options,
-                state,
-                status="auth_required",
-                is_zookeeper=True,
-                provided_credentials_ok=None,
-                credential_verdict="unsupported_sasl",
-                error=unsupported_error,
-            ),
-        )
-        payload.update(
-            {
-                "auth_required": True,
-                "auth_mechanism": "sasl",
-                "verification_capability": "unsupported",
-                "credential_auth_probe_results": _serialized_auth_probe_results(
-                    authenticated_results or {},
-                    authenticated_errors or {},
-                ),
-                "auth_error": unsupported_error,
-            }
-        )
-        return payload
-
-    if (
+    sasl_required = (
         state.digest_auth_unsupported
         or state.root_err == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH
         or _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH in anonymous_probe_results.values()
-    ):
-        return _unsupported_sasl()
+    )
+    if sasl_required:
+        state.digest_auth_unsupported = True
 
     # Replay every protected path, not only the first: distinct digest users
     # can have disjoint ACL rights. The public root is useful for diagnosis,
@@ -2101,7 +2068,9 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
         client = _zookeeper_lifecycle_client(ctx, state.selected_transport_config)
         try:
             client.connect()
-            auth_ok, auth_error = client.auth_digest(username, password)
+            auth_ok, auth_error = (
+                client.auth_sasl_digest(username, password) if sasl_required else client.auth_digest(username, password)
+            )
             authenticated_results: dict[str, int | None] = {}
             authenticated_errors: dict[str, str] = {}
             if auth_ok:
@@ -2109,11 +2078,16 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
                     client,
                     probe_paths,
                 )
-            if _is_sasl_required_error(auth_error) or (
-                _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH in authenticated_results.values()
+            if not sasl_required and (
+                _is_sasl_required_error(auth_error)
+                or (_ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH in authenticated_results.values())
             ):
                 client.close()
-                return _unsupported_sasl(authenticated_results, authenticated_errors)
+                sasl_required = True
+                state.digest_auth_unsupported = True
+                # The digest attempt consumed this session. Try SASL once on
+                # a fresh connection even when --retries was left at zero.
+                return authenticate_zookeeper(ctx, detect_record, options)
             authenticated_root_err = authenticated_results.get("/")
 
             transient_error: str | None = None
@@ -2144,7 +2118,12 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
                     authenticated_results,
                 )
             else:
-                probe_verdict = "rejected" if _is_explicit_digest_rejection(auth_error) else "unverified"
+                sasl_rejected = sasl_required and str(auth_error or "").startswith("authentication failed:")
+                probe_verdict = (
+                    "rejected"
+                    if sasl_rejected or (not sasl_required and _is_explicit_digest_rejection(auth_error))
+                    else "unverified"
+                )
             if auth_ok and probe_verdict == "valid":
                 provided_ok = True
                 credential_verdict = "valid"
@@ -2206,7 +2185,7 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
                         authenticated_results,
                         authenticated_errors,
                     ),
-                    "auth_mechanism": "digest",
+                    "auth_mechanism": "sasl" if sasl_required else "digest",
                     "verification_capability": "available",
                 }
             )
@@ -2250,9 +2229,10 @@ def _reopen_zookeeper_lifecycle_client(
         client.connect()
         if authenticated:
             credential = ctx.credential
-            auth_ok, auth_error = client.auth_digest(
-                credential.username or "",
-                credential.password or "",
+            auth_ok, auth_error = (
+                client.auth_sasl_digest(credential.username or "", credential.password or "")
+                if state.digest_auth_unsupported
+                else client.auth_digest(credential.username or "", credential.password or "")
             )
             if not auth_ok:
                 raise ConnectionError(auth_error or "authentication failed while reopening session")
@@ -2303,7 +2283,11 @@ def probe_zookeeper_capabilities(ctx: Any, record: Any, options: Mapping[str, An
     try:
         client.connect()
         if authenticated:
-            auth_ok, auth_error = client.auth_digest(credential.username or "", credential.password or "")
+            auth_ok, auth_error = (
+                client.auth_sasl_digest(credential.username or "", credential.password or "")
+                if state.digest_auth_unsupported
+                else client.auth_digest(credential.username or "", credential.password or "")
+            )
             if not auth_ok:
                 raise ConnectionError(auth_error or "authentication failed during write probe")
         create_ok, delete_ok, capability_error = _probe_znode_create_delete(
@@ -2450,6 +2434,7 @@ def _enumerate_zookeeper_lifecycle(
         "enum_workers": int(options.get("enum_workers", 3) or 3),
         "auth_username": credential.username if authenticated else None,
         "auth_password": credential.password if authenticated else None,
+        "auth_mechanism": "sasl" if authenticated and state.digest_auth_unsupported else "digest",
     }
     nested_scheduler = getattr(ctx, "nested_scheduler", None)
     if nested_scheduler is not None:
@@ -2471,6 +2456,7 @@ def _enumerate_zookeeper_lifecycle(
                 "enum_workers",
                 "auth_username",
                 "auth_password",
+                "auth_mechanism",
                 "transport_config",
                 "nested_scheduler",
             },

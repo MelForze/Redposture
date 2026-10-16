@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 from redposture_core.cli_args import build_parser  # noqa: E402
 from redposture_core.cve import normalize_version  # noqa: E402
 from scripts.check_compose_readiness import readiness_issues  # noqa: E402
+from scripts.qa_cve_contract import assert_cve_rendering  # noqa: E402
 from scripts.qa_owned_images import compose_images, missing_images, remove_images  # noqa: E402
 from scripts.qa_service_policy import startup_timeout  # noqa: E402
 from scripts.run_extended_version_matrix import _record  # noqa: E402
@@ -287,8 +288,7 @@ def run_case(case: dict[str, Any], destination: Path, *, validate_only: bool) ->
                 directory / f"probe-{mode}.log",
                 timeout=180,
             )
-            if "CVE's Enumeration" in output and "potentially affected" not in output:
-                raise AssertionError(f"empty CVE heading in {mode}")
+            assert_cve_rendering(record["cve_enumeration"], output)
         if case.get("balanced_actions", True):
             env = dict(os.environ, PYTHON_BIN=sys.executable, REDPOSTURE_LOCAL_QA_SERVICE=case["fixture"])
             run(

@@ -49,8 +49,10 @@ class ProgressBar:
         allow_nested: bool = False,
         render_initial: bool = False,
         refresh_interval_s: float | None = None,
+        unit: str = "target",
     ) -> None:
         self._label = str(label or "TASK").upper().strip() or "TASK"
+        self._unit = str(unit or "target")
         self._total = max(0, int(total))
         self._done = 0
         # Use stdout to avoid cross-stream progress/log interleaving artifacts.
@@ -74,7 +76,7 @@ class ProgressBar:
             self._render()
 
     def _build_description(self) -> str:
-        item_word = "target" if self._total == 1 else "targets"
+        item_word = self._unit if self._total == 1 else f"{self._unit}s"
         return f"Running redposture against {self._total} {item_word}"
 
     def _register_active_progress(self) -> None:
@@ -82,6 +84,10 @@ class ProgressBar:
             return
         with _ACTIVE_PROGRESS_LOCK:
             _ACTIVE_PROGRESS_BY_STREAM[id(self._stream)] = self
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
 
     def _unregister_active_progress(self) -> None:
         with _ACTIVE_PROGRESS_LOCK:
@@ -103,6 +109,13 @@ class ProgressBar:
             now = time.monotonic()
             if self._done < self._total and now - self._last_rendered_at < self._refresh_interval_s:
                 return
+            self._render()
+
+    def refresh(self) -> None:
+        """Update elapsed time and ETA even while a worker is waiting on I/O."""
+        if not self._enabled:
+            return
+        with self._lock:
             self._render()
 
     def set_total(self, total: int) -> None:
@@ -141,6 +154,18 @@ class ProgressBar:
                 self._done = self._total
                 self._render(final=True)
                 self._enabled = False
+        self._unregister_active_progress()
+
+    def abort(self) -> None:
+        """Leave an interrupted run at its actual completion percentage."""
+        if not self._enabled:
+            self._unregister_active_progress()
+            return
+        with self._lock:
+            if self._last_len > 0:
+                self._stream.write("\n")
+                self._stream.flush()
+            self._enabled = False
         self._unregister_active_progress()
 
     def pause_for_output(self) -> None:
@@ -264,6 +289,19 @@ class ProgressBar:
         self._stream.flush()
         self._last_len = visible_len
         self._last_rendered_at = time.monotonic()
+
+
+def make_command_progress(
+    label: str,
+    total: int,
+    *,
+    enabled: bool = True,
+    render_initial: bool = False,
+    unit: str = "target",
+) -> ProgressBar:
+    """Create a command progress bar through the shared progress runtime."""
+
+    return ProgressBar(label, total, enabled=enabled, render_initial=render_initial, unit=unit)
 
 
 class ProgressHandle(Protocol):

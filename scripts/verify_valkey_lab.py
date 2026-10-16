@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.qa_cve_contract import assert_cve_rendering  # noqa: E402
 from scripts.run_extended_version_matrix import _record  # noqa: E402
 
 
@@ -33,8 +34,11 @@ def validate_valkey_record(record: dict[str, Any], *, version_known: bool, crede
         assert enumeration["status"] in {"matched", "no_matches"}
     else:
         assert record.get("server_version") is None
-        assert enumeration["status"] == "version_unknown"
-        assert not enumeration.get("findings"), "unknown version produced a CVE"
+        assert record.get("implementation") is None
+        assert enumeration["status"] == "unsupported"
+        assert enumeration.get("reason") == "unsupported_product_detection"
+        assert enumeration.get("products") == []
+        assert enumeration.get("findings") == [], "unidentified RESP service produced a product CVE"
     assert all(item["product"] == "valkey" for item in enumeration.get("findings", [])), "Redis CVE leakage"
 
 
@@ -130,7 +134,7 @@ def main() -> int:
             (output / f"{name}-{mode}.log").write_text(result.stdout + result.stderr, encoding="utf-8")
             assert "\x1b" not in tsv.read_text(), "ANSI leaked into TSV"
             assert all(len(line.split("\t")) == 4 for line in tsv.read_text().splitlines()), "invalid TSV fields"
-            assert "CVE's Enumeration" not in result.stdout or "potentially affected" in result.stdout
+            assert_cve_rendering(record["cve_enumeration"], result.stdout)
         results.append(
             {
                 "case": name,

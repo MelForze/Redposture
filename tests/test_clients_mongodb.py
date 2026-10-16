@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import struct
+
 import pytest
+from bson import BSON
 
 from redposture_core.clients.mongodb import (
     MongoAuditClient,
@@ -15,6 +18,7 @@ from redposture_core.clients.mongodb import (
     non_system_databases,
     normalize_mongodb_error,
     open_mongodb_client,
+    probe_legacy_mongodb_hello,
 )
 
 
@@ -89,6 +93,50 @@ def test_build_mongodb_uri_escapes_auth_and_auth_source() -> None:
         "mongodb://[2001:db8::1]:27017/?authSource=admin&directConnection=true"
     )
     assert build_mongodb_uri("[::1]", 27017) == "mongodb://[::1]:27017/?authSource=admin&directConnection=true"
+
+
+def test_legacy_wire_probe_requires_valid_mongodb_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core.clients import mongodb
+
+    document = BSON.encode({"ok": 1, "ismaster": True, "minWireVersion": 0, "maxWireVersion": 6})
+    payload = struct.pack("<iqii", 0, 0, 0, 1) + document
+    response = struct.pack("<iiii", 16 + len(payload), 2, 1, 1) + payload
+
+    class FakeSocket:
+        def __init__(self, reply: bytes) -> None:
+            self.reply = reply
+            self.sent = b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def settimeout(self, _timeout):
+            return None
+
+        def sendall(self, request: bytes):
+            self.sent = request
+
+        def recv(self, size: int) -> bytes:
+            part, self.reply = self.reply[: min(size, 7)], self.reply[min(size, 7) :]
+            return part
+
+    fake = FakeSocket(response)
+    monkeypatch.setattr(mongodb.socket, "create_connection", lambda *_args, **_kwargs: fake)
+    assert probe_legacy_mongodb_hello("mongo.local", 27017, timeout=2) == {
+        "ok": 1,
+        "ismaster": True,
+        "minWireVersion": 0,
+        "maxWireVersion": 6,
+    }
+    assert b"admin.$cmd\0" in fake.sent
+    assert BSON(fake.sent[-len(BSON.encode({"isMaster": 1})) :]).decode() == {"isMaster": 1}
+
+    bad = FakeSocket(response[:12] + struct.pack("<i", 2005) + response[16:])
+    monkeypatch.setattr(mongodb.socket, "create_connection", lambda *_args, **_kwargs: bad)
+    assert probe_legacy_mongodb_hello("mongo.local", 27017, timeout=2) is None
 
 
 def test_mongo_audit_client_wraps_database_collection_helpers() -> None:

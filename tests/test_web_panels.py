@@ -922,7 +922,8 @@ def test_pgadmin_view_rows_marks_byte_budget_partial(monkeypatch: pytest.MonkeyP
     assert result["partial"] is True
 
 
-def test_pgadmin_backend_connection_does_not_save_password(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("sequence_ok", [True, False])
+def test_pgadmin_backend_connection_does_not_save_password(monkeypatch: pytest.MonkeyPatch, sequence_ok: bool) -> None:
     monkeypatch.setattr(web_panels, "HttpSessionPool", lambda **_kw: SimpleNamespace(close=lambda: None))
     posts: list[dict[str, object]] = []
 
@@ -956,11 +957,42 @@ def test_pgadmin_backend_connection_does_not_save_password(monkeypatch: pytest.M
         if path == "/browser/schema/nodes/1/2/4/":
             return _response(200, {"success": 1, "data": [{"_type": "schema", "_id": 5, "label": "public"}]})
         if path == "/browser/schema/obj/1/2/4/5":
-            return _response(200, {"nspacl": [{"grantee": "reader", "privileges": [{"privilege_type": "U"}]}]})
+            return _response(
+                200,
+                {
+                    "nspacl": [{"grantee": "reader", "privileges": [{"privilege_type": "U"}]}],
+                    "deftblacl": [{"grantee": "reader", "privileges": ["r"]}],
+                },
+            )
+        if path == "/browser/sequence/nodes/1/2/4/5/":
+            if not sequence_ok:
+                return _response(403, {})
+            return _response(200, {"success": 1, "data": [{"_type": "sequence", "_id": 7, "label": "order_seq"}]})
+        if path == "/browser/sequence/obj/1/2/4/5/7":
+            return _response(200, {"relacl": [{"grantee": "reader", "privileges": ["U", "r"]}]})
+        if path == "/browser/function/nodes/1/2/4/5/":
+            return _response(200, {"success": 1, "data": [{"_type": "function", "_id": 8, "label": "secret_fn()"}]})
+        if path == "/browser/function/obj/1/2/4/5/8":
+            return _response(200, {"proacl": [{"grantee": "reader", "privileges": ["X"]}]})
         if path == "/browser/table/nodes/1/2/4/5/":
             return _response(200, {"success": 1, "data": [{"_type": "table", "_id": 6, "label": "orders"}]})
         if path == "/browser/table/obj/1/2/4/5/6":
             return _response(200, {"relacl_str": ["reader=r/owner"], "acl": [{"grantee": "reader"}]})
+        if path == "/browser/column/nodes/1/2/4/5/6/":
+            return _response(
+                200,
+                {
+                    "success": 1,
+                    "data": [
+                        {"_type": "column", "_id": 9, "label": "email"},
+                        {"_type": "column", "_id": 10, "label": "id"},
+                    ],
+                },
+            )
+        if path == "/browser/column/obj/1/2/4/5/6/9":
+            return _response(200, {"attacl": [{"grantee": "reader", "privileges": ["r"]}]})
+        if path == "/browser/column/obj/1/2/4/5/6/10":
+            return _response(200, {"name": "id"})
         return _response(404, {})
 
     def post(_pool: object, _base: str, _path: str, body: bytes, _headers: object) -> HttpResponse:
@@ -989,7 +1021,11 @@ def test_pgadmin_backend_connection_does_not_save_password(monkeypatch: pytest.M
         entry.get("object_type") == "table" and entry["acl_fields"]["relacl_str"] == ["reader=r/owner"]
         for entry in inventory["privesc_check"]["records"]
     )
-    assert inventory["privesc_check"]["partial"] is False
+    kinds = {entry.get("object_type") for entry in inventory["privesc_check"]["records"]}
+    assert kinds >= {"function", "column"}
+    assert ("sequence" in kinds) is sequence_ok
+    assert any("deftblacl" in entry.get("acl_fields", {}) for entry in inventory["privesc_check"]["records"])
+    assert inventory["privesc_check"]["partial"] is not sequence_ok
     assert posts == [{"password": "db-secret", "save_password": False}]
     assert "db-secret" not in json.dumps(inventory)
     assert "must-not-leak" not in json.dumps(inventory)
@@ -1190,6 +1226,24 @@ def test_ui_rendering_uses_airflow_palette_and_has_no_ansi() -> None:
         "ui": {"version": None, "auth_required": True, "inventory": {"show_objects": {"count": 0, "items": []}}},
     }
     assert all("\x1b" not in line for line in web_panels.render_panel(record, "MINIO"))
+    record["ui"]["inventory"] = {
+        "export": {"count": 10_050, "items": ["/tmp/qa.jsonl"], "partial": True, "reason": "HTTP 429"}
+    }
+    export_lines = web_panels.render_panel(record, "MINIO")
+    assert any("Export Enumeration (count:10050)" in line for line in export_lines)
+    assert any("export coverage:partial" in line for line in export_lines)
+    assert all("\x1b" not in line for line in export_lines)
+    console.calls.clear()
+    assert web_panels.colorize_panel_line(
+        console, next(line for line in export_lines if "Export Enumeration" in line), "MINIO"
+    )
+    assert any("count:10050" in value and color == "red" for value, color in console.calls)
+    record["ui"]["inventory"] = {"export": {"status": "unavailable", "partial": True, "reason": "HTTP 403"}}
+    unavailable = web_panels.render_panel(record, "MINIO")[-1]
+    assert "[-] export unavailable (reason:HTTP 403)" in unavailable
+    console.calls.clear()
+    assert web_panels.colorize_panel_line(console, unavailable, "MINIO")
+    assert any("reason:HTTP 403" in value and color == "orange" for value, color in console.calls)
 
 
 def test_ui_cve_route_never_uses_backend_version() -> None:

@@ -12,7 +12,7 @@
     "auth_required": false,
     "credential_attempts": [
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "root",
         "token": null,

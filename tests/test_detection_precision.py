@@ -123,7 +123,9 @@ def test_elastic_generic_root_is_not_a_hard_fingerprint() -> None:
         {"Content-Type": "application/json"},
         None,
     )
-    assert canonical["signal_kind"] == "hard_positive"
+    # A version-shaped root alone is not sufficient to confirm Elasticsearch;
+    # it needs an independent marker such as its product header or tagline.
+    assert canonical["signal_kind"] == "soft_positive"
 
 
 @given(_JSON)

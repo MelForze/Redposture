@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_version": "2026-10-12",
+  "catalog_version": "2026-10-16",
   "entries": [
     {
       "id": "CVE-2017-15720",
@@ -378,6 +378,27 @@
         "https://nvd.nist.gov/vuln/detail/CVE-2018-12608"
       ],
       "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-41110",
+      "product": "docker_engine",
+      "title": "Docker Engine AuthZ plugin bypass when request body inspection is configured",
+      "severity": "CRITICAL",
+      "score": 9.9,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {"introduced": "19.03.0", "fixed": "23.0.15"},
+        {"introduced": "24.0.0", "fixed": "25.0.6"},
+        {"introduced": "26.0.0", "fixed": "26.1.5"},
+        {"introduced": "27.0.0", "fixed": "27.1.1"}
+      ],
+      "references": [
+        "https://github.com/moby/moby/security/advisories/GHSA-v23v-6jw2-98fq",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-41110"
+      ],
+      "verified_at": "2026-10-16",
+      "published_at": "2024-07-23"
     },
     {
       "id": "CVE-2014-3120",
@@ -3375,6 +3396,30 @@
       "verified_at": "2026-09-20"
     },
     {
+      "id": "CVE-2026-11933",
+      "product": "mongodb",
+      "title": "MongoDB server-side JavaScript use-after-free and possible memory disclosure (requires scripting access)",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "data_disclosure",
+      "affected": [
+        {"introduced": "4.4.0", "last_affected": "4.4.30"},
+        {"introduced": "5.0.0", "last_affected": "5.0.33"},
+        {"introduced": "6.0.0", "last_affected": "6.0.28"},
+        {"introduced": "7.0.0", "last_affected": "7.0.36"},
+        {"introduced": "8.0.0", "last_affected": "8.0.25"},
+        {"introduced": "8.2.0", "last_affected": "8.2.10"},
+        {"introduced": "8.3.0", "last_affected": "8.3.3"}
+      ],
+      "references": [
+        "https://www.mongodb.com/resources/products/alerts",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-11933"
+      ],
+      "verified_at": "2026-10-16",
+      "published_at": "2026-06-12"
+    },
+    {
       "id": "CVE-2019-7238",
       "product": "nexus_repository",
       "title": "Nexus Repository unauthenticated remote code execution",
@@ -3582,6 +3627,22 @@
       ],
       "verified_at": "2026-10-03",
       "required_permission": "nexus:script:*:run"
+    },
+    {
+      "id": "CVE-2026-11403",
+      "product": "nexus_repository",
+      "title": "Nexus format-specific API key predictability (requires enabled key realm and active user key)",
+      "severity": "HIGH",
+      "score": 8.7,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "impact": "account_takeover",
+      "affected": [{"introduced": "3.0.0", "fixed": "3.93.0"}],
+      "references": [
+        "https://support.sonatype.com/hc/en-us/articles/52347011450515-CVE-2026-11403-Nexus-Repository-3-Insufficient-Entropy-in-API-Key-Generation-2026-07-14",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-11403"
+      ],
+      "verified_at": "2026-10-16",
+      "published_at": "2026-07-14"
     },
     {
       "id": "CVE-2023-23612",
@@ -5588,6 +5649,47 @@
       "verified_at": "2026-10-05"
     },
     {
+      "id": "CVE-2026-2603",
+      "product": "keycloak",
+      "title": "Keycloak disabled SAML IdP broker login bypass (requires a valid IdP response)",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "auth_bypass",
+      "affected": [
+        {"fixed": "26.2.14"},
+        {"introduced": "26.3.0", "fixed": "26.4.10"},
+        {"introduced": "26.5.0", "fixed": "26.5.5"}
+      ],
+      "references": [
+        "https://github.com/keycloak/keycloak/issues/46911",
+        "https://github.com/keycloak/keycloak/security/advisories/GHSA-x4p7-7chp-64hq",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-2603"
+      ],
+      "verified_at": "2026-10-16",
+      "published_at": "2026-03-18"
+    },
+    {
+      "id": "CVE-2026-2092",
+      "product": "keycloak",
+      "title": "Keycloak SAML broker encrypted assertion validation bypass (requires signed IdP assertion)",
+      "severity": "HIGH",
+      "score": 7.7,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:L/A:L",
+      "impact": "auth_bypass",
+      "affected": [
+        {"last_affected": "26.2.5"},
+        {"introduced": "26.3.0", "last_affected": "26.4.7"},
+        {"introduced": "26.5.0", "fixed": "26.5.5"}
+      ],
+      "references": [
+        "https://github.com/keycloak/keycloak/security/advisories/GHSA-794g-x443-36f7",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-2092"
+      ],
+      "verified_at": "2026-10-16",
+      "published_at": "2026-05-29"
+    },
+    {
       "id": "CVE-2024-23897",
       "product": "jenkins",
       "title": "Jenkins CLI arbitrary file read with possible controller compromise",
@@ -5643,6 +5745,22 @@
       ],
       "verified_at": "2026-10-08",
       "published_at": "2026-09-02"
+    },
+    {
+      "id": "CVE-2025-47889",
+      "product": "jenkins_plugin_wso2id_oauth",
+      "title": "Jenkins WSO2 Oauth Plugin authentication bypass (only if installed and used as the security realm)",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [{"last_affected": "1.0"}],
+      "references": [
+        "https://www.jenkins.io/security/advisory/2025-05-14/#SECURITY-3481",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-47889"
+      ],
+      "verified_at": "2026-10-16",
+      "published_at": "2025-05-14"
     },
     {
       "id": "CVE-2025-2945",

@@ -18,6 +18,7 @@ from queue import Empty, Queue
 from typing import Any, Literal
 
 from .tls_cache import shared_client_ssl_context
+from .zookeeper_sasl import DigestMd5Client
 
 _ZK_PROTOCOL_VERSION = 0
 _ZK_PASSWD_DEFAULT = b"\x00" * 16
@@ -27,6 +28,7 @@ _ZK_OP_GET_DATA = 4
 _ZK_OP_GET_CHILDREN2 = 12
 _ZK_OP_CLOSE_SESSION = -11
 _ZK_OP_AUTH = 100
+_ZK_OP_SASL = 102
 _ZK_ERR_OK = 0
 _ZK_ERR_NONODE = -101
 _ZK_ERR_NOAUTH = -102
@@ -979,6 +981,39 @@ class _ZkClient:
             return True, None
         return False, f"authentication failed: {_zk_error_name(err)}"
 
+    def auth_sasl_digest(self, username: str, password: str) -> tuple[bool, str | None]:
+        """Authenticate this session with ZooKeeper's SASL DIGEST-MD5.
+
+        The exchange has a bounded number of frames and validates the server's
+        rspauth before returning success.  The caller must still test a
+        protected znode to establish the effective access of the identity.
+        """
+        sasl = DigestMd5Client(username, password)
+
+        def exchange(token: bytes) -> tuple[int, bytes | None]:
+            err, payload = self._request(_ZK_OP_SASL, struct.pack(">i", len(token)) + token)
+            if err != _ZK_ERR_OK:
+                return err, None
+            reply, end = _decode_zk_buffer(payload)
+            if end != len(payload):
+                raise ValueError("unexpected ZooKeeper SASL response payload")
+            return err, reply
+
+        err, challenge = exchange(b"")
+        if err != _ZK_ERR_OK:
+            # No challenge means the server did not offer a verifier for this
+            # mechanism. This says nothing about the supplied password.
+            return False, f"SASL negotiation unavailable: {_zk_error_name(err)}"
+        if challenge is None:
+            raise ValueError("missing ZooKeeper SASL challenge")
+        err, proof = exchange(sasl.response(challenge))
+        if err != _ZK_ERR_OK:
+            return False, f"authentication failed: {_zk_error_name(err)}"
+        if proof is None:
+            raise ValueError("missing ZooKeeper SASL server proof")
+        sasl.verify_server(proof)
+        return True, None
+
     def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
         payload = _encode_zk_string(path) + b"\x00"
         err, response_payload = self._request(_ZK_OP_GET_CHILDREN2, payload)
@@ -1109,6 +1144,7 @@ def _enumerate_znodes(
     enum_workers: int = 1,
     auth_username: str | None = None,
     auth_password: str | None = None,
+    auth_mechanism: str = "digest",
     transport_config: ZkTransportConfig | None = None,
     nested_scheduler: Any | None = None,
 ) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
@@ -1126,6 +1162,7 @@ def _enumerate_znodes(
             enum_workers=worker_count,
             auth_username=auth_username,
             auth_password=auth_password,
+            auth_mechanism=auth_mechanism,
             transport_config=transport_config,
             nested_scheduler=nested_scheduler,
         )
@@ -1284,6 +1321,7 @@ def _enumerate_znodes_parallel(
     enum_workers: int = 3,
     auth_username: str | None = None,
     auth_password: str | None = None,
+    auth_mechanism: str = "digest",
     transport_config: ZkTransportConfig | None = None,
     nested_scheduler: Any | None = None,
 ) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
@@ -1363,7 +1401,11 @@ def _enumerate_znodes_parallel(
                 active_clients[id(client)] = client
             client.connect()
             if auth_username is not None and auth_password is not None:
-                auth_ok, auth_error = client.auth_digest(auth_username, auth_password)
+                auth_ok, auth_error = (
+                    client.auth_sasl_digest(auth_username, auth_password)
+                    if auth_mechanism == "sasl"
+                    else client.auth_digest(auth_username, auth_password)
+                )
                 if not auth_ok:
                     result_queue.put(
                         {

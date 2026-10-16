@@ -53,6 +53,7 @@
         "username": "root"
       }
     ],
+    "credential_state": "valid",
     "database": null,
     "database_count": 5,
     "database_names": [
@@ -307,6 +308,7 @@
     "port": 27018,
     "projection": null,
     "provided_credentials": true,
+    "provided_credentials_ok": true,
     "provided_password": "root",
     "provided_username": "root",
     "query_documents": [],

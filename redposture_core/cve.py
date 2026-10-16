@@ -473,6 +473,32 @@ def resolve_products(module: str, payload: Mapping[str, Any]) -> list[DetectedPr
                         version_products.append(
                             _product("jenkins_plugin_allure", "Jenkins Allure Plugin", plugin_version)
                         )
+                wso2 = next(
+                    (
+                        plugin
+                        for plugin in plugins
+                        if isinstance(plugin, Mapping)
+                        and plugin.get("short_name") == "wso2id-oauth"
+                        and plugin.get("active") is not False
+                    ),
+                    None,
+                )
+                if wso2 is not None:
+                    version_products.append(
+                        _product("jenkins_plugin_wso2id_oauth", "Jenkins WSO2 Oauth Plugin", wso2.get("version"))
+                    )
+                elif isinstance(payload.get("plugins_count"), int) and payload["plugins_count"] > len(plugins):
+                    # The UI inventory was capped; absence from this page is not
+                    # evidence that the plugin is absent from the controller.
+                    version_products.append(
+                        _product(
+                            "jenkins_plugin_wso2id_oauth", "Jenkins WSO2 Oauth Plugin", None, confidence="inferred"
+                        )
+                    )
+            else:
+                version_products.append(
+                    _product("jenkins_plugin_wso2id_oauth", "Jenkins WSO2 Oauth Plugin", None, confidence="inferred")
+                )
         if module == "grafana":
             server_version = _clean_version(payload.get(field))
             parsed_server = normalize_version(server_version) if server_version is not None else None
@@ -494,9 +520,18 @@ def resolve_products(module: str, payload: Mapping[str, Any]) -> list[DetectedPr
             return [_product("elasticsearch", "Elasticsearch", payload.get("server_version"))]
         return []
     if module == "redis":
+        # A protected RESP endpoint can be Redis or Valkey. The lifecycle
+        # records an explicit null identity when INFO is unavailable; do not
+        # turn that protocol-only confirmation into Redis-specific CVEs.
         implementation = str(payload.get("implementation") or "redis").strip().lower()
         if implementation == "valkey" or payload.get("valkey_version"):
             return [_product("valkey", "Valkey", payload.get("valkey_version") or payload.get("server_version"))]
+        if payload.get("redis_version"):
+            return [_product("redis", "Redis", payload.get("redis_version"))]
+        if "implementation" in payload and not payload.get("implementation"):
+            return []
+        if implementation != "redis":
+            return []
         return [_product("redis", "Redis", payload.get("redis_version") or payload.get("server_version"))]
     if module in {"zookeeper", "keeper"}:
         is_keeper = payload.get("is_keeper") is True or module == "keeper"
@@ -643,7 +678,9 @@ def enumerate_record(
     cutoff_year = today.year - 4
     cutoff = date(cutoff_year, today.month, min(today.day, monthrange(cutoff_year, today.month)[1]))
     for product in products:
-        if product.confidence not in {"confirmed", "high"}:
+        if product.confidence not in {"confirmed", "high", "inferred"}:
+            continue
+        if product.confidence == "inferred" and product.version is not None:
             continue
         if not product.version or normalize_version(product.version, _version_scheme(product.product_key)) is None:
             has_unknown_version = True
@@ -668,6 +705,7 @@ def enumerate_record(
                         "product": product.product_key,
                         "detected_version": None,
                         "version_assessment": "unknown",
+                        **({"product_presence": "unverified"} if product.confidence == "inferred" else {}),
                         "published_at": entry.get("published_at"),
                         "recency_basis": recency_basis,
                         "severity": entry["severity"],

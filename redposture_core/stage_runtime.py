@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import functools
 import inspect
 import json
@@ -2582,6 +2583,29 @@ class AuditCommandRunner:
         started_at = time.monotonic()
         try:
             record = self._detect(ctx)
+            configured_timeout = float(getattr(self.args, "timeout", 3.0))
+            if not self._is_detected(record) and configured_timeout < 7.0:
+                timeout_text = _record_noise_text(record.to_dict()).lower()
+            else:
+                timeout_text = ""
+            if "timed out" in timeout_text or "connection timeout" in timeout_text:
+                # Retry only a timed-out detect, with a fresh transport state.
+                # Fast positives and definite negatives retain their original
+                # latency; the caller's args and later auth timeout stay intact.
+                retry_args = copy.copy(self.args)
+                try:
+                    retry_args.timeout = 7.0
+                except (AttributeError, TypeError):
+                    pass  # minimal embedded callers may not have a mutable namespace
+                else:
+                    self._close_lifecycle_state(state)
+                    retry_base_ctx = replace(base_ctx, args=retry_args)
+                    state = state_factory(retry_base_ctx) if state_factory is not None else None
+                    self._register_lifecycle_state(state)
+                    retry_ctx = replace(ctx, args=retry_args, lifecycle_state=state)
+                    if debug_emit is not None:
+                        debug_emit(f"detect_timeout_retry host={host} port={port} timeout=7.0")
+                    record = self._detect(retry_ctx)
             runtime_stage_telemetry = not bool(record.stages)
             if runtime_stage_telemetry:
                 result, error = _runtime_phase_outcome("detect", record)

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import gzip
+import ipaddress
 import json
 import re
 import ssl
 import threading
 import time
+import urllib.request
 import zlib
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -17,16 +19,24 @@ from dataclasses import field as dataclass_field
 from typing import Any
 from urllib.parse import quote
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, http_response_origin
+from ...clients.http_api import (
+    HttpApiClient,
+    HttpClientConfig,
+    build_http_target_url,
+    http_response_origin,
+    join_http_target_path,
+)
 from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
+from ...network_proxy import ProxySocketPatch
 from ...rendering import BooleanColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
 )
+from .async_detect import AsyncProbe, probe_direct_paths
 from .discover import DiscoverOptions, DiscoverReport, DiscoverRequest, DiscoverResponse, Finding, run_discovery
 from .http_session import ElasticHttpSession
 
@@ -36,6 +46,7 @@ _DISCOVER_MAX_PRINT_PER_INDEX = 200
 _TRANSPORT_DIAGNOSTIC_HEADER = "__redposture_transport_error__"
 _RESPONSE_TRUNCATED_HEADER = "__redposture_response_truncated__"
 _DETECT_EXTENDED_TIMEOUT = 2.5
+_DETECT_SLOW_PROBE_THRESHOLD = 1.0
 _DETECT_CONFIRM_PATHS = (
     "/_nodes?filter_path=nodes.*.version",
     "/_security/_authenticate",
@@ -905,36 +916,37 @@ def _collect_detect_transport_errors(probes: list[dict[str, Any]]) -> dict[str, 
     return collected
 
 
-def _detect_opensearch_marker(headers: dict[str, str], body: dict[str, Any] | None) -> str | None:
+def _detect_opensearch_markers(headers: dict[str, str], body: dict[str, Any] | None) -> list[str]:
+    markers: list[str] = []
     product_header = _header_lookup(headers, "X-Elastic-Product")
     if isinstance(product_header, str) and "opensearch" in product_header.strip().lower():
-        return "vendor_opensearch_header"
+        markers.append("vendor_opensearch_header")
 
     server_header = _header_lookup(headers, "Server")
     if isinstance(server_header, str) and "opensearch" in server_header.strip().lower():
-        return "vendor_opensearch_server"
+        markers.append("vendor_opensearch_server")
 
     if not isinstance(body, dict):
-        return None
+        return markers
 
     tagline = str(body.get("tagline") or "").strip().lower()
     if "opensearch" in tagline:
-        return "vendor_opensearch_tagline"
+        markers.append("vendor_opensearch_tagline")
 
     distribution = str(body.get("distribution") or "").strip().lower()
     if "opensearch" in distribution:
-        return "vendor_opensearch_distribution"
+        markers.append("vendor_opensearch_distribution")
 
     version = body.get("version")
     if not isinstance(version, dict):
-        return None
+        return markers
     version_distribution = str(version.get("distribution") or "").strip().lower()
     if "opensearch" in version_distribution:
-        return "vendor_opensearch_version_distribution"
+        markers.append("vendor_opensearch_version_distribution")
     build_flavor = str(version.get("build_flavor") or "").strip().lower()
     if "opensearch" in build_flavor:
-        return "vendor_opensearch_build_flavor"
-    return None
+        markers.append("vendor_opensearch_build_flavor")
+    return markers
 
 
 def _is_elastic_auth_error_payload(body: dict[str, Any]) -> bool:
@@ -1024,12 +1036,14 @@ def _classify_detect_probe(
         }
 
     body = _load_json_dict_loose(payload, headers)
-    opensearch_marker = _detect_opensearch_marker(headers, body)
-    if opensearch_marker:
+    opensearch_markers = _detect_opensearch_markers(headers, body)
+    if opensearch_markers:
         version = _extract_version_from_body_dict(body) if isinstance(body, dict) else None
         return {
-            "signal_kind": "hard_positive",
-            "signals": [opensearch_marker],
+            "signal_kind": "hard_positive"
+            if len(opensearch_markers) >= 2 or "vendor_opensearch_header" in opensearch_markers
+            else "soft_positive",
+            "signals": opensearch_markers,
             "version": version,
             "vendor": "opensearch",
         }
@@ -1048,7 +1062,7 @@ def _classify_detect_probe(
             if tagline == "You Know, for Search":
                 if "root_tagline" not in signals:
                     signals.append("root_tagline")
-                kind = "hard_positive"
+                kind = "soft_positive" if kind == "neutral" else kind
                 vendor = vendor or "elasticsearch"
             if (
                 version
@@ -1057,7 +1071,11 @@ def _classify_detect_probe(
             ):
                 if "root_version_shape" not in signals:
                     signals.append("root_version_shape")
-                kind = "hard_positive"
+                kind = (
+                    "hard_positive"
+                    if "root_tagline" in signals or "header_x_elastic_product" in signals
+                    else "soft_positive"
+                )
             if status in {401, 403} and _is_elastic_auth_error_payload(body):
                 if "security_exception_missing_auth" not in signals:
                     signals.append("security_exception_missing_auth")
@@ -1195,6 +1213,30 @@ def _request_detect_probe(
     secondary_error = str(fallback_error or "").strip() or "connection failed"
     combined = f"{preferred_scheme}={primary_error}; {fallback_scheme}={secondary_error}"
     return fallback_status, fallback_payload, fallback_headers, combined, fallback_scheme
+
+
+def _can_probe_direct_async(host: str, port: int) -> bool:
+    """Keep proxy and redirected-origin targets on the established HTTP path."""
+
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        # A fresh event loop per scan worker would also create a fresh DNS
+        # executor for hostnames.  Keep them on the established client until a
+        # shared resolver can bound that work independently of scan workers.
+        return False
+    if ProxySocketPatch._active_proxy is not None:
+        return False
+    proxies = urllib.request.getproxies()
+    if any(name in proxies for name in ("http", "https", "all")) and not urllib.request.proxy_bypass(host):
+        return False
+    lifecycle = getattr(_THREAD_LOCAL_ELASTIC_SESSION, "state", None)
+    if isinstance(lifecycle, ElasticLifecycleState):
+        if lifecycle.origin_host and lifecycle.origin_host != host.strip("[]"):
+            return False
+        if lifecycle.origin_port and int(lifecycle.origin_port) != int(port):
+            return False
+    return True
 
 
 def _resolve_server_version_without_auth(
@@ -3261,20 +3303,29 @@ def _audit_elastic_host(
         root_probe_status = int(status)
         preferred_scheme = scheme
 
-        def _run_confirmation_probe(probe_path: str, pass_name: str) -> dict[str, Any]:
+        def _run_confirmation_probe(
+            probe_path: str, pass_name: str, prefetched: AsyncProbe | None = None
+        ) -> dict[str, Any]:
             nonlocal preferred_scheme
             requested_scheme = preferred_scheme
-            probe_kwargs: dict[str, Any] = {
-                "preferred_scheme": requested_scheme,
-                "ca_file": ca_file,
-            }
-            probe_status, probe_payload, probe_headers, probe_error, probe_scheme = _request_detect_probe(
-                host,
-                port,
-                probe_path,
-                timeout,
-                **probe_kwargs,
-            )
+            if prefetched is not None and not prefetched.fallback:
+                probe_status = prefetched.status
+                probe_payload = prefetched.payload
+                probe_headers = dict(prefetched.headers or {})
+                probe_error = prefetched.error
+                probe_scheme = requested_scheme
+            else:
+                probe_kwargs: dict[str, Any] = {
+                    "preferred_scheme": requested_scheme,
+                    "ca_file": ca_file,
+                }
+                probe_status, probe_payload, probe_headers, probe_error, probe_scheme = _request_detect_probe(
+                    host,
+                    port,
+                    probe_path,
+                    timeout,
+                    **probe_kwargs,
+                )
             probe_transport_error = probe_headers.pop(_TRANSPORT_DIAGNOSTIC_HEADER, None)
             probe_detection = _classify_detect_probe(
                 probe_path,
@@ -3308,8 +3359,29 @@ def _audit_elastic_host(
         detect_decision = _evaluate_detect_decision(detect_probes)
         transient_probe_paths: list[str] = []
         if not bool(detect_decision.get("detected")):
-            for probe_path in _DETECT_CONFIRM_PATHS:
-                probe = _run_confirmation_probe(probe_path, "base")
+            slow_probe = time.monotonic() - stage1_started >= _DETECT_SLOW_PROBE_THRESHOLD
+            async_attempted = False
+            async_probes: dict[int, AsyncProbe] = {}
+            for probe_index, probe_path in enumerate(_DETECT_CONFIRM_PATHS):
+                if slow_probe and not async_attempted and _can_probe_direct_async(host, port):
+                    async_attempted = True
+                    remaining = _DETECT_CONFIRM_PATHS[probe_index:]
+                    try:
+                        fetched = probe_direct_paths(
+                            host,
+                            port,
+                            tuple(join_http_target_path(path) for path in remaining),
+                            preferred_scheme,
+                            timeout,
+                            ca_file,
+                        )
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        fetched = None
+                        _debug(f"async confirmation unavailable: {type(exc).__name__}")
+                    if fetched is not None:
+                        async_probes = {probe_index + offset: item for offset, item in enumerate(fetched)}
+                probe_started = time.monotonic()
+                probe = _run_confirmation_probe(probe_path, "base", async_probes.get(probe_index))
                 detect_probes.append(probe)
                 probe_error = str(probe.get("error") or "")
                 if (
@@ -3321,6 +3393,7 @@ def _audit_elastic_host(
                 detect_decision = _evaluate_detect_decision(detect_probes)
                 if bool(detect_decision.get("detected")):
                     break
+                slow_probe = slow_probe or time.monotonic() - probe_started >= _DETECT_SLOW_PROBE_THRESHOLD
 
         retry_paths = list(dict.fromkeys(transient_probe_paths))
         for retry_round in range(max(0, retries)):
@@ -3908,6 +3981,10 @@ def _audit_elastic_host(
             "port": port,
             "is_elastic": False,
             "status": "fail",
+            # Under heavy local concurrency macOS may report EINVAL for a
+            # closed socket instead of ECONNREFUSED.  Keep that operational
+            # error distinct from a malformed response received from a peer.
+            "operational_failure": "[errno 22]" in str(last_error or "").lower(),
             "auth_required": None,
             "server_version": None,
             "provided_credentials": provided_credentials,

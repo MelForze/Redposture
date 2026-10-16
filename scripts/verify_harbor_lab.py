@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.qa_cve_contract import assert_cve_rendering  # noqa: E402
 from scripts.run_extended_version_matrix import _record  # noqa: E402
 from scripts.seed_real_vendors import push_image  # noqa: E402
 
@@ -92,7 +93,7 @@ def main() -> int:
             (output / f"{name}-{mode}.log").write_text(run.stdout + run.stderr)
             assert "\x1b" not in target.read_text()
             assert all(len(line.split("\t")) == 4 for line in target.read_text().splitlines())
-            assert "CVE's Enumeration" not in run.stdout or "potentially affected" in run.stdout
+            assert_cve_rendering(record["cve_enumeration"], run.stdout)
         results.append(
             {
                 "case": name,

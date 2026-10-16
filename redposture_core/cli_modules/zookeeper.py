@@ -83,7 +83,10 @@ def _configure_zookeeper_protocol_parser(
         dest="username",
         default=None,
         metavar="name",
-        help=f"Optional {service_name} username or credential file for digest auth credential check.",
+        help=(
+            f"Optional {service_name} username or credential file for digest auth credential check"
+            + ("; SASL DIGEST-MD5 is selected when required." if service_name == "ZooKeeper" else ".")
+        ),
     )
     auth.add_argument(
         "-p",
@@ -91,13 +94,13 @@ def _configure_zookeeper_protocol_parser(
         dest="password",
         default=None,
         metavar="value",
-        help=f"Optional {service_name} password for digest auth credential check.",
+        help=f"Optional {service_name} password for credential check.",
     )
     auth.add_argument(
         "--defcreds",
         action="store_true",
         help=(
-            f"Try the built-in {service_name} digest credential set after explicit/file credentials. "
+            f"Try the built-in {service_name} credential set after explicit/file credentials. "
             "Each candidate performs a network auth attempt and may trigger server lockout policy."
         ),
     )

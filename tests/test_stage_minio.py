@@ -7,7 +7,7 @@ import pytest
 from redposture_core.audit_models import AuditRecord
 from redposture_core.cli_args import parse_args
 from redposture_core.clients.minio_api import MinioResponse
-from redposture_core.modules.minio import actions, policy, stage
+from redposture_core.modules.minio import actions, policy, render, stage
 from redposture_core.modules.minio.types import AnonymousResult, CredentialResult, MinioDetection
 
 
@@ -52,6 +52,43 @@ def test_minio_credential_gate_unavailable_skips_deep_checks_without_rejection()
         extra={"provided_credentials_ok": None, "credential_state": "verification_unavailable"},
     )
     assert stage._minio_credential_gate(None, record) == (False, "minio credential verification unavailable")
+
+
+def test_minio_defcreds_reports_ambiguous_signed_responses_without_false_negative() -> None:
+    record = {
+        "host": "h",
+        "port": 9000,
+        "attempted_credentials": [
+            {"username": "admin", "password": "wrong", "credential_state": "invalid"},
+            {"username": "minio", "password": "guess", "credential_state": "verification_unavailable"},
+            {"username": "root", "password": "guess", "credential_state": "transient_failure"},
+        ],
+    }
+    lines = render._format_credential_attempts_records(record, "txt")
+    assert any("[-] admin:wrong" in line for line in lines)
+    assert any("unavailable (1 pair(s)" in line for line in lines)
+    assert any("interrupted (1 pair(s)" in line for line in lines)
+    assert not any("[-] minio:guess" in line or "[-] root:guess" in line for line in lines)
+    assert render._format_credential_attempts_records(record, "json") == []
+    assert not any("\x1b[" in line for line in lines)
+
+
+def test_minio_unavailable_verdict_uses_airflow_style_color() -> None:
+    class FakeConsole:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, text: str, color: str, _stream: object) -> str:
+            return f"<{color}>{text}</{color}>"
+
+        def plain(self, message: str) -> None:
+            self.lines.append(message)
+
+    console = FakeConsole()
+    line = "MINIO\th\t9000\t [*] Credential verification unavailable (1 pair(s); signed response inconclusive)"
+    assert render._render_colored_minio_line(console, line)
+    assert "<orange>unavailable</orange>" in console.lines[0]
+    assert "<white>" in console.lines[0]
 
 
 def test_run_minio_stage_returns_validation_error_without_network():

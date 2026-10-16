@@ -394,10 +394,11 @@ def test_unavailable_attempts_do_not_obscure_definitive_rejection():
     assert render._format_record(rec, "txt") == ""
     assert render._format_credential_attempts_records(rec, "txt") == [
         f"{_PFX} [-] admin:bad",
+        f"{_PFX} [*] Credential verification unavailable (2 pair(s); signed response inconclusive)",
     ]
 
 
-def test_unavailable_attempt_is_suppressed_alongside_accepted_credential():
+def test_unavailable_attempt_is_summarized_alongside_accepted_credential():
     rec = _record(
         credential_state="valid",
         credential_results=[{"access_key": "admin", "state": "valid"}],
@@ -408,4 +409,6 @@ def test_unavailable_attempt_is_suppressed_alongside_accepted_credential():
         ],
     )
     assert "[+] admin:working" in render._format_record(rec, "txt")
-    assert render._format_credential_attempts_records(rec, "txt") == []
+    assert render._format_credential_attempts_records(rec, "txt") == [
+        f"{_PFX} [*] Credential verification unavailable (1 pair(s); signed response inconclusive)",
+    ]

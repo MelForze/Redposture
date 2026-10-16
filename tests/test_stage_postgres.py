@@ -9,6 +9,7 @@ import pytest
 
 from redposture_core import stage_postgres as postgres
 from redposture_core.audit_models import AuditRecord
+from redposture_core.modules.postgres import actions as pg_actions
 from redposture_core.modules.postgres import stage as postgres_module_stage
 from redposture_core.shell_capture import CommandResult
 from redposture_core.stage_postgres import (
@@ -3363,3 +3364,54 @@ def test_postgres_table_query_helpers_and_colored_renderer(monkeypatch: pytest.M
         "POSTGRES\t127.0.0.1\t5432\t [!] CRITICAL - COPY TO/FROM PROGRAM - OS command execution",
     )
     assert "<orange>CRITICAL - COPY TO/FROM PROGRAM - OS command execution</orange>" in painter.lines[-1]
+    assert postgres._render_colored_postgres_line(
+        painter, "POSTGRES\t127.0.0.1\t5432\t [*] ACL Inventory (records:4) (partial:False)"
+    )
+    assert "<red>records:4</red>" in painter.lines[-1]
+    assert "<bright_green>partial:False</bright_green>" in painter.lines[-1]
+    assert postgres._render_colored_postgres_line(
+        painter, "POSTGRES\t127.0.0.1\t5432\t [*] ACL Inventory (records:0) (partial:True)"
+    )
+    assert "<bright_green>records:0</bright_green>" in painter.lines[-1]
+    assert "<orange>partial:True</orange>" in painter.lines[-1]
+
+
+def test_postgres_acl_inventory_covers_object_classes_and_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    objects: dict[str, list[list[str | None]]] = {
+        "FROM pg_class c": [["app.order_seq", "USAGE,SELECT"]],
+        "FROM pg_attribute a": [["app.customers.email", "SELECT"]],
+        "FROM pg_proc p": [["app.secret_fn()", "EXECUTE"]],
+        "FROM pg_default_acl d": [["owner/app/r", "SELECT to auditee"]],
+    }
+
+    def query(_sock: object, sql: str) -> tuple[list[list[str | None]], str | None]:
+        for marker, rows in objects.items():
+            if marker in sql:
+                return rows, None
+        raise AssertionError(sql)
+
+    monkeypatch.setattr(pg_actions, "_pg_query_rows", query)
+    inventory = pg_actions._pg_collect_acl_inventory(object())
+    assert inventory["count"] == 4
+    assert inventory["partial"] is False
+    assert {item["object_type"] for item in inventory["records"]} == {"sequence", "column", "function", "default"}
+    assert "(read:True)" in _caps_suffix({"can_read_tables": False, "acl_inventory": inventory})
+    report = {"privesc_check": True, "privesc_checks": [], "acl_inventory": inventory}
+    txt = "\n".join(_format_privesc_detail_records(report, "txt"))
+    assert "ACL Inventory (records:4) (partial:False)" in txt
+    assert "app.customers.email" in txt and "\x1b[" not in txt
+    assert _format_privesc_detail_records(report, "json")[0].find('"acl_inventory"') > 0
+
+    def partial_query(_sock: object, sql: str) -> tuple[list[list[str | None]], str | None]:
+        if "FROM pg_proc p" in sql:
+            return [], "permission denied"
+        if "FROM pg_class c" in sql:
+            return [["app.first", "SELECT"], ["app.second", "SELECT"]], None
+        return [], None
+
+    monkeypatch.setattr(pg_actions, "_pg_query_rows", partial_query)
+    partial = pg_actions._pg_collect_acl_inventory(object(), limit=1)
+    assert partial["partial"] is True
+    assert partial["truncated"] == ["sequence"]
+    assert partial["errors"] == {"function": "permission denied"}
+    assert "(read:unknown)" in _caps_suffix({"can_read_tables": False, "acl_inventory": partial})

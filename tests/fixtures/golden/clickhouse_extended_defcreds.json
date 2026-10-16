@@ -119,7 +119,7 @@
       }
     ],
     "auth_required": false,
-    "auth_status": "rejected",
+    "auth_status": "valid",
     "auth_transport_attempts": 1,
     "credential_attempt_count": 15,
     "credential_attempts": [
@@ -229,7 +229,7 @@
         "username": "user"
       }
     ],
-    "credentials_source": null,
+    "credentials_source": "default",
     "database": "default",
     "database_count": 8,
     "database_fallback": false,
@@ -243,7 +243,7 @@
       "observability",
       "system"
     ],
-    "default_credentials": false,
+    "default_credentials": true,
     "defcreds_enabled": true,
     "detection_error_kind": null,
     "detection_signals": [
@@ -825,8 +825,39 @@
         "client_secret",
         "stripe_key"
       ],
-      "finding_count": 6,
+      "finding_count": 7,
       "findings": [
+        {
+          "column": "payload_a",
+          "confidence": "high",
+          "database": "discovery",
+          "fingerprint": "<DOCKER_ID>",
+          "location_count": 1,
+          "locations": [
+            {
+              "column": "payload_a",
+              "database": "discovery",
+              "object_path": "$",
+              "partition": "202609",
+              "row_offset": 1,
+              "table": "secret_corpus"
+            }
+          ],
+          "masked_value": "stil...8899",
+          "object_path": "$",
+          "occurrences": 1,
+          "partition": "202609",
+          "range": {
+            "limit": 1000,
+            "offset": 0
+          },
+          "scanned_context": {
+            "chunk_id": "discovery.secret_corpus|202609|0|1000"
+          },
+          "table": "secret_corpus",
+          "type": "client_secret",
+          "value": "still-detected-secret-778899"
+        },
         {
           "column": "payload_a",
           "confidence": "high",
@@ -27345,7 +27376,7 @@
         }
       ],
       "inventory_errors": [],
-      "occurrence_count": 8,
+      "occurrence_count": 9,
       "partial_reasons": [],
       "redacted": false,
       "resumed": true,
@@ -27356,8 +27387,8 @@
     },
     "discover_requested": true,
     "effective_database": "default",
-    "effective_password": null,
-    "effective_username": null,
+    "effective_password": "",
+    "effective_username": "default",
     "error": null,
     "execute_attempted": false,
     "execute_capability": true,
@@ -27376,7 +27407,7 @@
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
-    "provided_username": "admin",
+    "provided_username": "default",
     "read_capability": true,
     "requested_database": "default",
     "requested_operation_failure": false,
@@ -27418,7 +27449,7 @@
         "stage_name": "data"
       }
     ],
-    "status": "invalid_credentials_anonymous",
+    "status": "weak_default_creds",
     "table_access": [],
     "table_columns": [],
     "table_columns_info": [],

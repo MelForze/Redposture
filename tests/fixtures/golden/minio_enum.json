@@ -58,12 +58,12 @@
       "minio.product_fingerprint"
     ],
     "detection_status": "confirmed",
-    "discover_bytes_read": 20972050,
-    "discover_candidates_count": 8,
+    "discover_bytes_read": 20976170,
+    "discover_candidates_count": 10,
     "discover_coverage": "complete",
     "discover_coverage_percent": 100.0,
     "discover_findings_count": 11,
-    "discover_objects_scanned": 8,
+    "discover_objects_scanned": 10,
     "discover_partial_reasons": [],
     "discover_requested": true,
     "host": "127.0.0.1",
@@ -115,13 +115,23 @@
       },
       {
         "bucket": "secrets-corpus",
+        "key": "misc/blob.bin",
+        "reason": "content:unclassified"
+      },
+      {
+        "bucket": "secrets-corpus",
         "key": "misc/harmless-name-with-secret.log",
-        "reason": "name:secret"
+        "reason": "suffix:.log"
       },
       {
         "bucket": "secrets-corpus",
         "key": "misc/huge.env",
         "reason": "suffix:.env"
+      },
+      {
+        "bucket": "secrets-corpus",
+        "key": "misc/notes.txt",
+        "reason": "suffix:.txt"
       }
     ],
     "secret_findings": [

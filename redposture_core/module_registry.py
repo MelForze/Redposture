@@ -524,6 +524,15 @@ def configure_cli_subcommands(
             parser_kwargs["description"] = spec.description
         module_parser = subparsers.add_parser(spec.name, **parser_kwargs)
         spec.configure_parser(module_parser, helpers)
+        if spec.name in {
+            COMMAND_MINIO,
+            COMMAND_DOCKER,
+            COMMAND_MONGODB,
+            COMMAND_ELASTIC,
+            COMMAND_REDIS,
+            COMMAND_POSTGRES,
+        }:
+            module_parser.set_defaults(_ui_standard_export=True)
 
 
 __all__ = [

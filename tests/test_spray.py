@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import json
 import os
 import sqlite3
@@ -25,6 +27,7 @@ from redposture_core.stage_spray import (
     Candidate,
     RateGate,
     SpraySink,
+    _attempt_id,
     _config,
     _credential_detail,
     _effective_origin,
@@ -35,6 +38,7 @@ from redposture_core.stage_spray import (
     _oracle_spray_preflight,
     _render_rows,
     _run_target,
+    _spray_jobs,
     _supported,
     classify,
     load_candidates,
@@ -389,6 +393,149 @@ def test_classification_evidence_matrix(fields: dict[str, object], expected: str
 
     record = AuditRecord.from_mapping({"host": "localhost", "port": 1, **fields})
     assert classify(record, AuditCredentialRun("u", "p"), Runner())[0] == expected
+
+
+@pytest.mark.parametrize(
+    "negative",
+    ({"provided_credentials_ok": False}, {"credential_state": "invalid"}, {"auth_valid": False}),
+)
+def test_spray_explicit_rejection_overrides_other_positive_proof(negative: dict[str, object]) -> None:
+    class Runner:
+        def _credential_gate(self, _credential: object, _record: object) -> tuple[bool, str]:
+            return True, "identity"
+
+    record = AuditRecord.from_mapping(
+        {"host": "localhost", "port": 1, "status": "valid_credentials", "credential_verified": True, **negative}
+    )
+    assert classify(record, AuditCredentialRun("u", "p"), Runner())[0] == "invalid"
+
+
+def test_spray_explicit_rejection_overrides_claimed_identity_on_forbidden_resource() -> None:
+    class Runner:
+        def _credential_gate(self, _credential: object, _record: object) -> tuple[bool, str]:
+            return True, "identity"
+
+    record = AuditRecord.from_mapping(
+        {
+            "host": "localhost",
+            "port": 1,
+            "status": "forbidden",
+            "identity_verified": True,
+            "provided_credentials_ok": False,
+        }
+    )
+    assert classify(record, AuditCredentialRun("u", "p"), Runner())[0] == "invalid"
+
+
+def test_cidr_hosts_get_distinct_checkpoint_keys_without_changing_literal_keys() -> None:
+    first = ScanTargetSpec("10.0.0.1", raw="10.0.0.0/30")
+    second = ScanTargetSpec("10.0.0.2", raw="10.0.0.0/30")
+    assert _attempt_id("grafana", first, 3000, 0) != _attempt_id("grafana", second, 3000, 0)
+    literal = ScanTargetSpec("10.0.0.1", raw="10.0.0.1:3000")
+    legacy = hashlib.sha256(b"grafana\x0010.0.0.1:3000\x003000\x000").hexdigest()
+    assert _attempt_id("grafana", literal, 3000, 0) == legacy
+
+
+def test_explicit_ipv4_range_hosts_get_distinct_checkpoint_keys() -> None:
+    first = ScanTargetSpec("10.0.0.1", raw="10.0.0.1-10.0.0.2")
+    second = ScanTargetSpec("10.0.0.2", raw="10.0.0.1-10.0.0.2")
+    assert _attempt_id("grafana", first, 3000, 0) != _attempt_id("grafana", second, 3000, 0)
+
+
+@settings(max_examples=int(os.getenv("REDPOSTURE_SPRAY_FUZZ_EXAMPLES", "250")), deadline=None)
+@given(st.integers(min_value=0, max_value=(2**32 // 4) - 1), st.integers(min_value=0, max_value=100))
+def test_fuzz_cidr_checkpoint_keys_are_unique_per_host(network_index: int, candidate: int) -> None:
+    base = network_index * 4
+    network = str(ipaddress.IPv4Network((base, 30)))
+    first_host = str(ipaddress.IPv4Address(base + 1))
+    second_host = str(ipaddress.IPv4Address(base + 2))
+    first = ScanTargetSpec(first_host, raw=network)
+    second = ScanTargetSpec(second_host, raw=network)
+    assert _attempt_id("grafana", first, 3000, candidate) != _attempt_id("grafana", second, 3000, candidate)
+    address_range = f"{first_host}-{second_host}"
+    first = ScanTargetSpec(first_host, raw=address_range)
+    second = ScanTargetSpec(second_host, raw=address_range)
+    assert _attempt_id("grafana", first, 3000, candidate) != _attempt_id("grafana", second, 3000, candidate)
+
+
+@settings(max_examples=int(os.getenv("REDPOSTURE_SPRAY_FUZZ_EXAMPLES", "250")), deadline=None)
+@given(
+    proof=st.sampled_from(("credential_verified", "auth_valid", "token_valid", "login_success")),
+    negative=st.sampled_from(("provided_credentials_ok", "credential_verified", "auth_valid", "token_valid")),
+)
+def test_fuzz_conflicting_credential_proofs_never_validate(proof: str, negative: str) -> None:
+    class Runner:
+        def _credential_gate(self, _credential: object, _record: object) -> tuple[bool, str]:
+            return True, "identity"
+
+    fields: dict[str, object] = {proof: True, negative: False}
+    record = AuditRecord.from_mapping({"host": "localhost", "port": 1, "status": "valid_credentials", **fields})
+    assert classify(record, AuditCredentialRun("u", "p"), Runner())[0] != "valid"
+
+
+def test_cidr_spray_does_not_skip_second_confirmed_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import redposture_core.stage_spray as spray
+
+    authenticated: list[str] = []
+
+    def detect(ctx: AuditHookContext) -> AuditRecord:
+        return AuditRecord.from_mapping({"host": ctx.host, "port": ctx.port, "status": "detected"})
+
+    def auth(ctx: AuditHookContext, _record: AuditRecord) -> AuditRecord:
+        authenticated.append(ctx.host)
+        return AuditRecord.from_mapping(
+            {"host": ctx.host, "port": ctx.port, "status": "valid_credentials", "provided_credentials_ok": True}
+        )
+
+    spec = ModuleAuditSpec(
+        module="grafana",
+        label="GRAFANA",
+        default_port=3000,
+        detect=detect,
+        auth=auth,
+        is_detected=lambda _record: True,
+        credential_gate=lambda _credential, _record: (True, "verified"),
+    )
+    monkeypatch.setattr(
+        spray.importlib, "import_module", lambda _name: SimpleNamespace(build_grafana_spec=lambda _ns: spec)
+    )
+    journal = AttemptJournal(str(tmp_path / "cidr.sqlite3"), "fingerprint", False)
+    try:
+        for host in ("10.0.0.1", "10.0.0.2"):
+            _run_target(
+                "grafana",
+                Namespace(),
+                host,
+                3000,
+                ScanTargetSpec(host, raw="10.0.0.0/30"),
+                (Candidate("pair", "admin", "secret"),),
+                journal,
+                RateGate(1000, 0.001),
+                None,
+            )
+        assert authenticated == ["10.0.0.1", "10.0.0.2"]
+        assert [row[4] for row in journal.rows()] == ["confirmed", "valid", "confirmed", "valid"]
+    finally:
+        journal.close()
+
+
+def test_spray_streams_modules_in_round_robin_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    import redposture_core.stage_spray as spray
+
+    def targets(module: str, _ns: object):
+        for suffix in ("a", "b", "c"):
+            yield f"{module}-{suffix}", 8080, ScanTargetSpec(f"{module}-{suffix}")
+
+    monkeypatch.setattr(spray, "_job_targets", targets)
+    jobs = list(_spray_jobs(("airflow", "grafana"), {"airflow": object(), "grafana": object()}))
+    assert [(module, host) for module, _ns, host, _port, _target in jobs] == [
+        ("airflow", "airflow-a"),
+        ("grafana", "grafana-a"),
+        ("airflow", "airflow-b"),
+        ("grafana", "grafana-b"),
+        ("airflow", "airflow-c"),
+        ("grafana", "grafana-c"),
+    ]
 
 
 @pytest.mark.parametrize("state", ("unknown", "unverified", "verification_unavailable", "inconclusive"))
@@ -811,6 +958,53 @@ def test_multi_module_spray_groups_txt_without_serializing_auth(
     assert labels[0] == labels[1] and labels[2] == labels[3] and labels[0] != labels[2]
 
 
+def test_spray_progress_advances_for_confirmation_and_attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import redposture_core.stage_spray as spray
+
+    advances: list[int] = []
+    totals: list[int] = []
+
+    class Progress:
+        enabled = False
+
+        def __init__(self, _label: str, total: int, **_kwargs: object) -> None:
+            totals.append(total)
+
+        def advance(self, step: int = 1) -> None:
+            advances.append(step)
+
+        def close(self) -> None:
+            return
+
+    target = ScanTargetSpec("localhost", explicit_port=8080, raw="localhost:8080")
+    plan = SimpleNamespace(target_count=1, iter_target_specs=lambda: iter([(0, "localhost", 8080, target)]))
+    spec = ModuleAuditSpec(
+        module="airflow",
+        label="AIRFLOW",
+        default_port=8080,
+        detect=lambda _ctx: AuditRecord.from_mapping({"host": "localhost", "port": 8080, "status": "detected"}),
+        auth=lambda _ctx, _record: AuditRecord.from_mapping(
+            {"host": "localhost", "port": 8080, "status": "valid_credentials", "provided_credentials_ok": True}
+        ),
+        is_detected=lambda _record: True,
+        credential_gate=lambda _credential, _record: (True, "verified"),
+    )
+    monkeypatch.setattr(spray, "make_command_progress", Progress)
+    monkeypatch.setattr(
+        spray.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(build_airflow_plan=lambda _ns: plan, build_airflow_spec=lambda _ns: spec),
+    )
+    output = tmp_path / "spray.txt"
+    args = parse_args(
+        ["spray", "-t", "localhost:8080", "--modules", "airflow", "-u", "u", "-p", "p", "-o", str(output)]
+    )
+    assert run_spray_stage(args, None) == 0
+    assert totals == [2]
+    assert sum(advances) == 2
+    assert "[+] u:p" in output.read_text()
+
+
 def test_spray_uses_jenkins_credential_detail_without_repeating_secret() -> None:
     from redposture_core.modules.jenkins import render as jenkins_render
 
@@ -1186,8 +1380,11 @@ def test_live_output_resume_and_json_keep_exactly_one_result(monkeypatch: pytest
     entered = threading.Event()
     release = threading.Event()
     auth_calls = 0
+    detect_calls = 0
 
     def detect(_ctx: object) -> AuditRecord:
+        nonlocal detect_calls
+        detect_calls += 1
         return AuditRecord.from_mapping({"host": "localhost", "port": 8080, "status": "detected", "is_airflow": True})
 
     def auth(_ctx: object, _record: AuditRecord) -> AuditRecord:
@@ -1254,6 +1451,7 @@ def test_live_output_resume_and_json_keep_exactly_one_result(monkeypatch: pytest
     assert b"secret" not in checkpoint.read_bytes()
     assert run_spray_stage(parse_args([*argv, "--resume"]), None) == 0
     assert auth_calls == 1
+    assert detect_calls == 1
     assert len(output.read_text().splitlines()) == 2
 
 
@@ -1312,6 +1510,76 @@ def test_interrupted_request_is_inconclusive_without_retry(monkeypatch: pytest.M
     assert run_spray_stage(parse_args([*argv, "--resume"]), None) == 0
     assert auth_calls == 1
     assert [json.loads(line)["status"] for line in output.read_text().splitlines()] == ["confirmed", "inconclusive"]
+
+
+@pytest.mark.parametrize("first", ["exception", "transport_failure", "connection_failed"])
+def test_detection_operational_failure_can_be_retried_on_resume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, first: str
+) -> None:
+    import redposture_core.stage_spray as spray
+
+    detects = 0
+
+    def detect(_ctx: AuditHookContext) -> AuditRecord:
+        nonlocal detects
+        detects += 1
+        if detects == 1:
+            if first == "exception":
+                raise TimeoutError("temporary detection timeout")
+            if first == "transport_failure":
+                return AuditRecord.from_mapping(
+                    {
+                        "host": "localhost",
+                        "port": 8080,
+                        "status": "not_detected",
+                        "detection_status": "transport_failure",
+                    }
+                )
+            return AuditRecord.from_mapping({"host": "localhost", "port": 8080, "status": "connection_failed"})
+        return AuditRecord.from_mapping({"host": "localhost", "port": 8080, "status": "detected"})
+
+    spec = ModuleAuditSpec(
+        module="airflow",
+        label="AIRFLOW",
+        default_port=8080,
+        detect=detect,
+        auth=lambda _ctx, _record: AuditRecord.from_mapping(
+            {"host": "localhost", "port": 8080, "status": "valid_credentials", "provided_credentials_ok": True}
+        ),
+        is_detected=lambda record: record.status == "detected",
+        credential_gate=lambda _credential, _record: (True, "verified"),
+    )
+    monkeypatch.setattr(
+        spray.importlib, "import_module", lambda _name: SimpleNamespace(build_airflow_spec=lambda _ns: spec)
+    )
+    monkeypatch.setattr(
+        spray,
+        "_job_targets",
+        lambda _module, _ns: iter([("localhost", 8080, ScanTargetSpec("localhost", raw="localhost:8080"))]),
+    )
+    output = tmp_path / "spray.jsonl"
+    argv = [
+        "spray",
+        "-t",
+        "localhost:8080",
+        "--modules",
+        "airflow",
+        "-u",
+        "u",
+        "-p",
+        "p",
+        "-o",
+        str(output),
+        "-f",
+        "json",
+        "--checkpoint",
+        str(tmp_path / "checkpoint.sqlite3"),
+    ]
+    assert run_spray_stage(parse_args(argv), None) == 0
+    assert output.read_text() == ""
+    assert run_spray_stage(parse_args([*argv, "--resume"]), None) == 0
+    assert detects == 2
+    assert [json.loads(line)["status"] for line in output.read_text().splitlines()] == ["confirmed", "valid"]
 
 
 def test_keeper_read_only_detection_does_not_probe_ddl(monkeypatch: pytest.MonkeyPatch) -> None:

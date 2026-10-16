@@ -65,16 +65,13 @@ MATRIX_SERVICES=(
   exporters registry registry-harbor grafana minio rabbitmq airflow gitlab consul kubeapi postgres mongodb oracle docker
   clickhouse redis valkey etcd qdrant elastic opensearch grpc kafka zookeeper zookeeper-auth keeper proxmox proxy-isolated
 )
-READINESS_ALLOWED_COMPLETED=(
-  redposture-lab-registry-seed
-  redposture-lab-clickhouse-auth-seed
-  redposture-lab-clickhouse-open-seed
-  redposture-lab-redis-seed
-  redposture-lab-etcd-auth-seed
-  redposture-lab-etcd-seed
-  redposture-lab-keeper-tls-certs
-  redposture-lab-rabbitmq-certs
-  redposture-lab-rabbitmq-seed
+READINESS_ALLOWED_COMPLETED_SERVICES=(
+  nexus-seed registry-seed minio-seed rabbitmq-certs rabbitmq-seed
+  consul-acl-seed consul-seed kubeapi-open-seed kubeapi-seed docker-open-seed
+  clickhouse-auth-seed clickhouse-open-seed redis-seed etcd-auth-seed etcd-seed
+  qdrant-seed elastic-auth-seed elastic-open-seed opensearch-auth-seed opensearch-open-seed
+  kafka-auth-seed kafka-open-seed kafka-tls-seed zookeeper-seed zookeeper-auth-seed
+  keeper-seed keeper-tls-certs
 )
 
 collect_lab_ports() {
@@ -143,14 +140,30 @@ compose_service() {
       "${PYTHON_BIN}" "${LAB_DIR}/services/registry-harbor-real/prepare_version.py" \
         v2.11.1 "${OUT_DIR}/stands/harbor" >>"${OUT_DIR}/logs/harbor-prepare.log" 2>&1 || return 1
     fi
-    docker compose -p "${COMPOSE_PROJECT_NAME:-redposture-matrix-harbor}" -f "${compose_file}" "$@"
+    local override
+    override="$(qa_compose_override "${service}" "${compose_file}")" || return 1
+    docker compose -p "${COMPOSE_PROJECT_NAME:-redposture-matrix-harbor}" -f "${compose_file}" -f "${override}" "$@"
     return
   fi
   if [ ! -f "${compose_file}" ]; then
     echo "[error] local lab service compose not found: ${compose_file}" >&2
     return 2
   fi
-  docker compose -f "${compose_file}" "$@"
+  local override
+  override="$(qa_compose_override "${service}" "${compose_file}")" || return 1
+  docker compose -f "${compose_file}" -f "${override}" "$@"
+}
+
+qa_compose_override() {
+  local service="$1"
+  local compose_file="$2"
+  local override="${OUT_DIR}/logs/${service}-container-names.json"
+  if [ ! -f "${override}" ]; then
+    docker compose -f "${compose_file}" config --format json \
+      | "${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_compose_override.py" \
+          --project "${COMPOSE_PROJECT_NAME}" >"${override}" || return 1
+  fi
+  printf '%s\n' "${override}"
 }
 
 cleanup_current_service() {
@@ -258,9 +271,9 @@ wait_healthy_service() {
     fi
     local readiness_output
     local readiness_args=()
-    local completed_name
-    for completed_name in "${READINESS_ALLOWED_COMPLETED[@]}"; do
-      readiness_args+=(--allow-completed "${completed_name}")
+    local completed_service
+    for completed_service in "${READINESS_ALLOWED_COMPLETED_SERVICES[@]}"; do
+      readiness_args+=(--allow-completed-service "${completed_service}")
     done
     set +e
     readiness_output="$(
@@ -827,8 +840,10 @@ run_oracle_cases() {
 run_docker_cases() {
   local docker_client_cert="${OUT_DIR}/docker-client-cert.pem"
   local docker_client_key="${OUT_DIR}/docker-client-key.pem"
-  docker cp redposture-lab-docker-tls:/certs/client/cert.pem "${docker_client_cert}" >/dev/null
-  docker cp redposture-lab-docker-tls:/certs/client/key.pem "${docker_client_key}" >/dev/null
+  local docker_tls_id
+  docker_tls_id="$(compose_service docker ps -q docker-tls)"
+  docker cp "${docker_tls_id}:/certs/client/cert.pem" "${docker_client_cert}" >/dev/null
+  docker cp "${docker_tls_id}:/certs/client/key.pem" "${docker_client_key}" >/dev/null
   run_case docker docker_open 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
   run_case docker docker_tls_requires_client_certificate 1 docker -t 127.0.0.1 --port 2376 --system
   run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --tls-cert "${docker_client_cert}" --tls-key "${docker_client_key}" --system

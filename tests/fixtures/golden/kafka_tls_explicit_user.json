@@ -119,6 +119,7 @@
       "tls.orders"
     ],
     "transport": "tls",
-    "transport_mode": "tls"
+    "transport_mode": "tls",
+    "write_result": null
   }
 ]

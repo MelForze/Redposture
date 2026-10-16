@@ -153,6 +153,7 @@
       "secure.pipeline"
     ],
     "transport": "plaintext",
-    "transport_mode": "plaintext"
+    "transport_mode": "plaintext",
+    "write_result": null
   }
 ]

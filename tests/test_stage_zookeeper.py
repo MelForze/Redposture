@@ -706,9 +706,10 @@ def test_audit_zookeeper_two_pass_scope_and_policy_parity(monkeypatch: pytest.Mo
     assert totals == (4, 1, 1, 1, 1)
     detect_calls = [entry for entry in call_trace if entry[1] is False]
     deep_calls = [entry for entry in call_trace if entry[1] is True]
-    assert [host for host, *_rest in detect_calls] == ["host-open", "host-valid", "host-auth", "host-fail"]
+    assert [host for host, *_rest in detect_calls] == ["host-open", "host-valid", "host-auth", "host-fail", "host-fail"]
     assert {host for host, *_rest in deep_calls} == {"host-open", "host-valid"}
-    assert all(timeout == 2.5 for _, _, timeout, _ in detect_calls + deep_calls)
+    assert all(timeout == 2.5 for _, _, timeout, _ in detect_calls[:-1] + deep_calls)
+    assert detect_calls[-1][2] == 7.0  # one bounded retry after the timed-out detect
     assert all(retries == 3 for _, _, _, retries in detect_calls + deep_calls)
     assert any("host-open" in line and "(auth required:False)" in line for line in lines)
     assert not any("host-open" in line and "[+] anonymous access" in line for line in lines)
@@ -5219,6 +5220,7 @@ def test_lifecycle_tree_walk_delegates_hard_bound_workers_auth_and_transport(
                 "enum_workers": 7,
                 "auth_username": "zk",
                 "auth_password": "secret",
+                "auth_mechanism": "digest",
                 "transport_config": transport_config,
             },
         )
@@ -5275,6 +5277,7 @@ def test_lifecycle_show_znodes_reports_hard_limit_as_partial(
                 "enum_workers": 3,
                 "auth_username": None,
                 "auth_password": None,
+                "auth_mechanism": "digest",
             },
         )
     ]
@@ -5469,9 +5472,27 @@ def test_lifecycle_digest_transport_failure_is_unverified_not_rejected(
     assert "connection reset" in str(record["error"])
 
 
-def test_lifecycle_sasl_required_marks_digest_unsupported_without_network(
+def test_lifecycle_sasl_required_uses_sasl_and_protected_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class FakeClient:
+        def connect(self) -> None:
+            return
+
+        def auth_digest(self, *_args):
+            pytest.fail("digest must not be attempted on a SASL-only endpoint")
+
+        def auth_sasl_digest(self, username: str, password: str):
+            assert (username, password) == ("user", "pass")
+            return True, None
+
+        def get_children2(self, path: str):
+            assert path == "/"
+            return [], _ZK_ERR_OK, None
+
+        def close(self) -> None:
+            return
+
     state = lifecycle_actions.ZooKeeperLifecycleState(
         root_err=_ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH,
         auth_required=True,
@@ -5480,7 +5501,7 @@ def test_lifecycle_sasl_required_marks_digest_unsupported_without_network(
     monkeypatch.setattr(
         lifecycle_actions,
         "_zookeeper_lifecycle_client",
-        lambda *_args, **_kwargs: pytest.fail("digest network attempt must be skipped for SASL-only policy"),
+        lambda *_args, **_kwargs: FakeClient(),
     )
     ctx = SimpleNamespace(
         lifecycle_state=state,
@@ -5496,11 +5517,11 @@ def test_lifecycle_sasl_required_marks_digest_unsupported_without_network(
         _lifecycle_options(),
     )
 
-    assert record["status"] == "auth_required"
-    assert record["provided_credentials_ok"] is None
-    assert record["credential_verdict"] == "unsupported_sasl"
+    assert record["status"] == "weak_default_creds"
+    assert record["provided_credentials_ok"] is True
+    assert record["credential_verdict"] == "valid"
     assert record["auth_mechanism"] == "sasl"
-    assert record["verification_capability"] == "unsupported"
+    assert record["verification_capability"] == "available"
 
 
 def test_lifecycle_digest_auth_response_sasl_required_is_not_rejected(
@@ -5513,6 +5534,9 @@ def test_lifecycle_digest_auth_response_sasl_required_is_not_rejected(
             return
 
         def auth_digest(self, _username: str, _password: str):
+            return False, "authentication failed: SESSIONCLOSEDREQUIRESASLAUTH"
+
+        def auth_sasl_digest(self, _username: str, _password: str):
             return False, "authentication failed: SESSIONCLOSEDREQUIRESASLAUTH"
 
         def get_children2(self, _path: str):
@@ -5544,13 +5568,42 @@ def test_lifecycle_digest_auth_response_sasl_required_is_not_rejected(
     ctx.credential = SimpleNamespace(username="zk", password="zookeeper", source="default")
     second = lifecycle_actions.authenticate_zookeeper(ctx, {"status": "auth_required"}, _lifecycle_options())
 
-    assert created_clients == 1
+    assert created_clients == 3
     for record in (first, second):
         assert record["status"] == "auth_required"
-        assert record["provided_credentials_ok"] is None
-        assert record["credential_verdict"] == "unsupported_sasl"
+        assert record["provided_credentials_ok"] is False
+        assert record["credential_verdict"] == "rejected"
         assert record["auth_mechanism"] == "sasl"
-        assert record["verification_capability"] == "unsupported"
+        assert record["verification_capability"] == "available"
+
+
+def test_lifecycle_sasl_mechanism_unavailable_does_not_reject_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeClient:
+        def connect(self) -> None:
+            return
+
+        def auth_sasl_digest(self, _username: str, _password: str):
+            return False, "SASL negotiation unavailable: SESSIONCLOSEDREQUIRESASLAUTH"
+
+        def close(self) -> None:
+            return
+
+    state = lifecycle_actions.ZooKeeperLifecycleState(
+        root_err=_ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH,
+        auth_required=True,
+        anonymous_auth_probe_results={"/": _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH},
+    )
+    monkeypatch.setattr(lifecycle_actions, "_zookeeper_lifecycle_client", lambda *_a, **_k: FakeClient())
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username="user", password="pass", source="default"),
+    )
+    record = lifecycle_actions.authenticate_zookeeper(ctx, {"status": "auth_required"}, _lifecycle_options())
+    assert record["provided_credentials_ok"] is None
+    assert record["credential_verdict"] == "unverified"
 
 
 def test_lifecycle_exhaustive_success_keeps_only_first_verified_session(

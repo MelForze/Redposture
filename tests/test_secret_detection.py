@@ -8,6 +8,7 @@ non-matches across common field-name styles.
 from __future__ import annotations
 
 import base64
+import gzip
 
 import pytest
 
@@ -28,6 +29,10 @@ _FORMAT_SAMPLES = [
     ("bearer_token", "Authorization: Bearer abcdef012345.token_value"),
     ("password", "password = hunter2value"),
     ("webhook", "https://hooks.slack.com/services/T000/B000/XXXXXXXX"),
+    ("api_token", "sk-proj-AbCdEf0123456789AbCdEf0123456789"),
+    ("grafana_token", "glsa_AbCdEf0123456789AbCdEf012345"),
+    ("docker_token", "dckr_pat_AbCdEf0123456789AbCdEf01234"),
+    ("sendgrid_token", "SG.abcdefgh.ABCDEFGHIJKLMNOPQRST"),
 ]
 
 
@@ -106,6 +111,66 @@ def test_nested_container_recursion():
 def test_embedded_json_string_is_parsed():
     matches = sd.scan_value('{"api_key": "AKIAIOSFODNN7EXAMPLE"}')
     assert {m.detector for m in matches} & {"api_key", "aws_access_key"}
+
+
+@pytest.mark.parametrize("key", ["credential", "cred", "passphrase", "apisecret", "db_credential"])
+def test_additional_contextual_secret_names(key):
+    assert any(match.value == "OpaqueSecretValue123" for match in sd.scan_value({key: "OpaqueSecretValue123"}))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "DB_PASSWORD=SecretValue2026",
+        "db.password=SecretValue2026",
+        "export DB_PASS=SecretValue2026",
+        "--password=SecretValue2026",
+        "?apikey=SecretValue2026",
+        "WITH PASSWORD 'SecretValue2026'",
+        "<password>SecretValue2026</password>",
+        '<input name="password" value="SecretValue2026">',
+        '<db password="SecretValue2026"/>',
+    ],
+)
+def test_structured_text_secret_recall(text):
+    assert any(match.value == "SecretValue2026" for match in sd.scan_value(text))
+
+
+@pytest.mark.parametrize("encoding", ["base64", "hex", "gzip_base64", "double_base64"])
+def test_bounded_structured_encoded_secret_recall(encoding):
+    payload = b'{"credential":"EncodedSecretValue2026"}'
+    encoded = {
+        "base64": base64.b64encode(payload).decode(),
+        "hex": payload.hex(),
+        "gzip_base64": base64.b64encode(gzip.compress(payload)).decode(),
+        "double_base64": base64.b64encode(base64.b64encode(payload)).decode(),
+    }[encoding]
+    assert any(match.value == "EncodedSecretValue2026" for match in sd.scan_value(encoded))
+
+
+def test_encoded_benign_text_is_not_a_secret():
+    assert sd.scan_value(base64.b64encode(b"ordinary documentation text").decode()) == []
+
+
+@pytest.mark.parametrize("key", ["public_key", "api_key_id", "access_key_id", "secret_key_id", "token_id"])
+def test_non_secret_identifier_fields_are_not_credentials(key):
+    assert sd.scan_value({key: "CORPUS_NEGATIVE_PUBLIC_KEY_2026"}) == []
+
+
+@pytest.mark.parametrize("value", ["${CORPUS_PASSWORD}", "{{ vault.password }}"])
+def test_template_references_are_not_credentials(value):
+    assert sd.scan_value({"password": value}) == []
+
+
+def test_named_secret_is_not_duplicated_as_high_entropy_assignment():
+    matches = sd.scan_value("DB_PASSWORD=OpaqueNeutralValue2026")
+    assert [(item.detector, item.value) for item in matches] == [("password", "OpaqueNeutralValue2026")]
+
+
+def test_sensitive_key_with_embedded_json_reports_leaf_not_wrapper():
+    matches = sd.scan_value({"credential": '{"password":"NestedValue2026"}'})
+    assert any(item.value == "NestedValue2026" for item in matches)
+    assert not any(item.value.startswith("{") for item in matches)
 
 
 # --- masking / fingerprint / decode ----------------------------------------

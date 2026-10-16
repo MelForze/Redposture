@@ -31,6 +31,7 @@
     "module": "kafka",
     "partial": false,
     "port": 29092,
+    "probe_write": true,
     "provided_credentials": true,
     "provided_credentials_ok": true,
     "provided_password": "admin",
@@ -72,19 +73,19 @@
     "topic_permissions": {
       "secure.audit": {
         "read": true,
-        "write": null
+        "write": true
       },
       "secure.metrics": {
         "read": true,
-        "write": null
+        "write": true
       },
       "secure.orders": {
         "read": true,
-        "write": null
+        "write": true
       },
       "secure.pipeline": {
         "read": true,
-        "write": null
+        "write": true
       }
     },
     "topic_read_error": null,
@@ -95,6 +96,7 @@
       "secure.pipeline"
     ],
     "transport": "plaintext",
-    "transport_mode": "plaintext"
+    "transport_mode": "plaintext",
+    "write_result": null
   }
 ]

@@ -33,6 +33,7 @@ dist/
 
 # Local outputs
 .redposture/
+checklist.md
 # Local integration labs and opt-in suites are never versioned.
 lab/
 qa_tests/

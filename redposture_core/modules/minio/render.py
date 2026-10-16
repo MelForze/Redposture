@@ -133,6 +133,8 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
     selected_key = results[0].get("access_key") if results and isinstance(results[0], dict) else None
     winner_skipped = False
     lines: list[str] = []
+    unavailable = 0
+    transient = 0
     for attempt in attempts:
         if not isinstance(attempt, dict):
             continue
@@ -148,6 +150,16 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             lines.append(f"{prefix} [+] {username}:{_password_text(attempt.get('password'))}")
         elif attempt.get("credential_state") == "invalid":
             lines.append(f"{prefix} [-] {username}:{_password_text(attempt.get('password'))}")
+        elif attempt.get("credential_state") == "transient_failure":
+            transient += 1
+        else:
+            unavailable += 1
+    if unavailable:
+        lines.append(
+            f"{prefix} [*] Credential verification unavailable ({unavailable} pair(s); signed response inconclusive)"
+        )
+    if transient:
+        lines.append(f"{prefix} [*] Credential verification interrupted ({transient} pair(s); transport failure)")
     return lines
 
 
@@ -320,6 +332,11 @@ _DISCOVER_FINDINGS_RE = re.compile(r"\(findings:(\d+)\)")
 
 
 def _minio_extra_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
+    for verdict in ("unavailable", "interrupted"):
+        marker = f"Credential verification {verdict}"
+        if marker in payload:
+            start = payload.index(verdict, payload.index("Credential verification"))
+            return [(start, start + len(verdict), "orange")]
     if "Dump coverage:partial" in payload:
         start = payload.index("coverage:partial")
         return [(start, start + len("coverage:partial"), "orange")]

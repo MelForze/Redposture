@@ -12,77 +12,77 @@
     "auth_required": false,
     "credential_attempts": [
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "admin",
         "token": null,
         "username": "admin"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "changeme",
         "token": null,
         "username": "admin"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "etcd",
         "token": null,
         "username": "admin"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "password",
         "token": null,
         "username": "admin"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "etcd",
         "token": null,
         "username": "etcd"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "password",
         "token": null,
         "username": "etcd"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "12345678",
         "token": null,
         "username": "root"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "admin",
         "token": null,
         "username": "root"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "etcd",
         "token": null,
         "username": "root"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "password",
         "token": null,
         "username": "root"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "root",
         "token": null,
@@ -96,21 +96,21 @@
         "username": "root"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "service",
         "token": null,
         "username": "service"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "password",
         "token": null,
         "username": "user"
       },
       {
-        "error": "authenticate returned status 400",
+        "error": "invalid credentials",
         "ok": false,
         "password": "user",
         "token": null,

@@ -1286,3 +1286,27 @@ def test_kafka_sasl_first_negotiates_versions_after_auth(monkeypatch: pytest.Mon
     )
     assert (ok, correlation, error) == (True, 13, None)
     assert versions[kafka.KAFKA_FETCH] == (4, 7)
+
+
+def test_kafka_bootstrap_failure_is_not_password_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        kafka,
+        "_bootstrap_known_kafka_session",
+        lambda *_args, **_kwargs: (False, 2, "connection timed out"),
+    )
+    ok, _correlation, error = kafka._authenticate_or_probe(object(), 1, "user", "secret", known_kafka=True)
+    assert ok is None
+    assert error == "connection timed out"
+
+
+def test_kafka_post_sasl_metadata_probe_failure_keeps_auth_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda _sock, corr: (True, corr + 1, None))
+    monkeypatch.setattr(kafka, "_sasl_authenticate_plain", lambda _sock, corr, _u, _p: (True, corr + 1, None))
+    monkeypatch.setattr(
+        kafka,
+        "_probe_apiversions",
+        lambda *_args: kafka.KafkaApiVersionsResult(False, None, "metadata probe timed out", {}),
+    )
+    ok, _correlation, error = kafka._authenticate_or_probe(object(), 1, "user", "secret", sasl_first=True)
+    assert ok is True
+    assert error == "metadata probe timed out"

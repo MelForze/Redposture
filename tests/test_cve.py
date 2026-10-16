@@ -31,7 +31,7 @@ from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, 
 
 def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
     catalog = load_catalog()
-    assert catalog.version == "2026-10-12"
+    assert catalog.version == "2026-10-16"
     assert catalog.entries
     keys: set[tuple[str, str]] = set()
     for entry in catalog.entries:
@@ -70,12 +70,12 @@ def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
 
 def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
     counts = Counter(entry["product"] for entry in load_catalog().entries)
-    assert len(load_catalog().entries) == 204
+    assert len(load_catalog().entries) == 210
     assert counts == {
         "apache_airflow": 11,
         "apache_zookeeper": 2,
         "clickhouse": 3,
-        "docker_engine": 1,
+        "docker_engine": 2,
         "elasticsearch": 6,
         "etcd": 1,
         "gitlab": 72,
@@ -85,12 +85,13 @@ def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
         "harbor": 2,
         "hashicorp_consul": 1,
         "kubernetes": 1,
-        "keycloak": 3,
+        "keycloak": 5,
         "jenkins": 2,
         "jenkins_plugin_allure": 1,
+        "jenkins_plugin_wso2id_oauth": 1,
         "minio": 5,
-        "mongodb": 7,
-        "nexus_repository": 10,
+        "mongodb": 8,
+        "nexus_repository": 11,
         "opensearch": 1,
         "oracle_database": 2,
         "pgadmin": 1,
@@ -102,7 +103,7 @@ def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
         "valkey": 3,
     }
     assert Counter(entry["impact"] for entry in load_catalog().entries)["ssrf"] == 32
-    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 96, "L": 106, "H": 2}
+    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 98, "L": 110, "H": 2}
 
 
 @pytest.mark.parametrize(
@@ -326,6 +327,18 @@ def test_unknown_version_fallback_respects_publication_window_and_product_identi
     assert not enumerate_record(
         "redis", {"implementation": "valkey", "server_version": None}, catalog=catalog, confirmed=True
     )["findings"]
+    unidentified = enumerate_record(
+        "redis", {"implementation": None, "server_version": None}, catalog=catalog, confirmed=True
+    )
+    assert unidentified["status"] == "unsupported"
+    assert unidentified["reason"] == "unsupported_product_detection"
+    assert unidentified["products"] == []
+    assert unidentified["findings"] == []
+    identified = enumerate_record(
+        "redis", {"implementation": "redis", "server_version": None}, catalog=catalog, confirmed=True
+    )
+    assert identified["status"] == "version_unknown"
+    assert {item["product"] for item in identified["findings"]} == {"redis"}
     assert [
         item["id"]
         for item in enumerate_record("keycloak", {"version": None}, catalog=catalog, confirmed=True)["findings"]

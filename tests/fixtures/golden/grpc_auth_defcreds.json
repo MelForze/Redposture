@@ -195,6 +195,8 @@
       "type": "basic",
       "username": "admin"
     },
+    "credential_verification_requested": true,
+    "credential_verification_status": "available",
     "defcreds_used": true,
     "descriptor_protos_b64": [
       "ChtncnBjX2hlYWx0aC92MS9oZWFsdGgucHJvdG8SDmdycGMuaGVhbHRoLnYxIiUKEkhlYWx0aENoZWNrUmVxdWVzdBIPCgdzZXJ2aWNlGAEgASgJIqkBChNIZWFsdGhDaGVja1Jlc3BvbnNlEkEKBnN0YXR1cxgBIAEoDjIxLmdycGMuaGVhbHRoLnYxLkhlYWx0aENoZWNrUmVzcG9uc2UuU2VydmluZ1N0YXR1cyJPCg1TZXJ2aW5nU3RhdHVzEgsKB1VOS05PV04QABILCgdTRVJWSU5HEAESDwoLTk9UX1NFUlZJTkcQAhITCg9TRVJWSUNFX1VOS05PV04QAzKuAQoGSGVhbHRoElAKBUNoZWNrEiIuZ3JwYy5oZWFsdGgudjEuSGVhbHRoQ2hlY2tSZXF1ZXN0GiMuZ3JwYy5oZWFsdGgudjEuSGVhbHRoQ2hlY2tSZXNwb25zZRJSCgVXYXRjaBIiLmdycGMuaGVhbHRoLnYxLkhlYWx0aENoZWNrUmVxdWVzdBojLmdycGMuaGVhbHRoLnYxLkhlYWx0aENoZWNrUmVzcG9uc2UwAUJhChFpby5ncnBjLmhlYWx0aC52MUILSGVhbHRoUHJvdG9QAVosZ29vZ2xlLmdvbGFuZy5vcmcvZ3JwYy9oZWFsdGgvZ3JwY19oZWFsdGhfdjGqAg5HcnBjLkhlYWx0aC5WMWIGcHJvdG8z",

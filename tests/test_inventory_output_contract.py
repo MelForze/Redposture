@@ -39,6 +39,7 @@ def test_minio_unknown_attempts_do_not_claim_a_credential_result_in_txt() -> Non
     assert attempts == [
         "MINIO\t10.0.0.1\t6443\t [-] admin:admin",
         "MINIO\t10.0.0.1\t6443\t [+] minioadmin:minioadmin",
+        "MINIO\t10.0.0.1\t6443\t [*] Credential verification unavailable (1 pair(s); signed response inconclusive)",
     ]
 
 
@@ -58,8 +59,18 @@ def test_minio_attempt_fuzz_only_renders_conclusive_states(states: list[str]) ->
         ],
     }
     lines = minio._format_credential_attempts_records(record, "txt")
-    assert len(lines) == sum(state in {"invalid", "valid"} for state in states)
-    assert not any("verification unavailable" in line or "transient_failure" in line for line in lines)
+    conclusive = sum(state in {"invalid", "valid"} for state in states)
+    unavailable = states.count("verification_unavailable")
+    transient = states.count("transient_failure")
+    assert len(lines) == conclusive + bool(unavailable) + bool(transient)
+    assert sum("Credential verification unavailable" in line for line in lines) == bool(unavailable)
+    assert sum("Credential verification interrupted" in line for line in lines) == bool(transient)
+    assert not any(
+        f"user{i}:pass{i}" in line
+        for i, state in enumerate(states)
+        if state in {"verification_unavailable", "transient_failure"}
+        for line in lines
+    )
 
 
 @given(status=st.integers(min_value=200, max_value=299), body=st.binary(max_size=512))
@@ -243,7 +254,9 @@ def test_grpc_unknown_attempt_remains_unknown_instead_of_becoming_rejected() -> 
     }
     assert grpc._public_auth_attempts(attempt)[0]["status"] == "unverified"
     record = {"host": "127.0.0.1", "port": 50051, "attempted_credentials": grpc._public_auth_attempts(attempt)}
-    assert grpc._format_credential_attempts_records(record, "txt") == []
+    assert grpc._format_credential_attempts_records(record, "txt") == [
+        "GRPC    \t127.0.0.1\t50051\t [*] Credential verification unavailable (1 credential(s))"
+    ]
 
 
 @pytest.mark.parametrize(

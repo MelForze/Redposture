@@ -1,9 +1,11 @@
 [
   {
+    "acl_inventory": null,
     "auth_database": "postgres",
     "auth_method": "scram-sha-256",
     "auth_required": true,
     "can_execute_commands": true,
+    "can_read_data": true,
     "can_read_tables": true,
     "database": "postgres",
     "database_count": 1,

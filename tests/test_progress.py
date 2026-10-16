@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from redposture_core.console import Console
+from redposture_core.console import Console, set_console_no_color
 from redposture_core.progress import (
     CommandProgressOwner,
     NoOpProgress,
@@ -84,6 +84,43 @@ def test_progress_bar_renders_and_closes() -> None:
 
     assert "Running redposture against 3 targets" in stream.buffer
     assert "100%" in stream.buffer
+
+
+def test_progress_refresh_keeps_a_waiting_spray_visible() -> None:
+    stream = _FakeStream(tty=True)
+    bar = ProgressBar("spray", total=4, enabled=True, stream=stream, render_initial=True, unit="check")
+    try:
+        initial = stream.buffer
+        bar.refresh()
+        assert len(stream.buffer) > len(initial)
+        assert "Running redposture against 4 checks" in stream.buffer
+        assert "0%" in stream.buffer
+    finally:
+        bar.close()
+
+
+def test_aborted_progress_does_not_claim_full_completion() -> None:
+    stream = _FakeStream(tty=True)
+    bar = ProgressBar("spray", total=3, enabled=True, stream=stream, render_initial=True, unit="check")
+    bar.advance(1)
+    bar.abort()
+    assert "33%" in stream.buffer
+    assert "100%" not in stream.buffer
+    assert stream.buffer.endswith("\n")
+    assert not bar.enabled
+
+
+def test_spray_progress_no_color_has_no_ansi_on_tty() -> None:
+    stream = _FakeStream(tty=True)
+    set_console_no_color(True)
+    try:
+        bar = ProgressBar("spray", total=2, enabled=True, stream=stream, render_initial=True, unit="check")
+        bar.advance()
+        bar.refresh()
+        bar.close()
+        assert "\x1b[" not in stream.buffer
+    finally:
+        set_console_no_color(False)
 
 
 def test_progress_bar_does_not_render_initial_by_default() -> None:

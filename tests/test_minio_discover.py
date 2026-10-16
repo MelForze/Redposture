@@ -41,7 +41,7 @@ def test_is_candidate_key():
     assert discover.is_candidate_key("app/id_rsa")
     assert discover.is_candidate_key("infra/terraform.tfstate")
     assert discover.is_candidate_key("k8s/kubeconfig")
-    assert discover.is_candidate_key("neutral.txt") is None
+    assert discover.is_candidate_key("neutral.txt") == "suffix:.txt"
 
 
 def test_discover_finds_secret_via_shared_engine_with_full_value():
@@ -58,11 +58,13 @@ def test_discover_finds_secret_via_shared_engine_with_full_value():
 
 def test_default_discovery_checks_candidate_after_more_than_thousand_objects():
     body = b"password=secret-after-thousand"
-    client = _Client({"last.env": (200, body)})
+    client = _Client(
+        {**{f"plain-{index}.txt": (200, b"ordinary text") for index in range(1001)}, "last.env": (200, body)}
+    )
     objects = (_obj(f"plain-{index}.txt") for index in range(1001))
     result = discover.discover_secrets(client, (*objects, _obj("last.env")))
     assert result.coverage_complete is True
-    assert result.objects_scanned == 1
+    assert result.objects_scanned == 1002
     assert any(finding["value"] == "secret-after-thousand" for finding in result.findings)
 
 
@@ -144,7 +146,7 @@ def test_binary_object_does_not_crash():
 
 def test_non_candidate_keys_are_skipped():
     client = _Client({})
-    res = discover.discover_secrets(client, [_obj("photo.png"), _obj("readme.md")])
+    res = discover.discover_secrets(client, [_obj("photo.png"), _obj("movie.mp4")])
     assert res.objects_scanned == 0
     assert res.candidates == []
 
@@ -159,10 +161,19 @@ def test_truncated_listing_marks_partial_not_complete():
 
 
 def test_full_listing_within_budget_is_complete():
-    client = _Client({})
+    client = _Client({"a.txt": (200, b"plain"), "b.txt": (200, b"plain")})
     res = discover.discover_secrets(client, [_obj("a.txt"), _obj("b.txt")], budget=discover.Budget(max_objects=100))
     assert res.coverage_complete is True
     assert res.partial_reasons == []
+
+
+def test_neutral_binary_name_is_scanned_for_structured_secret() -> None:
+    body = b"DB_PASSWORD=secret-in-neutral-name"
+    client = _Client({"opaque.bin": (200, body)})
+    result = discover.discover_secrets(client, [_obj("opaque.bin", size=len(body))])
+    assert result.coverage_complete is True
+    assert result.candidates[0]["reason"] == "content:unclassified"
+    assert any(item["value"] == "secret-in-neutral-name" for item in result.findings)
 
 
 def test_global_byte_budget_is_exact_across_objects():

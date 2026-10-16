@@ -185,7 +185,7 @@ def configure_postgres_parser(
     discovery.add_argument(
         "--privesc-check",
         action="store_true",
-        help="Check Postgres privilege-escalation and server-side file/command execution capability risks.",
+        help="Check privilege escalation and read-only object ACLs (sequences, columns, functions, defaults).",
     )
     execute_action = exec_group.add_argument(
         "-x",

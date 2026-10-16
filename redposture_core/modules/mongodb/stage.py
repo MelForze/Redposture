@@ -36,6 +36,7 @@ def build_mongodb_spec(args: Any) -> ModuleAuditSpec:
         render_module=render,
         colorize=render._render_colored_mongodb_line,
         is_detected=lambda record: record.extra.get("is_mongodb") is True,
+        skip_credentials_without_verifier=True,
         # E3 opt-in: MongoDB anon-open (no --auth flag on the server) means
         # the detect probe already listed databases; the defcreds loop only
         # adds redundant round-trips.

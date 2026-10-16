@@ -312,6 +312,7 @@ _EXTENDED_EXPECTED_LABELS = (
     "fuzz_mongodb_missing_targets",
     "fuzz_oracle_missing_targets",
     "fuzz_docker_missing_targets",
+    "fuzz_airflow_missing_targets",
     "fuzz_clickhouse_missing_targets",
     "fuzz_redis_missing_targets",
     "fuzz_etcd_missing_targets",
@@ -1524,6 +1525,9 @@ def _record_has_meaningful_outcome(record: dict[str, object]) -> bool:
     return True
 
 
+_EXPECTED_AMBIGUOUS_AUTH_LABELS = frozenset({"consul_extended_ports_basic_auth"})
+
+
 def _validate_meaningful_outcomes(rows: list[dict[str, str]]) -> None:
     """A successful audit must contain an actual per-host outcome.
 
@@ -1541,6 +1545,18 @@ def _validate_meaningful_outcomes(rows: list[dict[str, str]]) -> None:
         records = list(_iter_audit_records_for_row(row))
         if not records:
             raise SystemExit(f"label '{row['label']}' exited 0 without an audit record")
+        if row["label"] in _EXPECTED_AMBIGUOUS_AUTH_LABELS:
+            # Consul's open API ignores Basic credentials. A successful HTTP
+            # response proves neither acceptance nor rejection of that pair.
+            if not all(
+                record.get("status") == "unknown_auth"
+                and record.get("auth_mode") == "basic"
+                and record.get("auth_valid") is None
+                and record.get("is_consul") is True
+                for record in records
+            ):
+                raise SystemExit(f"label '{row['label']}' did not preserve ambiguous Basic auth")
+            continue
         if not any(_record_has_meaningful_outcome(record) for record in records):
             statuses = sorted({str(record.get("status") or "") for record in records})
             raise SystemExit(f"label '{row['label']}' exited 0 without a meaningful outcome: statuses={statuses}")
@@ -2477,6 +2493,7 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_exporters_trigger_negative_listen_seconds": ("--listen-seconds must be > 0",),
     **{f"fuzz_{module}_missing_targets": (f"{module} requires -t/--targets",) for module in _MISSING_TARGET_MODULES},
     "fuzz_registry_missing_targets": ("docker-registry requires -t/--targets",),
+    "fuzz_airflow_missing_targets": ("targets are required",),
     "fuzz_harbor_option_surface": ("failed to parse targets",),
     "fuzz_nexus_option_surface": ("use either --token or --username/--password",),
     "fuzz_gitlab_oci_option_surface": ("failed to parse targets",),

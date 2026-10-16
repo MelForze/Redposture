@@ -63,6 +63,7 @@ _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _POSTGRES_DEEP_STATUSES = {"open_no_auth", "weak_default_creds", "valid_credentials", "invalid_credentials_anonymous"}
+_PG_ACL_ITEMS = 200
 _POSTGRES_DEFAULT_CREDENTIALS = (
     ("admin", "admin"),
     ("admin", "password"),
@@ -884,6 +885,83 @@ def _pg_privesc_summary(checks: list[dict[str, Any]]) -> dict[str, int]:
         elif item.get("vulnerable") is None:
             summary["unknown"] += 1
     return summary
+
+
+def _pg_collect_acl_inventory(sock: socket.socket, *, limit: int = _PG_ACL_ITEMS) -> dict[str, Any]:
+    """Read effective non-table and future-object privileges without changing state."""
+
+    queries = {
+        "sequence": (
+            "SELECT n.nspname || '.' || c.relname, "
+            "concat_ws(',', CASE WHEN has_sequence_privilege(c.oid, 'USAGE') THEN 'USAGE' END, "
+            "CASE WHEN has_sequence_privilege(c.oid, 'SELECT') THEN 'SELECT' END, "
+            "CASE WHEN has_sequence_privilege(c.oid, 'UPDATE') THEN 'UPDATE' END) "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE c.relkind = 'S' AND n.nspname NOT IN ('pg_catalog', 'information_schema') "
+            "AND n.nspname NOT LIKE 'pg_toast%' AND has_schema_privilege(n.oid, 'USAGE') "
+            "AND (has_sequence_privilege(c.oid, 'USAGE') OR has_sequence_privilege(c.oid, 'SELECT') "
+            "OR has_sequence_privilege(c.oid, 'UPDATE')) ORDER BY 1"
+        ),
+        "column": (
+            "SELECT n.nspname || '.' || c.relname || '.' || a.attname, "
+            "concat_ws(',', CASE WHEN has_column_privilege(c.oid, a.attnum, 'SELECT') "
+            "AND NOT has_table_privilege(c.oid, 'SELECT') THEN 'SELECT' END, "
+            "CASE WHEN has_column_privilege(c.oid, a.attnum, 'INSERT') "
+            "AND NOT has_table_privilege(c.oid, 'INSERT') THEN 'INSERT' END, "
+            "CASE WHEN has_column_privilege(c.oid, a.attnum, 'UPDATE') "
+            "AND NOT has_table_privilege(c.oid, 'UPDATE') THEN 'UPDATE' END, "
+            "CASE WHEN has_column_privilege(c.oid, a.attnum, 'REFERENCES') "
+            "AND NOT has_table_privilege(c.oid, 'REFERENCES') THEN 'REFERENCES' END) "
+            "FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r','p','v','m','f') "
+            "AND n.nspname NOT IN ('pg_catalog', 'information_schema') "
+            "AND n.nspname NOT LIKE 'pg_toast%' AND has_schema_privilege(n.oid, 'USAGE') "
+            "AND a.attacl IS NOT NULL ORDER BY 1"
+        ),
+        "function": (
+            "SELECT n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', "
+            "'EXECUTE' FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') "
+            "AND n.nspname NOT LIKE 'pg_toast%' AND has_schema_privilege(n.oid, 'USAGE') "
+            "AND p.proacl IS NOT NULL AND has_function_privilege(p.oid, 'EXECUTE') ORDER BY 1"
+        ),
+        "default": (
+            "SELECT owner.rolname || '/' || COALESCE(n.nspname, '*') || '/' || d.defaclobjtype::text, "
+            "acl.privilege_type || ' to ' || CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END "
+            "FROM pg_default_acl d JOIN pg_roles owner ON owner.oid = d.defaclrole "
+            "LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace "
+            "CROSS JOIN LATERAL aclexplode(d.defaclacl) acl "
+            "LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee "
+            "WHERE acl.grantee = 0 OR pg_has_role(acl.grantee, 'USAGE') ORDER BY 1, 2"
+        ),
+    }
+    cap = max(1, min(int(limit), _PG_ACL_ITEMS))
+    records: list[dict[str, str]] = []
+    errors: dict[str, str] = {}
+    truncated: list[str] = []
+    for kind, query in queries.items():
+        try:
+            rows, error = _pg_query_rows(sock, f"{query} LIMIT {cap + 1}")
+        except (OSError, ValueError, _PgAuditError) as exc:
+            rows, error = [], str(exc)
+        if error:
+            errors[kind] = error
+            continue
+        if len(rows) > cap:
+            truncated.append(kind)
+        for row in rows[:cap]:
+            if len(row) < 2 or not row[0] or not row[1]:
+                continue
+            records.append({"object_type": kind, "object": row[0], "privileges": row[1]})
+    return {
+        "count": len(records),
+        "records": records,
+        "partial": bool(errors or truncated),
+        "errors": errors,
+        "truncated": truncated,
+        "limit_per_class": cap,
+    }
 
 
 def _pg_collect_privesc_checks(
@@ -2195,8 +2273,10 @@ def _audit_postgres_host(
 
                 privesc_checks: list[dict[str, Any]] = []
                 privesc_summary: dict[str, int] = {}
+                acl_inventory: dict[str, Any] | None = None
                 if privesc_check:
                     privesc_checks, privesc_summary = _pg_collect_privesc_checks(sock, superuser)
+                    acl_inventory = _pg_collect_acl_inventory(sock)
 
                 try:
                     _pg_send_terminate(sock)
@@ -2288,12 +2368,14 @@ def _audit_postgres_host(
                     "privesc_check": privesc_check,
                     "privesc_checks": privesc_checks,
                     "privesc_summary": privesc_summary,
+                    "acl_inventory": acl_inventory,
                     "server_version": session.server_version,
                     "sslmode": tls_config.sslmode,
                     "tls_used": isinstance(sock, ssl.SSLSocket),
                     "superuser": superuser,
                     "can_execute_commands": can_execute_commands,
                     "can_read_tables": can_read_tables,
+                    "can_read_data": _pg_effective_read_status(can_read_tables, acl_inventory),
                     "readable_tables": readable_tables,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": query_error,
@@ -2431,10 +2513,25 @@ def _nxc_prefix(record: dict[str, Any]) -> str:
     return f"{'POSTGRES':<8}\t{host}\t{port}\t"
 
 
+def _pg_effective_read_status(can_read_tables: Any, acl_inventory: Any) -> bool | None:
+    if isinstance(acl_inventory, dict) and can_read_tables is not True:
+        acl_records = acl_inventory.get("records")
+        if isinstance(acl_records, list) and any(
+            isinstance(item, dict)
+            and item.get("object_type") == "column"
+            and "SELECT" in str(item.get("privileges") or "").split(",")
+            for item in acl_records
+        ):
+            can_read_tables = True
+        elif acl_inventory.get("partial"):
+            can_read_tables = None
+    return can_read_tables if isinstance(can_read_tables, bool) else None
+
+
 def _caps_suffix(record: dict[str, Any]) -> str:
     superuser = record.get("superuser")
     can_execute_commands = record.get("can_execute_commands")
-    can_read_tables = record.get("can_read_tables")
+    can_read_tables = _pg_effective_read_status(record.get("can_read_tables"), record.get("acl_inventory"))
     database_count = record.get("database_count")
     database_names = record.get("database_names")
 
@@ -2932,6 +3029,7 @@ def _format_privesc_detail_records(record: dict[str, Any], output_format: str, *
                     "database": record.get("database"),
                     "summary": summary,
                     "checks": checks,
+                    "acl_inventory": record.get("acl_inventory"),
                 },
                 ensure_ascii=False,
             )
@@ -2941,7 +3039,6 @@ def _format_privesc_detail_records(record: dict[str, Any], output_format: str, *
     lines = [f"{prefix} [*] PrivEsc Check"]
     if not checks:
         lines.append(f"{prefix} <no privesc checks available>")
-        return lines
 
     finding_count = 0
     for item in checks:
@@ -2965,8 +3062,22 @@ def _format_privesc_detail_records(record: dict[str, Any], output_format: str, *
         if vulnerable is True:
             finding_count += 1
             lines.append(f"{prefix} [!] {severity} - {title}")
-    if finding_count == 0:
+    if finding_count == 0 and checks:
         lines.append(f"{prefix} <no privesc findings>")
+    acl = record.get("acl_inventory")
+    if isinstance(acl, dict):
+        lines.append(f"{prefix} [*] ACL Inventory (records:{acl.get('count', 0)}) (partial:{bool(acl.get('partial'))})")
+        for item in acl.get("records", []):
+            if isinstance(item, dict):
+                lines.append(
+                    f"{prefix} [!] {_pg_text(item.get('object_type'))} "
+                    f"{_pg_text(item.get('object'))} ({_pg_text(item.get('privileges'))})"
+                )
+        if acl.get("partial"):
+            lines.append(
+                f"{prefix} [*] ACL inventory incomplete (errors:{len(acl.get('errors', {}))}) "
+                f"(truncated:{len(acl.get('truncated', []))})"
+            )
     return lines
 
 
@@ -3105,8 +3216,14 @@ def _render_colored_postgres_line(console: Console, line: str) -> bool:
             BooleanColorRule("superuser", unknown_color="orange"),
             BooleanColorRule("execute", unknown_color="orange"),
             BooleanColorRule("read", unknown_color="orange"),
+            BooleanColorRule("partial", true_color="orange", false_color="bright_green"),
         ),
-        counts=(CountColorRule("DBs", "red", unknown_color="orange", zero_color="bright_green"),),
+        counts=(
+            CountColorRule("DBs", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("records", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("errors", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("truncated", "red", unknown_color="orange", zero_color="bright_green"),
+        ),
         extra_spans=_postgres_extra_color_spans,
     ):
         return True

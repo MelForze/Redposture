@@ -828,6 +828,12 @@ def authenticate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
 def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
     """Bounded read-only inventory, only for requested existing CLI flags."""
     product = str(record.get("ui_product") or "")
+    from .web_panel_export import export_panel, standard_export_selection
+
+    if getattr(ctx.args, "_ui_standard_export", False):
+        export_categories = standard_export_selection(ctx.args, product)
+        if export_categories:
+            return export_panel(ctx, record, export_categories)
     ui = dict(record.get("ui") or {})
     base = str(ui.get("endpoint") or "")
     flags = {
@@ -1493,9 +1499,31 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                             if "acl" in key.lower() or "privilege" in key.lower()
                         }
                         if not fields:
-                            pg_grant_partial = True
+                            # pgAdmin omits ACL keys for objects without explicit grants.
                             return
                         pg_grant_records.append({"object_type": kind, "object": label, "acl_fields": fields})
+
+                    def read_acl_children(kind: str, label: str, path: str) -> None:
+                        nonlocal pg_grant_partial
+                        if time.monotonic() >= dump_deadline or len(pg_grant_records) >= _DUMP_COLLECTIONS:
+                            pg_grant_partial = True
+                            return
+                        response = get(f"/browser/{kind}/nodes/{path}/")
+                        children = _pgadmin_nodes(response, limit=_DUMP_COLLECTIONS + 1)
+                        if children is None:
+                            pg_grant_partial = True
+                            return
+                        if len(children) > _DUMP_COLLECTIONS:
+                            pg_grant_partial = True
+                        for child in children[:_DUMP_COLLECTIONS]:
+                            child_id = child.get("_id")
+                            if child.get("_type") != kind or not str(child_id).isdigit():
+                                continue
+                            if time.monotonic() >= dump_deadline or len(pg_grant_records) >= _DUMP_COLLECTIONS:
+                                pg_grant_partial = True
+                                break
+                            child_label = f"{label}/{str(child.get('label') or child_id)[:80]}"
+                            read_grants(kind, child_label, f"/browser/{kind}/obj/{path}/{child_id}")
 
                     wide_pg_walk = bool(flags & {"dump", "privesc_check"})
                     for server in servers[: _DUMP_COLLECTIONS if wide_pg_walk else 5]:
@@ -1606,6 +1634,10 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                                         f"{database_label}/{str(schema.get('label') or schema_id)[:80]}",
                                         f"/browser/schema/obj/{group_id}/{server_id}/{database_id}/{schema_id}",
                                     )
+                                    schema_path = f"{group_id}/{server_id}/{database_id}/{schema_id}"
+                                    schema_label = f"{database_label}/{str(schema.get('label') or schema_id)[:80]}"
+                                    read_acl_children("sequence", schema_label, schema_path)
+                                    read_acl_children("function", schema_label, schema_path)
                                 table_response = get(
                                     f"/browser/table/nodes/{group_id}/{server_id}/{database_id}/{schema_id}/"
                                 )
@@ -1627,6 +1659,11 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                                             "table",
                                             table_label,
                                             f"/browser/table/obj/{group_id}/{server_id}/{database_id}/{schema_id}/{table_id}",
+                                        )
+                                        read_acl_children(
+                                            "column",
+                                            table_label,
+                                            f"{group_id}/{server_id}/{database_id}/{schema_id}/{table_id}",
                                         )
                                     table_name = str(table.get("label") or "")
                                     schema_name = str(schema.get("label") or "")
@@ -2093,10 +2130,16 @@ def render_panel(record: dict[str, Any], label: str) -> list[str]:
                 else:
                     lines.append(f"{prefix} {clean[:512]}")
             if value.get("partial"):
-                lines.append(f"{prefix} [*] {key.replace('_', ' ')} coverage:partial")
+                reason = str(value.get("reason") or "")
+                reason = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", reason).replace("\r", " ").replace("\n", " ")
+                suffix = f" (reason:{reason[:256]})" if reason else ""
+                lines.append(f"{prefix} [*] {key.replace('_', ' ')} coverage:partial{suffix}")
         elif isinstance(value, dict):
             status = str(value.get("status") or "unavailable")
-            lines.append(f"{prefix} [-] {key.replace('_', ' ')} {status}")
+            reason = str(value.get("reason") or "") if key == "export" else ""
+            reason = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", reason).replace("\r", " ").replace("\n", " ")
+            suffix = f" (reason:{reason[:256]})" if reason else ""
+            lines.append(f"{prefix} [-] {key.replace('_', ' ')} {status}{suffix}")
     return lines
 
 
@@ -2110,6 +2153,7 @@ def colorize_panel_line(console: Any, line: str, label: str) -> bool:
         or " Enumeration (count:" in payload
         or payload.rstrip().endswith(" (UI)")
         or payload.startswith(" [+] ")
+        or payload.startswith(" [-] export ")
         or "coverage:partial" in payload
     ):
         return False
@@ -2129,6 +2173,7 @@ def colorize_panel_line(console: Any, line: str, label: str) -> bool:
         regexes=(
             RegexColorRule(r"\(version:[^)]+\)", "orange"),
             RegexColorRule(r"coverage:partial", "orange"),
+            RegexColorRule(r"\(reason:[^)]+\)", "orange"),
         ),
         counts=(CountColorRule("count", "red", unknown_color="orange", zero_color="bright_green"),),
         extra_spans=credential_spans,

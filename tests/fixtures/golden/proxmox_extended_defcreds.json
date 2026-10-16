@@ -9,7 +9,7 @@
     "attempted_credentials": [
       {
         "auth_method": "password",
-        "error": "permission denied",
+        "error": "pve credential rejected: permission denied",
         "password": "admin",
         "source": "default",
         "status": "auth_failed",
@@ -17,7 +17,7 @@
       },
       {
         "auth_method": "password",
-        "error": "permission denied",
+        "error": "pve credential rejected: permission denied",
         "password": "admin",
         "source": "default",
         "status": "auth_failed",
@@ -25,7 +25,7 @@
       },
       {
         "auth_method": "password",
-        "error": "permission denied",
+        "error": "pve credential rejected: permission denied",
         "password": "password",
         "source": "default",
         "status": "auth_failed",
@@ -33,7 +33,7 @@
       },
       {
         "auth_method": "password",
-        "error": "permission denied",
+        "error": "pve credential rejected: permission denied",
         "password": "12345678",
         "source": "default",
         "status": "auth_failed",
@@ -49,7 +49,7 @@
       },
       {
         "auth_method": "password",
-        "error": "permission denied",
+        "error": "pve credential rejected: permission denied",
         "password": "changeme",
         "source": "default",
         "status": "auth_failed",
@@ -57,7 +57,7 @@
       },
       {
         "auth_method": "password",
-        "error": "permission denied",
+        "error": "pve credential rejected: permission denied",
         "password": "password",
         "source": "default",
         "status": "auth_failed",
@@ -65,7 +65,7 @@
       },
       {
         "auth_method": "password",
-        "error": "permission denied",
+        "error": "pve credential rejected: permission denied",
         "password": "proxmox",
         "source": "default",
         "status": "auth_failed",
@@ -73,7 +73,7 @@
       },
       {
         "auth_method": "password",
-        "error": "permission denied",
+        "error": "pve credential rejected: permission denied",
         "password": "Proxmox123",
         "source": "default",
         "status": "auth_failed",
@@ -81,7 +81,7 @@
       },
       {
         "auth_method": "password",
-        "error": "permission denied",
+        "error": "pve credential rejected: permission denied",
         "password": "root",
         "source": "default",
         "status": "auth_failed",
@@ -89,7 +89,7 @@
       },
       {
         "auth_method": "password",
-        "error": "permission denied",
+        "error": "pve credential rejected: permission denied",
         "password": "toor",
         "source": "default",
         "status": "auth_failed",

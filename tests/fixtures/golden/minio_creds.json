@@ -64,29 +64,22 @@
     "status": "detected"
   },
   {
-    "api_endpoint": null,
-    "auth_required": null,
-    "console_endpoint": "http://127.0.0.1:19001",
-    "credential_verification_status": "unavailable",
-    "detection": {
-      "admin_plane": false,
-      "admin_s3_shape": false,
-      "console": true,
-      "health_live": true,
-      "root_status": 200,
-      "s3_shape": false,
-      "server_minio": true
-    },
-    "detection_detail_status": "console",
+    "auth_required": true,
+    "credential_state": "valid",
+    "credential_verification_status": "available",
     "detection_signals": [
-      "minio.probe",
+      "minio_console_title",
+      "minio_console_page",
       "minio.product_fingerprint"
     ],
     "detection_status": "confirmed",
     "host": "127.0.0.1",
-    "is_minio": true,
+    "is_ui": true,
     "module": "minio",
     "port": 19001,
+    "provided_credentials_ok": true,
+    "provided_password": "minioadmin",
+    "provided_username": "minioadmin",
     "service": "minio",
     "stages": [
       {
@@ -114,8 +107,19 @@
         "stage_name": "data"
       }
     ],
-    "status": "detected",
-    "write_probe": {},
-    "write_probe_leftovers": []
+    "status": "valid_credentials",
+    "surface": "ui",
+    "ui": {
+      "auth_required": true,
+      "credential_probe_path": null,
+      "credential_proof": "MinIO Console session",
+      "credential_state": "valid",
+      "endpoint": "http://127.0.0.1:19001",
+      "inventory": {},
+      "product": "minio_console",
+      "version": null
+    },
+    "ui_product": "minio_console",
+    "version": null
   }
 ]

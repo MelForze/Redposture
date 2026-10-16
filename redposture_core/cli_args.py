@@ -368,7 +368,7 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         type=_positive_float,
         default=3.0,
         metavar="seconds",
-        help="Network timeout in seconds.",
+        help="Timeout in seconds for one network operation; detection of a target can take longer.",
     )
     parser.add_argument(
         "-w",

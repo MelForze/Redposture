@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import base64
 import binascii
+import csv
 import hashlib
+import html
 import json
 import math
 import re
 import threading
 import time
 import urllib.parse
+import zlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, TypeAlias
@@ -42,6 +45,12 @@ _STRONG_FIELDS = {
     "password",
     "passwd",
     "pwd",
+    "passphrase",
+    "credential",
+    "credentials",
+    "cred",
+    "creds",
+    "apisecret",
     "client_secret",
     "private_key",
     "secret_access_key",
@@ -54,7 +63,6 @@ _STRONG_FIELDS = {
     "authorization",
     "api_token",
     "refresh_token",
-    "credentials",
     "connection_string",
     "connection_uri",
     "dsn",
@@ -125,6 +133,18 @@ _SLACK_RE = re.compile(r"(?<![A-Za-z0-9-])(xox[baprs]-[A-Za-z0-9-]{10,255})(?![A
 _STRIPE_RE = re.compile(r"(?<![A-Za-z0-9_])((?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,255})(?![A-Za-z0-9_])")
 _VAULT_RE = re.compile(r"(?<![A-Za-z0-9.])(hvs\.[A-Za-z0-9_-]{16,255})(?![A-Za-z0-9_-])")
 _NPM_RE = re.compile(r"(?<![A-Za-z0-9_])(npm_[A-Za-z0-9]{20,255})(?![A-Za-z0-9_])")
+_PROVIDER_TOKENS = (
+    (re.compile(r"(?<![\w-])(sk-(?:proj-|ant-[\w-]{4,})?[A-Za-z0-9_-]{20,})(?![\w-])"), "api_token"),
+    (re.compile(r"(?<!\w)(glsa_[A-Za-z0-9_-]{20,})(?!\w)"), "grafana_token"),
+    (re.compile(r"(?<!\w)(dop_v1_[A-Za-z0-9]{32,})(?!\w)"), "digitalocean_token"),
+    (re.compile(r"(?<!\w)(shpat_[A-Za-z0-9]{24,})(?!\w)"), "shopify_token"),
+    (re.compile(r"(?<!\w)(dckr_pat_[A-Za-z0-9_-]{20,})(?!\w)"), "docker_token"),
+    (re.compile(r"(?<!\w)(pypi-AgEI[A-Za-z0-9_-]{16,})(?!\w)"), "pypi_token"),
+    (re.compile(r"(?<!\w)(SG\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,})(?!\w)"), "sendgrid_token"),
+    (re.compile(r"(?<!\w)(SK[0-9a-fA-F]{32})(?!\w)"), "twilio_token"),
+    (re.compile(r"(?<!\w)(\d{6,12}:AA[A-Za-z0-9_-]{20,})(?!\w)"), "telegram_token"),
+    (re.compile(r"(https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+)"), "slack_webhook"),
+)
 _AUTH_HEADER_RE = re.compile(r"(?i)\b(Basic|Bearer)\s+([A-Za-z0-9._~+/=-]{8,})")
 _AZURE_SAS_RE = re.compile(r"(?i)(?:^|[?&])sig=([^&\s]{8,})")
 _AZURE_ACCOUNT_KEY_RE = re.compile(r"(?i)(?:^|[;\s])AccountKey=([^;\s]{16,})")
@@ -132,10 +152,38 @@ _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----[\s\S]+?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----"
 )
 _KEY_VALUE_RE = re.compile(
-    r"(?i)(?:^|[\s,;])"
-    r"(password|passwd|pwd|client[_-]?secret|api[_-]?token|refresh[_-]?token|secret[_-]?access[_-]?key)"
-    r"\s*[:=]\s*(?:[\"']([^\"'\s,;]+)[\"']|([^\s,;]+))"
+    r"(?i)(?<![\w.])(?:--)?"
+    r"((?:[A-Za-z][A-Za-z0-9]{0,32}[._-])*"
+    r"(?:password|passwd|pwd|passphrase|credential|credentials|cred|creds|pass|"
+    r"client[_-]?secret|api[_-]?secret|apisecret|api[_-]?token|"
+    r"_?auth[_-]?token|refresh[_-]?token|secret[_-]?access[_-]?key|"
+    r"secret[_-]?key|apikey))"
+    r"[\"']?\s*(?:=>|[:=])\s*(?:[\"']([^\"'\s,;<>]+)[\"']|([^\s,;&<>]+))"
 )
+_SECRET_KEY_SUFFIXES = (
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "credential",
+    "credentials",
+    "cred",
+    "creds",
+    "client_secret",
+    "api_secret",
+    "apisecret",
+    "api_token",
+    "token",
+    "auth_token",
+    "refresh_token",
+    "secret_access_key",
+    "secret_key",
+    "apikey",
+)
+_SQL_PASSWORD_RE = re.compile(r"(?i)\b(?:WITH\s+)?PASSWORD\s+['\"]([^'\"\s;]{4,})['\"]")
+_XML_SECRET_RE = re.compile(r"(?is)<([A-Za-z][\w:.-]{0,79})\b[^>]{0,2048}>([^<>]{4,4096})</\1\s*>")
+_TAG_RE = re.compile(r"<([A-Za-z][\w:.-]{0,79})\b([^<>]{0,2048})>", re.IGNORECASE)
+_ATTR_RE = re.compile(r"([A-Za-z][\w:.-]{0,79})\s*=\s*([\"'])(.*?)\2", re.DOTALL)
 _BLOB_TYPES = {"text", "keyword", "wildcard", "match_only_text", "flattened"}
 
 
@@ -384,7 +432,11 @@ def classify_field(value: str) -> FieldClass:
         return "medium"
     if {"client", "secret"}.issubset(parts) or {"private", "key"}.issubset(parts):
         return "strong"
-    if "password" in parts or "passwd" in parts:
+    if any(
+        part in {"password", "passwd", "passphrase", "credential", "credentials", "cred", "creds"} for part in parts
+    ):
+        return "strong"
+    if "apisecret" in parts:
         return "strong"
     if any(part in {"secret", "token"} for part in parts):
         return "medium"
@@ -743,6 +795,19 @@ def _candidate(value: str, secret_type: str, score: int, *detectors: str) -> Det
     )
 
 
+def _secret_key_kind(value: str) -> str | None:
+    name = normalize_field_name(value)
+
+    def ends_with_segment(suffix: str) -> bool:
+        return name == suffix or name.endswith(f"_{suffix}")
+
+    if any(ends_with_segment(suffix) for suffix in ("password", "passwd", "pwd", "passphrase", "pass")):
+        return "password"
+    if any(ends_with_segment(suffix) for suffix in _SECRET_KEY_SUFFIXES):
+        return "secret"
+    return None
+
+
 def _split_user_password(value: str) -> tuple[str, str] | None:
     """Parse one decoded credential pair without mistaking JSON/config blobs for it."""
 
@@ -774,6 +839,57 @@ def _decode_credential_base64(value: str) -> str | None:
     if not decoded or any(ord(character) < 9 for character in decoded):
         return None
     return decoded
+
+
+def _structured_decoded_text(value: str) -> bool:
+    stripped = value.lstrip()
+    if stripped.startswith(("{", "[")):
+        try:
+            return isinstance(json.loads(value), (dict, list))
+        except ValueError:
+            return False
+    return bool(_KEY_VALUE_RE.search(value) or _XML_SECRET_RE.search(value) or _TAG_RE.search(value))
+
+
+def _decode_structured_blob(value: str, max_bytes: int) -> str | None:
+    """Unwrap at most two encodings, accepting only bounded structured text.
+
+    Plain base64 user:password pairs in neutral fields remain unreported: their
+    encoding alone is not evidence that a document contains a credential.
+    """
+
+    if max_bytes <= 0 or len(value) > min(max_bytes * 2, 131_072):
+        return None
+    current = value.strip()
+    for _ in range(2):
+        raw: bytes | None = None
+        if re.fullmatch(r"[0-9a-fA-F]{16,}", current) and len(current) % 2 == 0:
+            try:
+                raw = bytes.fromhex(current)
+            except ValueError:
+                pass
+        if raw is None and re.fullmatch(r"[A-Za-z0-9_+/=-]{16,}", current):
+            try:
+                raw = base64.b64decode(current + "=" * (-len(current) % 4), altchars=b"-_", validate=True)
+            except (ValueError, binascii.Error):
+                pass
+        if raw is None or len(raw) > max_bytes:
+            return None
+        if raw.startswith(b"\x1f\x8b"):
+            try:
+                decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                raw = decompressor.decompress(raw, max_bytes + 1)
+                if len(raw) > max_bytes or not decompressor.eof:
+                    return None
+            except zlib.error:
+                return None
+        try:
+            current = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        if _structured_decoded_text(current):
+            return current
+    return None
 
 
 def _decode_base64url_json(value: str) -> Mapping[str, Any] | None:
@@ -824,7 +940,8 @@ def analyze_value(
     text = str(value)
     stripped = text.strip()
     field_class = field_classification or classify_field(path)
-    if _looks_placeholder(stripped):
+    markup = stripped.startswith("<") and ("=" in stripped or "</" in stripped)
+    if _looks_placeholder(stripped) and not markup:
         return [
             DetectedSecret(
                 value="",
@@ -867,6 +984,9 @@ def analyze_value(
     ):
         for match in regex.finditer(text):
             detections.append(_candidate(match.group(1), secret_type, score, detector))
+    for regex, secret_type in _PROVIDER_TOKENS:
+        for match in regex.finditer(text):
+            detections.append(_candidate(match.group(1), secret_type, 96, "provider_token_format"))
     for match in _AUTH_HEADER_RE.finditer(text):
         kind = match.group(1).lower()
         token = match.group(2)
@@ -878,10 +998,42 @@ def analyze_value(
             detections.append(_candidate(token, "bearer_token", 90, "bearer_auth"))
     for match in _KEY_VALUE_RE.finditer(text):
         raw_name = match.group(1)
+        kind = _secret_key_kind(raw_name)
+        if kind is None:
+            continue
         secret = match.group(2) or match.group(3) or ""
         if secret and not _looks_placeholder(secret):
-            kind = "password" if normalize_field_name(raw_name) in {"password", "passwd", "pwd"} else "secret"
             detections.append(_candidate(secret, kind, 85, "credential_pair", "sensitive_field"))
+    for match in _SQL_PASSWORD_RE.finditer(text):
+        if not _looks_placeholder(match.group(1)):
+            detections.append(_candidate(match.group(1), "password", 85, "sql_password"))
+    if "\n" in text and "," in text and len(text) <= 64 * 1024:
+        try:
+            rows = csv.reader(text.splitlines()[:101])
+            headers = next(rows)
+            secret_columns = [(offset, _secret_key_kind(name)) for offset, name in enumerate(headers)]
+            for row in rows:
+                for offset, kind in secret_columns:
+                    if kind and offset < len(row) and not _looks_placeholder(row[offset]):
+                        detections.append(_candidate(row[offset], kind, 82, "csv_secret_column"))
+        except (csv.Error, StopIteration):
+            pass
+    for match in _XML_SECRET_RE.finditer(text):
+        kind = _secret_key_kind(match.group(1))
+        secret = html.unescape(match.group(2).strip())
+        if kind and not _looks_placeholder(secret):
+            detections.append(_candidate(secret, kind, 85, "xml_secret_element"))
+    for tag in _TAG_RE.finditer(text):
+        attributes = {name.lower(): html.unescape(raw) for name, _quote, raw in _ATTR_RE.findall(tag.group(2))}
+        input_kind = _secret_key_kind(attributes.get("name", ""))
+        if tag.group(1).lower() == "input" and input_kind:
+            secret = attributes.get("value", "")
+            if not _looks_placeholder(secret):
+                detections.append(_candidate(secret, input_kind, 85, "html_secret_input"))
+        for name, secret in attributes.items():
+            kind = _secret_key_kind(name.removeprefix("data-"))
+            if kind and not _looks_placeholder(secret):
+                detections.append(_candidate(secret, kind, 85, "xml_secret_attribute"))
     lowered_text = text.lower()
     if "sv=" in lowered_text and any(marker in lowered_text for marker in ("&se=", "&sp=", "&sr=")):
         for match in _AZURE_SAS_RE.finditer(text):
@@ -1200,6 +1352,26 @@ def scan_value_tree(
                 result.suppressed_indicators += 1
         if decoded_json is not None and depth < effective_options.max_depth:
             walk(decoded_json, pointer, depth + 1, key_hint, True)
+        if not base64_decoded and scalar_size <= effective_options.max_embedded_json_bytes:
+            decoded_structured = _decode_structured_blob(scalar_text, effective_options.max_embedded_json_bytes)
+            if decoded_structured and depth < effective_options.max_depth:
+                try:
+                    decoded_value = json.loads(decoded_structured)
+                except ValueError:
+                    decoded_value = decoded_structured
+                walk(decoded_value, pointer, depth + 1, key_hint, True)
+        if not base64_decoded and scalar_size <= effective_options.max_embedded_json_bytes:
+            unescaped = scalar_text
+            if '\\"' in unescaped:
+                unescaped = unescaped.replace('\\"', '"')
+            if re.search(r"\\u[0-9a-fA-F]{4}", unescaped):
+                unescaped = re.sub(
+                    r"\\u([0-9a-fA-F]{4})",
+                    lambda match: chr(int(match.group(1), 16)),
+                    unescaped,
+                )
+            if unescaped != scalar_text and depth < effective_options.max_depth:
+                walk(unescaped, pointer, depth + 1, key_hint, True)
         stripped = scalar_text.lstrip()
         if (
             stripped.startswith(("{", "["))

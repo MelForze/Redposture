@@ -49,6 +49,7 @@ from ...console import Console
 from ...rendering import (
     CountColorRule,
     LiteralColorRule,
+    RegexColorRule,
     format_count_value,
     render_colored_marker_line,
     render_tagged_detail_line,
@@ -1377,11 +1378,16 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
                 transport_mode = candidate.transport_mode
                 state.protocol_requests += 1
                 ok, error = candidate.bootstrap(known_kafka=True, sasl_first=state.sasl_first)
-                if ok:
+                if ok is True:
                     state.protocol_requests += 1
-                    metadata, error = candidate.fetch_metadata(topics=None)
-                    ok = metadata is not None and not bool(metadata.get("auth_required"))
-                if ok:
+                    try:
+                        metadata, metadata_error = candidate.fetch_metadata(topics=None)
+                        if metadata is None or bool(metadata.get("auth_required")):
+                            error = metadata_error or "metadata access denied after authentication"
+                    except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+                        metadata = None
+                        error = _friendly_error_from_exception(exc)
+                if ok is True:
                     retained_session = candidate
                     break
                 candidate.close()
@@ -1766,7 +1772,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         attempts_suffix = _attempted_credentials_suffix(record)
         if attempts_suffix:
             return f"{prefix} [-] authentication required {attempts_suffix}"
-        if record.get("provided_credentials"):
+        if record.get("provided_credentials") and record.get("provided_credentials_ok") is False:
             username = str(record.get("provided_username") or "user").strip() or "user"
             provided_password = record.get("provided_password")
             password_text = "<empty>" if provided_password == "" else str(provided_password or "")
@@ -1794,8 +1800,13 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
     prefix = _nxc_prefix(record)
     success_statuses = {"valid_credentials", "weak_default_creds"}
     lines: list[str] = []
+    inconclusive = 0
     for attempt in attempts:
         if not isinstance(attempt, dict):
+            continue
+        status = str(attempt.get("status") or "")
+        if status not in success_statuses and attempt.get("provided_credentials_ok") is not False:
+            inconclusive += 1
             continue
         username = str(attempt.get("username") or "user")
         password = attempt.get("password")
@@ -1805,8 +1816,10 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             password_text = "<empty>"
         else:
             password_text = str(password)
-        marker = "[+]" if str(attempt.get("status") or "") in success_statuses else "[-]"
+        marker = "[+]" if status in success_statuses else "[-]"
         lines.append(f"{prefix} {marker} {username}:{password_text}")
+    if inconclusive:
+        lines.append(f"{prefix} [*] {inconclusive} credential check(s) inconclusive; see --debug/JSON")
     return lines
 
 
@@ -2211,6 +2224,7 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
             CountColorRule("topics", "red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("partitions", "red", unknown_color="orange", zero_color="bright_green"),
         ),
+        regexes=(RegexColorRule(r"\d+ credential check\(s\) inconclusive", "orange"),),
         extra_spans=lambda marker, right: (
             [(0, len(right), "orange")]
             if marker == "[!]" and right.startswith("Write probe unavailable:")

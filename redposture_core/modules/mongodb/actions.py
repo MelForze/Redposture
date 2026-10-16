@@ -14,14 +14,22 @@ from ...clients.mongodb import (
     MongoNotMongoError,
     close_quietly,
     is_auth_error,
+    is_legacy_wire_error,
     is_transient_network_error,
     json_safe,
     non_system_databases,
     normalize_mongodb_error,
     open_mongodb_client,
+    probe_legacy_mongodb_hello,
 )
 from ...console import Console
-from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import (
+    CountColorRule,
+    RegexColorRule,
+    format_count_value,
+    render_colored_marker_line,
+    render_tagged_detail_line,
+)
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -769,7 +777,12 @@ def _audit_mongodb_host(
                 elif anon_databases is not None:
                     database_names = anon_databases
                     database_error = None
-                    status = "invalid_credentials_anonymous"
+                    status = (
+                        "invalid_credentials_anonymous"
+                        if credential_attempts
+                        and all(item.get("credential_state") == "invalid" for item in credential_attempts)
+                        else "open_no_auth"
+                    )
                     effective_username = credential_candidates[0].get("username")
                     effective_password = credential_candidates[0].get("password")
                     auth_required = False
@@ -873,6 +886,39 @@ def _audit_mongodb_host(
             last_error = normalize_mongodb_error(exc)
             break
         except Exception as exc:
+            if is_legacy_wire_error(exc):
+                try:
+                    legacy_hello = probe_legacy_mongodb_hello(
+                        host,
+                        port,
+                        timeout=timeout,
+                        tls=tls,
+                        tls_ca_file=tls_ca,
+                        tls_certificate_key_file=tls_cert_key,
+                        tls_insecure=tls_insecure,
+                    )
+                except Exception:
+                    legacy_hello = None
+                if legacy_hello is not None:
+                    record = dict(record_template)
+                    record.update(
+                        {
+                            "timestamp": utc_now_iso(),
+                            "is_mongodb": True,
+                            "detection_status": "confirmed",
+                            "detection_signals": ["legacy_ismaster_wire_reply"],
+                            "status": "legacy_wire_unsupported",
+                            "auth_required": None,
+                            "credential_state": "unverified" if credential_candidates else None,
+                            "credential_verification_status": "unavailable",
+                            "credential_verification_reason": "legacy wire protocol is unsupported by installed PyMongo",
+                            "credential_attempts": [],
+                            "server_version": None,
+                            "hello": legacy_hello,
+                            "error": "installed PyMongo cannot authenticate to this legacy MongoDB wire version",
+                        }
+                    )
+                    return record
             last_error = normalize_mongodb_error(exc)
             if attempt >= attempts - 1:
                 break
@@ -1057,7 +1103,11 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [!] invalid credentials {username}:{password_text}; anonymous access still available {_caps_suffix(record)}"
     if status == "auth_required":
         attempts = _credential_attempt_rows(record)
-        if len(attempts) > 1:
+        if (
+            len(attempts) > 1
+            or record.get("credential_state") == "unverified"
+            or any(item.get("credential_state") == "unverified" for item in attempts)
+        ):
             return ""
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "-")
@@ -1065,18 +1115,17 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             password_text = "<empty>" if provided_password == "" else str(provided_password or "")
             return f"{prefix} [-] {username}:{password_text}"
         return ""
+    if status == "legacy_wire_unsupported":
+        return f"{prefix} [*] credential verification unavailable (reason:legacy MongoDB wire protocol)"
     err = _clip(str(record.get("error") or "connection failed"), 96)
     return f"{prefix} [!] connection failed err={err}"
 
 
 def _credential_attempt_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
-    attempted_rows = _generic_credential_attempt_rows(record.get("attempted_credentials"))
-    if len(attempted_rows) > 1:
-        return attempted_rows
     attempts = record.get("credential_attempts")
     if isinstance(attempts, list) and attempts:
         return [item for item in attempts if isinstance(item, dict)]
-    return attempted_rows
+    return _generic_credential_attempt_rows(record.get("attempted_credentials"))
 
 
 def _generic_credential_attempt_rows(attempted_credentials: Any) -> list[dict[str, Any]]:
@@ -1094,6 +1143,14 @@ def _generic_credential_attempt_rows(attempted_credentials: Any) -> list[dict[st
                 "ok": status in {"open_no_auth", "valid_credentials", "weak_default_creds"},
                 "default": item.get("source") == "default",
                 "error": status or None,
+                "credential_state": item.get("credential_state")
+                or (
+                    "valid"
+                    if status in {"valid_credentials", "weak_default_creds"}
+                    else "invalid"
+                    if status == "invalid_credentials_anonymous"
+                    else "unverified"
+                ),
             }
         )
     return rows
@@ -1101,9 +1158,10 @@ def _generic_credential_attempt_rows(attempted_credentials: Any) -> list[dict[st
 
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
     attempts = _credential_attempt_rows(record)
-    if len(attempts) < 2:
-        return []
     if output_format == "json":
+        return []
+    inconclusive = sum(1 for item in attempts if item.get("credential_state") == "unverified")
+    if len(attempts) < 2 and not inconclusive:
         return []
     prefix = _nxc_prefix(record)
     lines: list[str] = []
@@ -1111,6 +1169,8 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
     selected_password = record.get("provided_password")
     for attempt in attempts:
         if not isinstance(attempt, dict):
+            continue
+        if attempt.get("credential_state") == "unverified":
             continue
         username = str(attempt.get("username") or "-")
         password = attempt.get("password")
@@ -1121,6 +1181,8 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
         else:
             lines.append(f"{prefix} [-] {username}:{password_text}")
+    if inconclusive:
+        lines.append(f"{prefix} [*] {inconclusive} credential check(s) inconclusive; see --debug/JSON")
     return lines
 
 
@@ -1357,6 +1419,11 @@ def _render_colored_mongodb_line(console: Console, line: str) -> bool:
             CountColorRule("DBs", "red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("collections", "red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("documents", "red", unknown_color="orange", zero_color="bright_green"),
+        ),
+        regexes=(
+            RegexColorRule(r"\d+ credential check\(s\) inconclusive", "orange"),
+            RegexColorRule(r"credential verification unavailable", "orange"),
+            RegexColorRule(r"legacy MongoDB wire protocol", "orange"),
         ),
     ):
         return True

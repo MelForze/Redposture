@@ -219,6 +219,14 @@ _ACCESS_NOT_TESTED = "not_tested"
 _ACCESS_UNKNOWN = "unknown"
 _ACCESS_UNSUPPORTED = "unsupported"
 
+
+def _confirmed_no_credential_verifier(health_access: object, reflection_access: object) -> bool:
+    """Skip candidates only when both generic probes gave decisive public/absent results."""
+    public_or_absent = {_ACCESS_ANONYMOUS, _ACCESS_UNSUPPORTED, _ACCESS_NOT_TESTED}
+    values = {str(health_access or _ACCESS_UNKNOWN), str(reflection_access or _ACCESS_UNKNOWN)}
+    return values <= public_or_absent and _ACCESS_ANONYMOUS in values
+
+
 _ACCESS_COLORS: dict[str, str] = {
     _ACCESS_ANONYMOUS: "red",
     _ACCESS_AUTHENTICATED: "bright_green",
@@ -1685,12 +1693,19 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
     if output_format != "txt":
         return []
+    if (
+        record.get("credential_verification_requested")
+        and record.get("credential_verification_status") == "unavailable"
+    ):
+        reason = str(record.get("credential_verification_reason") or "no protected RPC")
+        return [f"{_nxc_prefix(record)} [*] Credential verification unavailable ({reason})"]
     attempts = record.get("attempted_credentials")
     if not isinstance(attempts, list) or not attempts:
         return []
     prefix = _nxc_prefix(record)
     success_statuses = {"valid_credentials", "weak_default_creds"}
     lines: list[str] = []
+    unresolved = 0
     for attempt in attempts:
         if not isinstance(attempt, dict):
             continue
@@ -1711,9 +1726,12 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             label = f"{username_text}:{password_text}"
         status = str(attempt.get("status") or "")
         if status not in success_statuses | {"invalid_credentials"}:
+            unresolved += 1
             continue
         marker = "[+]" if status in success_statuses else "[-]"
         lines.append(f"{prefix} {marker} {label}")
+    if unresolved:
+        lines.append(f"{prefix} [*] Credential verification unavailable ({unresolved} credential(s))")
     return lines
 
 
@@ -1908,6 +1926,7 @@ def _grpc_marker_color_spans(payload: str) -> list[tuple[int, int, str]]:
             ("(reflection:disable)", "bright_green"),
             ("(reflection:unknown)", "yellow"),
             ("authentication required", "red"),
+            ("verification unavailable", "orange"),
         )
         + tuple(
             (f"({field}:{access})", color)
@@ -2231,6 +2250,19 @@ def _grpc_lifecycle_audit(
         auth_used = record.get("auth_used")
         if isinstance(auth_used, dict):
             auth_used["source"] = "defcreds"
+    if bool(getattr(ctx.args, "defcreds", False)):
+        record["credential_verification_requested"] = True
+        baseline = state.detect_result or {}
+        if (
+            record.get("provided_credentials_ok") is not True
+            and _confirmed_no_credential_verifier(baseline.get("health_access"), baseline.get("reflection_access"))
+            and not options.get("invoke_path")
+            and not options.get("analyze")
+        ):
+            record["credential_verification_status"] = "unavailable"
+            record["credential_verification_reason"] = "no protected Health or Reflection RPC"
+        else:
+            record["credential_verification_status"] = "available"
     return record
 
 

@@ -21,6 +21,9 @@ from .enumerate import ObjectInfo
 # Stage 1: interesting-by-name substrings / suffixes. A match makes the key a
 # *candidate*, not a finding.
 _CANDIDATE_SUFFIXES = (
+    ".txt",
+    ".log",
+    ".csv",
     ".env",
     ".pem",
     ".key",
@@ -71,6 +74,20 @@ def is_candidate_key(key: str) -> str | None:
         if sub in lowered:
             return f"name:{sub}"
     return None
+
+
+def _candidate_reason(obj: ObjectInfo) -> str | None:
+    named = is_candidate_key(obj.key)
+    if named is not None:
+        return named
+    content_type = str(obj.content_type or "").lower().split(";", 1)[0].strip()
+    if content_type.startswith(("image/", "audio/", "video/")):
+        return None
+    if obj.key.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp3", ".mp4")):
+        return None
+    # Unknown extensions and application/octet-stream can contain plain text.
+    # Read them under the existing target-wide byte, object and time budgets.
+    return "content:unclassified"
 
 
 # Text carried from one chunk into the next so a secret straddling a chunk
@@ -263,7 +280,7 @@ def discover_secrets(
                 result._partial("object_limit")
                 return
             enumerated += 1
-            reason = is_candidate_key(obj.key)
+            reason = _candidate_reason(obj)
             if reason is None:
                 continue
             result.candidates.append({"bucket": obj.bucket, "key": obj.key, "reason": reason})

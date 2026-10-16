@@ -273,17 +273,18 @@ def test_auth_does_not_accept_public_200_or_ambiguous_403(monkeypatch: pytest.Mo
 
 def test_cve_jenkins_requires_exact_version_and_low_privilege_evidence() -> None:
     catalog = load_catalog()
+    no_wso2 = {"plugins": [], "plugins_count": 0, "plugins_access": "allowed"}
     anonymous = enumerate_record(
-        "jenkins", {"version": "2.440", "auth_required": True}, catalog=catalog, confirmed=True
+        "jenkins", {"version": "2.440", "auth_required": True, **no_wso2}, catalog=catalog, confirmed=True
     )
     assert {item["id"] for item in anonymous["findings"]} == {"CVE-2024-23897"}
     restricted = enumerate_record(
-        "jenkins", {"version": "2.555.2", "auth_required": True}, catalog=catalog, confirmed=True
+        "jenkins", {"version": "2.555.2", "auth_required": True, **no_wso2}, catalog=catalog, confirmed=True
     )
     assert restricted["findings"] == []
     verified = enumerate_record(
         "jenkins",
-        {"version": "2.555.2", "auth_required": True},
+        {"version": "2.555.2", "auth_required": True, **no_wso2},
         catalog=catalog,
         confirmed=True,
         credentials_provided=True,
@@ -291,13 +292,15 @@ def test_cve_jenkins_requires_exact_version_and_low_privilege_evidence() -> None
     assert {item["id"] for item in verified["findings"]} == {"CVE-2026-53435"}
     fixed = enumerate_record(
         "jenkins",
-        {"version": "2.555.3", "auth_required": True},
+        {"version": "2.555.3", "auth_required": True, **no_wso2},
         catalog=catalog,
         confirmed=True,
         credentials_provided=True,
     )
     assert fixed["findings"] == []
-    unknown = enumerate_record("jenkins", {"version": None, "auth_required": True}, catalog=catalog, confirmed=True)
+    unknown = enumerate_record(
+        "jenkins", {"version": None, "auth_required": True, **no_wso2}, catalog=catalog, confirmed=True
+    )
     assert {item["id"] for item in unknown["findings"]} == {"CVE-2024-23897"}
     assert unknown["findings"][0]["version_assessment"] == "unknown"
     plugin_record = {

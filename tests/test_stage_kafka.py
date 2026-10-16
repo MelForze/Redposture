@@ -300,8 +300,20 @@ def test_kafka_error_helpers_and_format_record_statuses() -> None:
         "provided_username": "kafka",
         "provided_password": "password",
         "attempted_credentials": [
-            {"username": "admin", "password": "admin", "source": "default", "status": "auth_required"},
-            {"username": "kafka", "password": "password", "source": "default", "status": "auth_required"},
+            {
+                "username": "admin",
+                "password": "admin",
+                "source": "default",
+                "status": "auth_required",
+                "provided_credentials_ok": False,
+            },
+            {
+                "username": "kafka",
+                "password": "password",
+                "source": "default",
+                "status": "auth_required",
+                "provided_credentials_ok": False,
+            },
         ],
     }
     assert kafka._format_record(sweep_record, "txt") == ""
@@ -2561,6 +2573,66 @@ def test_kafka_lifecycle_checks_sasl_plaintext_before_tls_fallback(monkeypatch: 
     assert record["transport_mode"] == "plaintext"
     assert state.sasl_first is True
     assert open_modes == [None, False]
+
+
+def test_kafka_sasl_success_remains_valid_when_metadata_is_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSession:
+        transport_mode = "plaintext"
+
+        def bootstrap(self, *, known_kafka: bool, sasl_first: bool = False):
+            assert known_kafka is True
+            assert sasl_first is False
+            return True, None
+
+        def fetch_metadata(self, *, topics=None):
+            assert topics is None
+            return None, "topic metadata denied"
+
+        def close(self):
+            return None
+
+    session = FakeSession()
+    monkeypatch.setattr(kafka_actions.KafkaSession, "open", lambda *_args, **_kwargs: session)
+    state = kafka_actions.KafkaLifecycleState(auth_required=True, transport_mode="plaintext")
+    ctx = argparse.Namespace(
+        host="127.0.0.1",
+        port=9092,
+        args=argparse.Namespace(timeout=1.0, retries=0),
+        credential=argparse.Namespace(username="reader", password="secret", source="provided"),
+        lifecycle_state=state,
+    )
+    record = kafka_actions.authenticate_kafka(
+        ctx,
+        {"host": "127.0.0.1", "port": 9092, "is_kafka": True, "status": "auth_required"},
+        {},
+    )
+    assert record["provided_credentials_ok"] is True
+    assert record["status"] == "valid_credentials"
+    assert record["credential_attempts"][0]["ok"] is True
+
+
+def test_kafka_unknown_sasl_result_is_not_rendered_as_invalid() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 9092,
+        "status": "auth_required",
+        "provided_credentials": True,
+        "provided_username": "slow",
+        "provided_password": "secret",
+        "provided_credentials_ok": None,
+        "attempted_credentials": [
+            {
+                "username": "slow",
+                "password": "secret",
+                "status": "auth_required",
+                "provided_credentials_ok": None,
+            }
+        ],
+    }
+    assert "slow:secret" not in kafka._format_record(record, "txt")
+    lines = kafka._format_credential_attempts_records(record, "txt")
+    assert len(lines) == 1
+    assert "1 credential check(s) inconclusive" in lines[0]
 
 
 def test_kafka_tls_marker_only_on_detect_line() -> None:

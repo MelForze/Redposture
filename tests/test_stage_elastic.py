@@ -203,6 +203,29 @@ def test_classify_detect_probe_accepts_opensearch_markers() -> None:
     assert classified["vendor"] == "opensearch"
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"tagline": "You Know, for Search"},
+        {"name": "es", "version": {"number": "8.1.0", "build_hash": "abc"}},
+        {"tagline": "The OpenSearch Project: https://opensearch.org/"},
+        {"version": {"number": "2.11.0", "distribution": "opensearch"}},
+    ],
+)
+def test_single_spoofable_elastic_marker_does_not_confirm(body: dict[str, object]) -> None:
+    classified = _classify_detect_probe("/", 200, json.dumps(body).encode(), {}, None)
+    assert classified["signal_kind"] != "hard_positive"
+    decision = _evaluate_detect_decision([{"path": "/", **classified}])
+    assert decision["detected"] is False
+
+
+def test_two_independent_legacy_elastic_markers_still_confirm() -> None:
+    body = {"name": "node", "tagline": "You Know, for Search", "version": {"number": "7.10.2", "build_hash": "abc"}}
+    classified = _classify_detect_probe("/", 200, json.dumps(body).encode(), {}, None)
+    assert classified["signal_kind"] == "hard_positive"
+    assert {"root_tagline", "root_version_shape"} <= set(classified["signals"])
+
+
 def test_classify_detect_probe_accepts_opensearch_security_realm_without_credentials() -> None:
     classified = _classify_detect_probe(
         "/",

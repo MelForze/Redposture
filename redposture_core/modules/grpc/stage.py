@@ -165,7 +165,24 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
     )
 
     def _detect(ctx: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(actions.detect_grpc(ctx, options), module="grpc", service="grpc")
+        payload = actions.detect_grpc(ctx, options)
+        if bool(getattr(ctx.args, "defcreds", False)):
+            payload["credential_verification_requested"] = True
+            # A caller-supplied application method can provide its own proof;
+            # otherwise an unprotected/disabled Health and Reflection pair is
+            # not a password verifier for an arbitrary gRPC application.
+            if (
+                actions._confirmed_no_credential_verifier(
+                    payload.get("health_access"), payload.get("reflection_access")
+                )
+                and not options.get("invoke_path")
+                and not options.get("analyze")
+            ):
+                payload["credential_verification_status"] = "unavailable"
+                payload["credential_verification_reason"] = "no protected Health or Reflection RPC"
+            else:
+                payload["credential_verification_status"] = "available"
+        return AuditRecord.from_mapping(payload, module="grpc", service="grpc")
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
         return AuditRecord.from_mapping(
@@ -207,6 +224,7 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         deep_gate=actions.grpc_deep_gate,
         credential_gate=_grpc_credential_gate,
+        skip_credentials_without_verifier=True,
         record_all_credential_attempts=full_credential_sweep,
         continue_after_credential_success=full_credential_sweep,
         continue_after_credential_error=full_credential_sweep,

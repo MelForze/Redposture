@@ -48,3 +48,22 @@ def test_valkey_qa_rejects_redis_identity_or_false_auth_success(mutation) -> Non
         record["provided_credentials_ok"] = False
     with pytest.raises(AssertionError):
         validate_valkey_record(record, version_known=True, credentials=True)
+
+
+def test_valkey_qa_requires_no_product_cve_when_info_is_unavailable() -> None:
+    record = {
+        "is_redis": True,
+        "implementation": None,
+        "server_version": None,
+        "provided_credentials_ok": False,
+        "cve_enumeration": {
+            "status": "unsupported",
+            "reason": "unsupported_product_detection",
+            "products": [],
+            "findings": [],
+        },
+    }
+    validate_valkey_record(copy.deepcopy(record), version_known=False, credentials=False)
+    record["cve_enumeration"]["products"] = [{"product_key": "redis"}]
+    with pytest.raises(AssertionError):
+        validate_valkey_record(record, version_known=False, credentials=False)

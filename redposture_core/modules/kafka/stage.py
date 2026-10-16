@@ -81,6 +81,7 @@ def _build_kafka_lifecycle_options(args: Any) -> dict[str, Any]:
         "show_clusters": bool(getattr(args, "show_clusters", False)),
         "show_brokers": bool(getattr(args, "show_brokers", False)),
         "show_consumer_groups": bool(getattr(args, "show_consumer_groups", False)),
+        "ui_dump_all": dump and explicit_max is None and dump_limit is None,
     }
 
 
@@ -212,6 +213,7 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         record_all_credential_attempts=full_credential_sweep,
+        credential_attempt_detail_fields=("provided_credentials_ok",),
         continue_after_credential_success=full_credential_sweep,
         continue_after_credential_error=full_credential_sweep,
         credential_gate=_kafka_credential_gate,

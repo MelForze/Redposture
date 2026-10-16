@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import socket
+import ssl
+import struct
 from collections.abc import Iterable
 from typing import Any
 from urllib.parse import quote
@@ -65,6 +68,79 @@ def is_mongodb_hello_response(result: Any) -> bool:
             "topologyVersion",
         )
     )
+
+
+def is_legacy_wire_error(exc: BaseException) -> bool:
+    """PyMongo 4 refuses servers whose handshake advertises wire < 8."""
+
+    message = str(exc).lower()
+    return "reports wire version" in message and "requires at least" in message
+
+
+def probe_legacy_mongodb_hello(
+    host: str,
+    port: int,
+    *,
+    timeout: float,
+    tls: bool = False,
+    tls_ca_file: str | None = None,
+    tls_certificate_key_file: str | None = None,
+    tls_insecure: bool = False,
+) -> dict[str, Any] | None:
+    """Read a bounded unauthenticated OP_QUERY isMaster reply for legacy detection.
+
+    This is only used after PyMongo reports its unsupported wire floor. It does
+    not authenticate or imply that any application data is accessible.
+    """
+
+    from bson import BSON
+
+    document = BSON.encode({"isMaster": 1})
+    body = struct.pack("<i", 0) + b"admin.$cmd\0" + struct.pack("<ii", 0, 1) + document
+    request = struct.pack("<iiii", 16 + len(body), 1, 0, 2004) + body
+
+    def read_exact(conn: socket.socket | ssl.SSLSocket, length: int) -> bytes:
+        result = bytearray()
+        while len(result) < length:
+            part = conn.recv(length - len(result))
+            if not part:
+                raise ConnectionError("truncated MongoDB reply")
+            result.extend(part)
+        return bytes(result)
+
+    with socket.create_connection((host, port), timeout=timeout) as raw:
+        raw.settimeout(timeout)
+        connection: socket.socket
+        if tls:
+            context = ssl.create_default_context(cafile=tls_ca_file)
+            if tls_insecure:
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+            if tls_certificate_key_file:
+                context.load_cert_chain(tls_certificate_key_file)
+            connection = context.wrap_socket(raw, server_hostname=host)
+        else:
+            connection = raw
+        with connection:
+            connection.sendall(request)
+            header = read_exact(connection, 16)
+            length, _request_id, response_to, opcode = struct.unpack("<iiii", header)
+            if not 36 <= length <= 1024 * 1024 or response_to != 1 or opcode != 1:
+                return None
+            payload = read_exact(connection, length - 16)
+    if len(payload) < 20:
+        return None
+    _flags, _cursor_id, _starting_from, returned = struct.unpack("<iqii", payload[:20])
+    if returned < 1 or len(payload) < 24:
+        return None
+    document_size = struct.unpack("<i", payload[20:24])[0]
+    if not 5 <= document_size <= len(payload) - 20:
+        return None
+    try:
+        result = BSON(payload[20 : 20 + document_size]).decode()
+    except Exception:
+        return None
+    return result if is_mongodb_hello_response(result) else None
 
 
 def _load_pymongo() -> Any:

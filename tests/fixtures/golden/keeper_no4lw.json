@@ -3,7 +3,8 @@
     "anonymous_auth_probe_results": {
       "/": "ok",
       "/keeper": "ok",
-      "/keeper/api_version": "ok"
+      "/keeper/api_version": "ok",
+      "/keeper/feature_flags": "ok"
     },
     "auth_error": null,
     "auth_inference_source": "root_ok",
@@ -16,6 +17,7 @@
     "can_create_znode": null,
     "can_delete_znode": null,
     "connect_error": null,
+    "credential_attempts_skipped": 1,
     "credential_auth_probe_results": {},
     "credential_verdict": null,
     "credential_verification_path": null,

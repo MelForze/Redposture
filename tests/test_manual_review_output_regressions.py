@@ -275,6 +275,8 @@ def test_runtime_does_not_repeat_bare_auth_requirement_but_keeps_failed_attempts
     )
     if module == "grafana":
         payload["attempted_credentials_count"] = 1
+    if module == "kafka":
+        payload["provided_credentials_ok"] = False
     lines = runner._render_record(AuditRecord.from_mapping(payload, module=module, service=module), plan, "txt", False)
     if module not in {"etcd", "clickhouse", "docker"}:
         assert any("bad:bad" in line or "credentials invalid" in line for line in lines)

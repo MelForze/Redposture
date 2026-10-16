@@ -395,6 +395,7 @@ def _try_credentials(
                 "default": bool(candidate.get("default")),
                 "source": candidate.get("source") or "explicit",
                 "error": None,
+                "credential_state": "valid",
             }
             attempts.append(attempt)
             if selected is None:
@@ -411,6 +412,7 @@ def _try_credentials(
                     "source": candidate.get("source") or "explicit",
                     "error": normalize_oracle_error(exc),
                     "status": "account_locked",
+                    "credential_state": "unverified",
                 }
             )
         except OracleAccountExpiredError as exc:
@@ -424,6 +426,19 @@ def _try_credentials(
                     "source": candidate.get("source") or "explicit",
                     "error": normalize_oracle_error(exc),
                     "status": "account_expired",
+                    "credential_state": "unverified",
+                }
+            )
+        except OracleAuthError as exc:
+            attempts.append(
+                {
+                    "username": username,
+                    "password": password,
+                    "ok": False,
+                    "default": bool(candidate.get("default")),
+                    "source": candidate.get("source") or "explicit",
+                    "error": normalize_oracle_error(exc),
+                    "credential_state": "invalid",
                 }
             )
         except Exception as exc:
@@ -435,6 +450,7 @@ def _try_credentials(
                     "default": bool(candidate.get("default")),
                     "source": candidate.get("source") or "explicit",
                     "error": normalize_oracle_error(exc),
+                    "credential_state": "unverified",
                 }
             )
         finally:
@@ -1326,16 +1342,21 @@ def _audit_oracle_host(
                     active_client_owned = True
                     status = "weak_default_creds" if selected_credential.get("default") else "valid_credentials"
                     auth_required = True
-                elif client is not None:
-                    status = "invalid_credentials"
                 elif terminal_status:
                     status = terminal_status
-                elif credential_attempts and _is_transient_oracle_connect_error(last_auth_error):
-                    raise OracleClientError(last_auth_error or "transient listener failure")
-                elif credential_attempts and last_auth_error:
+                elif credential_attempts and all(
+                    item.get("credential_state") == "invalid" for item in credential_attempts
+                ):
                     status = "invalid_credentials"
                 else:
                     status = "auth_required"
+                    if any(item.get("credential_state") == "unverified" for item in credential_attempts):
+                        record["credential_verification_status"] = "inconclusive"
+                        if any(
+                            _is_transient_oracle_connect_error(str(item.get("error") or ""))
+                            for item in credential_attempts
+                        ):
+                            record["operational_failure"] = True
             elif credential_candidates:
                 record["credential_verification_status"] = "unavailable"
                 probe_errors.append("Oracle service/SID not confirmed; credentials were not attempted")
@@ -1659,7 +1680,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     prefix = _nxc_prefix(record)
     status = str(record.get("status") or "fail")
     credential_attempts = record.get("credential_attempts")
-    has_attempt_details = isinstance(credential_attempts, list) and len(credential_attempts) > 1
+    has_attempt_details = isinstance(credential_attempts, list) and bool(credential_attempts)
     if status == "open_no_auth":
         return ""
     if status in {"valid_credentials", "weak_default_creds"}:
@@ -1672,7 +1693,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} {marker} {user}:{secret_text}{_caps_suffix(record)}"
     if status == "auth_required":
         return ""
-    if status in {"account_locked", "account_expired", "invalid_credentials"}:
+    if status in {"account_locked", "account_expired"}:
+        return ""
+    if status == "invalid_credentials":
         if has_attempt_details:
             return ""
         user = str(record.get("provided_username") or "-")
@@ -1685,15 +1708,21 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
     attempts = record.get("credential_attempts")
-    if output_format != "txt" or not isinstance(attempts, list) or len(attempts) < 2:
+    if output_format != "txt" or not isinstance(attempts, list) or not attempts:
         return []
 
+    inconclusive = sum(
+        1 for attempt in attempts if isinstance(attempt, dict) and attempt.get("credential_state") == "unverified"
+    )
     prefix = _nxc_prefix(record)
     selected_username = record.get("effective_username")
     selected_password = record.get("provided_password")
     lines: list[str] = []
     for attempt in attempts:
         if not isinstance(attempt, dict):
+            continue
+        state = attempt.get("credential_state")
+        if state == "unverified":
             continue
         username = str(attempt.get("username") or "-")
         password = attempt.get("password")
@@ -1704,6 +1733,8 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
         else:
             lines.append(f"{prefix} [-] {username}:{password_text}")
+    if inconclusive:
+        lines.append(f"{prefix} [*] {inconclusive} credential check(s) inconclusive; see --debug/JSON")
     return lines
 
 
@@ -2056,6 +2087,7 @@ def _render_colored_oracle_line(console: Console, line: str) -> bool:
             CountColorRule("Tables", "red", unknown_color="orange", zero_color="bright_green"),
         ),
         regexes=(
+            RegexColorRule(r"\d+ credential check\(s\) inconclusive", "orange"),
             RegexColorRule(r"\b(?:available|total):0\b", "bright_green"),
             RegexColorRule(r"\b(?:available|total):[1-9]\d*\b", "red"),
             RegexColorRule(r"\b(CRITICAL|HIGH|MEDIUM|LOW) - [^\n]+", "orange"),

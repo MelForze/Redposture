@@ -920,3 +920,55 @@ def test_grpc_explicit_transport_disables_opposite_probe(
     assert result["is_grpc"] is True
     assert result["transport_mode"] == ("tls" if requested_use_tls else "plaintext")
     assert observed_modes == [requested_use_tls, requested_use_tls]
+
+
+def test_defcreds_without_protected_grpc_rpc_reports_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core.modules.grpc import actions, stage
+
+    monkeypatch.setattr(
+        actions,
+        "detect_grpc",
+        lambda _ctx, _options: {
+            "host": "h",
+            "port": 50051,
+            "status": "detected",
+            "is_grpc": True,
+            "health_access": "anonymous",
+            "reflection_access": "not_tested",
+        },
+    )
+    args = parse_args(["grpc", "-t", "h:50051", "--defcreds"])
+    spec = stage.build_grpc_spec(args)
+    assert spec.skip_credentials_without_verifier is True
+    assert spec.detect is not None
+    record = spec.detect(SimpleNamespace(args=args)).to_dict()
+    assert record["credential_verification_status"] == "unavailable"
+    assert record["credential_verification_requested"] is True
+    lines = actions._format_credential_attempts_records(record, "txt")
+    assert len(lines) == 1
+    assert "Credential verification unavailable" in lines[0]
+    assert "\x1b[" not in lines[0]
+    assert actions._format_credential_attempts_records(record, "json") == []
+
+    class FakeConsole:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, text: str, color: str, _stream: object) -> str:
+            return f"<{color}>{text}</{color}>"
+
+        def plain(self, message: str) -> None:
+            self.lines.append(message)
+
+    console = FakeConsole()
+    assert actions._render_colored_grpc_line(console, lines[0])
+    assert "<orange>verification unavailable</orange>" in console.lines[0]
+
+
+def test_grpc_unknown_probe_cannot_skip_credential_candidates() -> None:
+    from redposture_core.modules.grpc.actions import _confirmed_no_credential_verifier
+
+    assert _confirmed_no_credential_verifier("anonymous", "unsupported") is True
+    assert _confirmed_no_credential_verifier("anonymous", "anonymous") is True
+    assert _confirmed_no_credential_verifier("unknown", "unsupported") is False
+    assert _confirmed_no_credential_verifier("auth_required", "unsupported") is False

@@ -69,6 +69,33 @@ def test_discovery_keeps_findings_beyond_previous_200_item_cap() -> None:
     assert any("LongSecretValue0219" in finding["sample"] for finding in findings)
 
 
+@pytest.mark.parametrize("kind", ["qemu", "lxc"])
+def test_discovery_ignores_pve_config_digest_without_losing_secrets(kind: str) -> None:
+    digest = "102cae94e625ee176a570807f168fd4d799eb1a8"
+    token = "ghp_1234567890abcdefghij1234567890abcdefghij"
+    endpoint = f"/nodes/pve/{kind}/101/config"
+    payload = json.dumps(
+        {"data": {"digest": digest, "description": f"api_token={token}", "password": "RealSecret12345"}}
+    ).encode()
+    findings: list[dict[str, str]] = []
+
+    proxmox_actions._scan_endpoint_payload(endpoint, payload, findings, set())
+
+    assert not any(digest in item["sample"] for item in findings)
+    assert any(token in item["sample"] for item in findings)
+    assert any("RealSecret12345" in item["sample"] for item in findings)
+
+
+def test_discovery_does_not_globally_suppress_opaque_config_values() -> None:
+    token = "api_token=LongSecretValue12345"
+    findings: list[dict[str, str]] = []
+    payload = json.dumps({"data": {"digest": token}}).encode()
+
+    proxmox_actions._scan_endpoint_payload("/nodes/pve/qemu/101/config", payload, findings, set())
+
+    assert any(token in item["sample"] for item in findings)
+
+
 def test_streamed_proxmox_findings_are_not_repeated_at_final_render() -> None:
     finding = {"endpoint": "/nodes/pve/config", "reason": "json_password", "path": "$.password", "sample": "secret"}
     record = {
@@ -2471,3 +2498,20 @@ def test_proxmox_add_user_does_not_grant_global_acl_implicitly(monkeypatch) -> N
     assert record["add_user_privileges_granted"] is None
     assert not any(path == "/access/acl" for _method, path in calls)
     assert _looks_like_proxmox_response(200, b"<html>login</html>", {}) is False
+
+
+def test_discover_text_xml_secret_requires_sensitive_tag() -> None:
+    from redposture_core.modules.proxmox import actions
+
+    findings: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    actions._collect_text_findings(
+        "<password>SecretXmlValue12345</password><description>ordinary text</description>",
+        "/nodes/pve/qemu/100/config",
+        findings,
+        seen,
+        path="$.description",
+        limit=20,
+    )
+    assert any(item["reason"] == "xml_password" and "SecretXmlValue12345" in item["sample"] for item in findings)
+    assert not any(item["reason"] == "xml_description" for item in findings)

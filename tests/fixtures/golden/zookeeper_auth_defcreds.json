@@ -6,285 +6,413 @@
     },
     "attempted_credentials": [
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "12345678",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "admin"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "admin",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "admin"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "changeme",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "admin"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "kafka",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "admin"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "password",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "admin"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "zookeeper",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "admin"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "broker",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "broker"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "brokerpass",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "broker"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "client",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "client"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "dev",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "dev"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "guest",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "guest"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "hadoop",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "hadoop"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "changeme",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "kafka"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "kafka",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "kafka"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "password",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "kafka"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "zookeeper",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "kafka"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "admin",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "root"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "password",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "root"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "root",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "root"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "rootpass",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "root"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "zookeeper",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "root"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "password",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "service"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "service",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "service"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "solr",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "solr"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "super",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "super"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "test",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "test"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "password",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "user"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "user",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "user"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "12345",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "user1"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "password",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "zk"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "zk",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "zk"
       },
       {
+        "credential_auth_probe_results": {
+          "/": "ok",
+          "/redposture-auth": "ok"
+        },
         "credential_verdict": "valid",
         "error": null,
         "password": "zookeeper",
@@ -294,28 +422,40 @@
         "username": "zk"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "admin",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "zookeeper"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "password",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "zookeeper"
       },
       {
-        "credential_verdict": "rejected",
-        "error": "authentication failed",
+        "credential_auth_probe_results": {
+          "/": "noauth",
+          "/redposture-auth": "noauth"
+        },
+        "credential_verdict": "unverified",
+        "error": "root query failed: NOAUTH",
         "password": "zookeeper",
-        "provided_credentials_ok": false,
+        "provided_credentials_ok": null,
         "source": "default",
         "status": "auth_required",
         "username": "zookeeper"
@@ -332,7 +472,8 @@
     "can_delete_znode": true,
     "connect_error": null,
     "credential_auth_probe_results": {
-      "/": "ok"
+      "/": "ok",
+      "/redposture-auth": "ok"
     },
     "credential_verdict": "valid",
     "credential_verification_path": "/",

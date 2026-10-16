@@ -35,7 +35,7 @@ def test_hard_positive_root_skips_all_confirmation_probes(monkeypatch: pytest.Mo
         lambda *_args, **_kwargs: (
             200,
             (b'{"name":"node-1","cluster_name":"prod","version":{"number":"2.19.1","distribution":"opensearch"}}'),
-            {},
+            {"X-Elastic-Product": "OpenSearch"},
             None,
             "http",
             False,
@@ -263,7 +263,7 @@ def test_detection_does_not_launch_cosmetic_version_probe(monkeypatch: pytest.Mo
         lambda *_args, **_kwargs: (
             200,
             b'{"tagline":"You Know, for Search"}',
-            {},
+            {"X-Elastic-Product": "Elasticsearch"},
             None,
             "http",
             False,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib
+import ipaddress
 import json
 import os
 import re
@@ -15,7 +16,7 @@ import threading
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
-from itertools import groupby
+from itertools import groupby, zip_longest
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -26,6 +27,7 @@ from .cli_args import build_parser
 from .console import Console
 from .module_registry import AUDIT_MODULE_NAMES
 from .network_proxy import RuntimeNetworkConfig
+from .progress import make_command_progress
 from .rendering import BooleanColorRule, collect_boolean_spans, format_report_line_for_console
 from .scheduler import BoundedScheduler
 from .spray_render import render_spray_line
@@ -34,6 +36,7 @@ from .stage_runtime import (
     AuditCredentialRun,
     AuditHookContext,
     ModuleAuditSpec,
+    is_pre_detect_operational_failure,
     render_record_with_module,
 )
 from .targeting import TargetParsePolicy, stream_scan_target_specs
@@ -248,6 +251,7 @@ class AttemptJournal:
         self.closed = False
         self.on_result: Any = None
         self.db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS finished_jobs (id TEXT PRIMARY KEY)")
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS results (id TEXT PRIMARY KEY, module TEXT NOT NULL, host TEXT NOT NULL, "
             "port INTEGER NOT NULL, candidate INTEGER, status TEXT NOT NULL, evidence TEXT NOT NULL, "
@@ -275,6 +279,19 @@ class AttemptJournal:
                 return None
             row = self.db.execute("SELECT status, evidence FROM results WHERE id=?", (key,)).fetchone()
             return (row[0], row[1]) if row else None
+
+    def job_finished(self, key: str) -> bool:
+        with self.lock:
+            if self.closed:
+                return False
+            return self.db.execute("SELECT 1 FROM finished_jobs WHERE id=?", (key,)).fetchone() is not None
+
+    def finish_job(self, key: str) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.db.execute("INSERT OR IGNORE INTO finished_jobs (id) VALUES (?)", (key,))
+            self.db.commit()
 
     def put(
         self,
@@ -372,10 +389,6 @@ def classify(record: AuditRecord, credential: AuditCredentialRun, runner: AuditC
         or any(marker in detail for marker in _LOCK_MARKERS)
     ):
         return "rate_limited", "server rate limit, CAPTCHA, or account lockout"
-    if status in {"access_denied", "forbidden"} and (
-        payload.get("identity_verified") is True or record.extra.get("auth_valid") is True
-    ):
-        return "access_denied", "identity verified; resource denied"
     # A module-specific credential gate is the authoritative positive proof.
     accepted, why = runner._credential_gate(credential, record)
     ui_product = str(payload.get("ui_product") or "") if payload.get("surface") == "ui" else ""
@@ -384,6 +397,22 @@ def classify(record: AuditRecord, credential: AuditCredentialRun, runner: AuditC
     credential_state = str(payload.get("credential_state") or "").lower()
     if credential_state in {"unknown", "unverified", "verification_unavailable", "inconclusive"}:
         return "inconclusive", _clean(why or credential_state)
+    negative_proofs = (
+        "provided_credentials_ok",
+        "credential_verified",
+        "auth_valid",
+        "token_valid",
+        "credentials_valid",
+        "login_success",
+    )
+    if any(record.extra.get(field) is False for field in negative_proofs) or credential_state == "invalid":
+        return "invalid", "credential rejected by product verifier"
+    if status == "invalid_credentials":
+        return "invalid", "credential rejected by product verifier"
+    if status in {"access_denied", "forbidden"} and (
+        payload.get("identity_verified") is True or record.extra.get("auth_valid") is True
+    ):
+        return "access_denied", "identity verified; resource denied"
     if accepted and (
         any(
             record.extra.get(field) is True
@@ -399,12 +428,6 @@ def classify(record: AuditRecord, credential: AuditCredentialRun, runner: AuditC
         or status in _PRODUCT_AUTH_SUCCESS_STATUSES
     ):
         return "valid", why
-    if (
-        record.extra.get("provided_credentials_ok") is False
-        or status == "invalid_credentials"
-        or credential_state == "invalid"
-    ):
-        return "invalid", "credential rejected by product verifier"
     if status == "auth_required" and why == "status=auth_required":
         return "inconclusive", "credential not verified; authentication still required"
     return "inconclusive", _clean(why or status or "verification unavailable")
@@ -427,7 +450,21 @@ def _supported(module: str, candidate: Candidate, detection: AuditRecord) -> boo
 
 
 def _attempt_id(module: str, target: Any, port: int, candidate: int | None, *, surface: str | None = None) -> str:
-    value = f"{module}\0{target.raw or target.host}\0{port}\0{candidate}"
+    # A CIDR or IPv4 range keeps its source expression in ``raw`` for every
+    # expanded host. Keying by that expression silently skips all but the
+    # first address. Keep the old key shape for individual targets so their
+    # existing checkpoints still resume.
+    identity = str(target.raw or target.host)
+    if "/" in identity:
+        try:
+            ipaddress.ip_network(identity, strict=False)
+        except ValueError:
+            pass
+        else:
+            identity = str(target.host)
+    elif re.fullmatch(r"[0-9.\s]+-[0-9.\s]+", identity):
+        identity = str(target.host)
+    value = f"{module}\0{identity}\0{port}\0{candidate}"
     if surface is not None:
         value += f"\0{surface}"
     return hashlib.sha256(value.encode()).hexdigest()
@@ -488,11 +525,28 @@ def _module_runtime_args(module: str, args: Any, config: dict[str, Any]) -> Any:
 
 
 def _job_targets(module: str, ns: Any) -> Iterator[tuple[str, int, Any]]:
-    stage = importlib.import_module(f"redposture_core.modules.{module.replace('-', '_')}.stage")
-    plan = getattr(stage, f"build_{module.replace('-', '_')}_plan")(ns)
+    plan = getattr(ns, "_spray_target_plan", None)
+    if plan is None:
+        stage = importlib.import_module(f"redposture_core.modules.{module.replace('-', '_')}.stage")
+        plan = getattr(stage, f"build_{module.replace('-', '_')}_plan")(ns)
     for _, host, port, target in plan.iter_target_specs():
         if target is not None:
             yield host, port, target
+
+
+def _spray_jobs(modules: tuple[str, ...], module_args: dict[str, Any]) -> Iterator[tuple[str, Any, str, int, Any]]:
+    """Give every selected detector an early turn without materializing targets."""
+
+    def module_jobs(module: str) -> Iterator[tuple[str, Any, str, int, Any]]:
+        ns = module_args[module]
+        for host, port, target in _job_targets(module, ns):
+            yield module, ns, host, port, target
+
+    sources = (module_jobs(module) for module in modules)
+    for round_items in zip_longest(*sources):
+        for item in round_items:
+            if item is not None:
+                yield item
 
 
 def _readonly_keeper_detection(ctx: AuditHookContext, args: Any) -> AuditRecord:
@@ -614,10 +668,10 @@ def _run_target(
     logger: Any,
     *,
     _surface_id: str | None = None,
-) -> None:
+) -> bool:
     ns = copy.copy(base_ns)
     if module == "oracle" and not _oracle_spray_preflight(host, port, ns):
-        return
+        return True
     stage = importlib.import_module(f"redposture_core.modules.{module.replace('-', '_')}.stage")
     spec = getattr(stage, f"build_{module.replace('-', '_')}_spec")(ns)
     runner = AuditCommandRunner(args=ns, spec=spec, logger=logger, emit_line=lambda _line: None)
@@ -634,9 +688,15 @@ def _run_target(
         except Exception as exc:
             if getattr(ns, "debug", False):
                 print(f"[d] spray detection {module} {host}:{port}: {type(exc).__name__}", file=sys.stderr)
-            return
+            return False
         if not runner._is_detected(detection):
-            return
+            # A transport failure does not prove that this target is a
+            # different product. Leave its job open so --resume can retry the
+            # detector when the network or service recovers.
+            return not (
+                is_pre_detect_operational_failure(detection)
+                or str(detection.status or "").lower() == "connection_failed"
+            )
         detection_key = _attempt_id(module, target, port, None, surface=_surface_id)
         prior_detection = journal.get(detection_key)
         detection_version = _record_version(detection)
@@ -669,9 +729,9 @@ def _run_target(
                 journal.put(key, module, host, port, index, "rate_limited", reason)
                 continue
             if delay_or_reason and not gate.paused(float(delay_or_reason)):
-                return
+                return False
             if gate.cancelled.is_set():
-                return
+                return False
             with gate.lock:
                 stopped_reason = gate.stopped.get(origin)
             if stopped_reason:
@@ -735,7 +795,7 @@ def _run_target(
         and not gate.cancelled.is_set()
     ):
         other_surface = "backend" if detection.extra.get("surface") == "ui" else "ui"
-        _run_target(
+        return _run_target(
             module,
             base_ns,
             host,
@@ -747,6 +807,7 @@ def _run_target(
             logger,
             _surface_id=other_surface,
         )
+    return True
 
 
 def _render_rows(
@@ -970,8 +1031,17 @@ def run_spray_stage(args: Any, logger: Any) -> int:
             policy=TargetParsePolicy(url_mode="preserve", path_policy="preserve"),
         )
         module_args = {module: _module_runtime_args(module, args, config.get(module, {})) for module in modules}
+        planned_work = 0
         for ns in module_args.values():
             ns._preparsed_target_plan = target_plan
+        for module, ns in module_args.items():
+            stage = importlib.import_module(f"redposture_core.modules.{module.replace('-', '_')}.stage")
+            build_plan = getattr(stage, f"build_{module.replace('-', '_')}_plan", None)
+            if build_plan is not None:
+                plan = build_plan(ns)
+                ns._spray_target_plan = plan
+                surfaces = 2 if module in web_panels.MODULE_PRODUCTS else 1
+                planned_work += plan.target_count * surfaces * (len(candidates) + 1)
         if not candidates:
             raise ValueError("credential files contain no candidates")
         if args.resume and not args.checkpoint:
@@ -1006,12 +1076,6 @@ def run_spray_stage(args: Any, logger: Any) -> int:
         try:
             gate = RateGate(args.origin_rate, args.account_interval)
 
-            def jobs() -> Iterator[tuple[str, Any, str, int, Any]]:
-                for module in modules:
-                    ns = module_args[module]
-                    for host, port, target in _job_targets(module, ns):
-                        yield module, ns, host, port, target
-
             console = Console(debug=args.debug, no_color=args.no_color, structured_output=args.output_format == "json")
             group_targets = args.output_format == "txt" and len(modules) > 1
             sink = SpraySink(
@@ -1022,6 +1086,26 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                 debug=bool(args.debug),
                 group_targets=group_targets,
             )
+            progress = make_command_progress(
+                "SPRAY",
+                planned_work,
+                enabled=args.output_format == "txt" and planned_work > 0,
+                render_initial=True,
+                unit="check",
+            )
+            progress_stop = threading.Event()
+            progress_thread: threading.Thread | None = None
+            if progress.enabled:
+
+                def refresh_progress() -> None:
+                    while not progress_stop.wait(1.0):
+                        progress.refresh()
+
+                progress_thread = threading.Thread(
+                    target=refresh_progress, name="redposture-spray-progress", daemon=True
+                )
+                progress_thread.start()
+            completed_normally = False
             try:
                 replay_rows = journal.rows()
                 if group_targets:
@@ -1037,7 +1121,23 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                 else:
                     for row in replay_rows:
                         sink.emit(*row)
-                journal.on_result = sink.emit
+                progress_local = threading.local()
+
+                def emit_result(
+                    module: str,
+                    host: str,
+                    port: int,
+                    index: int | None,
+                    status: str,
+                    evidence: str,
+                    detail: str = "",
+                ) -> None:
+                    sink.emit(module, host, port, index, status, evidence, detail)
+                    if status != "started":
+                        progress.advance()
+                        progress_local.done = getattr(progress_local, "done", 0) + 1
+
+                journal.on_result = emit_result
                 # The shared scheduler bounds the queue and uses daemon workers,
                 # so Ctrl+C cannot be held up by a blocked socket.
                 scheduler: BoundedScheduler[tuple[str, Any, str, int, Any], None] = BoundedScheduler(
@@ -1046,16 +1146,27 @@ def run_spray_stage(args: Any, logger: Any) -> int:
 
                 def work(job: tuple[str, Any, str, int, Any]) -> None:
                     module, ns, host, port, target = job
+                    progress_local.done = 0
+                    job_key = _attempt_id(module, target, port, -1)
+                    surfaces = 2 if module in web_panels.MODULE_PRODUCTS else 1
+                    budget = surfaces * (len(candidates) + 1)
+                    if journal.job_finished(job_key):
+                        progress.advance(budget)
+                        return
                     sink.begin_target(module, host, port)
                     try:
-                        _run_target(module, ns, host, port, target, candidates, journal, gate, logger)
+                        if _run_target(module, ns, host, port, target, candidates, journal, gate, logger):
+                            journal.finish_job(job_key)
                     finally:
                         sink.end_target()
+                        if not gate.cancelled.is_set():
+                            progress.advance(max(0, budget - progress_local.done))
 
-                outcomes = scheduler.iter_completed(jobs(), work)
+                outcomes = scheduler.iter_completed(_spray_jobs(modules, module_args), work)
                 try:
                     for _job, _result in outcomes:
                         pass
+                    completed_normally = True
                 except KeyboardInterrupt:
                     gate.cancel()
                     raise
@@ -1065,6 +1176,13 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                         close()
             finally:
                 journal.on_result = None
+                progress_stop.set()
+                if progress_thread is not None:
+                    progress_thread.join(timeout=2.0)
+                if completed_normally:
+                    progress.close()
+                else:
+                    progress.abort()
                 sink.close()
         finally:
             journal.close()

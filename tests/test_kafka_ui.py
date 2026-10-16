@@ -82,9 +82,77 @@ def test_repeated_kafka_ui_cursor_does_not_duplicate_message(monkeypatch: pytest
     assert result["ui_dump_partial"] is True
 
 
+def test_show_topics_without_count_stops_on_repeated_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    pages: list[str] = []
+
+    def get(_pool: object, _base: str, path: str, **_kwargs: object) -> HttpResponse:
+        if path == "/api/clusters":
+            value: object = [{"name": "qa", "status": "online"}]
+        else:
+            pages.append(path)
+            value = [{"name": f"topic-{index}"} for index in range(200)]
+        return HttpResponse(status=200, body=json.dumps(value).encode(), headers={})
+
+    monkeypatch.setattr(ui, "_get", get)
+    result = ui.collect_ui(
+        SimpleNamespace(),
+        {"status": "open_no_auth"},
+        SimpleNamespace(ui_base="http://qa", ui_http=object(), ui_cookie="", ui_vendor="kafbat"),
+        {"show_topics": True},
+    )
+    assert len(result["ui_topics"]) == 200
+    assert result["ui_topics_partial"] is True
+    assert len(pages) == 2
+
+
+def test_show_topics_without_count_reads_all_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    names = [f"topic-{index}" for index in range(1205)]
+
+    def get(_pool: object, _base: str, path: str, **_kwargs: object) -> HttpResponse:
+        if path == "/api/clusters":
+            value: object = [{"name": "qa", "status": "online"}]
+        else:
+            page = int(parse_qs(urlsplit(path).query)["page"][0])
+            value = [{"name": name} for name in names[(page - 1) * 200 : page * 200]]
+        return HttpResponse(status=200, body=json.dumps(value).encode(), headers={})
+
+    monkeypatch.setattr(ui, "_get", get)
+    result = ui.collect_ui(
+        SimpleNamespace(),
+        {"status": "open_no_auth"},
+        SimpleNamespace(ui_base="http://qa", ui_http=object(), ui_cookie="", ui_vendor="kafbat"),
+        {"show_topics": True},
+    )
+    assert len(result["ui_topics"]) == 1205
+    assert result["ui_topics_partial"] is False
+
+
+def test_show_consumer_groups_reads_all_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    groups = [f"group-{index}" for index in range(205)]
+
+    def get(_pool: object, _base: str, path: str, **_kwargs: object) -> HttpResponse:
+        if path == "/api/clusters":
+            value: object = [{"name": "qa", "status": "online"}]
+        else:
+            page = int(parse_qs(urlsplit(path).query)["page"][0])
+            value = {"consumerGroups": [{"groupId": group} for group in groups[(page - 1) * 100 : page * 100]]}
+        return HttpResponse(status=200, body=json.dumps(value).encode(), headers={})
+
+    monkeypatch.setattr(ui, "_get", get)
+    result = ui.collect_ui(
+        SimpleNamespace(),
+        {"status": "open_no_auth"},
+        SimpleNamespace(ui_base="http://qa", ui_http=object(), ui_cookie="", ui_vendor="kafbat"),
+        {"show_consumer_groups": True},
+    )
+    assert len(result["ui_consumer_groups"]) == 205
+    assert result["ui_consumer_groups_partial"] is False
+
+
 class _UiHandler(BaseHTTPRequestHandler):
     mode = "ui"
     posts = 0
+    message_count = 2
 
     def log_message(self, *_args: object) -> None:
         return
@@ -137,6 +205,11 @@ class _UiHandler(BaseHTTPRequestHandler):
                 self._send(200, [{"name": "local", "brokerCount": 1, "topicCount": 2, "readOnly": False}])
         elif path == "/api/clusters/local/topics":
             self._send(200, {"topics": [{"name": "events"}]})
+        elif path == "/api/clusters/local/topics/events":
+            self._send(
+                200,
+                {"partitions": [{"partition": 1, "offsetMin": 0, "offsetMax": self.message_count}]},
+            )
         elif path == "/api/clusters/local/brokers":
             self._send(200, [{"id": 1, "host": "broker"}])
         elif path == "/api/clusters/local/consumer-groups":
@@ -153,10 +226,12 @@ class _UiHandler(BaseHTTPRequestHandler):
             if path.endswith("/v2") != (self.mode != "provectus"):
                 self._send(404, {})
                 return
-            requested = int(parse_qs(urlsplit(self.path).query).get("limit", ["10"])[0])
+            query = parse_qs(urlsplit(self.path).query)
+            requested = int(query.get("limit", ["10"])[0])
+            start = int(query.get("seekTo", ["1::0"])[0].split("::")[-1])
             events = [
                 {"type": "MESSAGE", "message": {"partition": 1, "offset": n, "value": f"event-{n}"}}
-                for n in range(min(requested, 2))
+                for n in range(start, min(start + requested, self.message_count))
             ] + [{"type": "DONE"}]
             body = "\n\n".join("data:" + json.dumps(event) for event in events).encode() + b"\n\n"
             self._send(200, body, content_type="text/event-stream;charset=UTF-8")
@@ -195,7 +270,7 @@ class _UiHandler(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def ui_server() -> Generator[tuple[str, type[_UiHandler]], None, None]:
-    handler = type("Handler", (_UiHandler,), {"mode": "ui", "posts": 0})
+    handler = type("Handler", (_UiHandler,), {"mode": "ui", "posts": 0, "message_count": 2})
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -313,9 +388,156 @@ def test_ui_dump_reads_bounded_messages_and_no_write(ui_server: tuple[str, type[
     structured = _run("-t", target, *credentials, "--topic", "events", "--dump", "2", "-f", "json")
     record = json.loads(structured.stdout.splitlines()[-1])
     assert record["ui_dump_records"][0]["messages"][1]["value"] == "event-1"
-    assert record["ui_dump_records"][0]["complete"] is (mode != "provectus")
-    assert record["ui_dump_partial"] is (mode == "provectus")
+    assert record["ui_dump_records"][0]["complete"] is True
+    assert record["ui_dump_partial"] is False
     assert "\x1b[" not in structured.stdout
+
+
+def test_provectus_legacy_reads_all_1205_messages_by_offset(
+    ui_server: tuple[str, type[_UiHandler]],
+) -> None:
+    target, handler = ui_server
+    handler.mode = "provectus"
+    handler.message_count = 1205
+    result = _run(
+        "-t",
+        target,
+        "-u",
+        "admin",
+        "-p",
+        "admin",
+        "--topic",
+        "events",
+        "--dump",
+        "--max-messages",
+        "1300",
+        "-f",
+        "json",
+    )
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout.splitlines()[-1])
+    messages = record["ui_dump_records"][0]["messages"]
+    assert len(messages) == 1205
+    assert [message["offset"] for message in messages] == list(range(1205))
+    assert record["ui_dump_records"][0]["complete"] is True
+    assert record["ui_dump_partial"] is False
+    assert "\x1b[" not in result.stdout
+    text_result = _run("-t", target, "-u", "admin", "-p", "admin", "--topic", "events", "--dump", "--no-color")
+    assert "UI Export (messages:1205)" in text_result.stdout
+    assert "Dump coverage:partial" not in text_result.stdout
+    assert "\x1b[" not in text_result.stdout
+
+
+def test_provectus_dump_streams_without_duplicates(ui_server: tuple[str, type[_UiHandler]]) -> None:
+    target, handler = ui_server
+    handler.mode = "provectus"
+    handler.message_count = 1205
+    command = (
+        "-t",
+        target,
+        "-u",
+        "admin",
+        "-p",
+        "admin",
+        "--topic",
+        "events",
+        "--dump",
+        "-f",
+        "json",
+        "--no-color",
+    )
+    first = _run(*command)
+    assert first.returncode == 0, first.stderr
+    record = json.loads(first.stdout.splitlines()[-1])
+    result = record["ui_export"]
+    assert result["count"] == 1205
+    assert result["partial"] is False
+    assert record["ui_dump_records"] == []
+    second = _run(*command)
+    assert second.returncode == 0, second.stderr
+    resumed = json.loads(second.stdout.splitlines()[-1])["ui_export"]
+    assert resumed["count"] == 1205
+    rows = [json.loads(line) for line in Path(result["path"]).read_text().splitlines()]
+    assert [row["value"]["offset"] for row in rows] == list(range(1205))
+    assert len({(row["value"]["partition"], row["value"]["offset"]) for row in rows}) == 1205
+    assert "\x1b[" not in Path(result["path"]).read_text()
+    text_result = _run("-t", target, "-u", "admin", "-p", "admin", "--topic", "events", "--dump", "--no-color")
+    assert "UI Export (messages:1205)" in text_result.stdout
+    assert "\x1b[" not in text_result.stdout
+
+
+def test_ui_full_export_uses_airflow_count_and_value_palette() -> None:
+    class PaintConsole:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def _paint(self, value: str, color: str, _stream: object) -> str:
+            self.calls.append((value, color))
+            return value
+
+        def plain(self, _value: str) -> None:
+            pass
+
+    console = PaintConsole()
+    line = "KAFKA\t127.0.0.1\t18099\t [*] UI Export (messages:1205) (file:/tmp/qa.jsonl)"
+    assert kafka_render._render_colored_kafka_line(console, line)
+    assert any("messages:1205" in value and color == "red" for value, color in console.calls)
+    assert any("file:/tmp/qa.jsonl" in value and color == "orange" for value, color in console.calls)
+    console.calls.clear()
+    assert kafka_render._render_colored_kafka_line(
+        console, "KAFKA\t127.0.0.1\t18099\t [*] Topics coverage:partial (reason:repeated page)"
+    )
+    assert any("coverage:partial" in value and color == "orange" for value, color in console.calls)
+    record = {
+        "is_kafka_ui": True,
+        "host": "qa",
+        "port": 8080,
+        "ui_export": {"count": 1, "path": "/tmp/\x1b[31mqa.jsonl", "partial": True, "reason": "\x1b[31mHTTP 429"},
+    }
+    assert all("\x1b[" not in item for item in kafka_render._format_ui_detail_records(record, "txt"))
+
+
+def test_provectus_offset_pages_cover_multiple_partitions_without_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Pool:
+        def request(self, _method: str, url: str, **_kwargs: object) -> HttpResponse:
+            if "/v2?" in url:
+                return _response(404, {})
+            query = parse_qs(urlsplit(url).query)
+            positions = {0: 0, 1: 5}
+            for seek in query.get("seekTo", []):
+                partition, offset = seek.split("::")
+                positions[int(partition)] = int(offset)
+            events = [
+                {"type": "MESSAGE", "message": {"partition": part, "offset": offset, "value": "v"}}
+                for part, offset in positions.items()
+                if offset < (3 if part == 0 else 8)
+            ] + [{"type": "DONE"}]
+            return HttpResponse(
+                200,
+                ("\n\n".join("data:" + json.dumps(event) for event in events) + "\n\n").encode(),
+                {"Content-Type": "text/event-stream"},
+            )
+
+    def get(_pool: object, _base: str, path: str, **_kw: object) -> HttpResponse:
+        if path == "/api/clusters":
+            return _response(200, [{"name": "qa", "brokerCount": 1}])
+        return _response(
+            200,
+            {
+                "partitions": [
+                    {"partition": 0, "offsetMin": 0, "offsetMax": 3},
+                    {"partition": 1, "offsetMin": 5, "offsetMax": 8},
+                ]
+            },
+        )
+
+    monkeypatch.setattr(ui, "_get", get)
+    state = SimpleNamespace(ui_base="http://qa", ui_http=Pool(), ui_cookie="", ui_vendor="provectus")
+    result = ui.collect_ui(SimpleNamespace(), {"status": "open_no_auth"}, state, {"dump": True, "query_topic": "t"})
+    dump = result["ui_dump_records"][0]
+    assert [(m["partition"], m["offset"]) for m in dump["messages"]] == [(0, 0), (1, 5), (0, 1), (1, 6), (0, 2), (1, 7)]
+    assert dump["complete"] is True
+    assert result["ui_dump_partial"] is False
 
 
 def test_ui_dump_walks_all_topic_pages_beyond_old_ten_topic_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -454,6 +676,10 @@ def test_ui_color_contract() -> None:
         console, "KAFKA\t127.0.0.1\t8080\t [*] Dump Topic local/orders (messages:2) (max:3)"
     )
     assert "<red>messages:2</red>" in console.line
+    assert kafka_render._render_colored_kafka_line(
+        console, "KAFKA\t127.0.0.1\t8080\t [*] Dump completeness unverified: legacy Kafka UI has no cursor"
+    )
+    assert "<orange>Dump completeness unverified:" in console.line
 
 
 def test_ui_fingerprint_requires_independent_signals() -> None:

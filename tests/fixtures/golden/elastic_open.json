@@ -555,6 +555,45 @@
       {
         "confidence": "very_high",
         "detectors": [
+          "credential_pair",
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          },
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          },
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          },
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 4,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusEmbeddedClientSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
           "github_token_format"
         ],
         "fingerprint": "sha256:<DOCKER_ID>",
@@ -665,32 +704,6 @@
         "score": 98,
         "secret_type": "npm_token",
         "value": "npm_CorpusNpmToken2026ABCDEFGHIJ"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "nested-credentials",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/nested-credentials",
-            "source_kind": "document"
-          },
-          {
-            "id": "nested-credentials",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/nested-credentials",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 2,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusEmbeddedClientSecret!2026"
       },
       {
         "confidence": "very_high",

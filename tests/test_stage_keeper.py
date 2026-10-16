@@ -265,6 +265,24 @@ def test_keeper_digest_uses_closed_ddl_path_to_verify_identity(monkeypatch: pyte
     assert record["credential_auth_probe_results"][keeper_actions._DDL_QUEUE] == "ok"
 
 
+@pytest.mark.parametrize(
+    ("authenticated_code", "expected"),
+    [
+        (0, "valid"),
+        (-115, "rejected"),
+        (-102, "unverified_anonymous"),
+        (-101, "unverified_anonymous"),
+        (None, "unverified_anonymous"),
+    ],
+)
+def test_keeper_digest_requires_proven_access_transition(authenticated_code: int | None, expected: str) -> None:
+    from redposture_core.modules.keeper import actions as keeper_actions
+    from redposture_core.modules.zookeeper.actions import _credential_probe_verdict
+
+    ddl = keeper_actions._DDL_QUEUE
+    assert _credential_probe_verdict({"/": 0, ddl: -102}, {"/": 0, ddl: authenticated_code}) == expected
+
+
 def test_keeper_credential_renderer_shows_every_attempt_and_skipped_count() -> None:
     record = {
         "module": "keeper",

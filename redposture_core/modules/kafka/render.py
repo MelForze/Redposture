@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from ...console import Console
 from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line
 from . import actions
@@ -15,9 +17,14 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
         or "Kafbat UI" in line
         or "Clusters Enumeration" in line
         or "Brokers Enumeration" in line
+        or "Topics Enumeration" in line
+        or "Topics coverage:partial" in line
+        or "Consumer groups coverage:partial" in line
         or "Consumer Groups Enumeration" in line
         or "Dump Topic" in line
         or "Dump coverage:partial" in line
+        or "Dump completeness unverified" in line
+        or "UI Export" in line
     ):
         if render_colored_marker_line(
             console,
@@ -26,6 +33,9 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
             regexes=(
                 RegexColorRule(r"\(version:[^)]+\)", "orange"),
                 RegexColorRule(r"coverage:partial", "orange"),
+                RegexColorRule(r"Dump completeness unverified:[^\n]+", "orange"),
+                RegexColorRule(r"\(reason:[^)]+\)", "orange"),
+                RegexColorRule(r"\(file:[^)]+\)", "orange"),
             ),
             counts=tuple(
                 CountColorRule(name, "red", zero_color="bright_green")
@@ -99,6 +109,22 @@ def _format_ui_detail_records(record: dict, output_format: str) -> list[str]:
         return []
     prefix = _nxc_prefix(record)
     lines: list[str] = []
+    export = record.get("ui_export")
+    if isinstance(export, dict):
+
+        def clean(value: object) -> str:
+            return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(value)).replace("\r", " ").replace("\n", " ")
+
+        if isinstance(export.get("count"), int):
+            lines.append(
+                f"{prefix} [*] UI Export (messages:{export['count']}) (file:{clean(export.get('path') or '')})"
+            )
+            if export.get("partial"):
+                reason = clean(export.get("reason") or "incomplete")
+                lines.append(f"{prefix} [*] UI Export coverage:partial (reason:{reason[:256]})")
+        else:
+            reason = clean(export.get("reason") or "unavailable")
+            lines.append(f"{prefix} [-] UI Export unavailable (reason:{reason[:256]})")
     sections = (
         ("show_clusters", "ui_clusters", "Clusters Enumeration", "name"),
         ("show_brokers", "ui_brokers", "Brokers Enumeration", "host"),
@@ -120,6 +146,10 @@ def _format_ui_detail_records(record: dict, output_format: str) -> list[str]:
             name = str(item.get(name_field) or item.get("id") or "")
             if name:
                 lines.append(f"{prefix} {cluster + '/' if cluster else ''}{name}")
+    if record.get("ui_topics_partial"):
+        lines.append(f"{prefix} [*] Topics coverage:partial (reason:page unavailable or repeated)")
+    if record.get("ui_consumer_groups_partial"):
+        lines.append(f"{prefix} [*] Consumer groups coverage:partial (reason:page unavailable or repeated)")
     if record.get("dump"):
         dumps = record.get("ui_dump_records")
         if isinstance(dumps, list) and dumps:
@@ -146,7 +176,11 @@ def _format_ui_detail_records(record: dict, output_format: str) -> list[str]:
                         f"value:{shown_value}"
                     )
                 if item.get("error"):
-                    lines.append(f"{prefix} [-] {item['error']}")
+                    error = str(item["error"])
+                    if error.startswith("legacy Kafka UI cannot prove message completeness"):
+                        lines.append(f"{prefix} [*] Dump completeness unverified: legacy Kafka UI has no cursor")
+                    else:
+                        lines.append(f"{prefix} [-] {error}")
         else:
             reason = "no accessible clusters or topics" if record.get("ui_clusters") else "no accessible clusters"
             lines.append(f"{prefix} [-] Dump unavailable: {reason}")

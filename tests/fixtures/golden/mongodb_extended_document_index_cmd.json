@@ -36,6 +36,7 @@
         "documents": 5
       }
     ],
+    "credential_state": null,
     "database": "redposture",
     "database_count": 5,
     "database_names": null,
@@ -123,6 +124,7 @@
       "username": 1
     },
     "provided_credentials": false,
+    "provided_credentials_ok": null,
     "provided_password": null,
     "provided_username": null,
     "query_documents": [

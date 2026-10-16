@@ -210,6 +210,47 @@ def test_audit_mongodb_open_no_auth_with_dump(monkeypatch: pytest.MonkeyPatch) -
     assert len(record["documents"]) == 1
 
 
+def test_legacy_wire_is_detected_without_claiming_credential_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    class UnsupportedClient:
+        def hello(self):
+            raise RuntimeError("Server reports wire version 6, but PyMongo requires at least 8")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(mongodb_actions, "_open_client", lambda *_args, **_kwargs: UnsupportedClient())
+    monkeypatch.setattr(
+        mongodb_actions,
+        "probe_legacy_mongodb_hello",
+        lambda *_args, **_kwargs: {"ok": 1, "ismaster": True, "minWireVersion": 0, "maxWireVersion": 6},
+    )
+    record = mongodb._audit_mongodb_host(
+        "127.0.0.1",
+        27036,
+        1.0,
+        0,
+        [{"username": "admin", "password": "admin", "default": False}],
+        "admin",
+        None,
+        False,
+        False,
+        False,
+        [],
+        {},
+        False,
+        None,
+        None,
+        None,
+    )
+    assert record["is_mongodb"] is True
+    assert record["status"] == "legacy_wire_unsupported"
+    assert record["detection_status"] == "confirmed"
+    assert record["credential_state"] == "unverified"
+    assert record["credential_verification_status"] == "unavailable"
+    assert record["credential_attempts"] == []
+    assert "verification unavailable" in mongodb_actions._format_record(record, "txt")
+
+
 def test_audit_mongodb_auth_required_and_valid_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_open(monkeypatch, auth_required=True)
     denied = mongodb._audit_mongodb_host(
@@ -518,7 +559,7 @@ def test_audit_mongodb_invalid_credentials_anonymous_and_fail(monkeypatch: pytes
     def anonymous_with_invalid_creds(host, port, *, username=None, password=None, auth_db="admin", timeout=1.0):
         if username is None:
             return _FakeRaw(auth_required=False, username=username, password=password)
-        return _FakeRaw(auth_required=True, username=username, password=password)
+        raise RuntimeError("authentication failed")
 
     monkeypatch.setattr(mongodb, "open_mongodb_client", anonymous_with_invalid_creds)
     invalid = mongodb._audit_mongodb_host(
@@ -566,7 +607,7 @@ def test_audit_mongodb_invalid_credentials_do_not_run_anonymous_deep(monkeypatch
     def anonymous_with_invalid_creds(host, port, *, username=None, password=None, auth_db="admin", timeout=1.0):
         if username is None:
             return _FakeRaw(auth_required=False, username=username, password=password)
-        return _FakeRaw(auth_required=True, username=username, password=password)
+        raise RuntimeError("authentication failed")
 
     monkeypatch.setattr(mongodb, "open_mongodb_client", anonymous_with_invalid_creds)
     lines: list[str] = []
@@ -1111,9 +1152,31 @@ def test_mongodb_credential_attempts_records_renders_per_attempt_lines() -> None
         ],
     }
     generic_lines = mongodb._format_credential_attempts_records(generic_record, "txt")
-    assert len(generic_lines) == 2
-    assert "[-] root:root" in generic_lines[0]
-    assert "[-] admin:admin" in generic_lines[1]
+    assert len(generic_lines) == 1
+    assert "2 credential check(s) inconclusive" in generic_lines[0]
+
+
+def test_mongodb_unverified_attempts_are_not_rendered_as_rejected() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 27017,
+        "status": "auth_required",
+        "provided_credentials": True,
+        "provided_username": "slow",
+        "provided_password": "secret",
+        "credential_state": "unverified",
+        "credential_attempts": [
+            {"username": "bad", "password": "bad", "ok": False, "credential_state": "invalid"},
+            {"username": "slow", "password": "secret", "ok": False, "credential_state": "unverified"},
+        ],
+    }
+    lines = mongodb._format_credential_attempts_records(record, "txt")
+    assert any("[-] bad:bad" in line for line in lines)
+    assert any("1 credential check(s) inconclusive" in line for line in lines)
+    assert "slow:secret" not in "\n".join(lines)
+    single = dict(record, credential_attempts=[record["credential_attempts"][1]])
+    assert "slow:secret" not in mongodb._format_record(single, "txt")
+    assert any("inconclusive" in line for line in mongodb._format_credential_attempts_records(single, "txt"))
 
 
 def test_mongodb_format_record_defers_to_credential_attempts_when_multiple() -> None:

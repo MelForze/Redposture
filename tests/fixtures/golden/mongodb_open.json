@@ -49,6 +49,7 @@
         "documents": 3
       }
     ],
+    "credential_state": null,
     "database": null,
     "database_count": 5,
     "database_names": [
@@ -409,6 +410,7 @@
     "port": 27017,
     "projection": null,
     "provided_credentials": false,
+    "provided_credentials_ok": null,
     "provided_password": null,
     "provided_username": null,
     "query_documents": [],

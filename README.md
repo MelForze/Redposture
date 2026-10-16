@@ -100,10 +100,19 @@ through Kibana/OpenSearch Dashboards Dev Tools when those APIs allow it.
 For pgAdmin, `--pgadmin-server-password` connects a saved PostgreSQL server
 for inventory and read-only `--dump` without storing that password in pgAdmin.
 With no bucket, collection, or table filter, `--dump` walks all accessible
-MinIO objects, mongo-express collections, or pgAdmin tables. The UI dump is
-bounded by 10,000 records, 64 MiB, and five minutes per target; `partial` in
-JSON marks any incomplete traversal. UI credentials remain separate from
-backend credentials.
+MinIO objects, mongo-express collections, or pgAdmin tables. A numeric UI dump
+limit, where available, keeps the inline audit bounded by 10,000 records,
+64 MiB, and five minutes per target. `partial` in JSON marks an incomplete
+traversal. UI credentials remain separate from backend credentials.
+
+Unbounded standard flags (`--show-*`, `--dump`, Docker inventory flags, and
+Elastic `--discover`) stream the selected UI data to a private JSONL file in
+`.redposture/ui-exports/`, with a SQLite checkpoint and progress every 100
+records. Explicit numeric counts retain bounded inline output. An interrupted
+read resumes automatically with the same target, account and filters; a
+completed read starts a fresh file. MinIO Console has no list cursor, so its
+list request grows up to 65,536 items or 8 MiB; reaching either limit is
+reported as `partial`.
 
 `spray` checks supplied pairs or tokens only after a module confirms the product.
 It does not run inventory, discovery, or CVE checks. A bare host uses the selected
@@ -324,7 +333,14 @@ redposture kafka -t kafka.example -u producer -p 'password' --topic audit.events
 redposture kafka -t http://kafka-ui.example:8080 -u auditor -p 'password' --show-clusters --show-topics --show-brokers --show-consumer-groups
 ```
 
-Kafka detects broker listeners and Kafbat/Provectus Kafka UI on explicit `host:port` targets automatically. Bare hosts also scan common UI ports. UI logins are verified through the UI identity API; broker SASL credentials are checked only against brokers. A UI login or generic HTTP response alone does not confirm the product. UI `--dump` without `--topic` walks all visible topic pages, up to 2,000 topics and 64 MiB per target; incomplete reads are marked `partial`. Topic writes require a broker listener.
+Kafka detects broker listeners and Kafbat/Provectus Kafka UI on explicit `host:port` targets automatically. Bare hosts also scan common UI ports. UI logins are verified through the UI identity API; broker SASL credentials are checked only against brokers. A UI login or generic HTTP response alone does not confirm the product. UI `--dump` without `--topic` walks all visible topic pages and writes the result to disk; incomplete reads are marked `partial`. Topic writes require a broker listener.
+Older Provectus UI versions without a cursor continue by partition offsets;
+the dump is complete only after reaching the topic's end-offset snapshot.
+For a disk-backed full UI read, use `kafka --dump [--topic NAME]` without a
+numeric limit. The private JSONL file and checkpoint are under
+`.redposture/ui-exports/`; interrupted reads resume automatically. `--dump N`
+keeps the bounded inline result. `--show-topics` without a count lists every
+visible topic; `--show-topics N` limits the list.
 
 `--probe-write` works alone or with `--topic NAME`; it appends one audit marker to each probed topic. An inconclusive result is shown as `write:unknown`.
 `--write-message` sends one UTF-8 record; `--write-file` sends one binary record (up to 1 MiB). Both require `--topic`, and `--write-key` is optional. A lost broker acknowledgment is reported as unconfirmed and never retried, because the record may already be present.
@@ -475,6 +491,10 @@ On a protected `/v2/`, Basic pairs are checked even if the auth challenge is abs
 only definitive results are printed.
 
 ### ZooKeeper
+
+`-u/-p` and `--defcreds` use digest ACL authentication or SASL DIGEST-MD5
+when the server requires it. A protected znode must confirm access; Kerberos
+ticket authentication is separate from password-pair checks.
 
 ```bash
 redposture zookeeper -t targets.txt --enum-cve

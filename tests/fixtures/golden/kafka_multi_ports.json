@@ -164,7 +164,8 @@
       "security.alerts"
     ],
     "transport": "plaintext",
-    "transport_mode": "plaintext"
+    "transport_mode": "plaintext",
+    "write_result": null
   },
   {
     "auth_required": false,
@@ -331,7 +332,8 @@
       "security.alerts"
     ],
     "transport": "plaintext",
-    "transport_mode": "plaintext"
+    "transport_mode": "plaintext",
+    "write_result": null
   },
   {
     "auth_required": false,
@@ -498,7 +500,8 @@
       "security.alerts"
     ],
     "transport": "plaintext",
-    "transport_mode": "plaintext"
+    "transport_mode": "plaintext",
+    "write_result": null
   },
   {
     "auth_required": false,
@@ -665,7 +668,8 @@
       "security.alerts"
     ],
     "transport": "plaintext",
-    "transport_mode": "plaintext"
+    "transport_mode": "plaintext",
+    "write_result": null
   },
   {
     "auth_required": false,
@@ -832,6 +836,7 @@
       "security.alerts"
     ],
     "transport": "plaintext",
-    "transport_mode": "plaintext"
+    "transport_mode": "plaintext",
+    "write_result": null
   }
 ]
