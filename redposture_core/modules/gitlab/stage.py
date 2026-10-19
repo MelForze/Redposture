@@ -137,6 +137,7 @@ def _build_gitlab_host_stage_options(args: Any) -> dict[str, Any]:
 
 def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
     options = _build_gitlab_host_stage_options(args)
+    web_options = {**options, "show_repositories": bool(getattr(args, "images", False))}
     registry_spec = oci_stage.build_registry_spec(args, product="gitlab")
     resolved_host_stage = getattr(actions, _PRODUCTION_HOST_STAGE.__name__, _PRODUCTION_HOST_STAGE)
     use_lifecycle_hooks = (
@@ -255,8 +256,16 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
                 ctx.target, route_state=state.web, api_prefixes=("/api/v4", "/users/sign_in", "/-")
             ):
                 result = actions.collect_gitlab_data(
-                    _surface_ctx(ctx, state.web, anonymous=source == "registry_token"), record, options
+                    _surface_ctx(ctx, state.web, anonymous=source == "registry_token"), record, web_options
                 )
+            if not (web_options["show_repositories"] or options["project_filters"] or options["clone"]):
+                public_projects = result.get("public_projects")
+                token_projects = result.get("token_projects")
+                result["public_projects_count"] = len(public_projects) if isinstance(public_projects, list) else None
+                result["token_projects_count"] = len(token_projects) if isinstance(token_projects, list) else None
+                result["public_projects"] = None
+                result["token_projects"] = None
+                result["token_access"] = None
         if prior.get("gitlab_surface") in {"container_registry", "web_and_registry"} and registry_spec.data is not None:
             registry_payload = prior.get("container_registry")
             if isinstance(registry_payload, dict):

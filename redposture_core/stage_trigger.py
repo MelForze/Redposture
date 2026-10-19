@@ -1016,6 +1016,8 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
 
     if output_path:
+        if "mysql" in selected_trigger_exporters or not selected_trigger_exporters:
+            logger.set_mysql_hash_output(output_path)
         if output_format == "txt":
             try:
                 logger.set_text_output(output_path)

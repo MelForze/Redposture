@@ -156,10 +156,13 @@ def test_all_audit_summary_renderers_use_unknown_instead_of_dash_for_counts() ->
         qdrant._format_record({"host": "h", "port": 6333, "status": "open_no_auth", "collections_count": None}, "txt"),
     ]
     assert suppressed_anonymous_summaries == ["", ""]
+    # ZooKeeper/Keeper omit the count before enumeration; an attempted but
+    # unresolved count is explicitly marked unknown.
+    assert zookeeper._with_optional_znodes({"znode_count": None}, "line") == "line"
 
     rendered = [
         redis._with_optional_keys({"key_count": None}, "line"),
-        zookeeper._with_optional_znodes({"znode_count": None}, "line"),
+        zookeeper._with_optional_znodes({"znode_count": None, "znode_count_unknown": True}, "line"),
         kafka._with_optional_topics({"topic_count": None}, "line"),
         registry._with_optional_images({"image_count": None}, "line"),
         grafana._with_optional_datasources({"datasource_count": None}, "line"),

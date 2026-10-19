@@ -553,8 +553,9 @@ def test_discover_txt_renderer_is_compact_masked_and_does_not_clip_values() -> N
         },
     }
     lines = actions._format_discover_detail_records(record, "txt")
-    assert "coverage:100.00%" in lines[0]
+    assert "coverage:100.00%" in lines[-2]
     finding_line = next(line for line in lines if " [!] ApiKey " in line)
+    assert lines.index(finding_line) < lines.index(next(line for line in lines if "Discover Secrets (status:" in line))
     assert f'Value="{long_masked_value}"' in finding_line
     assert 'Place="app.events.payload$.token"' in finding_line
     assert "confidence" not in finding_line

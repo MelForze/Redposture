@@ -30,7 +30,7 @@ from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
-from ...rendering import BooleanColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...scheduler import NestedSchedulerCancelled
 from ...stage_runtime import (
     StageTelemetryBuilder,
@@ -2088,7 +2088,8 @@ def _format_nodes_detail_records(record: dict[str, Any], output_format: str) -> 
         ]
 
     prefix = _nxc_prefix(record)
-    lines = [f"{prefix} [*] Nodes"]
+    count = len(nodes) if isinstance(nodes, list) else "unknown"
+    lines = [f"{prefix} [*] Nodes Enumeration (Count:{count})"]
     if nodes_error:
         lines.append(f"{prefix} <error:{_clip(str(nodes_error), 120)}>")
         return lines
@@ -2124,7 +2125,8 @@ def _format_users_detail_records(record: dict[str, Any], output_format: str) -> 
         ]
 
     prefix = _nxc_prefix(record)
-    lines = [f"{prefix} [*] Users"]
+    count = len(users) if isinstance(users, list) else "unknown"
+    lines = [f"{prefix} [*] Users Enumeration (Count:{count})"]
     if users_error:
         lines.append(f"{prefix} <error:{_clip(str(users_error), 120)}>")
         return lines
@@ -2211,15 +2213,16 @@ def _render_colored_proxmox_line(console: Console, line: str) -> bool:
         tag="PROXMOX",
         include_auth_required=False,
         booleans=(
-            BooleanColorRule("adduser"),
-            BooleanColorRule("modify"),
-            BooleanColorRule("backup"),
-            BooleanColorRule("read"),
+            BooleanColorRule("adduser", unknown_color="orange"),
+            BooleanColorRule("modify", unknown_color="orange"),
+            BooleanColorRule("backup", unknown_color="orange"),
+            BooleanColorRule("read", unknown_color="orange"),
         ),
+        counts=(CountColorRule("Count", "true_red", unknown_color="orange", zero_color="bright_green"),),
         extra_spans=_extra_spans,
     ):
         return True
-    return render_tagged_detail_line(console, line, tag="PROXMOX")
+    return render_tagged_detail_line(console, line, tag="PROXMOX", default_color="orange")
 
 
 def _attach_proxmox_stage_telemetry(

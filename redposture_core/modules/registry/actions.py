@@ -69,6 +69,7 @@ _RegistryCredentialKey = tuple[str | None, str | None, str | None, str]
 class RegistryLifecycleState:
     anonymous_probe: _RegistryProbe | None = None
     anonymous_nexus: tuple[dict[str, Any] | None, str | None] | None = None
+    anonymous_nexus_repositories: list[dict[str, Any]] | None = None
     credential_probes: dict[_RegistryCredentialKey, _RegistryProbe] = dc_field(default_factory=dict)
     credential_nexus: dict[_RegistryCredentialKey, tuple[dict[str, Any] | None, str | None]] = dc_field(
         default_factory=dict
@@ -645,13 +646,14 @@ def _fetch_manifest_payload(
     *,
     headers: dict[str, str],
     depth: int = 0,
+    api_prefix: str = "",
 ) -> tuple[dict[str, Any] | None, str | None]:
     if depth > 4:
         return None, "manifest recursion depth exceeded"
 
     req_headers = dict(headers)
     req_headers["Accept"] = _REGISTRY_MANIFEST_ACCEPT
-    path = f"/v2/{_quote_repo(repository)}/manifests/{_quote_ref(reference)}"
+    path = f"{api_prefix}/v2/{_quote_repo(repository)}/manifests/{_quote_ref(reference)}"
     status, body, resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=req_headers)
     if error:
         return None, error
@@ -696,6 +698,7 @@ def _fetch_manifest_payload(
                 timeout,
                 headers=headers,
                 depth=depth + 1,
+                api_prefix=api_prefix,
             )
 
     return (
@@ -717,8 +720,9 @@ def _fetch_blob_json(
     timeout: float,
     *,
     headers: dict[str, str],
+    api_prefix: str = "",
 ) -> tuple[dict[str, Any] | None, str | None]:
-    path = f"/v2/{_quote_repo(repository)}/blobs/{_quote_ref(digest)}"
+    path = f"{api_prefix}/v2/{_quote_repo(repository)}/blobs/{_quote_ref(digest)}"
     status, body, _resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=headers)
     if error:
         return None, error
@@ -792,19 +796,24 @@ def _inspect_image(
     timeout: float,
     *,
     headers: dict[str, str],
+    api_prefix: str = "",
+    display_repository: str | None = None,
 ) -> dict[str, Any]:
     manifest_payload, manifest_error = _fetch_manifest_payload(
-        host, port, repository, reference, timeout, headers=headers
+        host, port, repository, reference, timeout, headers=headers, api_prefix=api_prefix
     )
     if manifest_error:
         return {
-            "image": _display_image(repository, reference),
-            "repository": repository,
+            "image": _display_image(display_repository or repository, reference),
+            "repository": display_repository or repository,
             "reference": reference,
             "error": manifest_error,
         }
 
     metadata = _extract_image_metadata(repository, reference, manifest_payload or {})
+    if display_repository:
+        metadata["image"] = _display_image(display_repository, reference)
+        metadata["repository"] = display_repository
     config_digest = metadata.get("config_digest")
     env_values: list[str] = []
     exposed_ports: list[str] = []
@@ -817,7 +826,9 @@ def _inspect_image(
     config_created: str | None = None
 
     if isinstance(config_digest, str) and config_digest:
-        config_blob, config_error = _fetch_blob_json(host, port, repository, config_digest, timeout, headers=headers)
+        config_blob, config_error = _fetch_blob_json(
+            host, port, repository, config_digest, timeout, headers=headers, api_prefix=api_prefix
+        )
         if config_blob is not None:
             config_created_raw = config_blob.get("created")
             if isinstance(config_created_raw, str) and config_created_raw.strip():
@@ -864,6 +875,47 @@ def _inspect_image(
     metadata["suspicious"] = suspicious
     metadata["config_blob"] = config_blob
     return metadata
+
+
+def _inspect_nexus_rest_image(
+    host: str,
+    port: int,
+    repository: str,
+    reference: str,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    """Read a Docker component through Nexus's REST repository proxy.
+
+    Nexus REST and Docker connector ports expose the same manifest/blob API at
+    different paths.  The first segment is a Nexus *storage* repository, not
+    part of the OCI image name.
+    """
+    storage, separator, image_repository = repository.partition("/")
+    if (
+        not separator
+        or not storage
+        or not image_repository
+        or storage in {".", ".."}
+        or any(part in {"", ".", ".."} for part in image_repository.split("/"))
+    ):
+        return {
+            "image": _display_image(repository, reference),
+            "repository": repository,
+            "reference": reference,
+            "error": "Nexus image must be <storage>/<image>:<tag>",
+        }
+    return _inspect_image(
+        host,
+        port,
+        image_repository,
+        reference,
+        timeout,
+        headers=headers,
+        api_prefix=f"/repository/{urllib.parse.quote(storage, safe='')}",
+        display_repository=repository,
+    )
 
 
 def _should_download_large(total_size: int, image_name: str, console: Console) -> bool:
@@ -1683,6 +1735,7 @@ def _registry_lifecycle_payload(
         "token_provided": bool(credential.token),
         "debug": bool(getattr(ctx.args, "debug", False)),
         "show_images": bool(options["show_images"]),
+        "show_repositories": bool(options.get("show_repositories")),
         "docker": bool(options["docker"]),
         "show_tags": bool(options["show_tags"]),
         "repository": options["repository"],
@@ -1692,6 +1745,8 @@ def _registry_lifecycle_payload(
         "gitlab": bool(options["gitlab"]),
         "nexus": bool(options["nexus"]),
         "assets": bool(options["assets"]),
+        "asset": options.get("asset"),
+        "asset_error": None,
         "inspect": bool(options["inspect"]),
         "image": options["image"],
         "download": bool(options["download"]),
@@ -1699,17 +1754,22 @@ def _registry_lifecycle_payload(
         "images": None,
         "images_error": None,
         "harbor_info": None,
+        "harbor_project_count": None,
         "harbor_projects": None,
         "harbor_repositories": None,
         "harbor_artifacts": None,
         "harbor_error": None,
         "gitlab_info": None,
+        "gitlab_repository_count": None,
         "gitlab_error": None,
         "gitlab_repositories": None,
         "gitlab_repository_details": None,
         "selected_repository_tags": None,
+        "repository_tags": None,
+        "repository_tag_errors": None,
         "metadata_result": None,
         "nexus_info": None,
+        "nexus_repository_count": None,
         "nexus_repositories": None,
         "nexus_repository_details": None,
         "nexus_assets": None,
@@ -1993,6 +2053,29 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
         payload["auth_required"] = None
         payload["error"] = f"requested {'/'.join(sorted(selected_vendors))} fingerprint not confirmed"
     payload["nexus_info"] = nexus_info
+    if payload.get("is_harbor") is True and payload.get("auth_required") is False:
+        harbor_projects, _projects_error = _fetch_harbor_projects(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            headers={},
+            legacy=bool(re.match(r"v?1\.", str((payload.get("harbor_info") or {}).get("harbor_version") or ""))),
+        )
+        if harbor_projects is not None:
+            payload["harbor_project_count"] = len(harbor_projects)
+    if payload.get("is_gitlab") is True and payload.get("auth_required") is False:
+        registry_repositories, _catalog_error = _fetch_registry_catalog(
+            str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), headers={}
+        )
+        if registry_repositories is not None:
+            payload["gitlab_repository_count"] = len(registry_repositories)
+    if payload.get("is_nexus") is True and payload.get("auth_required") is False:
+        repository_records, _repository_error = _fetch_nexus_repository_records(
+            str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), headers={}
+        )
+        if repository_records is not None:
+            state.anonymous_nexus_repositories = repository_records
+            payload["nexus_repository_count"] = len(repository_records)
     if product != "registry":
         payload["credential_verification_status"] = (
             "available"
@@ -2378,6 +2461,7 @@ def collect_registry_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> 
             token=token,
             docker=bool(options["docker"]),
             show_images=bool(options["show_images"]),
+            show_repositories=bool(options.get("show_repositories")),
             show_tags=bool(options["show_tags"]),
             repository=options["repository"],
             tag=options["tag"],
@@ -2395,6 +2479,7 @@ def collect_registry_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> 
             detect_nexus=bool(options["nexus"]),
             initial_probe=probe,
             initial_nexus=nexus_result,
+            initial_nexus_repositories=state.anonymous_nexus_repositories if use_anonymous else None,
             anonymous_probe_status=state.anonymous_probe[0] if state.anonymous_probe is not None else None,
             anonymous_probe_headers=state.anonymous_probe[2] if state.anonymous_probe is not None else None,
         )
@@ -2421,6 +2506,19 @@ def collect_registry_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> 
         _enrich_registry_gitlab_version(
             result["gitlab_info"], float(getattr(ctx.args, "timeout", 5.0)), password or token
         )
+    asset_selector = str(options.get("asset") or "").strip()
+    result["asset"] = asset_selector or None
+    result["asset_error"] = None
+    if asset_selector and isinstance(result.get("nexus_assets"), list):
+        selected_assets = [
+            item
+            for item in result["nexus_assets"]
+            if isinstance(item, dict)
+            and asset_selector in {str(item.get("path") or "").strip(), str(item.get("download_url") or "").strip()}
+        ]
+        result["nexus_assets"] = selected_assets
+        if not selected_assets and not result.get("nexus_error"):
+            result["asset_error"] = f"asset not found: {asset_selector}"
     result["data_transport_attempts"] = data_attempts
     if deep_status == "fail" and bool(prior.get("is_registry")):
         result["is_registry"] = True
@@ -2438,6 +2536,9 @@ def collect_registry_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> 
         "auth_transport_attempts",
     ):
         if name in prior:
+            result[name] = prior[name]
+    for name in ("nexus_repository_count", "harbor_project_count", "gitlab_repository_count"):
+        if result.get(name) is None and prior.get(name) is not None:
             result[name] = prior[name]
     for name in (
         "attempts",
@@ -2490,8 +2591,10 @@ def _audit_registry_host_core(
     detect_nexus: bool = False,
     initial_probe: _RegistryProbe | None = None,
     initial_nexus: tuple[dict[str, Any] | None, str | None] | None = None,
+    initial_nexus_repositories: list[dict[str, Any]] | None = None,
     anonymous_probe_status: int | None = None,
     anonymous_probe_headers: Mapping[str, str] | None = None,
+    show_repositories: bool = False,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -2573,13 +2676,29 @@ def _audit_registry_host_core(
             nexus_repositories: list[str] | None = None
             nexus_repository_details: list[dict[str, Any]] | None = None
             nexus_assets_list: list[dict[str, Any]] | None = None
-            if nexus and is_nexus is True and nexus_error != "authentication required":
-                nexus_repository_details, nexus_error_repositories = _fetch_nexus_repository_records(
-                    host,
-                    port,
-                    timeout,
-                    headers=auth_headers,
+            nexus_image_refs: list[str] = []
+            if (
+                nexus
+                and (
+                    show_images
+                    or show_repositories
+                    or assets
+                    or (show_tags and not repository_raw)
+                    or (inspect and not image_raw)
                 )
+                and is_nexus is True
+                and nexus_error != "authentication required"
+            ):
+                if attempt == 0 and initial_nexus_repositories is not None:
+                    nexus_repository_details = [dict(item) for item in initial_nexus_repositories]
+                    nexus_error_repositories = None
+                else:
+                    nexus_repository_details, nexus_error_repositories = _fetch_nexus_repository_records(
+                        host,
+                        port,
+                        timeout,
+                        headers=auth_headers,
+                    )
                 if nexus_error_repositories and nexus_error is None:
                     nexus_error = nexus_error_repositories
                 nexus_repository_details = nexus_repository_details or []
@@ -2602,13 +2721,26 @@ def _audit_registry_host_core(
 
             gitlab_repository_details: list[dict[str, Any]] | None = None
             selected_repository_tags: list[str] | None = None
+            repository_tags: dict[str, list[str]] | None = {} if show_tags and not repository_raw else None
+            repository_tag_errors: dict[str, str] | None = {} if repository_tags is not None else None
             metadata_result: dict[str, Any] | None = None
 
-            if nexus and is_nexus is True and nexus_repository_details:
+            if (
+                nexus
+                and (show_images or assets or repository_tags is not None or (inspect and not image_raw))
+                and is_nexus is True
+                and nexus_repository_details
+            ):
                 component_counts: dict[str, int] = {}
                 assets_accum: list[dict[str, Any]] = []
                 repo_names = [str(item.get("name") or "").strip() for item in nexus_repository_details]
                 repo_names = [name for name in repo_names if name]
+                if (repository_tags is not None or show_images or (inspect and not image_raw)) and not assets:
+                    repo_names = [
+                        str(item.get("name") or "").strip()
+                        for item in nexus_repository_details
+                        if str(item.get("format") or "").lower() == "docker" and str(item.get("name") or "").strip()
+                    ]
                 if repository_raw:
                     repo_names = [repository_raw]
                 for repo_name in repo_names:
@@ -2621,9 +2753,33 @@ def _audit_registry_host_core(
                     )
                     if components_error and nexus_error is None:
                         nexus_error = components_error
+                    if components_error and repository_tag_errors is not None:
+                        repository_tag_errors[repo_name] = components_error
                     if components is None:
                         continue
                     component_counts[repo_name] = len(components)
+                    if show_images or repository_tags is not None or (inspect and not image_raw):
+                        repo_format = next(
+                            (
+                                str(item.get("format") or "").lower()
+                                for item in nexus_repository_details
+                                if item.get("name") == repo_name
+                            ),
+                            "",
+                        )
+                        if repo_format == "docker":
+                            for component in components:
+                                component_name = str(component.get("name") or "").strip()
+                                component_tag = str(component.get("version") or "").strip()
+                                if not component_name:
+                                    continue
+                                if show_images or (inspect and not image_raw):
+                                    nexus_image_refs.append(
+                                        f"{repo_name}/{_display_image(component_name, component_tag or '<untagged>')}"
+                                    )
+                                if repository_tags is not None and component_tag:
+                                    key = f"{repo_name}/{component_name}"
+                                    repository_tags.setdefault(key, []).append(component_tag)
                     if assets:
                         assets_accum.extend(_extract_nexus_assets(components))
                 for repo_item in nexus_repository_details:
@@ -2632,6 +2788,8 @@ def _audit_registry_host_core(
                         repo_item["components"] = component_counts.get(repo_name)
                 if assets:
                     nexus_assets_list = assets_accum
+                if repository_tags is not None:
+                    repository_tags = {name: sorted(set(tags)) for name, tags in sorted(repository_tags.items())}
 
             if not is_registry and not nexus_detected_service:
                 return {
@@ -2650,6 +2808,7 @@ def _audit_registry_host_core(
                     "token_provided": token_provided,
                     "debug": debug,
                     "show_images": show_images,
+                    "show_repositories": show_repositories,
                     "docker": docker,
                     "show_tags": show_tags,
                     "repository": repository_raw,
@@ -2675,6 +2834,8 @@ def _audit_registry_host_core(
                     "gitlab_repositories": gitlab_repositories,
                     "gitlab_repository_details": gitlab_repository_details,
                     "selected_repository_tags": selected_repository_tags,
+                    "repository_tags": repository_tags,
+                    "repository_tag_errors": repository_tag_errors,
                     "metadata_result": metadata_result,
                     "nexus_info": nexus_info,
                     "nexus_repositories": nexus_repositories,
@@ -2734,19 +2895,25 @@ def _audit_registry_host_core(
             images_error: str | None = None
             can_access_registry_data = bool(is_registry and status == 200)
 
-            if show_images and not can_access_registry_data:
+            if (
+                (show_images or repository_tags is not None)
+                and not can_access_registry_data
+                and not nexus_detected_service
+            ):
                 images_error = "authentication required"
 
             # Catalog and per-repository tag enumeration can be very expensive
             # on production registries. Only perform it for actions that
             # explicitly need whole-registry inventory.
             need_catalog = can_access_registry_data and bool(
-                show_images or gitlab or (inspect and image_raw is None) or (download and image_raw is None)
+                show_images
+                or repository_tags is not None
+                or (inspect and image_raw is None)
+                or (download and image_raw is None)
             )
             if need_catalog:
                 repos, images_error = _fetch_registry_catalog(host, port, timeout, headers=auth_headers)
-                if repos is None:
-                    repos = []
+                repos = sorted(set(repos or []))
 
             if can_access_registry_data:
                 image_refs = []
@@ -2756,17 +2923,23 @@ def _audit_registry_host_core(
                         if tags_list is None:
                             if images_error is None and tag_error:
                                 images_error = f"{repo}: {tag_error}"
+                            if repository_tag_errors is not None and tag_error:
+                                repository_tag_errors[repo] = tag_error
                             continue
                         if tag_error and images_error is None:
                             images_error = f"{repo}: {tag_error}"
+                        if repository_tag_errors is not None and tag_error:
+                            repository_tag_errors[repo] = tag_error
                         repo_tags_map[repo] = list(tags_list)
+                        if repository_tags is not None:
+                            repository_tags[repo] = sorted(set(tags_list))
                         if not tags_list:
                             image_refs.append(f"{repo}:<untagged>")
                             continue
                         for repo_tag in tags_list:
                             image_refs.append(_display_image(repo, repo_tag))
                 image_refs = sorted(set(image_refs or []))
-                if is_gitlab is True:
+                if is_gitlab is True and need_catalog:
                     gitlab_repositories = sorted(set(repos or []))
                     last_pushed_by_repo: dict[str, str] = {}
                     if gitlab:
@@ -2805,16 +2978,24 @@ def _audit_registry_host_core(
                     metadata_result = _inspect_image(host, port, repository_raw, tag_raw, timeout, headers=auth_headers)
             elif show_tags and repository_raw:
                 selected_repository_tags = None
+            if nexus_detected_service and not can_access_registry_data and show_images:
+                image_refs = sorted(set(nexus_image_refs))
+                images_error = nexus_error
             if metadata and repository_raw and tag_raw and not can_access_registry_data:
-                metadata_result = {
-                    "image": _display_image(repository_raw, tag_raw),
-                    "repository": repository_raw,
-                    "reference": tag_raw,
-                    "error": "cannot fetch metadata without registry access",
-                }
+                if nexus_detected_service:
+                    metadata_result = _inspect_nexus_rest_image(
+                        host, port, repository_raw, tag_raw, timeout, headers=auth_headers
+                    )
+                else:
+                    metadata_result = {
+                        "image": _display_image(repository_raw, tag_raw),
+                        "repository": repository_raw,
+                        "reference": tag_raw,
+                        "error": "cannot fetch metadata without registry access",
+                    }
 
             # Deep Harbor parsing is enabled only with --harbor.
-            if harbor and is_harbor is True:
+            if harbor and (show_images or repository_tags is not None) and is_harbor is True:
                 legacy_options = (
                     {"legacy": True} if re.match(r"v?1\.", str((harbor_info or {}).get("harbor_version") or "")) else {}
                 )
@@ -2852,14 +3033,26 @@ def _audit_registry_host_core(
                         if artifacts_error and harbor_error is None:
                             harbor_error = artifacts_error
                         artifacts_accum.extend(artifacts or [])
+                        if repository_tags is not None:
+                            tags = [
+                                artifact.split("@", 1)[0][len(repo_name) + 1 :]
+                                for artifact in artifacts or []
+                                if artifact.startswith(f"{repo_name}:")
+                            ]
+                            repository_tags[repo_name] = sorted(set(repository_tags.get(repo_name, []) + tags))
+                            if artifacts_error and repository_tag_errors is not None:
+                                repository_tag_errors[repo_name] = artifacts_error
                 harbor_repositories = sorted(set(repos_accum))
                 harbor_artifacts = sorted(set(artifacts_accum))
+                if repository_tags is not None and repository_tags and harbor_error is None:
+                    images_error = None
 
             inspections: list[dict[str, Any]] | None = None
             inspection_error: str | None = None
             inspect_needed = inspect or bool(download)
             if inspect_needed:
-                if not can_access_registry_data:
+                nexus_rest_inspect = bool(nexus_detected_service and inspect)
+                if not can_access_registry_data and not nexus_rest_inspect:
                     inspection_error = "cannot inspect images without registry access"
                 else:
                     inspect_targets: list[tuple[str, str]] = []
@@ -2870,22 +3063,26 @@ def _audit_registry_host_core(
                         else:
                             inspect_targets.append((repo, ref))
                     else:
-                        if not image_refs:
+                        available_refs = image_refs if can_access_registry_data else sorted(set(nexus_image_refs))
+                        if not available_refs:
                             inspection_error = "no images discovered for inspection"
                         else:
-                            for image_ref in image_refs[:_REGISTRY_MAX_INSPECT_IMAGES]:
+                            for image_ref in available_refs[:_REGISTRY_MAX_INSPECT_IMAGES]:
                                 repo, ref = _split_image_reference(image_ref)
                                 if repo and ref:
                                     inspect_targets.append((repo, ref))
-                            if len(image_refs) > _REGISTRY_MAX_INSPECT_IMAGES and inspection_error is None:
+                            if len(available_refs) > _REGISTRY_MAX_INSPECT_IMAGES and inspection_error is None:
                                 inspection_error = (
                                     f"inspect list truncated to first {_REGISTRY_MAX_INSPECT_IMAGES} images "
-                                    f"(found {len(image_refs)})"
+                                    f"(found {len(available_refs)})"
                                 )
 
                     inspections = []
                     for repo, ref in inspect_targets:
-                        inspected = _inspect_image(host, port, repo, ref, timeout, headers=auth_headers)
+                        if nexus_rest_inspect and not can_access_registry_data:
+                            inspected = _inspect_nexus_rest_image(host, port, repo, ref, timeout, headers=auth_headers)
+                        else:
+                            inspected = _inspect_image(host, port, repo, ref, timeout, headers=auth_headers)
                         inspections.append(inspected)
 
             download_result: dict[str, Any] | None = None
@@ -2933,6 +3130,7 @@ def _audit_registry_host_core(
                 "token_provided": token_provided,
                 "debug": debug,
                 "show_images": show_images,
+                "show_repositories": show_repositories,
                 "docker": docker,
                 "show_tags": show_tags,
                 "repository": repository_raw,
@@ -2945,7 +3143,9 @@ def _audit_registry_host_core(
                 "inspect": inspect,
                 "image": image_raw,
                 "download": download,
-                "image_count": len(image_refs or []) if need_catalog else None,
+                "image_count": len(image_refs or [])
+                if (need_catalog or nexus_detected_service and show_images)
+                else None,
                 # Keep full list only when it may be rendered/used directly.
                 "images": image_refs if (show_images or inspect or (download and image_raw is None)) else None,
                 "images_error": images_error,
@@ -2959,10 +3159,15 @@ def _audit_registry_host_core(
                 "gitlab_repositories": gitlab_repositories,
                 "gitlab_repository_details": gitlab_repository_details,
                 "selected_repository_tags": selected_repository_tags,
+                "repository_tags": repository_tags,
+                "repository_tag_errors": repository_tag_errors,
                 "metadata_result": metadata_result,
                 "nexus_info": nexus_info,
-                "nexus_repositories": nexus_repositories,
-                "nexus_repository_details": nexus_repository_details,
+                "nexus_repository_count": len(nexus_repository_details)
+                if nexus_repository_details is not None
+                else None,
+                "nexus_repositories": nexus_repositories if show_repositories else None,
+                "nexus_repository_details": nexus_repository_details if show_repositories else None,
                 "nexus_assets": nexus_assets_list,
                 "nexus_error": nexus_error,
                 "inspections": inspections,
@@ -2996,6 +3201,7 @@ def _audit_registry_host_core(
         "token_provided": token_provided,
         "debug": debug,
         "show_images": show_images,
+        "show_repositories": show_repositories,
         "docker": docker,
         "show_tags": show_tags,
         "repository": repository_raw,
@@ -3021,6 +3227,8 @@ def _audit_registry_host_core(
         "gitlab_repositories": None,
         "gitlab_repository_details": None,
         "selected_repository_tags": None,
+        "repository_tags": None,
+        "repository_tag_errors": None,
         "metadata_result": None,
         "nexus_info": None,
         "nexus_repositories": None,
@@ -3063,6 +3271,7 @@ def _call_audit_registry_host_with_thread_debug(
     debug: bool,
     run_deep_checks: bool,
     debug_emit: Callable[[str], None] | None,
+    show_repositories: bool = False,
 ) -> dict[str, Any]:
     def _invoke() -> dict[str, Any]:
         try:
@@ -3076,6 +3285,7 @@ def _call_audit_registry_host_with_thread_debug(
                 token=token,
                 docker=docker,
                 show_images=show_images,
+                show_repositories=show_repositories,
                 show_tags=show_tags,
                 repository=repository,
                 tag=tag,
@@ -3105,6 +3315,7 @@ def _call_audit_registry_host_with_thread_debug(
                 token=token,
                 docker=docker,
                 show_images=show_images,
+                show_repositories=show_repositories,
                 show_tags=show_tags,
                 repository=repository,
                 tag=tag,
@@ -3159,6 +3370,7 @@ def _audit_registry_host(
     console: Console,
     debug: bool,
     run_deep_checks: bool = True,
+    show_repositories: bool = False,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -3359,6 +3571,7 @@ def _audit_registry_host(
             token=token,
             docker=docker,
             show_images=show_images,
+            show_repositories=show_repositories,
             show_tags=show_tags,
             repository=repository,
             tag=tag,
@@ -3424,6 +3637,7 @@ def _audit_registry_host(
             "token_provided": bool(token),
             "debug": debug,
             "show_images": show_images,
+            "show_repositories": show_repositories,
             "docker": docker,
             "show_tags": show_tags,
             "repository": str(repository or "").strip() or None,
@@ -3449,6 +3663,8 @@ def _audit_registry_host(
             "gitlab_repositories": None,
             "gitlab_repository_details": None,
             "selected_repository_tags": None,
+            "repository_tags": None,
+            "repository_tag_errors": None,
             "metadata_result": None,
             "nexus_info": None,
             "nexus_repositories": None,
@@ -3490,6 +3706,7 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
         "status",
         "auth_required",
         "image_count",
+        "show_repositories",
         "images",
         "images_error",
         "harbor_info",
@@ -3502,6 +3719,8 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
         "gitlab_repositories",
         "gitlab_repository_details",
         "selected_repository_tags",
+        "repository_tags",
+        "repository_tag_errors",
         "metadata_result",
         "nexus_info",
         "nexus_repositories",
@@ -3622,6 +3841,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     debug = bool(record.get("debug"))
     is_registry = bool(record.get("is_registry"))
     show_images = bool(record.get("show_images")) and is_registry
+    show_repositories = bool(record.get("show_repositories")) and is_registry
     show_tags = bool(record.get("show_tags")) and is_registry
     repository_raw = str(record.get("repository") or "").strip()
     tag_raw = str(record.get("tag") or "").strip()
@@ -3635,7 +3855,11 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     image_raw = str(record.get("image") or "").strip()
     targeted_repo_lookup = bool(repository_raw and (show_tags or metadata_enabled))
     targeted_image_lookup = bool(image_raw and (inspect or download))
-    suppress_vendor_inventory = targeted_repo_lookup or targeted_image_lookup
+    # Explicit list flags still render their inventory when combined with a
+    # selector for a deeper action.
+    suppress_vendor_inventory = (targeted_repo_lookup or targeted_image_lookup) and not (
+        show_repositories or show_images
+    )
 
     images_raw = record.get("images")
     images = [str(item) for item in images_raw] if isinstance(images_raw, list) else []
@@ -3668,6 +3892,18 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     selected_repository_tags = (
         [str(item) for item in selected_repository_tags_raw] if isinstance(selected_repository_tags_raw, list) else []
     )
+    repository_tags_raw = record.get("repository_tags")
+    repository_tags = (
+        {str(name): [str(tag) for tag in tags] for name, tags in repository_tags_raw.items() if isinstance(tags, list)}
+        if isinstance(repository_tags_raw, dict)
+        else None
+    )
+    repository_tag_errors_raw = record.get("repository_tag_errors")
+    repository_tag_errors = (
+        {str(name): str(error) for name, error in repository_tag_errors_raw.items()}
+        if isinstance(repository_tag_errors_raw, dict)
+        else {}
+    )
     metadata_result = record.get("metadata_result") if isinstance(record.get("metadata_result"), dict) else None
     is_gitlab = record.get("is_gitlab")
     nexus_info = record.get("nexus_info")
@@ -3685,6 +3921,8 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     nexus_assets = (
         [item for item in nexus_assets_raw if isinstance(item, dict)] if isinstance(nexus_assets_raw, list) else []
     )
+    asset_selector = str(record.get("asset") or "").strip()
+    asset_error = str(record.get("asset_error") or "").strip()
     nexus_error = str(record.get("nexus_error") or "").strip()
     is_nexus = record.get("is_nexus")
 
@@ -3708,6 +3946,21 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                         "port": record.get("port"),
                         "images": images,
                         "error": images_error or None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        if show_tags and not repository_raw:
+            payloads.append(
+                json.dumps(
+                    {
+                        "timestamp": record.get("timestamp"),
+                        "type": "tags",
+                        "host": record.get("host"),
+                        "port": record.get("port"),
+                        "repositories": repository_tags,
+                        "repository_errors": repository_tag_errors,
+                        "error": images_error or nexus_error or harbor_error or None,
                     },
                     ensure_ascii=False,
                 )
@@ -3762,6 +4015,8 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     "repositories": nexus_repositories,
                     "repository_details": nexus_repository_details,
                     "assets": nexus_assets if assets_enabled else None,
+                    "asset": asset_selector or None,
+                    "asset_error": asset_error or None,
                     "error": nexus_error or None,
                 },
                 ensure_ascii=False,
@@ -3824,7 +4079,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             lines.append(f"{prefix} [*] Harbor detected version={version}")
         else:
             lines.append(f"{prefix} [*] Harbor detected")
-        if harbor and not suppress_vendor_inventory:
+        if harbor and show_images and not suppress_vendor_inventory:
             if harbor_projects:
                 lines.append(f"{prefix} [*] Harbor Projects Enumeration")
                 for item in harbor_projects:
@@ -3870,7 +4125,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             probe_error = str(gitlab_info.get("token_probe_error") or "").strip()
             if probe_error:
                 lines.append(f"{prefix} [-] {probe_error}")
-            if not suppress_vendor_inventory and gitlab_repository_details:
+            if show_images and not suppress_vendor_inventory and gitlab_repository_details:
                 lines.append(f"{prefix} [*] GitLab Repositories Enumeration")
                 for gitlab_repo in gitlab_repository_details:
                     repo_name = str(gitlab_repo.get("repository") or "").strip() or "-"
@@ -3881,13 +4136,13 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     lines.append(
                         f"{prefix} {repo_name} (tags:{tags_count_text}) (latest:{latest_tag}) (last pushed:{last_pushed})"
                     )
-            elif not suppress_vendor_inventory and gitlab_repositories:
+            elif show_images and not suppress_vendor_inventory and gitlab_repositories:
                 lines.append(f"{prefix} [*] GitLab Repositories Enumeration")
                 for item in gitlab_repositories:
                     lines.append(f"{prefix} {item}")
-            elif not suppress_vendor_inventory and images_error:
+            elif show_images and not suppress_vendor_inventory and images_error:
                 lines.append(f"{prefix} [-] GitLab repositories unavailable: {images_error}")
-            elif not suppress_vendor_inventory and record.get("status") != "auth_required":
+            elif show_images and not suppress_vendor_inventory and record.get("status") != "auth_required":
                 lines.append(f"{prefix} [*] GitLab Repositories Enumeration")
                 lines.append(f"{prefix} <no repositories>")
     elif show_gitlab_presence and is_gitlab is False:
@@ -3905,6 +4160,22 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             lines.append(f"{prefix} [-] {repository_raw}: {images_error}")
         else:
             lines.append(f"{prefix} <no tags>")
+    elif show_tags:
+        names = sorted(set(repository_tags or {}) | set(repository_tag_errors))
+        if names:
+            for name in names:
+                tags = (repository_tags or {}).get(name, [])
+                lines.append(f"{prefix} [*] Tags Enumeration {name}")
+                for item in tags:
+                    lines.append(f"{prefix} {item}")
+                if name in repository_tag_errors:
+                    lines.append(f"{prefix} [-] {name}: {repository_tag_errors[name]}")
+                elif not tags:
+                    lines.append(f"{prefix} <no tags>")
+        if (images_error or nexus_error or harbor_error) and not repository_tag_errors:
+            lines.append(f"{prefix} [-] Tags enumeration partial: {images_error or nexus_error or harbor_error}")
+        elif not names:
+            lines.append(f"{prefix} [*] Tags Enumeration (repositories:0)")
 
     if metadata_enabled and repository_raw and tag_raw:
         image_display = _display_image(repository_raw, tag_raw)
@@ -3951,19 +4222,20 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         else:
             lines.append(f"{prefix} [*] Nexus Repository detected")
         if nexus:
-            if not suppress_vendor_inventory and nexus_repository_details:
+            if show_repositories and not suppress_vendor_inventory and nexus_repository_details:
                 lines.append(f"{prefix} [*] Nexus Repositories Enumeration")
                 for nexus_repo in nexus_repository_details:
                     repo_name = str(nexus_repo.get("name") or "").strip() or "-"
+                    repo_format = str(nexus_repo.get("format") or "").strip() or "-"
                     repo_type = str(nexus_repo.get("type") or "").strip() or "-"
                     online_raw = nexus_repo.get("online")
                     online_text = "True" if online_raw is True else "False" if online_raw is False else "unknown"
                     components_raw = nexus_repo.get("components")
-                    components_text = format_count_value(components_raw)
-                    lines.append(
-                        f"{prefix} {repo_name} (type:{repo_type}) (online:{online_text}) (components:{components_text})"
-                    )
-            elif not suppress_vendor_inventory and nexus_repositories:
+                    detail = f"{repo_name} (format:{repo_format}) (type:{repo_type}) (online:{online_text})"
+                    if isinstance(components_raw, int) and not isinstance(components_raw, bool):
+                        detail += f" (components:{components_raw})"
+                    lines.append(f"{prefix} {detail}")
+            elif show_repositories and not suppress_vendor_inventory and nexus_repositories:
                 lines.append(f"{prefix} [*] Nexus Repositories Enumeration")
                 for item in nexus_repositories:
                     lines.append(f"{prefix} {item}")
@@ -3984,6 +4256,8 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                                 first_key = sorted(checksums.keys())[0]
                                 checksum_text = f"{first_key}:{checksums[first_key]}"
                         lines.append(f"{prefix} downloadUrl={url} checksum={checksum_text}")
+                elif asset_error:
+                    lines.append(f"{prefix} [-] {asset_error}")
                 else:
                     lines.append(f"{prefix} <no assets>")
             if nexus_error:

@@ -76,7 +76,7 @@ def configure_gitlab_parser(
         metavar="dir",
         help="Output directory root for --clone repositories.",
     )
-    add_oci_content_flags(parser.add_argument_group("Container Registry"))
+    add_oci_content_flags(parser.add_argument_group("Container Registry"), product="gitlab")
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(
         "-f",

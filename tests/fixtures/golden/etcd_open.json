@@ -10,6 +10,109 @@
     },
     "api_versions": "v2,v3",
     "auth_required": false,
+    "content_discovery": {
+      "bytes_inspected": 713,
+      "findings": [
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/app/api_key.api_key",
+          "source": "anonymous",
+          "type": "api_key",
+          "value": "rp-d...2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/cache/redis_uri.redis_uri",
+          "source": "anonymous",
+          "type": "connection_string",
+          "value": "redi...79/0"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/cache/redis_uri.redis_uri",
+          "source": "anonymous",
+          "type": "url_credentials",
+          "value": "redi...79/0"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/db/password.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "********"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/db/readonly_password.readonly_password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "********"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/integrations/slack/webhook.webhook",
+          "source": "anonymous",
+          "type": "webhook",
+          "value": "http...CTED"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/v3/datasource/admin_password.admin_password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "*****"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/v3/datasource/postgres_dsn.postgres_dsn",
+          "source": "anonymous",
+          "type": "connection_string",
+          "value": "post...able"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/v3/datasource/postgres_dsn.postgres_dsn",
+          "source": "anonymous",
+          "type": "url_credentials",
+          "value": "post...able"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/v3/kafka/sasl_password.sasl_password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "Kfka...2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/v3/observability/remote_write.remote_write",
+          "source": "anonymous",
+          "type": "url_credentials",
+          "value": "http...rite"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.key_value_entries./redposture/v3/token.token",
+          "source": "anonymous",
+          "type": "generic_secret",
+          "value": "rp-v...2026"
+        }
+      ],
+      "source": "anonymous",
+      "status": "complete"
+    },
     "defcreds_enabled": false,
     "detection_signals": [
       "etcd.probe",

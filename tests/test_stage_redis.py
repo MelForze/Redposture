@@ -301,6 +301,94 @@ def test_format_detect_record_txt() -> None:
     )
     assert "[*] Redis Database" in line
     assert "(auth required:True)" in line
+    assert "(version:" not in line
+
+
+def test_format_detect_record_includes_known_version_and_plain_json() -> None:
+    record = {
+        "timestamp": "2026-01-01T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 6379,
+        "is_redis": True,
+        "auth_required": False,
+        "server_version": "7.4.11",
+    }
+    line = redis_stage._format_detect_record(record, "txt")
+    assert line.endswith("(auth required:False) (version:7.4.11)")
+    assert "\x1b[" not in line
+    payload = json.loads(redis_stage._format_detect_record(record, "json"))
+    assert payload["version"] == "7.4.11"
+    assert "\x1b[" not in json.dumps(payload)
+
+
+def test_anonymous_redis_detection_reads_version_without_enum_cve(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = redis_actions.RedisAuditLifecycleState(
+        host="localhost",
+        port=6379,
+        timeout=1.0,
+        retries=0,
+        debug=False,
+        debug_emit=None,
+        started=time.monotonic(),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        redis_actions, "_open_redis_lifecycle_socket", lambda item: setattr(item, "sock", _DummySocket())
+    )
+
+    def reply(_sock: object, *parts: str) -> tuple[str, str]:
+        calls.append(" ".join(parts))
+        if parts == ("PING",):
+            return "simple", "PONG"
+        return "bulk", "# Server\r\nredis_version:7.4.11\r\n"
+
+    monkeypatch.setattr(redis_actions, "_send_cmd", reply)
+    ctx = AuditHookContext(
+        SimpleNamespace(enum_cve=False, _spray_capabilities=False),
+        None,
+        "localhost",
+        6379,
+        AuditCredentialRun(source="anonymous"),
+        lifecycle_state=state,
+    )
+    detected = redis_actions.redis_detect_hook(ctx)
+    assert calls == ["PING", "INFO SERVER"]
+    assert detected.extra["server_version"] == "7.4.11"
+    assert "(version:7.4.11)" in redis_stage._format_detect_record(detected.to_dict(), "txt")
+
+
+def test_redis_info_denial_keeps_confirmed_detection_without_inventing_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = redis_actions.RedisAuditLifecycleState(
+        host="localhost",
+        port=6379,
+        timeout=1.0,
+        retries=0,
+        debug=False,
+        debug_emit=None,
+        started=time.monotonic(),
+    )
+    monkeypatch.setattr(
+        redis_actions, "_open_redis_lifecycle_socket", lambda item: setattr(item, "sock", _DummySocket())
+    )
+    monkeypatch.setattr(
+        redis_actions,
+        "_send_cmd",
+        lambda _sock, *parts: ("simple", "PONG") if parts == ("PING",) else ("error", "NOPERM"),
+    )
+    ctx = AuditHookContext(
+        SimpleNamespace(enum_cve=False, _spray_capabilities=False),
+        None,
+        "localhost",
+        6379,
+        AuditCredentialRun(source="anonymous"),
+        lifecycle_state=state,
+    )
+    detected = redis_actions.redis_detect_hook(ctx)
+    assert detected.status == "open_no_auth"
+    assert detected.extra["server_version"] is None
+    assert "(version:" not in redis_stage._format_detect_record(detected.to_dict(), "txt")
 
 
 def test_format_keys_detail_records_contains_sections() -> None:
@@ -1365,131 +1453,24 @@ def test_redis_defcreds_expand_after_provided_and_file_candidates(tmp_path) -> N
         ("user", "password", "default"),
         ("user", "user", "default"),
     ]
-    direct_args = parse_args(
-        [
-            "redis",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "6379",
-            "-u",
-            "app",
-            "-p",
-            "secret",
-            "--defcreds",
-        ]
-    )
-    redis_module_stage._prepare_redis_credential_runs(direct_args)
-    assert [(run.username, run.password, run.source) for run in direct_args._audit_credential_runs] == [
-        ("app", "secret", "provided"),
-        *defaults,
-    ]
-
-    credentials = tmp_path / "credentials.txt"
-    credentials.write_text("one:1\ntwo:2\n", encoding="utf-8")
-    file_args = parse_args(
-        [
-            "redis",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "6379",
-            "-u",
-            str(credentials),
-            "--defcreds",
-        ]
-    )
-    redis_module_stage._prepare_redis_credential_runs(file_args)
-    plan = redis_module_stage.build_redis_plan(file_args)
-    assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [
-        ("one", "1", "file"),
-        ("two", "2", "file"),
-        *defaults,
-    ]
+    # NEXT_QA #4: provided creds + --defcreds is rejected; --defcreds alone yields only defaults.
+    with pytest.raises(SystemExit):
+        parse_args(["redis", "-t", "127.0.0.1", "--port", "6379", "-u", "app", "-p", "secret", "--defcreds"])
+    alone = parse_args(["redis", "-t", "127.0.0.1", "--port", "6379", "--defcreds"])
+    redis_module_stage._prepare_redis_credential_runs(alone)
+    assert [(run.username, run.password, run.source) for run in alone._audit_credential_runs] == defaults
 
 
 def test_redis_explicit_default_overlap_stays_provided_and_is_stably_deduplicated() -> None:
-    args = parse_args(
-        [
-            "redis",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "6379",
-            "-u",
-            "redis",
-            "-p",
-            "redis",
-            "--defcreds",
-        ]
-    )
-
-    redis_module_stage._prepare_redis_credential_runs(args)
-    runs = args._audit_credential_runs
-
-    assert (runs[0].username, runs[0].password, runs[0].source) == ("redis", "redis", "provided")
-    assert [(run.username, run.password) for run in runs] == [
-        ("redis", "redis"),
-        *sorted(
-            (pair for pair in redis_actions._REDIS_DEFAULT_CREDENTIALS if pair != ("redis", "redis")),
-            key=lambda pair: (pair[0].lower(), pair[1].lower()),
-        ),
-    ]
-    assert sum((run.username, run.password) == ("redis", "redis") for run in runs) == 1
+    # NEXT_QA #4: explicit pair that overlaps a default + --defcreds is rejected (no layering).
+    with pytest.raises(SystemExit):
+        parse_args(["redis", "-t", "127.0.0.1", "--port", "6379", "-u", "redis", "-p", "redis", "--defcreds"])
 
 
-def test_redis_defcreds_try_provided_before_default_and_classify_default(monkeypatch) -> None:
-    commands: list[tuple[str, ...]] = []
-    monkeypatch.setattr(redis_actions.socket, "create_connection", lambda *_args, **_kwargs: _DummySocket())
-
-    def send_cmd(_sock, *parts):
-        command = tuple(str(item) for item in parts)
-        commands.append(command)
-        if command == ("PING",):
-            return "error", "NOAUTH Authentication required."
-        if command == ("AUTH", "app", "bad"):
-            return "error", "WRONGPASS invalid credentials"
-        if command == ("AUTH", "redis", "redis"):
-            return "simple", "OK"
-        if command[0] == "AUTH":
-            return "error", "WRONGPASS invalid credentials"
-        if command == ("DBSIZE",):
-            return "integer", 3
-        pytest.fail(f"unexpected Redis command: {command!r}")
-
-    monkeypatch.setattr(redis_actions, "_send_cmd", send_cmd)
-    args = parse_args(
-        [
-            "redis",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "6379",
-            "-u",
-            "app",
-            "-p",
-            "bad",
-            "--defcreds",
-            "-f",
-            "json",
-        ]
-    )
-
-    result = _run_redis_lifecycle_result(args)
-
-    assert commands == [
-        ("PING",),
-        ("AUTH", "app", "bad"),
-        *[
-            ("AUTH", username, password)
-            for username, password in sorted(
-                redis_actions._REDIS_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
-            )
-        ],
-        ("DBSIZE",),
-    ]
-    assert result.records[0]["status"] == "weak_default_creds"
-    assert result.records[0]["default_credentials"] is True
+def test_redis_defcreds_try_provided_before_default_and_classify_default() -> None:
+    # NEXT_QA #4: provided creds + --defcreds is rejected at the CLI.
+    with pytest.raises(SystemExit):
+        parse_args(["redis", "-t", "127.0.0.1", "--port", "6379", "-u", "app", "-p", "bad", "--defcreds", "-f", "json"])
 
 
 def test_redis_defcreds_checks_full_catalog_after_late_default_success(

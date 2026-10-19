@@ -6,14 +6,57 @@ import argparse
 from collections.abc import Callable
 
 
-def add_oci_content_flags(group: argparse._ArgumentGroup) -> None:
-    group.add_argument("--images", action="store_true", help="List accessible repositories and tags.")
-    group.add_argument("--repository", metavar="name", help="Repository for targeted tag or metadata checks.")
-    group.add_argument("--show-tags", action="store_true", help="Show tags for --repository.")
-    group.add_argument("--tag", metavar="name", help="Tag for --repository and --metadata.")
-    group.add_argument("--metadata", action="store_true", help="Show image config metadata for --repository and --tag.")
-    group.add_argument("--inspect", action="store_true", help="Inspect an image manifest and config.")
-    group.add_argument("--image", metavar="name", help="Image reference for --inspect or --download.")
+def add_oci_content_flags(group: argparse._ArgumentGroup, *, product: str) -> None:
+    if product == "nexus":
+        group.add_argument(
+            "--show-repositories",
+            action="store_true",
+            help="List Nexus storage repositories with their format and type.",
+        )
+        group.add_argument(
+            "--repository",
+            metavar="name",
+            help="Nexus storage for --show-images, or Docker image repository for tags and metadata.",
+        )
+    group.add_argument(
+        "--show-images",
+        "--images",
+        dest="images",
+        action="store_true",
+        help="List accessible Docker image names and tags.",
+    )
+    group.add_argument("--image", metavar="name", help="Image reference for --show-manifest or --download.")
+    if product != "nexus":
+        group.add_argument(
+            "--repository", metavar="name", help="Docker image repository for targeted tag or metadata checks."
+        )
+    group.add_argument(
+        "--show-tags",
+        action="store_true",
+        help="Show tags for every accessible Docker image repository, or only --repository.",
+    )
+    group.add_argument("--tag", metavar="name", help="Tag for --repository and --show-metadata.")
+    group.add_argument(
+        "--show-manifest",
+        "--inspect",
+        dest="inspect",
+        action="store_true",
+        help="Inspect an image manifest and config.",
+    )
+    group.add_argument(
+        "--show-metadata",
+        "--metadata",
+        dest="metadata",
+        action="store_true",
+        help="Show image config metadata for --repository and --tag.",
+    )
+    if product == "nexus":
+        group.add_argument(
+            "--show-assets", "--assets", dest="assets", action="store_true", help="Show Nexus asset URLs and checksums."
+        )
+        group.add_argument(
+            "--asset", metavar="path-or-url", help="Show one Nexus asset by its exact path or download URL."
+        )
     group.add_argument("--download", action="store_true", help="Download blobs for --image.")
     group.add_argument("--download-dir", default="./registry_downloads", metavar="dir", help="Blob output directory.")
 
@@ -31,7 +74,7 @@ def configure_oci_registry_parser(
 ) -> None:
     common = parser.add_argument_group("Common")
     auth = parser.add_argument_group("Auth")
-    actions = parser.add_argument_group("OCI images")
+    actions = parser.add_argument_group("Nexus repositories / OCI images" if product == "nexus" else "OCI images")
     add_output_flags(common)
     add_log_flag(common)
     add_scan_host_flags(common, include_profiles=False)
@@ -51,9 +94,7 @@ def configure_oci_registry_parser(
     auth.add_argument("-p", "--password", metavar="value", help="Basic password.")
     auth.add_argument("--token", metavar="value", help="Registry Bearer token.")
     auth.add_argument("--defcreds", action="store_true", help="Check a small catalog of weak Basic pairs.")
-    add_oci_content_flags(actions)
-    if product == "nexus":
-        actions.add_argument("--assets", action="store_true", help="Show Nexus asset URLs and checksums.")
+    add_oci_content_flags(actions, product=product)
 
 
 def configure_docker_registry_parser(parser: argparse.ArgumentParser, **kwargs: object) -> None:

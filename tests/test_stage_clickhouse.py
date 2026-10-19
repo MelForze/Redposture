@@ -1175,7 +1175,6 @@ def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
             "9000",
             "-u",
             str(credentials),
-            "--defcreds",
             shell_flag,
         ]
     )
@@ -1186,48 +1185,23 @@ def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
     )
 
     assert rc == 0
+    # NEXT_QA #4: no --defcreds here (file creds are standalone), so only the implicit
+    # no-auth probe and the file pairs are attempted; the shell then reuses the winning
+    # file credential (admin:admin).
     assert connection_attempts == [
         ("default", ""),
         ("bad", "bad"),
         ("admin", "admin"),
-        ("admin", "changeme"),
-        ("admin", "password"),
-        ("clickhouse", "clickhouse"),
-        ("clickhouse", "password"),
-        ("default", ""),
-        ("default", "12345678"),
-        ("default", "changeme"),
-        ("default", "clickhouse"),
-        ("default", "default"),
-        ("default", "password"),
-        ("root", "password"),
-        ("root", "root"),
-        ("user", "password"),
-        ("user", "user"),
         ("admin", "admin"),
     ]
     assert emitted_records[0]["status"] == "valid_credentials"
     assert emitted_records[0]["credentials_source"] == "file"
-    assert emitted_records[0]["defcreds_enabled"] is True
+    assert emitted_records[0]["defcreds_enabled"] is False
     assert [
         (item["username"], item["password"], item["source"]) for item in emitted_records[0]["credential_attempts"]
     ] == [
         ("bad", "bad", "file"),
         ("admin", "admin", "file"),
-        ("admin", "changeme", "default"),
-        ("admin", "password", "default"),
-        ("clickhouse", "clickhouse", "default"),
-        ("clickhouse", "password", "default"),
-        ("default", "", "default"),
-        ("default", "12345678", "default"),
-        ("default", "changeme", "default"),
-        ("default", "clickhouse", "default"),
-        ("default", "default", "default"),
-        ("default", "password", "default"),
-        ("root", "password", "default"),
-        ("root", "root", "default"),
-        ("user", "password", "default"),
-        ("user", "user", "default"),
     ]
     assert len(shell_calls) == 1
     assert shell_calls[0][0].username == "admin"
@@ -1992,37 +1966,9 @@ def test_clickhouse_lifecycle_tries_credential_file_pairs_after_one_anonymous_de
 
 
 def test_clickhouse_defcreds_plan_preserves_provided_then_default_order() -> None:
-    args = parse_args(
-        [
-            "clickhouse",
-            "-t",
-            "127.0.0.1",
-            "-u",
-            "app",
-            "-p",
-            "secret",
-            "--defcreds",
-        ]
-    )
-    plan = clickhouse_stage.build_clickhouse_plan(args)
-    assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [
-        ("app", "secret", "provided"),
-        ("admin", "admin", "default"),
-        ("admin", "changeme", "default"),
-        ("admin", "password", "default"),
-        ("clickhouse", "clickhouse", "default"),
-        ("clickhouse", "password", "default"),
-        ("default", "", "default"),
-        ("default", "12345678", "default"),
-        ("default", "changeme", "default"),
-        ("default", "clickhouse", "default"),
-        ("default", "default", "default"),
-        ("default", "password", "default"),
-        ("root", "password", "default"),
-        ("root", "root", "default"),
-        ("user", "password", "default"),
-        ("user", "user", "default"),
-    ]
+    # NEXT_QA #4: explicit pair + --defcreds is rejected (no provided-then-default layering).
+    with pytest.raises(SystemExit):
+        parse_args(["clickhouse", "-t", "127.0.0.1", "-u", "app", "-p", "secret", "--defcreds"])
 
 
 def test_clickhouse_lifecycle_renders_every_attempt_until_first_success_without_duplicate(

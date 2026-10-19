@@ -32,7 +32,7 @@ from ...utils import is_signature_compat_typeerror
 from . import actions, policy, render
 
 _DEFAULT_PORT = 5432
-_DEFAULT_PORTS: tuple[int, ...] | None = (5432, 6432, 15432, 16432, 25432, 26432, 80, 443)
+_DEFAULT_PORTS: tuple[int, ...] | None = (5432, 6432, 15432, 16432, 25432, 26432, 80, 443, 3000)
 _POSTGRES_HOST_STAGE = actions.host_stage
 _POSTGRES_HOST_STAGE_NAME = actions.host_stage.__name__
 _POSTGRES_HOST_STAGE_IMPL = getattr(actions, _POSTGRES_HOST_STAGE_NAME, actions.host_stage)
@@ -628,6 +628,7 @@ def build_postgres_spec(args: Any) -> ModuleAuditSpec:
         and not bool(getattr(args, "stop_on_success", False)),
         record_all_credential_attempts=bool(getattr(args, "defcreds", False)),
         credential_attempt_detail_fields=("credential_verified", "credential_verification"),
+        defer_phase_output_until_final=True,
     )
 
 

@@ -2556,6 +2556,7 @@ def _caps_suffix(record: dict[str, Any]) -> str:
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth_required = record.get("auth_required")
     auth_required_text = "True" if auth_required is True else "False" if auth_required is False else "unknown"
+    version = str(record.get("server_version") or "").strip() or "unknown"
 
     if output_format == "json":
         return json.dumps(
@@ -2568,11 +2569,12 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "detected": bool(record.get("is_postgres")),
                 "auth_required": auth_required,
                 "auth_method": record.get("auth_method"),
+                "version": record.get("server_version"),
             },
             ensure_ascii=False,
         )
 
-    return f"{_nxc_prefix(record)} [*] Postgres Database (auth required:{auth_required_text})"
+    return f"{_nxc_prefix(record)} [*] Postgres Database (auth required:{auth_required_text}) (version:{version})"
 
 
 def _format_tables_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -3156,7 +3158,11 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         line = f"{prefix} [!] {label}"
         return f"{line} err={err}" if err != "-" else line
 
-    fail_line = f"{prefix} [!] connection failed"
+    fail_line = (
+        f"{prefix} [!] post-detection check failed"
+        if record.get("detection_preserved")
+        else f"{prefix} [!] connection failed"
+    )
     return f"{fail_line} err={err}" if err != "-" else fail_line
 
 
@@ -3212,6 +3218,7 @@ def _render_colored_postgres_line(console: Console, line: str) -> bool:
         console,
         line,
         tag="POSTGRES",
+        regexes=((r"\(version:[^)]+\)", "orange"),),
         booleans=(
             BooleanColorRule("superuser", unknown_color="orange"),
             BooleanColorRule("execute", unknown_color="orange"),

@@ -13,6 +13,21 @@
     "can_create_znode": null,
     "can_delete_znode": null,
     "connect_error": null,
+    "content_discovery": {
+      "bytes_inspected": 487,
+      "findings": [
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./redposture/app/api_key.api_key",
+          "source": "anonymous",
+          "type": "api_key",
+          "value": "rp-k...2026"
+        }
+      ],
+      "source": "anonymous",
+      "status": "complete"
+    },
     "credential_auth_probe_results": {},
     "credential_verdict": null,
     "credential_verification_path": null,
@@ -223,6 +238,21 @@
     "can_create_znode": null,
     "can_delete_znode": null,
     "connect_error": null,
+    "content_discovery": {
+      "bytes_inspected": 487,
+      "findings": [
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./redposture/app/api_key.api_key",
+          "source": "anonymous",
+          "type": "api_key",
+          "value": "rp-k...2026"
+        }
+      ],
+      "source": "anonymous",
+      "status": "complete"
+    },
     "credential_auth_probe_results": {},
     "credential_verdict": null,
     "credential_verification_path": null,

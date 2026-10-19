@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -47,12 +48,54 @@ def test_full_docker_matrix_is_reproducible_and_local_only() -> None:
     assert "run_full_local_qa.sh" not in workflows
 
 
+def test_docker_matrix_continues_after_a_failed_service_and_cleans_it(tmp_path: Path) -> None:
+    source = (ROOT / "scripts/run_lab_matrix_sequential.sh").read_text(encoding="utf-8")
+    service_runner = (
+        "run_service_block() (" + source.split("run_service_block() (", 1)[1].split("# The local QA runner owns", 1)[0]
+    )
+    harness = f"""
+set -euo pipefail
+OUT_DIR={shlex.quote(str(tmp_path))}
+CURRENT_SERVICE=""
+STATUS_FILE="$OUT_DIR/matrix-status.tsv"
+cleanup_current_service() {{
+  if [ -n "$CURRENT_SERVICE" ]; then echo "$CURRENT_SERVICE" >> "$OUT_DIR/cleanup.txt"; fi
+}}
+start_service() {{
+  CURRENT_SERVICE="$1"
+  if [ "$1" = broken ]; then return 7; fi
+}}
+stop_service() {{ CURRENT_SERVICE=""; }}
+run_dummy_cases() {{
+  echo "cases:$CURRENT_SERVICE" >> "$OUT_DIR/cases.txt"
+  if [ "$CURRENT_SERVICE" = mismatch ]; then
+    printf 'module\\tlabel\\t0\\t7\\t-\\t-\\n' >> "$STATUS_FILE"
+  fi
+}}
+{service_runner}
+printf 'module\\tlabel\\texpected_exit\\texit_code\\tjson_path\\tlog_path\\n' > "$STATUS_FILE"
+printf 'service\\tstatus\\texit_code\\tduration_seconds\\n' > "$SERVICE_SUMMARY"
+run_matrix_service broken run_dummy_cases
+run_matrix_service healthy run_dummy_cases
+run_matrix_service mismatch run_dummy_cases
+"""
+    result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    summary = (tmp_path / "service-summary.tsv").read_text(encoding="utf-8")
+    assert "broken\tfailed\t7\t" in summary
+    assert "healthy\tpassed\t0\t" in summary
+    assert "mismatch\tfailed\t1\t" in summary
+    assert (tmp_path / "cleanup.txt").read_text(encoding="utf-8").splitlines() == ["broken"]
+    assert (tmp_path / "cases.txt").read_text(encoding="utf-8").splitlines() == ["cases:healthy", "cases:mismatch"]
+
+
 def test_real_heavy_vendors_are_seeded_in_separate_matrix_blocks() -> None:
     script = (ROOT / "scripts/run_lab_matrix_sequential.sh").read_text()
     assert "qa_service_policy.py" in script
     assert "prepare_version.py" in script
-    assert "run_service_block registry-harbor run_registry_harbor_cases" in script
-    assert "run_service_block valkey run_valkey_cases" in script
+    assert "run_matrix_service registry-harbor run_registry_harbor_cases" in script
+    assert "run_matrix_service valkey run_valkey_cases" in script
     assert "scripts/bootstrap_gitlab_lab.py" in script
     assert "scripts/seed_real_vendors.py harbor" in script
     bootstrap = (ROOT / "scripts/bootstrap_gitlab_lab.py").read_text()
@@ -109,6 +152,70 @@ def test_extended_matrix_accounts_for_every_cli_option() -> None:
     assert report["missing_actions"] == {}
 
 
+def test_nexus_postrun_expectation_matches_selected_asset(tmp_path: Path) -> None:
+    verifier = _load_postrun_verifier()
+    script = (ROOT / "scripts/run_lab_matrix_sequential.sh").read_text(encoding="utf-8")
+    case = next(line for line in script.splitlines() if "run_case nexus registry_nexus 0 " in line)
+    selected_asset = case.split("--asset ", 1)[1].split()[0]
+    assert selected_asset in verifier._RICH_OUTPUT_REQUIRED_SUBSTRINGS["registry_nexus"]
+
+    artifact = tmp_path / "registry_nexus.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "nexus_repositories": ["raw-internal", "raw-observability", "raw-security"],
+                "nexus_assets": [{"path": selected_asset}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    row = {
+        "label": "registry_nexus",
+        "exit_code": "0",
+        "log_path": str(tmp_path / "missing.log"),
+        "json_path": str(artifact),
+    }
+    verifier._validate_rich_lab_outputs([row])
+
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8").replace(selected_asset, "release-metadata.json"), encoding="utf-8"
+    )
+    with pytest.raises(SystemExit, match="missing expected seeded lab data"):
+        verifier._validate_rich_lab_outputs([row])
+
+
+def test_idempotency_cases_repeat_the_same_command_without_intervening_cases() -> None:
+    script = (ROOT / "scripts/run_lab_matrix_sequential.sh").read_text(encoding="utf-8")
+    lines = script.splitlines()
+    for module, base, twin in (
+        ("postgres", "postgres_default", "postgres_idempotency"),
+        ("mongodb", "mongodb_auth", "mongodb_idempotency"),
+        ("redis", "redis_default", "redis_idempotency"),
+        ("etcd", "etcd_open", "etcd_idempotency"),
+        ("kafka", "kafka_open", "kafka_idempotency"),
+    ):
+        base_index = next(i for i, line in enumerate(lines) if f"run_case {module} {base} 0 " in line)
+        twin_index = next(i for i, line in enumerate(lines) if f"run_case {module} {twin} 0 " in line)
+        assert 0 < twin_index - base_index <= 3
+        assert shlex.split(lines[base_index].strip())[4:] == shlex.split(lines[twin_index].strip())[4:]
+
+
+def test_golden_discovery_normalizes_finding_order_without_dropping_duplicates() -> None:
+    verifier = _load_postrun_verifier()
+    finding_a = {"type": "password", "object_path": "$.accounts.password"}
+    finding_b = {"type": "token", "object_path": "$.tokens.value"}
+    left = {"module": "mongodb", "content_discovery": {"findings": [finding_b, finding_a, finding_a]}}
+    right = {"module": "mongodb", "content_discovery": {"findings": [finding_a, finding_b, finding_a]}}
+    missing = {"module": "mongodb", "content_discovery": {"findings": [finding_a, finding_b]}}
+
+    normalized = verifier._normalize_for_golden(left)
+    assert normalized == verifier._normalize_for_golden(right)
+    assert normalized != verifier._normalize_for_golden(missing)
+    assert verifier._normalize_for_golden(
+        {"module": "mongodb", "cve_enumeration": {"findings": [finding_b, finding_a]}}
+    ) != verifier._normalize_for_golden({"module": "mongodb", "cve_enumeration": {"findings": [finding_a, finding_b]}})
+
+
 def test_split_lab_compose_files_only_reference_paths_inside_current_checkout() -> None:
     compose_files = sorted((ROOT / "lab" / "services").glob("*/docker-compose.yml"))
     if not compose_files:
@@ -149,6 +256,36 @@ def test_every_raw_negative_fuzz_case_has_a_required_output_contract() -> None:
     assert labels
     assert labels <= set(verifier._EXTENDED_EXPECTED_LABELS)
     assert labels <= set(verifier._EXPECTED_FAILURE_OUTPUT_SUBSTRINGS)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "fuzz_docker_missing_targets",
+        "fuzz_docker_defcreds_missing_targets",
+        "fuzz_harbor_option_surface",
+        "fuzz_nexus_option_surface",
+    ],
+)
+def test_negative_matrix_case_reaches_its_intended_validation_error(label: str) -> None:
+    verifier = _load_postrun_verifier()
+    script = (ROOT / "scripts" / "run_lab_matrix_sequential.sh").read_text(encoding="utf-8")
+    line = next(value.strip() for value in script.splitlines() if "run_raw_case " in value and f" {label} " in value)
+    invocation = shlex.split(line)
+    module = label.split("_", 2)[1]
+    assert invocation[:4] == ["run_raw_case", module, label, "2"]
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "redposture.py"), *invocation[4:]],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == int(invocation[3]), result.stderr
+    assert all(
+        fragment in result.stdout + result.stderr for fragment in verifier._EXPECTED_FAILURE_OUTPUT_SUBSTRINGS[label]
+    ), result.stderr
 
 
 def test_airflow_missing_targets_fuzz_error_matches_qa_contract(tmp_path: Path) -> None:

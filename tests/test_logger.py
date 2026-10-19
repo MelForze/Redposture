@@ -94,9 +94,74 @@ def test_logger_marks_mysql_native_challenge_response_as_credential_evidence(
     )
     output = capsys.readouterr().out
     assert "(CRED!)" in output
+    hashcat = "$mysqlna$" + "12" * 20 + "*" + "ab" * 20
+    assert "(hashcat:" not in output
+    assert f"auth_plugin=mysql_native_password hashcat={hashcat} auth_salt=" in output
     assert "[CRED]" in output
     assert "auth_response=" in output
     assert "pass=" not in output
+
+
+def test_logger_mysql_hash_is_colored_only_on_console_and_saved_without_ansi(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    logger = AttemptLogger()
+    saved = tmp_path / "trigger.txt"
+    logger.set_text_output(str(saved))
+    logger.set_trigger_callback_mode(True)
+    monkeypatch.setattr(logger_module, "should_use_color", lambda _stream: True)
+    monkeypatch.setattr(logger_module, "is_console_no_color", lambda: False)
+    hashcat = "$mysqlna$" + "12" * 20 + "*" + "ab" * 20
+
+    logger.log(
+        "mysql",
+        ("10.0.0.5", 50001),
+        username="exporter",
+        auth_plugin="mysql_native_password",
+        auth_salt="12" * 20,
+        auth_response="ab" * 20,
+        listen_port=13316,
+    )
+    console_output = capsys.readouterr().out
+    assert f"auth_plugin=mysql_native_password hashcat={hashcat} auth_salt=" in console_output
+    assert "\x1b[1;38;5;208m[" in console_output
+    assert f"auth_plugin=mysql_native_password hashcat={hashcat} auth_salt=" in saved.read_text()
+    assert "(hashcat:" not in saved.read_text()
+    assert "\x1b[" not in saved.read_text()
+
+    monkeypatch.setattr(logger_module, "is_console_no_color", lambda: True)
+    logger.log(
+        "mysql",
+        ("10.0.0.6", 50002),
+        username="exporter",
+        auth_plugin="mysql_native_password",
+        auth_salt="13" * 20,
+        auth_response="ac" * 20,
+        listen_port=13316,
+    )
+    no_color_output = capsys.readouterr().out
+    assert "hashcat=$mysqlna$" in no_color_output
+    assert "\x1b[" not in no_color_output
+    logger.close()
+
+
+def test_logger_does_not_mark_malformed_mysql_response_as_credential(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logger = AttemptLogger()
+    logger.set_trigger_callback_mode(True)
+    logger.log(
+        "mysql",
+        ("10.0.0.5", 50001),
+        username="exporter",
+        auth_plugin="mysql_native_password",
+        auth_salt="12" * 20,
+        auth_response="zz" * 20,
+        listen_port=13316,
+    )
+    output = capsys.readouterr().out
+    assert "(CRED!)" not in output
+    assert "$mysqlna$" not in output
 
 
 def test_logger_trigger_callback_mode_prints_callback_line_without_creds(capsys: pytest.CaptureFixture[str]) -> None:

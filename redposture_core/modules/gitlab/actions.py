@@ -12,7 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from http.cookies import SimpleCookie
@@ -1762,7 +1762,10 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
                     project=project,
                 )
 
-            if ctx.nested_scheduler is not None:
+            completed_projects: Iterable[tuple[dict[str, Any], dict[str, Any]]]
+            if not (options.get("show_repositories") or project_filters or options["clone"]):
+                completed_projects = ()
+            elif ctx.nested_scheduler is not None:
                 completed_projects = ctx.nested_scheduler.iter_completed(
                     token_projects,
                     _probe_lifecycle_project,

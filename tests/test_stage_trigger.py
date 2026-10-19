@@ -1176,7 +1176,7 @@ def test_trigger_json_with_listen_requires_output(monkeypatch: pytest.MonkeyPatc
     assert rc == 2
 
 
-def test_trigger_without_listen_enables_attempt_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_trigger_without_listen_enables_attempt_logging(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
     def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
@@ -1198,7 +1198,7 @@ def test_trigger_without_listen_enables_attempt_logging(monkeypatch: pytest.Monk
     monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
 
     rc = run_trigger_stage(
-        _base_args(with_listen=False, output="trigger.txt", debug=False),
+        _base_args(with_listen=False, output=str(tmp_path / "trigger.txt"), debug=False),
         AttemptLogger(),
     )
     assert rc == 0
@@ -1601,7 +1601,7 @@ def test_trigger_stage_argument_and_validation_paths(monkeypatch: pytest.MonkeyP
     assert rc == 2
 
 
-def test_trigger_stage_target_parse_and_output_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_trigger_stage_target_parse_and_output_error_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_trigger.collect_scan_target_specs",
         lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad targets")),
@@ -1635,7 +1635,7 @@ def test_trigger_stage_target_parse_and_output_error_paths(monkeypatch: pytest.M
         "set_text_output",
         lambda *_a, **_k: (_ for _ in ()).throw(OSError("cannot open")),
     )
-    rc = run_trigger_stage(_base_args(output="trigger.txt"), logger)
+    rc = run_trigger_stage(_base_args(output=str(tmp_path / "trigger.txt")), logger)
     assert rc == 2
 
 

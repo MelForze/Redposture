@@ -16,7 +16,13 @@ from ...audit_models import AuditRecord
 from ...clients import transport
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
-from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import (
+    CountColorRule,
+    RegexColorRule,
+    format_count_value,
+    render_colored_marker_line,
+    render_tagged_detail_line,
+)
 from ...show_limits import (
     dump_flag_enabled,
     dump_flag_limit,
@@ -739,8 +745,7 @@ def redis_detect_hook(ctx: Any) -> AuditRecord:
                 state.auth_required = False
                 state.status = "open_no_auth"
                 state.error = None
-                if bool(getattr(ctx.args, "enum_cve", False)) or bool(getattr(ctx.args, "_spray_capabilities", False)):
-                    _capture_redis_server_identity(state)
+                _capture_redis_server_identity(state)
                 return _redis_lifecycle_record(state, include_data=False)
             if ping_type == "error":
                 confirmed, auth_required = _confirm_redis_error_response(state.sock, str(ping_value))
@@ -1453,6 +1458,11 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
 
     prefix = _nxc_prefix(record)
     lines = []
+    dumped_by_key: dict[str, list[tuple[int, str]]] = {}
+    for index, entry in enumerate(dumped_key_entries):
+        if entry.get("key") is not None:
+            dumped_by_key.setdefault(str(entry["key"]), []).append((index, _redis_kv_entry_text(entry)))
+    emitted_entries: set[int] = set()
     if show_keys and key_names:
         total = record.get("key_count")
         if key_limit is not None and isinstance(total, int) and total > len(displayed_key_names):
@@ -1461,12 +1471,25 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
             lines.append(f"{prefix} [*] Keys Enumeration")
         for item in displayed_key_names:
             lines.append(f"{prefix} {_format_redis_text(item)}")
+            if dump_keys:
+                for index, value in dumped_by_key.get(item, []):
+                    lines.append(f"{prefix} {_format_redis_text(value)}")
+                    emitted_entries.add(index)
     if query_key and isinstance(query_key_value, str):
         lines.append(f"{prefix} [*] Dump Key {query_key}")
         lines.append(f"{prefix} {_format_redis_text(query_key_value)}")
-    if dump_keys and dumped_key_values:
+    if dump_keys and dumped_key_values and (not show_keys or len(emitted_entries) < len(dumped_key_values)):
         lines.append(f"{prefix} [*] Dump Keys")
-        for item in dumped_key_values:
+        remaining = (
+            [
+                _redis_kv_entry_text(entry)
+                for index, entry in enumerate(dumped_key_entries)
+                if index not in emitted_entries
+            ]
+            if dumped_key_entries
+            else dumped_key_values
+        )
+        for item in remaining:
             lines.append(f"{prefix} {_format_redis_text(item)}")
     return lines
 
@@ -1567,6 +1590,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth_required_text = (
         "True" if auth_required_value is True else "False" if auth_required_value is False else "unknown"
     )
+    version = record.get("server_version") or record.get("redis_version") or record.get("valkey_version")
 
     if output_format == "json":
         return json.dumps(
@@ -1578,12 +1602,16 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "service": "redis",
                 "detected": bool(record.get("is_redis")),
                 "auth_required": auth_required_value,
+                "version": version,
             },
             ensure_ascii=False,
         )
 
     prefix = _nxc_prefix(record)
-    return f"{prefix} [*] Redis Database (auth required:{auth_required_text})"
+    line = f"{prefix} [*] Redis Database (auth required:{auth_required_text})"
+    if version:
+        line += f" (version:{version})"
+    return line
 
 
 def _render_colored_redis_line(console: Console, line: str) -> bool:
@@ -1591,6 +1619,7 @@ def _render_colored_redis_line(console: Console, line: str) -> bool:
         console,
         line,
         tag="REDIS",
+        regexes=(RegexColorRule(r"\(version:[^)]+\)", "orange"),),
         counts=(CountColorRule("keys", "red", unknown_color="orange", zero_color="bright_green"),),
     ):
         return True

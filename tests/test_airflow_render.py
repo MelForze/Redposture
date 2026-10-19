@@ -242,7 +242,7 @@ def test_discovery_finding_and_summary_use_common_colors():
             ],
         },
     )
-    summary, finding = render._format_discover_records(record, "txt")
+    finding, summary = render._format_discover_records(record, "txt")
 
     summary_console = _Console()
     assert render._render_colored_airflow_line(summary_console, summary)

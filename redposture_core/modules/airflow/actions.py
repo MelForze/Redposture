@@ -871,14 +871,15 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     if discover_requested and callable(live_emit):
         from . import render
 
-        keys_lines = render._format_show_keys_records(merged, "txt")
-        connections_lines = render._format_show_connections_records(merged, "txt")
-        if keys_lines:
-            live_emit(keys_lines)
-            merged["_show_keys_streamed"] = True
-        if connections_lines:
-            live_emit(connections_lines)
-            merged["_show_connections_streamed"] = True
+        if not dump_requested:
+            keys_lines = render._format_show_keys_records(merged, "txt")
+            connections_lines = render._format_show_connections_records(merged, "txt")
+            if keys_lines:
+                live_emit(keys_lines)
+                merged["_show_keys_streamed"] = True
+            if connections_lines:
+                live_emit(connections_lines)
+                merged["_show_connections_streamed"] = True
         live_emit([f"AIRFLOW\t{ctx.host}\t{int(ctx.port)}\t [*] Discover Secrets"])
 
     def _on_finding(finding: dict[str, Any]) -> None:

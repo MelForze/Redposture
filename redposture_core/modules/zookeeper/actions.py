@@ -2848,6 +2848,12 @@ def _zookeeper_implementation_label(record: Mapping[str, Any]) -> str:
 
 
 def _with_optional_znodes(record: dict[str, Any], message: str) -> str:
+    if (
+        record.get("znode_count") is None
+        and not record.get("znode_count_unknown")
+        and not record.get("znode_count_partial")
+    ):
+        return message
     state = "partial" if bool(record.get("znode_count_partial")) else None
     if bool(record.get("znode_count_unknown")) and state is None:
         state = "unknown"
@@ -3073,7 +3079,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         if record.get("credential_verdict") == "unsupported_sasl":
             return f"{prefix} [*] digest credential verification unsupported: SASL required"
         if _credential_attempt_denied_on_protected_nodes(record, record):
-            return f"{prefix} [-] {_credentials_label(record)} (no access to tested znodes)"
+            return f"{prefix} [-] {_credentials_label(record)} (no access to protected znodes; credentials unverified)"
         return f"{prefix} [*] credential verification inconclusive; see --debug/JSON"
 
     if status == "open_no_auth":
@@ -3156,7 +3162,9 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             continue
         if not accepted:
             if _credential_attempt_denied_on_protected_nodes(record, attempt):
-                lines.append(f"{prefix} [-] {username}:{password_text} (no access to tested znodes)")
+                lines.append(
+                    f"{prefix} [-] {username}:{password_text} (no access to protected znodes; credentials unverified)"
+                )
             elif attempt.get("credential_verdict") == "unsupported_sasl":
                 unsupported_sasl += 1
             else:
@@ -3186,8 +3194,9 @@ def _format_credential_verification_records(
     prefix = _nxc_prefix(record)
     reason = str(record.get("credential_verification_reason") or "no protected znode found")
     skipped = record.get("credential_attempts_skipped")
-    skipped_note = f"; {skipped} pair(s) not attempted" if isinstance(skipped, int) and skipped > 0 else ""
-    line = f"{prefix} [*] credential verification unavailable: {reason}{skipped_note}; use --znode <protected-path>"
+    reason_text = "no protected znodes for verification" if reason == "no protected znode found" else reason
+    skipped_note = f" ({skipped} pair(s) not attempted)" if isinstance(skipped, int) and skipped > 0 else ""
+    line = f"{prefix} [-] credential verification unavailable ({reason_text}){skipped_note}"
     return [line]
 
 
@@ -3364,8 +3373,28 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str, *,
 
     prefix = _nxc_prefix(record)
     lines = []
+    grouped_dump = bool(show_znodes and dump and not query_znode and znode_details and znode_values)
+    grouped_target = bool(
+        show_znodes and query_znode and any(item.get("path") == query_znode for item in znode_details)
+    )
+    values_by_path: dict[str, list[str]] = {}
+    unmatched_values: list[str] = []
+    if grouped_dump:
+        known_paths = {str(item.get("path") or "") for item in znode_details}
+        max_path_length = max((len(path) for path in known_paths), default=0)
+        for value in znode_values:
+            path = ""
+            for position, char in enumerate(value[: max_path_length + 1]):
+                if char == ":" and value[:position] in known_paths:
+                    path = value[:position]
+            if path:
+                values_by_path.setdefault(path, []).append(value)
+            else:
+                unmatched_values.append(value)
     if show_znodes and znode_details:
         lines.append(f"{prefix} [*] Znodes Enumeration (Count:{shown_count})")
+        if grouped_dump:
+            lines.append(f"{prefix} [*] Dump Znodes")
         if debug and unknown_note:
             lines.append(f"{prefix} [*] {unknown_note}")
         if debug and truncation_note:
@@ -3376,21 +3405,36 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str, *,
             error = str(item.get("error") or "").strip()
             if error:
                 lines.append(f"{prefix} {path}:<{error}>")
-                continue
-            if state == "empty":
+            elif state == "empty":
                 lines.append(f"{prefix} {path}:<empty>")
-                continue
-            children = item.get("children")
-            data_length = item.get("bytes")
-            if isinstance(children, int) and isinstance(data_length, int):
-                lines.append(f"{prefix} {path} (children:{children},bytes:{data_length})")
             else:
-                lines.append(f"{prefix} {path}")
-    if query_znode:
+                children = item.get("children")
+                data_length = item.get("bytes")
+                if isinstance(children, int) and isinstance(data_length, int):
+                    lines.append(f"{prefix} {path} (children:{children},bytes:{data_length})")
+                else:
+                    lines.append(f"{prefix} {path}")
+            for value in values_by_path.get(path, []):
+                lines.append(f"{prefix} {value}")
+            if grouped_target and path == query_znode:
+                lines.append(f"{prefix} [*] Znode {query_znode}")
+                if isinstance(query_znode_value, str):
+                    lines.append(f"{prefix} {query_znode_value}")
+                if dump:
+                    lines.append(f"{prefix} [*] Dump Znode {query_znode}")
+                    if isinstance(query_znode_dump, str):
+                        lines.append(f"{prefix} {query_znode_dump}")
+                    elif query_znode_dump_error:
+                        lines.append(f"{prefix} [-] {query_znode_dump_error}")
+                    else:
+                        lines.append(f"{prefix} <no data>")
+        for value in unmatched_values:
+            lines.append(f"{prefix} {value}")
+    if query_znode and not grouped_target:
         lines.append(f"{prefix} [*] Znode {query_znode}")
         if isinstance(query_znode_value, str):
             lines.append(f"{prefix} {query_znode_value}")
-    if dump and query_znode:
+    if dump and query_znode and not grouped_target:
         lines.append(f"{prefix} [*] Dump Znode {query_znode}")
         if isinstance(query_znode_dump, str):
             lines.append(f"{prefix} {query_znode_dump}")
@@ -3399,13 +3443,15 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str, *,
         else:
             lines.append(f"{prefix} <no data>")
     if dump and not query_znode and (znode_values_raw is not None or dump_error):
-        lines.append(f"{prefix} [*] Dump Znodes")
+        if not grouped_dump:
+            lines.append(f"{prefix} [*] Dump Znodes")
         if debug and unknown_note:
             lines.append(f"{prefix} [*] {unknown_note}")
         if debug and truncation_note:
             lines.append(f"{prefix} [*] {truncation_note}")
-        for item in znode_values:
-            lines.append(f"{prefix} {item}")
+        if not grouped_dump:
+            for item in znode_values:
+                lines.append(f"{prefix} {item}")
         if dump_error and not znode_values:
             lines.append(f"{prefix} [-] {dump_error}")
     dump_section_rendered = bool(dump and not query_znode and (znode_values_raw is not None or dump_error))
@@ -3423,6 +3469,20 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str, *,
 
 def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
     for tag in ("ZOOKEEPER", "KEEPER"):
+        if line.startswith(tag) and " [-] " in line:
+            payload = line.split(" [-] ", 1)[1]
+            if payload.endswith("(no access to protected znodes; credentials unverified)") or payload.startswith(
+                "credential verification unavailable ("
+            ):
+                reason_start = payload.find(" (") + 2
+                reason_end = payload.find(")", reason_start)
+                return render_module_marker_line(
+                    console,
+                    line,
+                    tag=tag,
+                    spans=((reason_start, reason_end, "orange"),),
+                    marker_colors={"[*]": "white", "[+]": "bright_green", "[-]": "red", "[!]": "yellow"},
+                )
         if (
             line.startswith(tag)
             and " [*] " in line
@@ -3432,6 +3492,7 @@ def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
                     "credential verification unavailable",
                     "credential verification inconclusive",
                     "credential check(s) inconclusive",
+                    "verification inconclusive",
                     "digest credential verification unsupported",
                     "digest verification unsupported",
                     "not attempted",
@@ -3469,7 +3530,7 @@ def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
                 CountColorRule("Count", "red", unknown_color="orange", zero_color="bright_green"),
             ),
             extra_spans=lambda marker, payload: (
-                [(0, len(payload.split(" (", 1)[0]), "true_red" if marker == "[+]" else "bright_green")]
+                [(0, len(payload.split(" (", 1)[0]), "true_red" if marker == "[+]" else "white")]
                 if marker in {"[+]", "[-]"} and ":" in payload.split(" (", 1)[0]
                 else []
             ),

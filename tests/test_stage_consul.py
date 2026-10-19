@@ -253,6 +253,20 @@ def test_auth_summary_line_token_valid_and_failed() -> None:
     assert "err=denied" in fail_line
 
 
+def test_rejected_consul_token_has_one_concise_denial() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 8500,
+        "is_consul": True,
+        "auth_mode": "token",
+        "auth_valid": False,
+        "auth_error": "Consul ACL token not found",
+        "auth_scopes": _scope_fixture(False, False, False),
+    }
+    assert consul._auth_summary_line(record) == "[-] token auth failed (Token not found)"
+    assert consul._detail_lines(record, "txt") == []
+
+
 def test_bool_text() -> None:
     assert consul._bool_text(True) == "True"
     assert consul._bool_text(False) == "False"

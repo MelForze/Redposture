@@ -15,6 +15,7 @@ from ...clients.http_api import HttpResponse, infer_http_base_path
 from ...clients.http_session import HttpSessionPool
 from ...ui_export import UIExport
 from ...utils import utc_now_iso
+from . import http_surfaces
 
 _AUTH_TYPES = {"DISABLED", "LOGIN_FORM", "LDAP", "OAUTH2"}
 _VERSION = re.compile(r"^v?[0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9._-]+)?$")
@@ -101,7 +102,21 @@ def _clusters(value: Any, *, limit: int | None = _MAX_CLUSTERS) -> list[dict[str
 def _base(ctx: Any, scheme: str) -> str:
     target = getattr(ctx, "target", None)
     path = str(getattr(target, "path", "") or "")
-    prefix = infer_http_base_path(path, ("/api/info", "/api/config/authentication", "/api/clusters", "/login"))
+    prefix = infer_http_base_path(
+        path,
+        (
+            "/api/info",
+            "/api/config/authentication",
+            "/api/clusters",
+            "/login",
+            "/topics",
+            "/v3/clusters",
+            "/connectors",
+            "/subjects",
+            "/info",
+            "/ui",
+        ),
+    )
     return f"{scheme}://{ctx.host}:{ctx.port}{prefix.rstrip('/')}"
 
 
@@ -276,6 +291,13 @@ def detect_ui(ctx: Any, state: Any) -> dict[str, Any]:
     last_error: str | None = None
     for scheme in schemes:
         base = _base(ctx, scheme)
+        # REST gateways and other consoles have distinct APIs and identities.
+        other = http_surfaces.detect(pool, base, ctx)
+        if other is not None:
+            state.ui_base = base
+            state.ui_vendor = str(other["ui_vendor"])
+            state.ui_auth_type = None
+            return other
         info_response = _get(pool, base, "/api/info")
         if info_response.error:
             last_error = info_response.error
@@ -602,6 +624,8 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
 
 
 def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, Any]) -> dict[str, Any]:
+    if record.get("kafka_interface") == "http_surface":
+        return http_surfaces.collect(record, options)
     if options.get("ui_dump_all"):
         return _collect_ui_full(ctx, record, state, options)
     payload = dict(record)

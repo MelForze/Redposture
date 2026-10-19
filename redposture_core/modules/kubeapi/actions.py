@@ -1342,6 +1342,7 @@ def _list_secrets(
     password: str | None = None,
     client: HttpApiClient | None = None,
     retries: int = 0,
+    resource: str = "secrets",
 ) -> KubeResourceResult:
     results: list[dict[str, Any]] = []
     access_confirmed = False
@@ -1351,7 +1352,7 @@ def _list_secrets(
             _invoke_kube_list_items(
                 host,
                 port,
-                "/api/v1/secrets",
+                f"/api/v1/{resource}",
                 timeout,
                 use_https=use_https,
                 insecure=insecure,
@@ -1379,7 +1380,7 @@ def _list_secrets(
                 _invoke_kube_list_items(
                     host,
                     port,
-                    f"/api/v1/namespaces/{encoded_ns}/secrets",
+                    f"/api/v1/namespaces/{encoded_ns}/{resource}",
                     timeout,
                     use_https=use_https,
                     insecure=insecure,
@@ -1411,7 +1412,11 @@ def _list_secrets(
         decoded_data: dict[str, str] = {}
         if isinstance(data_map, dict):
             for key in sorted(data_map.keys()):
-                decoded_data[str(key)] = _decode_secret_data_value(data_map.get(key))
+                decoded_data[str(key)] = (
+                    str(data_map.get(key) or "")
+                    if resource == "configmaps"
+                    else _decode_secret_data_value(data_map.get(key))
+                )
         results.append(
             {
                 "namespace": forced_ns or _metadata_namespace(item),
@@ -3161,6 +3166,29 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
         if secrets is None and not secrets_error:
             secrets_error = "secrets request failed"
         secrets_out = list(secrets or [])
+    configmaps_out: list[dict[str, Any]] = []
+    configmaps_error: str | None = None
+    configmaps_result = KubeResourceResult(None, None, False, False)
+    if bool(getattr(ctx.args, "discover", False)):
+        configmaps_result = _coerce_resource_result(
+            _list_secrets(
+                request_host,
+                request_port,
+                float(getattr(ctx.args, "timeout", 5.0)),
+                use_https=state.use_https,
+                insecure=state.insecure,
+                ca_file=state.ca_file,
+                namespaces=list(options["namespace_filters"]),
+                token=token,
+                username=username,
+                password=password,
+                client=data_client,
+                retries=int(getattr(ctx.args, "retries", 0) or 0),
+                resource="configmaps",
+            )
+        )
+        configmaps, configmaps_error = configmaps_result
+        configmaps_out = list(configmaps or [])
     exec_result: dict[str, Any] | None = None
     if options["exec_pod"] and options["exec_command"]:
         resolved_ns, resolved_pod, resolve_error = _resolve_exec_pod_target(
@@ -3200,6 +3228,9 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
             "namespaces": namespaces_out,
             "pods": pods_out if options["show_pods"] else [],
             "secrets": secrets_out,
+            "configmaps": configmaps_out,
+            "configmaps_error": configmaps_error,
+            "configmaps_partial": bool(getattr(ctx.args, "discover", False) and not configmaps_result.complete),
             "exec_result": exec_result,
             "namespaces_error": namespaces_error,
             "pods_error": pods_error,

@@ -920,7 +920,7 @@ def test_audit_grafana_formats_datasources_and_check_failures(monkeypatch) -> No
     assert record["status"] == "open_no_auth"
     assert record["datasource_count"] == 2
     datasource_lines = _format_datasources_detail_records(record, "txt")
-    assert any("[*] Dump Datasources" in line for line in datasource_lines)
+    assert any("[*] Datasources Enumeration (datasources:1)" in line for line in datasource_lines)
     assert any("name=prometheus" in line for line in datasource_lines)
     check_lines = _format_check_detail_records(record, "txt")
     assert any("probe failed status=502 elapsed=7ms" in line for line in check_lines)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from redposture_core.audit_models import AuditRecord
@@ -65,8 +67,17 @@ def test_product_inventory_is_counted_and_auth_block_does_not_show_empty_section
     assert lines[1].endswith("[+] admin:Harbor12345")
     assert any("[*] Images Enumeration (images:1)" in line for line in lines)
     assert any("[*] Harbor Projects Enumeration (projects:1)" in line for line in lines)
+    assert not any("Harbor Repositories Enumeration" in line for line in lines)
     assert not any("Harbor detected" in line for line in lines)
     assert all(len(line.split("\t", 3)) == 4 for line in lines)
+    json_records = [
+        json.loads(line)
+        for line in render_record_with_module(
+            spec.render_module, AuditRecord.from_mapping(payload, module="harbor"), "json"
+        )
+    ]
+    assert next(item for item in json_records if item.get("type") == "harbor")["repositories"] == ["core/control-plane"]
+    assert all("\x1b[" not in line for line in map(json.dumps, json_records))
 
     blocked = {**payload, "status": "auth_required", "images": [], "harbor_projects": [], "harbor_repositories": []}
     blocked.pop("provided_username")
@@ -75,6 +86,29 @@ def test_product_inventory_is_counted_and_auth_block_does_not_show_empty_section
         spec.render_module, AuditRecord.from_mapping(blocked, module="harbor"), "txt"
     )
     assert blocked_lines == ["HARBOR\thost\t5000\t [*] Harbor (auth required:True) (version:unknown)"]
+
+
+def test_docker_registry_txt_tag_order_keeps_json_data_unchanged() -> None:
+    spec = registry_stage.build_registry_spec(
+        parse_args(["docker-registry", "-t", "http://host:5000", "--show-tags"]), product="docker-registry"
+    )
+    tags = ["zeta", "2.0.0", "latest", "2.0.1", "2025-10-02", "alpha", "2026-01-01"]
+    payload = {
+        "host": "host",
+        "port": 5000,
+        "is_registry": True,
+        "status": "open_no_auth",
+        "auth_required": False,
+        "show_tags": True,
+        "repository": "team/app",
+        "selected_repository_tags": tags,
+    }
+    record = AuditRecord.from_mapping(payload, module="docker-registry")
+    lines = render_record_with_module(spec.render_module, record, "txt")
+    details = [line.split("\t", 3)[-1].strip() for line in lines]
+    assert details[-7:] == ["latest", "2026-01-01", "2025-10-02", "2.0.1", "2.0.0", "alpha", "zeta"]
+    assert all("\x1b[" not in line for line in lines)
+    assert payload["selected_repository_tags"] == tags
 
 
 def test_registry_detection_and_credential_stages_do_not_claim_empty_inventory() -> None:

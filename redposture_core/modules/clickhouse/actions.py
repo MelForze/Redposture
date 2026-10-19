@@ -3324,19 +3324,20 @@ def _format_discover_detail_records(record: dict[str, Any], output_format: str) 
         return [f"{prefix} [!] Discover Secrets unavailable"]
     status = str(report.get("status") or "unknown")
     coverage = float(report.get("coverage_percent") or 0.0)
-    lines = [
-        f"{prefix} [*] Discover Secrets "
-        f"(status:{status}) (coverage:{coverage:.2f}%) "
-        f"(findings:{int(report.get('finding_count') or 0)}) "
-        f"(occurrences:{int(report.get('occurrence_count') or 0)}) "
-        f"(tables:{int(report.get('tables_scanned') or 0)})"
-    ]
+    lines: list[str] = []
     findings = report.get("findings")
     if isinstance(findings, list) and not record.get("_discover_findings_streamed"):
         for finding in findings:
             if not isinstance(finding, dict):
                 continue
             lines.append(_format_discover_finding_line(record, finding))
+    lines.append(
+        f"{prefix} [*] Discover Secrets "
+        f"(status:{status}) (coverage:{coverage:.2f}%) "
+        f"(findings:{int(report.get('finding_count') or 0)}) "
+        f"(occurrences:{int(report.get('occurrence_count') or 0)}) "
+        f"(tables:{int(report.get('tables_scanned') or 0)})"
+    )
     errors = report.get("scan_errors")
     if isinstance(errors, list) and errors:
         lines.append(f"{prefix} [!] Discover incomplete chunks:{len(errors)}; resume with --resume")

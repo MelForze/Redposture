@@ -1897,16 +1897,43 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             output_format,
         )
     )
-    lines.extend(
-        _limited_detail(
-            record,
-            "tables",
-            "show_tables_limit",
-            "Tables",
-            lambda row: f"{row.get('owner')}.{row.get('table_name')} rows={row.get('num_rows', '-')}",
-            output_format,
-        )
+    table_detail = _limited_detail(
+        record,
+        "tables",
+        "show_tables_limit",
+        "Tables",
+        lambda row: f"{row.get('owner')}.{row.get('table_name')} rows={row.get('num_rows', '-')}",
+        output_format,
     )
+    grouped_rows: set[int] = set()
+    grouped_rows_header = False
+    dump_rows = record.get("rows")
+    if output_format == "txt" and table_detail and isinstance(dump_rows, list) and dump_rows:
+        prefix = _nxc_prefix(record)
+        rows_by_table: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = {}
+        for index, row in enumerate(dump_rows):
+            if isinstance(row, dict):
+                rows_by_table.setdefault((str(row.get("schema")), str(row.get("table"))), []).append((index, row))
+        lines.extend([table_detail[0], f"{prefix} [*] Dump Rows"])
+        grouped_rows_header = True
+        raw_tables = record.get("tables") or []
+        raw_limit = record.get("show_tables_limit")
+        shown_tables = limit_sequence(
+            raw_tables, raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
+        )
+        for table_line, table in zip(table_detail[1:], shown_tables, strict=False):
+            lines.append(table_line)
+            if not isinstance(table, dict):
+                continue
+            identity = (str(table.get("owner")), str(table.get("table_name")))
+            for index, row in rows_by_table.get(identity, []):
+                lines.append(
+                    f"{prefix} {row.get('schema')}.{row.get('table')}:"
+                    f"{_clip(json.dumps(row.get('row'), ensure_ascii=False, separators=(',', ':')), 260)}"
+                )
+                grouped_rows.add(index)
+    else:
+        lines.extend(table_detail)
     if record.get("roles"):
         lines.extend(
             _limited_detail(
@@ -1946,8 +1973,11 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             )
         else:
             prefix = _nxc_prefix(record)
-            lines.append(f"{prefix} [*] Dump Rows")
-            for row in record.get("rows") or []:
+            if not grouped_rows_header:
+                lines.append(f"{prefix} [*] Dump Rows")
+            for index, row in enumerate(record.get("rows") or []):
+                if index in grouped_rows:
+                    continue
                 lines.append(
                     f"{prefix} {row.get('schema')}.{row.get('table')}:{_clip(json.dumps(row.get('row'), ensure_ascii=False, separators=(',', ':')), 260)}"
                 )

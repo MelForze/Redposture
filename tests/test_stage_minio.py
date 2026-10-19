@@ -9,6 +9,7 @@ from redposture_core.cli_args import parse_args
 from redposture_core.clients.minio_api import MinioResponse
 from redposture_core.modules.minio import actions, policy, render, stage
 from redposture_core.modules.minio.types import AnonymousResult, CredentialResult, MinioDetection
+from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun
 
 
 def test_build_minio_plan_default_ports():
@@ -24,6 +25,84 @@ def test_build_minio_spec_wires_hooks():
     assert spec.auth is not None
     assert spec.colorize is not None
     assert spec.skip_credentials_without_verifier is True
+
+
+@pytest.mark.parametrize("show_buckets", [False, True])
+def test_discover_emits_verified_credential_before_live_findings_without_duplicates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, show_buckets: bool
+) -> None:
+    args = parse_args(
+        ["minio", "-t", "127.0.0.1:19000", "-u", "minioadmin", "-p", "minioadmin", "--discover"]
+        + (["--show-buckets"] if show_buckets else [])
+    )
+    args.output_format = "txt"
+    monkeypatch.setattr(
+        actions,
+        "detect_record",
+        lambda ctx: {
+            "host": ctx.host,
+            "port": ctx.port,
+            "is_minio": True,
+            "status": "auth_required",
+            "detection_status": "confirmed",
+            "auth_required": True,
+            "version": "old-header",
+        },
+    )
+
+    def auth_record(_ctx, prior):
+        return {
+            **prior,
+            "status": "valid_credentials",
+            "credential_state": "valid",
+            "provided_credentials_ok": True,
+            "credential_results": [{"access_key": "minioadmin", "state": "valid"}],
+            "credential_secret": "minioadmin",
+            "admin_capability": "confirmed",
+        }
+
+    monkeypatch.setattr(actions, "auth_record", auth_record)
+    monkeypatch.setattr(actions, "capabilities_record", lambda _ctx, prior: {**prior, "version": "authoritative"})
+    emitted: list[str] = []
+
+    def data_record(ctx, prior):
+        assert emitted[:2] == [
+            "MINIO\t127.0.0.1\t19000\t [*] MinIO (auth required:True) (version:authoritative)",
+            "MINIO\t127.0.0.1\t19000\t [+] minioadmin:minioadmin (admin:True)",
+        ]
+        assert ctx.live_emit is not None
+        ctx.live_emit(['MINIO\t127.0.0.1\t19000\t [!] Secret Value="test" Place="bucket/key$"'])
+        return {
+            **prior,
+            **({"buckets": [{"name": "bucket"}]} if show_buckets else {}),
+            "discover_requested": True,
+            "discover_coverage": "complete",
+            "discover_coverage_percent": 100.0,
+            "discover_findings_count": 1,
+            "discover_objects_scanned": 1,
+            "_discover_findings_streamed": True,
+        }
+
+    monkeypatch.setattr(actions, "data_record", data_record)
+    output_path = tmp_path / "minio-discover.txt"
+    runner = AuditCommandRunner(args=args, spec=stage.build_minio_spec(args), emit_line=emitted.append)
+    runner.run_plan(
+        AuditCommandPlan(
+            targets_by_port={19000: ("127.0.0.1",)},
+            credential_runs=(AuditCredentialRun(username="minioadmin", password="minioadmin", source="provided"),),
+            output_path=str(output_path),
+            output_format="txt",
+            workers=1,
+        )
+    )
+    assert emitted[2].endswith('[!] Secret Value="test" Place="bucket/key$"')
+    assert sum("[+] minioadmin:minioadmin" in line for line in emitted) == 1
+    assert sum("[*] MinIO (auth required:" in line for line in emitted) == 1
+    assert any("Discover Secrets (status:complete)" in line for line in emitted)
+    if show_buckets:
+        assert any("Buckets Enumeration (Count:1)" in line for line in emitted)
+    assert output_path.read_text(encoding="utf-8").splitlines() == emitted
+    assert "\x1b[" not in output_path.read_text(encoding="utf-8")
 
 
 def test_minio_credential_gate_verified_and_rejected():

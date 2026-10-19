@@ -327,13 +327,21 @@ def test_keeper_unknown_credential_color_and_plain_output(capsys: pytest.Capture
     assert keeper_stage.render._render_colored_keeper_line(painted, "KEEPER\t127.0.0.1\t9181\t [+] admin:secret")
     assert ("admin:secret", "true_red") in painted.colors
     assert keeper_stage.render._render_colored_keeper_line(painted, "KEEPER\t127.0.0.1\t9181\t [-] admin:wrong")
-    assert ("admin:wrong", "bright_green") in painted.colors
-    denied_line = "KEEPER\t127.0.0.1\t9181\t [-] admin:wrong (no access to tested znodes)"
+    assert ("admin:wrong", "white") in painted.colors
+    denied_line = "KEEPER\t127.0.0.1\t9181\t [-] admin:wrong (no access to protected znodes; credentials unverified)"
     assert keeper_stage.render._render_colored_keeper_line(painted, denied_line)
-    assert ("admin:wrong", "bright_green") in painted.colors
+    assert ("[-]", "red") in painted.colors
+    assert ("admin:wrong (", "white") in painted.colors
+    assert ("no access to protected znodes; credentials unverified", "orange") in painted.colors
+    unavailable_line = (
+        "KEEPER\t127.0.0.1\t9181\t [-] credential verification unavailable (no protected znodes for verification)"
+    )
+    assert keeper_stage.render._render_colored_keeper_line(painted, unavailable_line)
+    assert ("no protected znodes for verification", "orange") in painted.colors
     assert keeper_stage.render._render_colored_keeper_line(Console(no_color=True), line)
     assert keeper_stage.render._render_colored_keeper_line(Console(no_color=True), denied_line)
-    assert capsys.readouterr().out == f"{line}\n{denied_line}\n"
+    assert keeper_stage.render._render_colored_keeper_line(Console(no_color=True), unavailable_line)
+    assert capsys.readouterr().out == f"{line}\n{denied_line}\n{unavailable_line}\n"
     assert "\x1b[" not in denied_line
 
 

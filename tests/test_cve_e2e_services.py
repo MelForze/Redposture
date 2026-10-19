@@ -231,6 +231,21 @@ def test_redis_live_resp_version_controls_cve_boundary(version: str, affected: b
     assert ("CVE-2022-31144" in findings) is affected
 
 
+def test_redis_live_detection_prints_version_without_enum_cve() -> None:
+    with _redis_service("7.4.11") as port:
+        args = parse_args(["redis", "-t", "127.0.0.1", "--port", str(port), "--no-color"])
+        stage = importlib.import_module("redposture_core.modules.redis.stage")
+        lines: list[str] = []
+        AuditCommandRunner(
+            args=args,
+            spec=stage.build_redis_spec(args),
+            emit_line=lines.append,
+        ).run_plan(stage.build_redis_plan(args))
+
+    assert any("[*] Redis Database (auth required:False) (version:7.4.11)" in line for line in lines)
+    assert all("\x1b[" not in line for line in lines)
+
+
 def test_nexus_live_fingerprint_and_version_feed_cve_enumeration() -> None:
     with _http_service("nexus", "3.68.0") as port:
         record = _audit_json("nexus", port)

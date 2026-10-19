@@ -1,5 +1,6 @@
 [
   {
+    "_discover_auth_before_data": true,
     "admin_capability": "partial",
     "admin_evidence": {
       "accountinfo": "ok",

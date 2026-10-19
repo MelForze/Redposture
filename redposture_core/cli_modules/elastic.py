@@ -92,22 +92,31 @@ def configure_elastic_parser(
     )
 
     actions.add_argument(
+        "--show-endpoints",
         "--endpoints",
+        dest="endpoints",
         action="store_true",
         help="List available _cat endpoints from /_cat?help.",
     )
     actions.add_argument(
+        "--show-plugins",
         "--plugins",
+        dest="plugins",
         action="store_true",
         help="List installed plugins from GET /_cat/plugins.",
     )
     actions.add_argument(
+        "--show-cluster",
         "--cluster",
+        dest="cluster",
         action="store_true",
         help="Show cluster health and nodes.",
     )
     actions.add_argument(
+        "--show-user",
+        "--show-users",
         "--user",
+        dest="user",
         action="store_true",
         help="Show security users via /_security/user.",
     )

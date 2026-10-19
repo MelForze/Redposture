@@ -10,7 +10,15 @@
     "can_exec_pod": null,
     "can_list_namespaces": true,
     "can_list_pods": true,
-    "can_list_secrets": null,
+    "can_list_secrets": false,
+    "configmaps_error": "configmaps is forbidden: User \"system:anonymous\" cannot list resource \"configmaps\" in API group \"\" at the cluster scope",
+    "configmaps_partial": true,
+    "content_discovery": {
+      "bytes_inspected": 0,
+      "findings": [],
+      "source": "anonymous",
+      "status": "partial"
+    },
     "detection_signals": [
       "kubeapi.probe",
       "kubeapi.product_fingerprint"
@@ -62,9 +70,8 @@
     "pods_error": null,
     "pods_partial": false,
     "port": 26443,
-    "secrets": [],
-    "secrets_error": null,
-    "secrets_partial": false,
+    "secrets_error": "secrets is forbidden: User \"system:anonymous\" cannot list resource \"secrets\" in API group \"\" at the cluster scope",
+    "secrets_partial": true,
     "service": "kubeapi",
     "show_namespaces": true,
     "show_pods": true,

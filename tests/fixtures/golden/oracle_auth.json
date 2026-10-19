@@ -4,7 +4,7 @@
     "banner": "Oracle AI Database 26ai Free Release 23.26.3.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.3.0.0",
     "capabilities": {
       "can_list_dblinks": false,
-      "can_list_tables": false,
+      "can_list_tables": true,
       "can_list_users": true,
       "can_privesc_check": false,
       "can_query": true,
@@ -14,6 +14,12 @@
     "con_name": "FREEPDB1",
     "connect_service": "FREEPDB1",
     "connect_sid": null,
+    "content_discovery": {
+      "bytes_inspected": 2,
+      "findings": [],
+      "source": "authenticated",
+      "status": "complete"
+    },
     "credential_attempts": [
       {
         "error": null,
@@ -76,7 +82,6 @@
     "provided_username": "redposture",
     "query_rows": [],
     "roles": [],
-    "rows": [],
     "schemas": [],
     "sensitive_findings": [],
     "service": "oracle",
@@ -115,7 +120,6 @@
       }
     ],
     "status": "valid_credentials",
-    "tables": [],
     "tls_supported": false,
     "transport": "tcp",
     "transport_mode": "tcp",

@@ -45,12 +45,6 @@ def configure_keycloak_parser(
     token.add_argument("--token", default=None, metavar="token", help="Bearer token for read-only API checks.")
     token.add_argument("--token-file", default=None, metavar="file", help="Read bearer token from a file.")
     enumeration.add_argument(
-        "--realm",
-        action="append",
-        metavar="name",
-        help="Realm to check (default: master); repeatable.",
-    )
-    enumeration.add_argument(
         "--enum-realms",
         action="store_true",
         help="Check up to 32 common realm names for confirmed public Keycloak realms.",
@@ -59,6 +53,12 @@ def configure_keycloak_parser(
         "--show-realms",
         action="store_true",
         help="List token-visible realms and their read-only security settings.",
+    )
+    enumeration.add_argument(
+        "--realm",
+        action="append",
+        metavar="name",
+        help="Realm to check (default: master); repeatable.",
     )
     enumeration.add_argument(
         "--show-clients",

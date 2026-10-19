@@ -94,6 +94,7 @@ def build_rabbitmq_spec(args: Any) -> ModuleAuditSpec:
         ),
         structured_output_redact_fields=("attempted_credentials",),
         suppress_undetected_records_in_text=True,
+        defer_phase_output_until_final=True,
     )
 
 

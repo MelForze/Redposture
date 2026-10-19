@@ -13,6 +13,101 @@
     "can_create_znode": null,
     "can_delete_znode": null,
     "connect_error": null,
+    "content_discovery": {
+      "bytes_inspected": 1080,
+      "findings": [
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./config/services/grafana.grafana",
+          "source": "anonymous",
+          "type": "password",
+          "value": "*****"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./config/services/kafka.kafka",
+          "source": "anonymous",
+          "type": "password",
+          "value": "metr...pass"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./config/services/postgres.postgres",
+          "source": "anonymous",
+          "type": "connection_string",
+          "value": "post...able"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./config/services/postgres.postgres",
+          "source": "anonymous",
+          "type": "url_credentials",
+          "value": "post...able"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./observability/remote_write_url.remote_write_url",
+          "source": "anonymous",
+          "type": "url_credentials",
+          "value": "http...rite"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./redposture/app/api_key.api_key",
+          "source": "anonymous",
+          "type": "api_key",
+          "value": "rp-z...2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./redposture/app/jwt_secret.jwt_secret",
+          "source": "anonymous",
+          "type": "generic_secret",
+          "value": "rp-j...2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./redposture/app/oidc_client_secret.oidc_client_secret",
+          "source": "anonymous",
+          "type": "client_secret",
+          "value": "oidc...-lab"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./redposture/cache/redis_uri.redis_uri",
+          "source": "anonymous",
+          "type": "connection_string",
+          "value": "redi...79/0"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./redposture/cache/redis_uri.redis_uri",
+          "source": "anonymous",
+          "type": "url_credentials",
+          "value": "redi...79/0"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.znode./redposture/db/password.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "********"
+        }
+      ],
+      "source": "anonymous",
+      "status": "complete"
+    },
     "credential_auth_probe_results": {},
     "credential_verdict": null,
     "credential_verification_path": null,

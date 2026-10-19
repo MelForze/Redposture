@@ -95,7 +95,7 @@ def configure_oracle_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try the curated Oracle default/common credential set after provided, file, combo, or spray credentials.",
+        help="Try the curated Oracle default/common credential set; incompatible with supplied credentials and wordlists.",
     )
     auth.add_argument(
         "--combo-list",
@@ -136,10 +136,10 @@ def configure_oracle_parser(
         **optional_show_count_kwargs("Show schemas with visible tables. Optional count limits output."),
     )
     discovery.add_argument(
-        "--show-tables", **optional_show_count_kwargs("Show visible tables. Optional count limits output.")
+        "--schema", default=None, metavar="name", help="Schema owner for --show-tables/--table/--dump."
     )
     discovery.add_argument(
-        "--schema", default=None, metavar="name", help="Schema owner for --show-tables/--table/--dump."
+        "--show-tables", **optional_show_count_kwargs("Show visible tables. Optional count limits output.")
     )
     discovery.add_argument("--table", default=None, metavar="name", help="Table name for dump/query target.")
     discovery.add_argument(

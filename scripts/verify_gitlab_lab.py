@@ -65,6 +65,7 @@ def main() -> int:
             "--timeout",
             "15",
             "--enum-cve",
+            *(["--images"] if name in {"anonymous", "root", "reporter"} else []),
             *(["--token", token] if token else []),
         ]
         json_command = [*command, "--format", "json"]
@@ -73,6 +74,9 @@ def main() -> int:
         (output / f"{name}.jsonl").write_text(run.stdout + run.stderr)
         record = _record(run.stdout)
         assert record.get("is_gitlab") is True
+        if name == "anonymous":
+            projects = {project["path_with_namespace"] for project in record["public_projects"]}
+            assert {"redposture-lab/public-api", "team-platform/ops-scripts"} <= projects
         enumeration = record["cve_enumeration"]
         if name in {"root", "reporter"}:
             assert record.get("token_valid") is True

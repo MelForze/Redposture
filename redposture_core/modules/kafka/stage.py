@@ -37,8 +37,23 @@ _DEFAULT_PORT = 9092
 # `redposture_core/clients/kafka.py`; the transport used ends up as the
 # `transport_mode` field on the audit record, rendered as `(transport:tls)`
 # in text output — same convention as docker/grpc/oracle.
-_DEFAULT_PORTS: tuple[int, ...] | None = (9092, 9093, 19092, 19093, 29092, 29093, 8080, 8081, 8443, 80, 443)
-_UI_PORTS = {80, 443, 8080, 8081, 8443}
+_DEFAULT_PORTS: tuple[int, ...] | None = (
+    9092,
+    9093,
+    19092,
+    19093,
+    29092,
+    29093,
+    8080,
+    8081,
+    8082,
+    8083,
+    8088,
+    8443,
+    80,
+    443,
+)
+_UI_PORTS = {80, 443, 8080, 8081, 8082, 8083, 8088, 8443}
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_kafka_host
 

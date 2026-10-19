@@ -1663,6 +1663,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             label = _credential_label(auth_used)
         else:
             label = "credentials"
+        if label == "token":
+            label = "token accepted"
         return f"{prefix} [+] {label}"
 
     if status == "auth_required":
@@ -1714,7 +1716,7 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         credential_type = str(attempt.get("provided_credential_type") or "")
         source = str(attempt.get("source") or "provided")
         if credential_type == "token" or (username is None and password is None):
-            label = f"token (source:{source})"
+            label = "token"
         else:
             username_text = str(username or "user")
             if password is None:
@@ -1729,6 +1731,8 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             unresolved += 1
             continue
         marker = "[+]" if status in success_statuses else "[-]"
+        if label == "token":
+            label = "token accepted" if marker == "[+]" else f"token (source:{source})"
         lines.append(f"{prefix} {marker} {label}")
     if unresolved:
         lines.append(f"{prefix} [*] Credential verification unavailable ({unresolved} credential(s))")
@@ -1934,6 +1938,7 @@ def _grpc_marker_color_spans(payload: str) -> list[tuple[int, int, str]]:
             for access, color in _ACCESS_COLORS.items()
         ),
         regexes=(
+            RegexColorRule(r"token accepted", "red"),
             RegexColorRule(r"\((services|methods|descriptors|checks):[1-9]\d*\)", "red"),
             RegexColorRule(r"\((services|methods|descriptors|checks):0\)", "bright_green"),
             RegexColorRule(r"\((services|methods|descriptors|checks):unknown\)", "orange"),

@@ -1,5 +1,7 @@
 [
   {
+    "asset": null,
+    "asset_error": null,
     "assets": false,
     "attempted_credentials": [
       {
@@ -176,11 +178,13 @@
     "gitlab_error": null,
     "gitlab_info": null,
     "gitlab_repositories": null,
+    "gitlab_repository_count": null,
     "gitlab_repository_details": null,
     "harbor": false,
     "harbor_artifacts": null,
     "harbor_error": null,
     "harbor_info": null,
+    "harbor_project_count": null,
     "harbor_projects": null,
     "harbor_repositories": null,
     "host": "127.0.0.1",
@@ -207,6 +211,7 @@
       "version_source": "server_header"
     },
     "nexus_repositories": null,
+    "nexus_repository_count": 11,
     "nexus_repository_details": null,
     "port": 15004,
     "probe_status": 404,
@@ -214,9 +219,12 @@
     "provided_credentials_ok": false,
     "provided_username": "service",
     "repository": null,
+    "repository_tag_errors": null,
+    "repository_tags": null,
     "selected_repository_tags": null,
     "service": "nexus",
     "show_images": false,
+    "show_repositories": false,
     "show_tags": false,
     "stages": [
       {

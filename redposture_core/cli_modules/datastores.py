@@ -91,6 +91,14 @@ def configure_redis_parser(
         **optional_show_count_kwargs("Show Redis key names only (SCAN). Optional count limits scanned/shown keys."),
     )
     actions.add_argument(
+        "-key",
+        "--key",
+        dest="key",
+        default=None,
+        metavar="name",
+        help="Dump one specific Redis key by name (with value).",
+    )
+    actions.add_argument(
         "--dump",
         dest="dump",
         **optional_dump_count_kwargs(
@@ -112,14 +120,6 @@ def configure_redis_parser(
         default=20,
         metavar="MS",
         help="Pause in milliseconds between dump pages to pace server load (default 20, 0 disables).",
-    )
-    actions.add_argument(
-        "-key",
-        "--key",
-        dest="key",
-        default=None,
-        metavar="name",
-        help="Dump one specific Redis key by name (with value).",
     )
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(
@@ -189,6 +189,14 @@ def configure_etcd_parser(
         ),
     )
     actions.add_argument(
+        "-key",
+        "--key",
+        dest="key",
+        default=None,
+        metavar="path",
+        help="Dump specific etcd key (example: /redposture/env) when auth is not required.",
+    )
+    actions.add_argument(
         "--dump",
         dest="dump",
         **optional_dump_count_kwargs(
@@ -210,14 +218,6 @@ def configure_etcd_parser(
         default=20,
         metavar="MS",
         help="Pause in milliseconds between dump pages to pace server load (default 20, 0 disables).",
-    )
-    actions.add_argument(
-        "-key",
-        "--key",
-        dest="key",
-        default=None,
-        metavar="path",
-        help="Dump specific etcd key (example: /redposture/env) when auth is not required.",
     )
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(
@@ -257,7 +257,8 @@ def configure_kafka_parser(
             "(examples: 9092, '9092,9093,29092', 9092-9095, ./ports.txt). "
             "If omitted, scans 9092, 9093 (commonly SASL_SSL), "
             "19092, 19093, 29092, 29093, and common Kafka UI ports "
-            "80, 443, 8080, 8081, 8443. A host:port target also checks both protocols."
+            "80, 443, 8080, 8081, 8082, 8083, 8088, 8443. "
+            "A host:port target also checks broker and HTTP surfaces."
         ),
     )
     add_multi_ports_flag(common)
@@ -308,6 +309,13 @@ def configure_kafka_parser(
         **optional_show_count_kwargs("Show topic names after successful access/auth. Optional count limits output."),
     )
     actions.add_argument(
+        "--topic",
+        dest="topic",
+        default=None,
+        metavar="name",
+        help="Select one topic for details, dump, write probe, or message write.",
+    )
+    actions.add_argument(
         "--show-clusters", action="store_true", help="Show clusters exposed by Kafbat/Provectus Kafka UI."
     )
     actions.add_argument("--show-brokers", action="store_true", help="Show Kafka UI broker inventory (read-only).")
@@ -339,13 +347,6 @@ def configure_kafka_parser(
         "--write-key",
         metavar="text",
         help="Optional UTF-8 record key for --write-message or --write-file.",
-    )
-    actions.add_argument(
-        "--topic",
-        dest="topic",
-        default=None,
-        metavar="name",
-        help="Select one topic for details, dump, write probe, or message write.",
     )
     actions.add_argument(
         "--dump",

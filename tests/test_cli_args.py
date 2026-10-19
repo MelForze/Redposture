@@ -344,7 +344,7 @@ def test_help_documents_implicit_target_file_precedence() -> None:
     [
         ("docker-registry", ["Common", "Auth", "OCI images"]),
         ("harbor", ["Common", "Auth", "OCI images"]),
-        ("nexus", ["Common", "Auth", "OCI images"]),
+        ("nexus", ["Common", "Auth", "Nexus repositories / OCI images"]),
         ("grafana", ["Common", "Auth", "Actions", "SSRF / Probes"]),
         ("proxmox", ["Common", "Auth", "Actions"]),
         ("gitlab", ["Common", "Auth", "Actions", "Container Registry"]),
@@ -640,13 +640,11 @@ def test_grpc_auth_flags_are_parsed() -> None:
             "50061",
             "--token",
             "grpc-lab-token-2026",
-            "--defcreds",
         ]
     )
     assert args.command == "grpc"
     assert args.port == 50061
     assert args.token == "grpc-lab-token-2026"
-    assert args.defcreds is True
     assert args.analyze is False
 
     analyze_args = parse_args(["grpc", "-t", "127.0.0.1", "--analyze"])
@@ -1185,7 +1183,6 @@ def test_redis_flags_are_parsed() -> None:
             "redis",
             "--password",
             "redis",
-            "--defcreds",
             "--show-keys",
             "--dump",
             "-key",
@@ -1205,7 +1202,6 @@ def test_redis_flags_are_parsed() -> None:
     assert args.ports == "6379,6380,16379"
     assert args.username == "redis"
     assert args.password == "redis"
-    assert args.defcreds is True
     assert args.show_keys is True
     assert args.dump is True
     assert args.key == "session:admin"
@@ -1821,11 +1817,13 @@ def test_proxmox_auth_flags_are_optional_at_parse_time() -> None:
     assert args.defcreds is False
 
 
-def test_proxmox_username_password_and_defcreds_are_parsed() -> None:
-    args = parse_args(["proxmox", "-t", "10.0.0.21", "-u", "root@pam", "-p", "toor", "--defcreds"])
+def test_proxmox_username_password_parse_and_defcreds_is_exclusive() -> None:
+    args = parse_args(["proxmox", "-t", "10.0.0.21", "-u", "root@pam", "-p", "toor"])
     assert args.username == "root@pam"
     assert args.password == "toor"
-    assert args.defcreds is True
+    # NEXT_QA #4: --defcreds is standalone — combining it with -u/-p is rejected.
+    with pytest.raises(SystemExit):
+        parse_args(["proxmox", "-t", "10.0.0.21", "-u", "root@pam", "-p", "toor", "--defcreds"])
 
 
 def test_proxmox_discover_creds_default_is_disabled() -> None:
@@ -2034,7 +2032,6 @@ def test_zookeeper_flags_are_parsed() -> None:
             "zk-user",
             "-p",
             "zk-pass",
-            "--defcreds",
             "--show-znodes",
             "--dump",
             "--znode",
@@ -2062,7 +2059,6 @@ def test_zookeeper_flags_are_parsed() -> None:
     assert args.ports == "2181,22181"
     assert args.username == "zk-user"
     assert args.password == "zk-pass"
-    assert args.defcreds is True
     assert args.show_znodes is True
     assert args.dump is True
     assert args.znode == "/brokers/ids/1"
@@ -2195,11 +2191,10 @@ def test_elastic_flags_are_parsed() -> None:
             "ElasticRead!2026",
             "--apitoken",
             "ZXM6bGFiLXRva2Vu",
-            "--defcreds",
-            "--endpoints",
-            "--plugins",
-            "--cluster",
-            "--user",
+            "--show-endpoints",
+            "--show-plugins",
+            "--show-cluster",
+            "--show-user",
             "--discover",
             "-f",
             "json",
@@ -2218,7 +2213,6 @@ def test_elastic_flags_are_parsed() -> None:
     assert args.username == "elastic"
     assert args.password == "ElasticRead!2026"
     assert args.apitoken == "ZXM6bGFiLXRva2Vu"
-    assert args.defcreds is True
     assert args.endpoints is True
     assert args.plugins is True
     assert args.cluster is True
@@ -2226,6 +2220,18 @@ def test_elastic_flags_are_parsed() -> None:
     assert args.discover is True
     assert args.output_format == "json"
     assert args.output == "elastic_audit.jsonl"
+
+
+def test_elastic_legacy_inventory_aliases_still_work() -> None:
+    args = parse_args(["elastic", "-t", "host:9200", "--endpoints", "--plugins", "--cluster", "--user"])
+    assert (args.endpoints, args.plugins, args.cluster, args.user) == (True, True, True, True)
+    users = parse_args(["elastic", "-t", "host:9200", "--show-users"])
+    assert users.user is True
+    help_text = _command_help("elastic")
+    offsets = [
+        help_text.index(flag) for flag in ("--show-endpoints", "--show-plugins", "--show-cluster", "--show-user")
+    ]
+    assert offsets == sorted(offsets)
 
 
 def test_elastic_rejects_profiles_file_flag() -> None:
@@ -2266,7 +2272,6 @@ def test_grafana_flags_are_parsed() -> None:
             "admin",
             "-p",
             "secret",
-            "--defcreds",
             "--show-datasources",
             "--ssrf-target",
             "http://127.0.0.1/probe",
@@ -2289,7 +2294,6 @@ def test_grafana_flags_are_parsed() -> None:
     assert args.ports == "3000,3001"
     assert args.username == "admin"
     assert args.password == "secret"
-    assert args.defcreds is True
     assert args.show_datasources is True
     assert args.ssrf_target == "http://127.0.0.1/probe"
     assert args.ssrf_port == "8081"
@@ -2392,7 +2396,6 @@ def test_postgres_flags_are_parsed() -> None:
             "postgres",
             "--password",
             "postgres",
-            "--defcreds",
             "--show-databases",
             "--show-tables",
             "--show-columns",
@@ -2430,7 +2433,6 @@ def test_postgres_flags_are_parsed() -> None:
     assert args.database == "appdb"
     assert args.username == "postgres"
     assert args.password == "postgres"
-    assert args.defcreds is True
     assert args.show_databases is True
     assert args.show_tables is True
     assert args.show_columns is True
@@ -2555,7 +2557,6 @@ def test_clickhouse_flags_are_parsed() -> None:
             "default",
             "--password",
             "default",
-            "--defcreds",
             "--show-databases",
             "--show-tables",
             "--show-columns",
@@ -2590,7 +2591,6 @@ def test_clickhouse_flags_are_parsed() -> None:
     assert args.database == "analytics"
     assert args.username == "default"
     assert args.password == "default"
-    assert args.defcreds is True
     assert args.show_databases is True
     assert args.show_tables is True
     assert args.show_columns is True

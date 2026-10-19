@@ -224,14 +224,9 @@ def test_runtime_invalid_credentials_do_not_enumerate(monkeypatch):
 
 
 def test_runtime_keeps_failed_attempt_and_successful_default(monkeypatch):
-    record, lines = run_broker(monkeypatch, BrokerPool(), "-u", "bad", "-p", "bad", "--defcreds")
-    attempts = record["attempted_credentials"]
-    assert len(attempts) == 1 + len(actions.DEFAULT_CREDENTIALS)
-    assert attempts[0]["credential_state"] == "rejected"
-    assert sum(attempt["credential_state"] == "valid" for attempt in attempts) == 1
-    assert any(attempt["credential_state"] == "valid" and attempt["admin"] is True for attempt in attempts)
-    assert any("[-] bad" in line for line in lines)
-    assert record["credential_username"] == "guest"
+    # NEXT_QA #4: explicit pair + --defcreds is rejected at the CLI.
+    with pytest.raises(SystemExit):
+        run_broker(monkeypatch, BrokerPool(), "-u", "bad", "-p", "bad", "--defcreds")
 
 
 def test_runtime_anonymous_fallback_after_rejected_credentials(monkeypatch):
@@ -334,12 +329,10 @@ def test_transport_auto_switch_and_explicit_scheme(monkeypatch):
 
 
 def test_cli_plan_default_ports_deduplicates_guest_and_preserves_empty_password():
-    args = parse_args(["rabbitmq", "-t", "h", "-u", "guest", "-p", "guest", "--defcreds"])
-    plan = stage.build_rabbitmq_plan(args)
-    assert plan.ports == (15672, 15671)
-    assert len(plan.credential_runs) == len(actions.DEFAULT_CREDENTIALS) == 17
-    assert len({(run.username, run.password) for run in plan.credential_runs}) == 17
-    assert (plan.credential_runs[0].username, plan.credential_runs[0].password) == ("guest", "guest")
+    # NEXT_QA #4: explicit pair + --defcreds is rejected (no provided+defaults layering).
+    with pytest.raises(SystemExit):
+        parse_args(["rabbitmq", "-t", "h", "-u", "guest", "-p", "guest", "--defcreds"])
+    # An explicit empty password is still preserved on its own (no --defcreds).
     args = parse_args(["rabbitmq", "-t", "h", "-u", "guest", "-p", ""])
     assert stage.build_rabbitmq_plan(args).credential_runs[0].password == ""
 

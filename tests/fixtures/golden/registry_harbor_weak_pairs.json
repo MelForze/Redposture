@@ -1,5 +1,7 @@
 [
   {
+    "asset": null,
+    "asset_error": null,
     "assets": false,
     "attempted_credentials": [
       {
@@ -177,10 +179,7 @@
     "gitlab_repositories": null,
     "gitlab_repository_details": null,
     "harbor": true,
-    "harbor_artifacts": [
-      "core/control-plane:latest@sha256:<DOCKER_ID>",
-      "security/scanner-adapter:latest@sha256:<DOCKER_ID>"
-    ],
+    "harbor_artifacts": null,
     "harbor_error": null,
     "harbor_info": {
       "auth_mode": "db_auth",
@@ -198,15 +197,8 @@
       "registry_url": "127.0.0.1:18280",
       "self_registration": false
     },
-    "harbor_projects": [
-      "core",
-      "library",
-      "security"
-    ],
-    "harbor_repositories": [
-      "core/control-plane",
-      "security/scanner-adapter"
-    ],
+    "harbor_projects": null,
+    "harbor_repositories": null,
     "host": "127.0.0.1",
     "image": null,
     "image_count": null,
@@ -227,6 +219,7 @@
     "nexus_error": null,
     "nexus_info": null,
     "nexus_repositories": null,
+    "nexus_repository_count": null,
     "nexus_repository_details": null,
     "port": 18280,
     "probe_status": 200,
@@ -234,9 +227,12 @@
     "provided_credentials_ok": true,
     "provided_username": "admin",
     "repository": null,
+    "repository_tag_errors": null,
+    "repository_tags": null,
     "selected_repository_tags": null,
     "service": "harbor",
     "show_images": false,
+    "show_repositories": false,
     "show_tags": false,
     "stages": [
       {

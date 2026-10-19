@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from redposture_core.cli_args import parse_args
 from redposture_core.modules.airflow import actions
 from redposture_core.modules.airflow.stage import build_airflow_plan
@@ -36,10 +38,9 @@ def test_plan_with_defcreds_includes_full_catalog():
 
 
 def test_plan_defcreds_dedups_provided_pair():
-    plan = build_airflow_plan(
+    # NEXT_QA #4: explicit pair + --defcreds is rejected at the CLI.
+    with pytest.raises(SystemExit):
         parse_args(["airflow", "-t", "127.0.0.1", "-u", "airflow", "-p", "airflow", "--defcreds"])
-    )
-    assert _pairs(plan).count(("airflow", "airflow")) == 1
 
 
 def test_plan_defcreds_default_runs_are_sorted_stably():

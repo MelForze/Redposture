@@ -528,9 +528,8 @@ def _emit_clickhouse_record(record: dict[str, Any], output_format: str) -> None:
         render._format_auth_attempt_detail_records,
         render._format_record,
         render._format_databases_detail_records,
-        render._format_tables_detail_records,
+        render._format_grouped_table_detail_records,
         render._format_table_columns_detail_records,
-        render._format_table_dump_detail_records,
         render._format_discover_detail_records,
         render._format_execute_detail_records,
     ):

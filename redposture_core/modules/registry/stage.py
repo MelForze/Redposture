@@ -96,6 +96,7 @@ def build_registry_spec(args: Any, *, product: str = "registry") -> ModuleAuditS
     options = {
         "docker": product == "docker-registry" or bool(getattr(args, "docker", False)),
         "show_images": bool(getattr(args, "images", False)),
+        "show_repositories": bool(getattr(args, "show_repositories", False)),
         "show_tags": bool(getattr(args, "show_tags", False)),
         "repository": str(getattr(args, "repository", "") or "").strip() or None,
         "tag": str(getattr(args, "tag", "") or "").strip() or None,
@@ -104,7 +105,8 @@ def build_registry_spec(args: Any, *, product: str = "registry") -> ModuleAuditS
         "gitlab": product == "gitlab" or bool(getattr(args, "gitlab", False)) or enum_cve,
         "nexus": product == "nexus" or bool(getattr(args, "nexus", False)) or enum_cve,
         "product": product,
-        "assets": bool(getattr(args, "assets", False)),
+        "assets": bool(getattr(args, "assets", False) or getattr(args, "asset", None)),
+        "asset": str(getattr(args, "asset", "") or "").strip() or None,
         "inspect": bool(getattr(args, "inspect", False)),
         "image": str(getattr(args, "image", "") or "").strip() or None,
         "download": bool(getattr(args, "download", False)),

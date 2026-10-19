@@ -29,16 +29,9 @@ def _ctx() -> SimpleNamespace:
 
 
 def test_defcreds_expanded_without_duplicate_explicit_pair() -> None:
-    args = parse_args(["jenkins", "-t", "127.0.0.1:8080", "-u", "admin", "-p", "admin", "--defcreds"])
-    runs = build_jenkins_plan(args).credential_runs
-    pairs = [(item.username, item.password) for item in runs if item.username is not None]
-    assert len(pairs) == 18
-    assert len(set(pairs)) == len(pairs)
-    assert pairs[0] == ("admin", "admin")
-    assert ("admin", "changeme") in pairs
-    assert ("jenkins", "admin") in pairs
-    assert ("service", "service") in pairs
-    assert runs[0].source == "provided"
+    # NEXT_QA #4: explicit pair + --defcreds is rejected (no provided+defaults layering).
+    with pytest.raises(SystemExit):
+        parse_args(["jenkins", "-t", "127.0.0.1:8080", "-u", "admin", "-p", "admin", "--defcreds"])
 
 
 def test_api_token_file_becomes_one_provided_credential(tmp_path: Any) -> None:

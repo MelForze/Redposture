@@ -1282,7 +1282,7 @@ def _format_datasources_detail_records(record: dict[str, Any], output_format: st
             )
         ]
     prefix = _nxc_prefix(record)
-    lines = [f"{prefix} [*] Dump Datasources"]
+    lines = [f"{prefix} [*] Datasources Enumeration (datasources:{len(items)})"]
     for item in items:
         lines.append(f"{prefix} name={item['name']} type={item['type']} url={item['url']} access={item['access']}")
     return lines

@@ -89,14 +89,6 @@ def configure_clickhouse_parser(
         metavar="name",
         help="TLS SNI/certificate hostname override.",
     )
-    common.add_argument(
-        "-d",
-        "--database",
-        dest="database",
-        default="default",
-        metavar="name",
-        help="Database used for authentication context and table operations.",
-    )
     auth.add_argument(
         "-u",
         "--username",
@@ -121,6 +113,14 @@ def configure_clickhouse_parser(
     actions.add_argument(
         "--show-databases",
         **optional_show_count_kwargs("Show database names after successful access/auth. Optional count limits output."),
+    )
+    actions.add_argument(
+        "-d",
+        "--database",
+        dest="database",
+        default="default",
+        metavar="name",
+        help="Database used for authentication context and table operations.",
     )
     actions.add_argument(
         "--show-tables",

@@ -621,7 +621,65 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    from .data_discovery import DISCOVERY_MODULES
+
+    discovery_groups = {
+        "mongodb": "Discovery / Dump",
+        "oracle": "Discovery / Dump",
+        "postgres": "Discovery / Dump",
+        "jenkins": "Inventory",
+    }
+    for name in sorted(DISCOVERY_MODULES):
+        subparser = subparsers.choices.get(name)
+        if subparser is not None:
+            group_title = discovery_groups.get(name, "Actions")
+            group = next((item for item in subparser._action_groups if item.title == group_title), None)
+            if group is None:
+                raise RuntimeError(f"{name} parser has no {group_title!r} group for --discover")
+            group.add_argument(
+                "--discover",
+                action="store_true",
+                help="Read bounded accessible content and inspect it for secrets.",
+            )
+
     return parser
+
+
+# `--defcreds` sprays curated default credentials and runs standalone — it
+# cannot be combined with any supplied credential (a user:pass pair, a credential file,
+# or any token). Oracle wordlists are also supplied credential sources.
+_DEFCREDS_CONFLICTING_DESTS: dict[str, str] = {
+    "username": "-u/--username",
+    "password": "-p/--password",
+    "token": "--token",
+    "token_file": "--token-file",
+    "api_token": "--api-token",
+    "api_token_file": "--api-token-file",
+    "apitoken": "--apitoken",
+    "tokens": "--tokens",
+    "pve_api_token": "--pveapitoken",
+    "registry_token": "--registry-token",
+    "session_token": "--session-token",
+    "pgadmin_server_password": "--pgadmin-server-password",
+    "user_list": "--user-list",
+    "pass_list": "--pass-list",
+    "combo_list": "--combo-list",
+}
+
+
+def _reject_defcreds_with_supplied_credentials(parser: argparse.ArgumentParser, parsed: argparse.Namespace) -> None:
+    if not getattr(parsed, "defcreds", False):
+        return
+    conflicting = [
+        flag for dest, flag in _DEFCREDS_CONFLICTING_DESTS.items() if getattr(parsed, dest, None) is not None
+    ]
+    if getattr(parsed, "spray_passwords", False):
+        conflicting.append("--spray-passwords")
+    if conflicting:
+        parser.error(
+            f"--defcreds cannot be combined with supplied credentials ({', '.join(conflicting)}); "
+            "run --defcreds on its own to spray curated defaults, or drop it to use the supplied credentials"
+        )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -669,6 +727,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(f"module command is required: {command_names_for_error()}")
 
     parsed = parser.parse_args(raw_argv)
+    _reject_defcreds_with_supplied_credentials(parser, parsed)
     parsed._port_option_provided = port_option_was_provided
     parsed._workers_option_provided = workers_option_was_provided
     parsed._retries_option_provided = retries_option_was_provided

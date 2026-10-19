@@ -115,6 +115,9 @@ def _tee_console_output(log_path: str) -> Iterator[None]:
 
 
 def _run_command(args: Any, logger: AttemptLogger) -> int:
+    from .data_discovery import prepare_discovery_request
+
+    prepare_discovery_request(args)
     if args.command == COMMAND_EXPORTERS:
         action = getattr(args, "exporters_action", None)
         action_spec = EXPORTERS_ACTION_SPECS_BY_NAME.get(str(action or ""))

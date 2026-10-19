@@ -112,13 +112,6 @@ def _configure_zookeeper_protocol_parser(
         ),
     )
     actions.add_argument(
-        "--dump",
-        dest="dump",
-        **optional_dump_count_kwargs(
-            "Dump znode values. Optional count limits dumped znodes when no --znode is selected."
-        ),
-    )
-    actions.add_argument(
         "--znode",
         dest="znode",
         default=None,
@@ -126,6 +119,13 @@ def _configure_zookeeper_protocol_parser(
         help=(
             "Show one znode detail by path "
             f"(example: {'/clickhouse/tables' if default_port == 9181 else '/brokers/ids'})."
+        ),
+    )
+    actions.add_argument(
+        "--dump",
+        dest="dump",
+        **optional_dump_count_kwargs(
+            "Dump znode values. Optional count limits dumped znodes when no --znode is selected."
         ),
     )
     actions.add_argument(

@@ -360,31 +360,11 @@ def test_airflow2_defcreds_all_rejected_reports_every_pair_once() -> None:
     assert len(result.records[0]["attempted_credentials"]) == len(expected)
 
 
-def test_airflow3_defcreds_deduplicates_provided_pair_uses_bearer_and_redacts_json() -> None:
-    valid = {("airflow", "airflow")}
-    with _serve("v2", valid=valid, transient={("dev", "dev")}) as server:
-        _result, lines, plan = _run(
-            server,
-            output_format="json",
-            extra_args=("-u", "airflow", "-p", "airflow"),
-        )
-
-    expected = _plan_pairs(plan)
-    assert len(expected) == 19
-    assert expected[0] == ("airflow", "airflow")
-    assert expected.count(("airflow", "airflow")) == 1
-    assert server.token_attempts == expected
-    assert any(auth and auth.startswith("Bearer qa-token-") for _method, _path, auth in server.calls)
-    payload = next(json.loads(line) for line in lines if line.startswith("{") and '"service": "airflow"' in line)
-    assert payload["credential_state"] == "valid"
-    assert payload["authenticated_dags_count"] == 0
-    assert payload["authenticated_keys_count"] == 0
-    assert payload["authenticated_connections_count"] == 0
-    assert "role" not in payload
-    assert payload["default_credentials"] is False
-    assert "credential_password" not in payload
-    assert "attempted_credentials" not in payload
-    assert "qa-token-" not in json.dumps(payload)
+def test_airflow3_defcreds_rejects_supplied_pair() -> None:
+    # NEXT_QA #4: `_run` always passes --defcreds; adding an explicit pair is rejected at the CLI.
+    with _serve("v2", valid={("airflow", "airflow")}, transient={("dev", "dev")}) as server:
+        with pytest.raises(SystemExit):
+            _run(server, output_format="json", extra_args=("-u", "airflow", "-p", "airflow"))
 
 
 @pytest.mark.parametrize("generation", ["v1", "v2"])

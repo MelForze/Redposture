@@ -1428,6 +1428,11 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
 
     prefix = _nxc_prefix(record)
     lines = []
+    dumped_by_key: dict[str, list[tuple[int, str]]] = {}
+    for index, entry in enumerate(dumped_key_entries):
+        if entry.get("key") is not None:
+            dumped_by_key.setdefault(str(entry["key"]), []).append((index, _etcd_kv_entry_text(entry)))
+    emitted_entries: set[int] = set()
     if show_keys and key_names:
         total = record.get("key_count")
         if show_keys_limit is not None and isinstance(total, int) and total > len(displayed_key_names):
@@ -1436,12 +1441,25 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
             lines.append(f"{prefix} [*] Keys Enumeration")
         for item in displayed_key_names:
             lines.append(f"{prefix} {_format_etcd_text(item)}")
+            if dump_keys:
+                for index, value in dumped_by_key.get(item, []):
+                    lines.append(f"{prefix} {_format_etcd_text(value)}")
+                    emitted_entries.add(index)
     if query_key and isinstance(query_key_value, str):
         lines.append(f"{prefix} [*] Dump Key {query_key}")
         lines.append(f"{prefix} {_format_etcd_text(query_key_value)}")
-    if dump_keys and dumped_key_values:
+    if dump_keys and dumped_key_values and (not show_keys or len(emitted_entries) < len(dumped_key_values)):
         lines.append(f"{prefix} [*] Dump Keys")
-        for item in dumped_key_values:
+        remaining = (
+            [
+                _etcd_kv_entry_text(entry)
+                for index, entry in enumerate(dumped_key_entries)
+                if index not in emitted_entries
+            ]
+            if dumped_key_entries
+            else dumped_key_values
+        )
+        for item in remaining:
             lines.append(f"{prefix} {_format_etcd_text(item)}")
     return lines
 

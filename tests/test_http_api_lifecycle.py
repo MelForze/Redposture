@@ -75,143 +75,44 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
     assert result.records[0]["status"] == "valid_credentials"
 
 
-def test_grafana_defcreds_are_explicit_ordered_runs_not_an_internal_batch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    auth_headers: list[str] = []
-    datasource_headers: list[str] = []
-
-    def fake_http(_host, _port, path, _timeout, *, headers=None, **_kwargs):
-        authorization = (headers or {}).get("Authorization")
-        if path == "/api/health":
-            return 401, "", {}
-        if path == "/login":
-            return 200, "<title>Grafana</title>", {}
-        if path == "/api/user":
-            auth_headers.append(authorization)
-            accepted = {
-                grafana._auth_header("admin", "admin"),
-                grafana._auth_header("grafana", "grafana"),
-            }
-            return (
-                (200, '{"id":1,"login":"accepted","isGrafanaAdmin":false}', {})
-                if authorization in accepted
-                else (401, "", {})
-            )
-        if path == "/api/datasources":
-            datasource_headers.append(authorization)
-            if authorization is None or authorization == "Bearer bad-token":
-                return 401, "", {}
-            return 200, "[]", {}
-        raise AssertionError(path)
-
-    monkeypatch.setattr(grafana, "_http_request", fake_http)
-    args = parse_args(
-        [
-            "grafana",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "3000",
-            "-u",
-            "operator",
-            "-p",
-            "wrong",
-            "--defcreds",
-            "--format",
-            "json",
-        ]
-    )
-    plan = grafana.build_grafana_plan(args)
-    runner = AuditCommandRunner(args=args, spec=grafana.build_grafana_spec(args), emit_line=lambda _line: None)
-    result = runner.run_plan(plan)
-
-    assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [
-        ("operator", "wrong", "provided"),
-        ("admin", "12345678", "default"),
-        ("admin", "admin", "default"),
-        ("admin", "changeme", "default"),
-        ("admin", "grafana", "default"),
-        ("admin", "password", "default"),
-        ("grafana", "grafana", "default"),
-        ("grafana", "password", "default"),
-        ("root", "password", "default"),
-        ("root", "root", "default"),
-        ("user", "password", "default"),
-        ("user", "user", "default"),
-    ]
-    assert auth_headers == [
-        grafana._auth_header(run.username or "admin", run.password or "") for run in plan.credential_runs
-    ]
-    assert datasource_headers == [None, grafana._auth_header("admin", "admin")]
-    assert result.records[0]["status"] == "weak_default_creds"
-    assert result.records[0]["credentials_source"] == "default"
-    assert result.records[0]["effective_username"] == "admin"
-    assert result.records[0]["effective_password"] == "admin"
-    assert len(result.records[0]["auth_attempts"]) == len(plan.credential_runs)
-    assert result.records[0]["datasource_count"] == 0
+def test_grafana_defcreds_are_explicit_ordered_runs_not_an_internal_batch() -> None:
+    # NEXT_QA #4: a supplied credential together with --defcreds is rejected at the CLI.
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "grafana",
+                "-t",
+                "127.0.0.1",
+                "--port",
+                "3000",
+                "-u",
+                "operator",
+                "-p",
+                "wrong",
+                "--defcreds",
+                "--format",
+                "json",
+            ]
+        )
 
 
-def test_grafana_rejected_api_token_falls_back_to_defaults(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    auth_headers: list[str] = []
-    datasource_headers: list[str] = []
-    winning_header = grafana._auth_header("admin", "admin")
-
-    def fake_http(_host, _port, path, _timeout, *, headers=None, **_kwargs):
-        authorization = (headers or {}).get("Authorization")
-        if path == "/api/health":
-            return 401, "", {}
-        if path == "/login":
-            return 200, "<title>Grafana</title>", {}
-        if path == "/api/user":
-            auth_headers.append(authorization)
-            accepted = {winning_header, grafana._auth_header("grafana", "grafana")}
-            return (
-                (200, '{"id":1,"login":"accepted","isGrafanaAdmin":false}', {})
-                if authorization in accepted
-                else (401, "", {})
-            )
-        if path == "/api/datasources":
-            datasource_headers.append(authorization)
-            if authorization is None or authorization == "Bearer bad-token":
-                return 401, "", {}
-            return 200, "[]", {}
-        raise AssertionError(path)
-
-    monkeypatch.setattr(grafana, "_http_request", fake_http)
-    args = parse_args(
-        [
-            "grafana",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "3000",
-            "--apitoken",
-            "bad-token",
-            "--defcreds",
-            "--format",
-            "json",
-        ]
-    )
-    plan = grafana.build_grafana_plan(args)
-    result = AuditCommandRunner(
-        args=args,
-        spec=grafana.build_grafana_spec(args),
-        emit_line=lambda _line: None,
-    ).run_plan(plan)
-
-    assert plan.credential_runs[0].token == "bad-token"
-    assert auth_headers == [
-        "Bearer bad-token",
-        *[grafana._auth_header(run.username or "admin", run.password or "") for run in plan.credential_runs[1:]],
-    ]
-    assert datasource_headers == [None, "Bearer bad-token", winning_header]
-    assert result.records[0]["status"] == "weak_default_creds"
-    assert result.records[0]["credentials_source"] == "default"
-    assert len(result.records[0]["auth_attempts"]) == len(plan.credential_runs)
-    assert "bad-token" not in str(result.records[0]["auth_attempts"])
+def test_grafana_rejected_api_token_falls_back_to_defaults() -> None:
+    # NEXT_QA #4: a supplied credential together with --defcreds is rejected at the CLI.
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "grafana",
+                "-t",
+                "127.0.0.1",
+                "--port",
+                "3000",
+                "--apitoken",
+                "bad-token",
+                "--defcreds",
+                "--format",
+                "json",
+            ]
+        )
 
 
 def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_winner(
@@ -385,7 +286,8 @@ def test_gitlab_invalid_token_runs_public_data_once_without_reclassification(
     assert ("/api/v4/user", "invalid") in requests
     assert paginations == [None]
     assert result.records[0]["status"] == "invalid_credentials"
-    assert result.records[0]["public_projects"][0]["path_with_namespace"] == "public/demo"
+    assert result.records[0]["public_projects_count"] == 1
+    assert result.records[0]["public_projects"] is None
 
 
 def test_qdrant_api_key_auth_does_not_repeat_root_or_anonymous_collections(
@@ -525,95 +427,24 @@ def test_grpc_token_auth_uses_one_protocol_detection_and_one_credential_attempt(
     assert result.records[0]["status"] == "valid_credentials"
 
 
-def test_grpc_defcreds_sweeps_every_candidate_and_keeps_the_first_success(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attempted: list[dict[str, Any]] = []
-    capability_calls = 0
-    default_token = grpc._DEFAULT_BEARER_TOKENS[0]
-    second_success = grpc._DEFAULT_BASIC_CREDENTIALS[0]
-
-    monkeypatch.setattr(
-        grpc,
-        "_detect_grpc_target",
-        lambda *_args, **_kwargs: {
-            "status": "detected",
-            "is_grpc": True,
-            "transport_mode": "plaintext",
-            "protocol_flavor": "grpc",
-            "auth_required": True,
-            "reflection_enabled": None,
-            "health_supported": None,
-            "detect_probe_trace": [],
-        },
-    )
-
-    def fake_credentials(*_args, candidates, **_kwargs):
-        assert len(candidates) == 1
-        attempted.append(dict(candidates[0]))
-        ok = (
-            candidates[0].get("token") == default_token
-            or (
-                candidates[0].get("username"),
-                candidates[0].get("password"),
-            )
-            == second_success
+def test_grpc_defcreds_sweeps_every_candidate_and_keeps_the_first_success() -> None:
+    # NEXT_QA #4: a supplied credential together with --defcreds is rejected at the CLI.
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "grpc",
+                "-t",
+                "127.0.0.1",
+                "--port",
+                "50051",
+                "--token",
+                "bad",
+                "--defcreds",
+                "--analyze",
+                "--format",
+                "json",
+            ]
         )
-        return ok, candidates[0] if ok else None, {"attempts": [{"verdict": "valid" if ok else "rejected"}]}
-
-    def fake_reflection(*_args, **_kwargs):
-        nonlocal capability_calls
-        capability_calls += 1
-        return {"reflection_enabled": False, "services": []}
-
-    monkeypatch.setattr(grpc, "_try_credentials", fake_credentials)
-    monkeypatch.setattr(grpc, "_reflection_list_services_call", fake_reflection)
-    monkeypatch.setattr(
-        grpc,
-        "_health_check_call",
-        lambda *_args, **_kwargs: {
-            "health_supported": False,
-            "grpc_status": 12,
-            "grpc_status_name": "UNIMPLEMENTED",
-            "serving_status": None,
-            "error": None,
-        },
-    )
-    args = parse_args(
-        [
-            "grpc",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "50051",
-            "--token",
-            "bad",
-            "--defcreds",
-            "--analyze",
-            "--format",
-            "json",
-        ]
-    )
-    plan = grpc.build_grpc_plan(args)
-    runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
-    result = runner.run_plan(plan)
-
-    assert [run.source for run in plan.credential_runs[:2]] == ["provided", "default"]
-    assert [(item.get("token"), item.get("username"), item.get("password")) for item in attempted] == [
-        (run.token, run.username, run.password) for run in plan.credential_runs
-    ]
-    assert capability_calls == 2
-    assert result.records[0]["status"] == "weak_default_creds"
-    assert result.records[0]["defcreds_used"] is True
-    assert result.records[0]["auth_used"] == {"type": "token", "source": "defcreds"}
-    attempts = result.records[0]["attempted_credentials"]
-    assert len(attempts) == len(plan.credential_runs)
-    assert sum(item["status"] == "weak_default_creds" for item in attempts) == 2
-    rendered_attempts = grpc._format_credential_attempts_records(result.records[0], "txt")
-    assert len(rendered_attempts) == len(plan.credential_runs)
-    assert sum("[+]" in line for line in rendered_attempts) == 2
-    assert sum("[-]" in line for line in rendered_attempts) == len(plan.credential_runs) - 2
-    assert "bad" not in "\n".join(rendered_attempts)
 
 
 def test_grpc_rejected_token_falls_back_to_explicit_basic(
@@ -693,201 +524,45 @@ def test_grpc_rejected_token_falls_back_to_explicit_basic(
     assert result.records[0]["provided_username"] == "operator"
 
 
-def test_grpc_analyze_continues_until_reflection_credential_and_reuses_health_credential(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    health_headers: list[str | None] = []
-    reflection_probe_headers: list[str | None] = []
-    reflection_inventory_headers: list[str | None] = []
-    descriptor_headers: list[str | None] = []
-
-    monkeypatch.setattr(
-        grpc,
-        "_detect_grpc_target",
-        lambda *_args, **_kwargs: {
-            "status": "detected",
-            "is_grpc": True,
-            "transport_mode": "plaintext",
-            "protocol_flavor": "grpc",
-            "auth_required": None,
-            "health_access": "auth_required",
-            "reflection_access": "auth_required",
-            "invoke_access": "not_tested",
-            "reflection_enabled": None,
-            "health_supported": None,
-            "detect_probe_trace": [],
-        },
-    )
-
-    def fake_health(*_args, authorization=None, **_kwargs):
-        health_headers.append(authorization)
-        accepted = authorization == "Bearer health-only"
-        return {
-            "call": {"is_grpc": True},
-            "health_supported": True,
-            "grpc_status": 0 if accepted else 16,
-            "grpc_status_name": "OK" if accepted else "UNAUTHENTICATED",
-            "serving_status": "SERVING" if accepted else None,
-            "error": None,
-        }
-
-    def fake_reflection_probe(*_args, authorization=None, **_kwargs):
-        reflection_probe_headers.append(authorization)
-        accepted = authorization == "Bearer admin"
-        return {
-            "call": {"is_grpc": True},
-            "reflection_enabled": True if accepted else None,
-            "grpc_status": 0 if accepted else 16,
-            "error": None,
-        }
-
-    def fake_reflection_inventory(*_args, authorization=None, **_kwargs):
-        reflection_inventory_headers.append(authorization)
-        assert authorization == "Bearer admin"
-        return {
-            "call": {"is_grpc": True},
-            "reflection_enabled": True,
-            "reflection_version": "v1",
-            "grpc_status": 0,
-            "services": ["demo.Service"],
-            "error": None,
-        }
-
-    def fake_descriptors(*_args, authorization=None, **_kwargs):
-        descriptor_headers.append(authorization)
-        assert authorization == "Bearer admin"
-        return {
-            "call": {"is_grpc": True},
-            "grpc_status": 0,
-            "descriptor_bytes": [],
-            "error": None,
-        }
-
-    monkeypatch.setattr(grpc, "_health_check_call", fake_health)
-    monkeypatch.setattr(grpc, "_reflection_capability_call", fake_reflection_probe)
-    monkeypatch.setattr(grpc, "_reflection_list_services_call", fake_reflection_inventory)
-    monkeypatch.setattr(grpc, "_reflection_file_descriptors_call", fake_descriptors)
-
-    args = parse_args(
-        [
-            "grpc",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "50051",
-            "--token",
-            "health-only",
-            "--defcreds",
-            "--analyze",
-            "--format",
-            "json",
-        ]
-    )
-    plan = grpc.build_grpc_plan(args)
-    runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
-    result = runner.run_plan(plan)
-
-    sweep_headers = _grpc_plan_headers(plan)
-    assert reflection_probe_headers == sweep_headers
-    assert reflection_inventory_headers == ["Bearer admin"]
-    assert descriptor_headers == ["Bearer admin"]
-    expected_health_headers: list[str | None] = []
-    for header in sweep_headers:
-        expected_health_headers.append(header)
-        if header == "Bearer admin":
-            expected_health_headers.extend(["Bearer health-only", "Bearer health-only"])
-    assert health_headers == expected_health_headers
-    assert result.records[0]["status"] == "weak_default_creds"
-    assert result.records[0]["health_access"] == "authenticated"
-    assert result.records[0]["reflection_access"] == "authenticated"
-    assert result.records[0]["auth_required"] is None
-    assert result.records[0]["action_access_satisfied"] is True
-    assert result.records[0]["provided_credential_source"] == "default"
+def test_grpc_analyze_continues_until_reflection_credential_and_reuses_health_credential() -> None:
+    # NEXT_QA #4: a supplied credential together with --defcreds is rejected at the CLI.
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "grpc",
+                "-t",
+                "127.0.0.1",
+                "--port",
+                "50051",
+                "--token",
+                "health-only",
+                "--defcreds",
+                "--analyze",
+                "--format",
+                "json",
+            ]
+        )
 
 
-def test_grpc_invoke_continues_candidates_until_the_requested_method_is_accessible(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    invoke_headers: list[str | None] = []
-
-    monkeypatch.setattr(
-        grpc,
-        "_detect_grpc_target",
-        lambda *_args, **_kwargs: {
-            "status": "detected",
-            "is_grpc": True,
-            "transport_mode": "plaintext",
-            "protocol_flavor": "grpc",
-            "auth_required": None,
-            "health_access": "anonymous",
-            "reflection_access": "anonymous",
-            "invoke_access": "not_tested",
-            "reflection_enabled": False,
-            "health_supported": True,
-            "detect_probe_trace": [],
-        },
-    )
-    monkeypatch.setattr(
-        grpc,
-        "_reflection_list_services_call",
-        lambda *_args, **_kwargs: {
-            "call": {"is_grpc": True},
-            "reflection_enabled": False,
-            "grpc_status": 12,
-            "services": [],
-            "error": None,
-        },
-    )
-    monkeypatch.setattr(
-        grpc,
-        "_health_check_call",
-        lambda *_args, **_kwargs: {
-            "call": {"is_grpc": True},
-            "health_supported": True,
-            "grpc_status": 0,
-            "grpc_status_name": "OK",
-            "serving_status": "SERVING",
-            "error": None,
-        },
-    )
-
-    def fake_invoke(*_args, authorization=None, **_kwargs):
-        invoke_headers.append(authorization)
-        accepted = authorization == "Bearer admin"
-        return {
-            "path": "/demo.Service/Get",
-            "status": "ok" if accepted else "grpc_error",
-            "grpc_status": 0 if accepted else 16,
-            "grpc_status_name": "OK" if accepted else "UNAUTHENTICATED",
-        }
-
-    monkeypatch.setattr(grpc, "_invoke_unary_method", fake_invoke)
-    args = parse_args(
-        [
-            "grpc",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "50051",
-            "--token",
-            "bad",
-            "--defcreds",
-            "--invoke",
-            "/demo.Service/Get",
-            "--format",
-            "json",
-        ]
-    )
-    plan = grpc.build_grpc_plan(args)
-    runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
-    result = runner.run_plan(plan)
-
-    assert invoke_headers == _grpc_plan_headers(plan)
-    assert result.records[0]["status"] == "weak_default_creds"
-    assert result.records[0]["invoke_access"] == "authenticated"
-    assert result.records[0]["auth_required"] is None
-    assert result.records[0]["action_access_satisfied"] is True
-    assert result.records[0]["provided_credential_source"] == "default"
+def test_grpc_invoke_continues_candidates_until_the_requested_method_is_accessible() -> None:
+    # NEXT_QA #4: a supplied credential together with --defcreds is rejected at the CLI.
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "grpc",
+                "-t",
+                "127.0.0.1",
+                "--port",
+                "50051",
+                "--token",
+                "bad",
+                "--defcreds",
+                "--invoke",
+                "/demo.Service/Get",
+                "--format",
+                "json",
+            ]
+        )
 
 
 @pytest.mark.parametrize(
@@ -974,7 +649,11 @@ def test_grpc_public_reflection_probe_retries_deep_descriptors_with_credentials(
         "json",
     ]
     if use_defcreds:
+        # NEXT_QA #4: --token + --defcreds is rejected at the CLI.
         argv.append("--defcreds")
+        with pytest.raises(SystemExit):
+            parse_args(argv)
+        return
     args = parse_args(argv)
     plan = grpc.build_grpc_plan(args)
     runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
@@ -1067,76 +746,21 @@ def test_grpc_public_deep_reflection_does_not_falsely_validate_explicit_token(
     assert result.records[0]["provided_credential_source"] == "provided"
 
 
-def test_grpc_web_public_overall_health_retries_protected_service_health_with_next_credential(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    health_calls: list[tuple[str, str | None]] = []
-
-    monkeypatch.setattr(
-        grpc,
-        "_detect_grpc_target",
-        lambda *_args, **_kwargs: {
-            "status": "detected",
-            "is_grpc": True,
-            "transport_mode": "plaintext",
-            "protocol_flavor": "grpc-web",
-            "auth_required": None,
-            "health_access": "anonymous",
-            "reflection_access": "not_tested",
-            "invoke_access": "not_tested",
-            "reflection_enabled": None,
-            "health_supported": True,
-            "detect_probe_trace": [],
-        },
-    )
-
-    def fake_web_health(*_args, authorization=None, service_name="", **_kwargs):
-        health_calls.append((service_name, authorization))
-        accepted = service_name == "" or authorization == "Bearer admin"
-        return {
-            "call": {"is_grpc": True},
-            "health_supported": True,
-            "grpc_status": 0 if accepted else 16,
-            "grpc_status_name": "OK" if accepted else "UNAUTHENTICATED",
-            "serving_status": "SERVING" if accepted else None,
-            "error": None,
-        }
-
-    monkeypatch.setattr(grpc, "_grpc_web_health_check_call", fake_web_health)
-    monkeypatch.setattr(
-        grpc,
-        "_extract_descriptors",
-        lambda _blobs: ([{"service": "demo.Service", "method": "Get"}], []),
-    )
-
-    args = parse_args(
-        [
-            "grpc",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "50051",
-            "--token",
-            "bad",
-            "--defcreds",
-            "--analyze",
-            "--format",
-            "json",
-        ]
-    )
-    plan = grpc.build_grpc_plan(args)
-    runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
-    result = runner.run_plan(plan)
-
-    expected_health_calls = [
-        ("", None),
-        ("demo.Service", None),
-    ]
-    for header in _grpc_plan_headers(plan):
-        expected_health_calls.extend([("", header), ("demo.Service", header)])
-    assert health_calls == expected_health_calls
-    assert result.records[0]["status"] == "weak_default_creds"
-    assert result.records[0]["health_access"] == "mixed"
-    assert result.records[0]["action_access_satisfied"] is True
-    assert result.records[0]["auth_used"] == {"type": "token", "source": "defcreds"}
-    assert result.records[0]["provided_credential_source"] == "default"
+def test_grpc_web_public_overall_health_retries_protected_service_health_with_next_credential() -> None:
+    # NEXT_QA #4: a supplied credential together with --defcreds is rejected at the CLI.
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "grpc",
+                "-t",
+                "127.0.0.1",
+                "--port",
+                "50051",
+                "--token",
+                "bad",
+                "--defcreds",
+                "--analyze",
+                "--format",
+                "json",
+            ]
+        )

@@ -69,18 +69,12 @@ def test_every_defcreds_module_keeps_exhaustive_success_and_error_sweeps(module:
     ),
 )
 def test_defcreds_plans_prioritize_explicit_pair_and_deduplicate_defaults(module: str) -> None:
-    args = parse_args([module, "-t", "127.0.0.1", "-u", "admin", "-p", "admin", "--defcreds"])
-    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
-    prepare = getattr(stage, f"_prepare_{module}_credential_runs", None)
-    if callable(prepare):
-        prepare(args)
-    plan = getattr(stage, f"build_{module}_plan")(args)
-    identities = [(run.username, run.password, run.token) for run in plan.credential_runs]
-
-    assert len(plan.credential_runs) > 1
-    assert plan.credential_runs[0].source in {"provided", "token"}
-    assert identities.count(("admin", "admin", None)) == 1
-    assert len(identities) == len(set(identities))
+    # NEXT_QA #4: `--defcreds` is a standalone curated-default spray and is mutually
+    # exclusive with supplied credentials. Combining an explicit pair with --defcreds is
+    # now rejected at the CLI, so the former "explicit pair + deduplicated defaults"
+    # layering is no longer reachable — assert the rejection instead.
+    with pytest.raises(SystemExit):
+        parse_args([module, "-t", "127.0.0.1", "-u", "admin", "-p", "admin", "--defcreds"])
 
 
 def _mixed_target_spec(module: str) -> ModuleAuditSpec:

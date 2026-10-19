@@ -99,6 +99,64 @@ def test_capabilities_record_skips_when_no_valid_credential():
     assert "admin_capability" not in rec
 
 
+def test_verified_pair_gets_admin_verdict_before_first_phase_output(monkeypatch):
+    from types import SimpleNamespace
+
+    calls: list[str] = []
+
+    class Client:
+        scheme = "http"
+
+        def admin_info(self, *, signed=True):
+            return _denied()
+
+    client = Client()
+    monkeypatch.setattr(actions, "_client_for", lambda _ctx, _credential: client)
+    monkeypatch.setattr(
+        actions,
+        "verify_credential",
+        lambda _client: actions.CredentialResult("valid", "AK", None),
+    )
+
+    def classify(_client):
+        calls.append("admin")
+        return actions.AdminCapability("confirmed", "delegated_admin", {"list_users": "ok"})
+
+    monkeypatch.setattr(actions, "classify_admin_capability", classify)
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(session_token=None),
+        credential=SimpleNamespace(username="AK", password="SK", source="provided"),
+        lifecycle_state=None,
+    )
+    first = actions.auth_record(ctx, {"auth_required": True})
+    assert first["admin_capability"] == "confirmed"
+    assert first["provided_credentials_ok"] is True
+    final = actions.capabilities_record(ctx, first)
+    assert final["admin_capability"] == "confirmed"
+    assert calls == ["admin"]
+
+
+def test_admin_probe_failure_keeps_verified_s3_pair(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(actions, "_client_for", lambda _ctx, _credential: object())
+    monkeypatch.setattr(
+        actions,
+        "verify_credential",
+        lambda _client: actions.CredentialResult("valid", "AK", None),
+    )
+    monkeypatch.setattr(actions, "classify_admin_capability", lambda _client: (_ for _ in ()).throw(TimeoutError()))
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(session_token=None),
+        credential=SimpleNamespace(username="AK", password="SK", source="provided"),
+        lifecycle_state=None,
+    )
+    record = actions.auth_record(ctx, {"auth_required": True})
+    assert record["provided_credentials_ok"] is True
+    assert record["admin_capability"] == "unknown"
+    assert record["admin_evidence"] == {"probe_error": "TimeoutError"}
+
+
 def test_admin_equivalent_is_delegated_admin_not_over_claimed_root():
     from redposture_core.modules.minio import actions as _a
 

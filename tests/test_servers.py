@@ -244,11 +244,12 @@ def test_mysql_handshake_response_extracts_native_auth_material() -> None:
     assert parse_mysql_handshake_response(b"\x00" * 32) is None
 
 
-def test_mysql_callback_logs_challenge_and_native_response() -> None:
+def test_mysql_callback_logs_challenge_and_native_response(tmp_path) -> None:
     import hashlib
 
     logger = AttemptLogger()
     logger.set_trigger_callback_mode(True, ["127.0.0.1"])
+    hash_path = logger.set_mysql_hash_output(str(tmp_path / "trigger.txt"))
     server = SimpleNamespace(server_address=("127.0.0.1", 13306), attempt_logger=logger)
     left, right = socket.socketpair()
     worker = threading.Thread(
@@ -285,6 +286,7 @@ def test_mysql_callback_logs_challenge_and_native_response() -> None:
         assert events[0]["auth_salt"] == salt.hex()
         assert events[0]["auth_response"] == scramble.hex()
         assert logger._is_trigger_cred_event(events[0])
+        assert hash_path.read_text(encoding="ascii") == f"$mysqlna${salt.hex()}*{scramble.hex()}\n"
     finally:
         right.close()
         left.close()

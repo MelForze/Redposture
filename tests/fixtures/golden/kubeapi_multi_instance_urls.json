@@ -11,6 +11,9 @@
     "can_list_namespaces": true,
     "can_list_pods": null,
     "can_list_secrets": null,
+    "configmaps": [],
+    "configmaps_error": null,
+    "configmaps_partial": false,
     "detection_signals": [
       "kubeapi.probe",
       "kubeapi.product_fingerprint"
@@ -90,6 +93,9 @@
     "can_list_namespaces": true,
     "can_list_pods": null,
     "can_list_secrets": null,
+    "configmaps": [],
+    "configmaps_error": null,
+    "configmaps_partial": false,
     "detection_signals": [
       "kubeapi.probe",
       "kubeapi.product_fingerprint"
@@ -169,6 +175,9 @@
     "can_list_namespaces": true,
     "can_list_pods": null,
     "can_list_secrets": null,
+    "configmaps": [],
+    "configmaps_error": null,
+    "configmaps_partial": false,
     "detection_signals": [
       "kubeapi.probe",
       "kubeapi.product_fingerprint"
@@ -248,6 +257,9 @@
     "can_list_namespaces": true,
     "can_list_pods": null,
     "can_list_secrets": null,
+    "configmaps": [],
+    "configmaps_error": null,
+    "configmaps_partial": false,
     "detection_signals": [
       "kubeapi.probe",
       "kubeapi.product_fingerprint"
@@ -327,6 +339,9 @@
     "can_list_namespaces": true,
     "can_list_pods": null,
     "can_list_secrets": null,
+    "configmaps": [],
+    "configmaps_error": null,
+    "configmaps_partial": false,
     "detection_signals": [
       "kubeapi.probe",
       "kubeapi.product_fingerprint"

@@ -401,6 +401,49 @@ def _qdrant_get_collection_info(
     return _http_json_request(host, port, "GET", f"/collections/{encoded_name}", timeout, headers=headers)
 
 
+def _qdrant_scroll_payloads(
+    host: str, port: int, timeout: float, collection_name: str, *, headers: dict[str, str] | None
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read at most 1,000 points / 8 MiB from a collection without mutation."""
+    encoded = urllib.parse.quote(collection_name, safe="")
+    points: list[dict[str, Any]] = []
+    offset: Any = None
+    seen_offsets: set[str] = set()
+    byte_count = 0
+    for _page in range(10):
+        request_body: dict[str, Any] = {"limit": 100, "with_payload": True, "with_vector": False}
+        if offset is not None:
+            request_body["offset"] = offset
+        status, body, error = _http_json_request(
+            host,
+            port,
+            "POST",
+            f"/collections/{encoded}/points/scroll",
+            timeout,
+            headers=headers,
+            payload=request_body,
+        )
+        result = body.get("result") if isinstance(body, dict) else None
+        page_points = result.get("points") if isinstance(result, dict) else None
+        if error or status != 200 or not isinstance(page_points, list):
+            return points, True
+        selected = [
+            {"id": point.get("id"), "payload": point.get("payload")} for point in page_points if isinstance(point, dict)
+        ]
+        byte_count += len(json.dumps(selected, ensure_ascii=False, default=str).encode())
+        if byte_count > 8 * 1024 * 1024:
+            return points, True
+        points.extend(selected)
+        offset = result.get("next_page_offset") if isinstance(result, dict) else None
+        if offset is None:
+            return points, False
+        marker = _json_compact(offset)
+        if marker in seen_offsets:
+            return points, True
+        seen_offsets.add(marker)
+    return points, True
+
+
 def _qdrant_edit_probe_empty_patch(
     host: str,
     port: int,
@@ -1274,18 +1317,10 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 96)
     collections_count = record.get("collections_count")
     collections_text = format_count_value(collections_count)
-    ghsa_check = record.get("ghsa_f632_vm87_2m2f")
-    rce_suffix = ""
-    if isinstance(ghsa_check, dict) and str(ghsa_check.get("assessment") or "").strip() == "potentially_vulnerable":
-        rce_suffix = " RCE!"
-
     if status == "open_no_auth":
         return ""
     if status == "open_auth":
-        return (
-            f"{prefix} [+] collections access with api-key{rce_suffix} "
-            f"(anonymous:blocked) (collections:{collections_text})"
-        )
+        return f"{prefix} [+] API key accepted (collections:{collections_text})"
     if status == "auth_required":
         return ""
     if status == "unknown_auth":
@@ -1313,7 +1348,8 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
     ssrf_requested = bool(record.get("ssrf_requested"))
     ssrf_results = record.get("ssrf_results")
     edit_probe_visible = bool(edit_probe) and (debug or output_format == "json")
-    ghsa_visible = isinstance(ghsa_check, dict) and (debug or output_format == "json")
+    potential_rce = isinstance(ghsa_check, dict) and ghsa_check.get("assessment") == "potentially_vulnerable"
+    ghsa_visible = isinstance(ghsa_check, dict) and (debug or output_format == "json" or potential_rce)
     if not any([show_collections, dump_requested, edit_probe_visible, ghsa_visible, ssrf_requested]):
         return []
 
@@ -1401,23 +1437,54 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
             )
         return lines
 
+    dump_items = collection_dump_items if isinstance(collection_dump_items, list) else []
+    emitted_dump_items: set[int] = set()
+    dump_items_by_name: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, item in enumerate(dump_items):
+        if isinstance(item, dict):
+            dump_items_by_name.setdefault(str(item.get("name") or ""), []).append((index, item))
+
+    def append_collection_dump(item: dict[str, Any]) -> None:
+        name = str(item.get("name") or "-")
+        status = item.get("status")
+        status_text = f" status={status}" if status is not None else ""
+        if bool(item.get("ok")):
+            lines.append(f"{prefix} [*] Collection (name:{name})")
+            info_raw = str(item.get("info_raw") or "").strip()
+            if info_raw:
+                lines.append(f"{prefix} info={info_raw}")
+        else:
+            err = _clip(str(item.get("error") or "unknown"), 120)
+            lines.append(f"{prefix} [-] collection dump failed name={name}{status_text} err={err}")
+
     if show_collections:
         source = str(record.get("collections_source") or "-")
         count = record.get("collections_count")
         count_text = format_count_value(count)
         suffix = f" (source:{source})" if source and source != "-" else ""
         lines.append(f"{prefix} [*] Collections (count:{count_text}){suffix}")
+        if dump_requested and dump_items:
+            selector_suffix = f" (name:{collection_selector})" if collection_selector else ""
+            lines.append(f"{prefix} [*] Collections Dump{selector_suffix}")
         if isinstance(collections, list):
             if not collections:
                 lines.append(f"{prefix} <no collections>")
             for name in collections:
                 lines.append(f"{prefix} {name}")
+                if dump_requested:
+                    for index, item in dump_items_by_name.get(str(name), []):
+                        if index not in emitted_dump_items:
+                            append_collection_dump(item)
+                            emitted_dump_items.add(index)
         else:
             err = str(record.get("collections_list_error") or "").strip()
             if err:
                 lines.append(f"{prefix} [-] collections unavailable err={_clip(err, 120)}")
             else:
                 lines.append(f"{prefix} [-] collections unavailable")
+
+    if potential_rce:
+        lines.append(f"{prefix} [!] RCE:potential (CVE-2026-25628; affected version; /logger reachable)")
 
     if debug and isinstance(ghsa_check, dict):
         marker = str(ghsa_check.get("marker") or "[*]")
@@ -1455,28 +1522,16 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
 
     if dump_requested:
         selector_suffix = f" (name:{collection_selector})" if collection_selector else ""
-        lines.append(f"{prefix} [*] Collections Dump{selector_suffix}")
+        if not (show_collections and dump_items):
+            lines.append(f"{prefix} [*] Collections Dump{selector_suffix}")
         dump_error = str(record.get("collection_dump_error") or "").strip()
         if dump_error:
             lines.append(f"{prefix} [-] dump unavailable err={_clip(dump_error, 120)}")
-        items = collection_dump_items if isinstance(collection_dump_items, list) else []
-        if not items and not dump_error:
+        if not dump_items and not dump_error:
             lines.append(f"{prefix} <collection not found>" if collection_selector else f"{prefix} <no collections>")
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name") or "-")
-            ok = bool(item.get("ok"))
-            status = item.get("status")
-            status_text = f" status={status}" if status is not None else ""
-            if ok:
-                lines.append(f"{prefix} [*] Collection (name:{name})")
-                info_raw = str(item.get("info_raw") or "").strip()
-                if info_raw:
-                    lines.append(f"{prefix} info={info_raw}")
-            else:
-                err = _clip(str(item.get("error") or "unknown"), 120)
-                lines.append(f"{prefix} [-] collection dump failed name={name}{status_text} err={err}")
+        for index, item in enumerate(dump_items):
+            if index not in emitted_dump_items and isinstance(item, dict):
+                append_collection_dump(item)
 
     if debug and isinstance(edit_probe, dict):
         probe_collection = str(edit_probe.get("collection") or "-")
@@ -1546,7 +1601,8 @@ def _render_colored_qdrant_line(console: Console, line: str) -> bool:
         tag=_QDRANT_TAG,
         regexes=(
             RegexColorRule(r"(?i)\(idor:true\)", "red"),
-            RegexColorRule(r"RCE!", "orange"),
+            RegexColorRule(r"API key accepted", "red"),
+            RegexColorRule(r"RCE:potential", "orange"),
         ),
         counts=(
             CountColorRule("collections", "red", unknown_color="orange", zero_color="bright_green"),
@@ -1813,6 +1869,10 @@ def collect_qdrant_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
                     "info_raw": _json_compact(payload) if error is None and status == 200 else None,
                 }
             )
+            if bool(getattr(ctx.args, "discover", False)) and error is None and status == 200:
+                points, partial = _qdrant_scroll_payloads(host, port, timeout, str(name), headers=headers)
+                record["payload_discovery_partial"] = bool(record.get("payload_discovery_partial") or partial)
+                record.setdefault("payload_discovery_items", []).append({"collection": str(name), "points": points})
 
     edit_target = collection_name or (str(collections[0]) if isinstance(collections, list) and collections else None)
     if edit_target:

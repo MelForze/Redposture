@@ -1756,11 +1756,12 @@ def test_proxmox_detail_renderers_cover_findings_nodes_users_text_and_json() -> 
     assert any('"type": "credential_hit"' in line for line in _format_findings_detail_records(record, "json"))
 
     node_lines = _format_nodes_detail_records(record, "txt")
-    assert any("[*] Nodes" in line for line in node_lines)
+    assert any("[*] Nodes Enumeration (Count:1)" in line for line in node_lines)
     assert any(line.endswith("pve1") for line in node_lines)
     assert any('"type": "nodes_dump"' in line for line in _format_nodes_detail_records(record, "json"))
 
     user_lines = _format_users_detail_records(record, "txt")
+    assert any("[*] Users Enumeration (Count:unknown)" in line for line in user_lines)
     assert any("<error:permission denied>" in line for line in user_lines)
     assert any('"type": "users_dump"' in line for line in _format_users_detail_records(record, "json"))
 

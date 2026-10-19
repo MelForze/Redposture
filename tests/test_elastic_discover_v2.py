@@ -2080,6 +2080,9 @@ def test_normal_text_exports_full_findings_but_hides_raw_candidate_documents() -
 
     assert "Discover Secrets (status:complete) (findings:1)" in normal
     finding_line = next(line for line in normal_lines if " Value=" in line and " Place=" in line)
+    assert normal_lines.index(
+        next(line for line in normal_lines if "Discover Secrets (status:" in line)
+    ) > normal_lines.index(finding_line)
     assert (
         '[!] Pass Value="full-exported-secret" '
         'Place="source_kind:document/object:logs/doc-1/index:logs/id:doc-1/path:/password"'

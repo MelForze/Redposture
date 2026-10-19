@@ -1,146 +1,34 @@
 <p align="center">
-  <a href="https://deepwiki.com/MelForze/Redposture">
-    <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
-  </a>
-  <a href="https://github.com/MelForze/Redposture/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/MelForze/Redposture?style=flat-square" alt="License">
-  </a>
-  <a href="https://github.com/MelForze/Redposture/actions/workflows/ci.yml">
-    <img src="https://img.shields.io/github/actions/workflow/status/MelForze/Redposture/ci.yml?branch=main&style=flat-square&label=CI" alt="CI">
-  </a>
-  <a href="https://github.com/MelForze/Redposture/releases">
-    <img src="https://img.shields.io/github/v/tag/MelForze/Redposture?style=flat-square&label=version" alt="Latest version">
-  </a>
-  <img src="https://img.shields.io/badge/modules-25-2b2f36?style=flat-square" alt="Modules">
+  <a href="https://deepwiki.com/MelForze/Redposture"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+  <a href="https://github.com/MelForze/Redposture/blob/main/LICENSE"><img src="https://img.shields.io/github/license/MelForze/Redposture?style=flat-square" alt="License"></a>
+  <a href="https://github.com/MelForze/Redposture/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/MelForze/Redposture/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://pypi.org/project/redposture/"><img src="https://img.shields.io/pypi/v/redposture?style=flat-square" alt="PyPI version"></a>
+  <img src="https://img.shields.io/badge/audit_modules-26-2b2f36?style=flat-square" alt="26 audit modules">
   <img src="https://img.shields.io/badge/Python-3.12%2B-2b2f36?style=flat-square" alt="Python 3.12+">
-  <img src="https://img.shields.io/badge/install-pipx-2b2f36?style=flat-square" alt="Install with pipx">
 </p>
-
 
 # RedPosture
 
-CLI for authorized audits of exposed services: identify the product, verify access,
-enumerate data, find secrets, and match versions against an offline CVE catalog.
-Python 3.12+; 26 audit modules, credential spray, and exporter scan/collect/trigger workflows.
+CLI for authorized audits of exposed services. It identifies products, verifies access, reads available inventory, discovers secrets, and checks a bundled offline CVE catalog. Python 3.12+; 26 audit modules plus `spray` and exporter workflows.
 
 ## Install
 
+Install the latest **published** release from [PyPI](https://pypi.org/project/redposture/):
+
 ```bash
-pipx install "git+https://github.com/MelForze/Redposture.git"
+pipx install redposture
 redposture --version
 ```
 
+For the current repository code, use `python -m venv .venv`, `source .venv/bin/activate`, then `python -m pip install -e .`. A local version change appears on PyPI only after a release is published.
+
 ## Usage
 
-- `-t`: host, URL, CIDR, IPv4 range, comma-separated list or target file; `--port`:
-  port, list or range. `-ot, --out-target` accepts exclusions in the same formats:
-  `--out-target exclusions.txt` removes matching hosts before ports are expanded.
-- `-u/-p`, module-specific token flags or `--defcreds` perform real login checks.
-  `-o results.txt` writes TXT, `-f json` writes structured results, and `--debug`
-  shows diagnostics. See `redposture <module> -h` for all flags.
+Run `redposture MODULE -t TARGET`; `TARGET` can be a host, `host:port`, URL, CIDR/range, comma-separated list, or file. Use `redposture MODULE -h` for flags. `-o FILE` saves output; `-f json` selects JSON instead of TXT. `--debug` shows diagnostics. TXT contains confirmed services; unconfirmed detections remain in debug/JSON. Saved files contain no ANSI colors.
 
-TXT shows confirmed services only. Generic login/SSO pages, HTTP status codes and
-an isolated `version` field do not confirm a product or start auth, discovery or CVE
-checks. Unconfirmed results and pre-detection errors remain in debug/JSON. JSON
-includes `detection_status` (`confirmed`, `probable`, `not_service`,
-`transport_failure`), `detection_signals` and any older `detection_detail_status`.
-With no confirmed service, one `No MODULE service detected` line includes the
-unreachable count; if nonzero it uses `[!]` and exits nonzero. Post-detection
-errors stay visible.
-SSO appears as `auth required:sso`; verified/rejected credentials use `[+]`/`[-]`.
-Inconclusive pairs appear only in debug/JSON.
+## Default credential checks
 
-Main workers: 64 for fewer than 1000 expanded `host:port` tasks, otherwise 128
-(`-w` overrides). Shared nested workers: 32/64, capped by `-w`; per-target discovery
-limits are MinIO/Elastic/Proxmox 8 and ClickHouse 4 (`max_threads=1` per query).
-Audit targets stream continuously through a bounded queue. Multi-target scans show
-address and `host:port` counts by port before starting; this plan stays out of
-saved TXT/JSON. Exporters use separate schedulers.
-
-Postgres and ClickHouse `--os-shell` show command exit status and separate
-stdout/stderr. Binary output gets a safe hex preview; use `:hex [stdout|stderr]
-[bytes]`, `:base64 [stdout|stderr] [bytes]`, or `:save [stdout|stderr]
-<local-path>` for captured bytes. `:limit 16M` changes the per-stream capture
-budget (default 8 MiB, maximum 50 MiB); `:help` lists local commands.
-`:save` never overwrites an existing file. A truncated capture is marked
-partial, and an interrupted command is never replayed automatically.
-Docker/KubeAPI exec include Base64 fields in JSON for binary output; Oracle
-Scheduler captures at most 8 KiB per stream when readback is available.
-
-`--discover` covers Airflow, MinIO, Elastic/OpenSearch, ClickHouse and Proxmox.
-The default budget is 50 MiB per target. Only Elastic/OpenSearch has a default
-deadline (300 s); other modules have no default time or item cap. Use
-`--discover-max-bytes`/`--discover-time` to override.
-Findings stream live; incomplete scans are marked partial. ClickHouse supports
-`--checkpoint`/`--resume`.
-
-HTTP checks may follow redirects across scheme, host and port with supplied
-credentials. The URL scheme selects the first attempt; a canonical HTTP 400
-requiring HTTPS retries safe GET/HEAD discovery. Later checks reuse the resolved
-origin, while changing requests are not replayed
-to select a scheme. Target TLS accepts self-signed certificates by default;
-where supported, a CA file enables certificate and hostname verification. mTLS
-needs a client certificate and key. For a reverse proxy, supply its mounted URL (for example
-`https://host/airflow/api/v1/version`) and the DNS name required for Host/SNI;
-the module retains the URL prefix after removing a known API suffix.
-In HTTP audit modules, a URL without a port uses 80 for `http` or 443 for
-`https`; bare hosts still use the module's port list. An explicit URL port or
-`--port` overrides the scheme default. ClickHouse treats an HTTP(S) URL as an
-HTTP target unless `--protocol` was explicitly selected.
-
-The `minio`, `docker`, `mongodb`, `elastic`, `redis`, and `postgres` commands
-also recognize MinIO Console, Portainer, mongo-express, Kibana/OpenSearch
-Dashboards, Redis Insight, and pgAdmin 4 on explicit HTTP targets. Bare-host
-scans include their common UI ports. A UI login verifies only UI access, never
-backend credentials. Existing inventory flags use bounded, read-only UI APIs
-where available; unavailable backend connections are reported explicitly.
-The UI adapters can read MinIO Console objects, mongo-express documents,
-Redis Insight key values, Portainer environment details, and cluster data
-through Kibana/OpenSearch Dashboards Dev Tools when those APIs allow it.
-For pgAdmin, `--pgadmin-server-password` connects a saved PostgreSQL server
-for inventory and read-only `--dump` without storing that password in pgAdmin.
-With no bucket, collection, or table filter, `--dump` walks all accessible
-MinIO objects, mongo-express collections, or pgAdmin tables. A numeric UI dump
-limit, where available, keeps the inline audit bounded by 10,000 records,
-64 MiB, and five minutes per target. `partial` in JSON marks an incomplete
-traversal. UI credentials remain separate from backend credentials.
-
-Unbounded standard flags (`--show-*`, `--dump`, Docker inventory flags, and
-Elastic `--discover`) stream the selected UI data to a private JSONL file in
-`.redposture/ui-exports/`, with a SQLite checkpoint and progress every 100
-records. Explicit numeric counts retain bounded inline output. An interrupted
-read resumes automatically with the same target, account and filters; a
-completed read starts a fresh file. MinIO Console has no list cursor, so its
-list request grows up to 65,536 items or 8 MiB; reaching either limit is
-reported as `partial`.
-
-`spray` checks supplied pairs or tokens only after a module confirms the product.
-It does not run inventory, discovery, or CVE checks. A bare host uses the selected
-modules' normal ports; a URL or `host:port` keeps its explicit port.
-With multiple modules, TXT prints each target as one block after its attempts
-finish; JSON stays live. Rate limits can therefore delay a target's TXT block.
-
-```bash
-redposture spray -t targets.txt --modules airflow,grafana --pairs pairs.txt -o spray.txt
-redposture spray -t targets.txt --modules keycloak,kubeapi --tokens tokens.txt --checkpoint spray.sqlite3 -o spray-tokens.txt
-redposture spray -t targets.txt --modules all --users users.txt --passwords passwords.txt --origin-rate 2 --account-interval 60 -o spray-all.txt
-redposture spray -t targets.txt --modules airflow -u admin -p @passwords.txt -o spray-admin.txt
-redposture spray -t targets.txt --modules all --users users.txt --passwords passwords.txt --origin-rate 2 --account-interval 60 --checkpoint spray-all.txt.checkpoint.sqlite3 --resume -o spray-all.txt
-```
-
-Pairs use the first colon as separator. `-u/--users` and `-p/--passwords`
-each accept a literal or an existing file; prefix a filename with `@` to
-require that it exists. Sources can be mixed, and each password is tried
-across all users before the next password. Results and the raw
-secrets appear in terminal, TXT, and JSON as requested; output and checkpoint
-files are mode `0600`. A begun attempt interrupted before its result becomes
-`inconclusive` on resume and is not retried. `--module-config` accepts only
-auth/transport settings, such as `{"keeper":{"znode":"/protected"}}` or
-`{"keycloak":{"realm":"master"}}`; action flags are rejected. Docker Engine
-pairs (unlike Portainer UI pairs) and Keycloak pairs report `unsupported`
-because those modules cannot verify them. `redposture spray -h` lists all options.
-
-## Default credentials checked by `--defcreds`
+`--defcreds` tries product-specific weak candidates only after detection. The table lists the actual candidates; it is not a list of guaranteed factory passwords. The `docker` command supports `--defcreds` only for a confirmed Portainer UI, not Docker Engine.
 
 | Module | Credential pairs checked |
 | --- | --- |
@@ -163,6 +51,7 @@ because those modules cannot verify them. `redposture spray -h` lists all option
 | GitLab | `root:root`, `root:password`, `root:admin`, `root:changeme`, `root:gitlab`, `root:admin123`, `admin:admin`, `admin:password`, `admin:changeme`, `admin:gitlab`, `gitlab:gitlab`, `gitlab:password`, `gitlab:admin`, `user:user`, `user:password`, `test:test`, `guest:guest`, `dev:dev`, `root:12345678` |
 | Harbor | `admin:Harbor12345`, `admin:harbor`, `admin:harbor123`, `admin:Harbor123`, `harbor:harbor`, `harbor:password`, then `admin:admin`, `admin:password`, `admin:changeme`, `admin:admin123`, `admin:123456`, `root:root`, `root:password`, `root:admin`, `root:changeme`, `user:user`, `user:password`, `test:test`, `guest:guest`, `dev:dev`, `service:service`, `admin:12345678` |
 | Nexus | `admin:admin123`, `nexus:nexus`, `admin:nexus`, `admin:nexus123`, `admin:sonatype`, `nexus:password`, `nexus:admin`, then `admin:admin`, `admin:password`, `admin:changeme`, `admin:123456`, `root:root`, `root:password`, `root:admin`, `root:changeme`, `user:user`, `user:password`, `test:test`, `guest:guest`, `dev:dev`, `service:service`, `admin:12345678` |
+| Docker (Portainer only) | `admin:admin`, `admin:password`, `admin:12345678` |
 | Docker Registry | `registry:registry`, `registry:password`, `registry:admin`, `registry:changeme`, `registry:registry123`, `docker:docker`, `docker:password`, then `admin:admin`, `admin:password`, `admin:changeme`, `admin:admin123`, `admin:123456`, `root:root`, `root:password`, `root:admin`, `root:changeme`, `user:user`, `user:password`, `test:test`, `guest:guest`, `dev:dev`, `service:service`, `admin:12345678` |
 | KubeAPI | `admin:admin`, `admin:password`, `root:root`, `root:password`, `kubeadmin:kubeadmin`, `kubernetes:kubernetes`, `user:user`, `test:test`, `admin:12345678` |
 | RabbitMQ | `admin:admin`, `admin:changeme`, `admin:password`, `admin:rabbitmq`, `guest:guest`, `guest:password`, `rabbitmq:admin`, `rabbitmq:password`, `rabbitmq:rabbitmq`, `root:password`, `root:root`, `service:password`, `service:service`, `test:test`, `user:password`, `user:user`, `admin:12345678` |
@@ -172,7 +61,6 @@ duplicates removed from the module catalog:
 
 | UI | Additional pairs |
 | --- | --- |
-| Portainer | `admin:admin`, `admin:password`, `admin:12345678` |
 | mongo-express | `admin:pass`, `admin:admin`, `admin:password` |
 | Kibana | `elastic:changeme`, `elastic:elastic`, `kibana:kibana` |
 | OpenSearch Dashboards | `admin:admin`, `admin:password` |
@@ -180,50 +68,94 @@ duplicates removed from the module catalog:
 | pgAdmin 4 | `admin@example.com:admin`, `admin@admin.com:admin` |
 | Redis Insight | No native UI password. `redis:password`, `admin:admin` apply only if a confirmed reverse proxy Basic challenge protects the UI. |
 
-These are weak-password candidates, not universal factory passwords: [Harbor](https://goharbor.io/docs/edge/install-config/run-installer-script/)
-documents `admin:Harbor12345`, while [GitLab](https://docs.gitlab.com/install/next_steps/)
-and [Nexus](https://help.sonatype.com/en/install-nexus-repository.html) generate installation-specific
-passwords. [Kubernetes](https://kubernetes.io/docs/reference/access-authn-authz/authentication/)
-has no universal Basic pair; KubeAPI tries candidates only when Basic is advertised.
-Neither public `/v2/` nor HTTP 200 proves registry authentication. Inconclusive
-checks stay in debug/JSON; rate limiting or account lock stops the credential sweep.
-The eight-digit numeric candidate is a weak password, not a product default.
+`consul`, `keycloak`, and `qdrant` have no `--defcreds`; use token/API-key options. KubeAPI tests pairs only if Basic is advertised. ZooKeeper/Keeper need a protected znode: `credentials unverified` does **not** mean a wrong password. Rate limiting or account lock stops further attempts.
 
-## Module Examples
+## Offline CVE coverage
 
-Each block has three independent commands. Replace hosts and credentials;
-`targets.txt` has one target per line. Keeper/ZooKeeper credential checks need an
-ACL-protected verifier znode (`--znode /app`). Explicit write/exec/SSRF actions
-are omitted.
+Every audit command accepts `--enum-cve`, but a confirmed product, suitable version and catalog match are needed for a finding. The bundled catalog contains **210 records** (revision `2026-10-16`):
+
+| Product | CVEs | Product | CVEs |
+| --- | ---: | --- | ---: |
+| GitLab | 72 | PostgreSQL | 23 |
+| Redis | 23 | Airflow | 11 |
+| Grafana | 11 | Nexus Repository | 11 |
+| MongoDB | 8 | Elasticsearch | 6 |
+| Keycloak | 5 | MinIO | 5 |
+| Qdrant | 5 | RabbitMQ | 4 |
+| ClickHouse | 3 | Valkey | 3 |
+| ZooKeeper | 2 | Docker Engine | 2 |
+| Harbor | 2 | Jenkins | 2 |
+| Oracle Database | 2 | etcd | 1 |
+| Grafana Enterprise | 1 | Grafana Image Renderer | 1 |
+| Consul | 1 | Jenkins Allure plugin | 1 |
+| Jenkins WSO2ID OAuth plugin | 1 | Kubernetes | 1 |
+| OpenSearch | 1 | pgAdmin 4 | 1 |
+| Proxmox VE | 1 | | |
+| **Total** | **210** | | |
+
+Known-version matches mean *potentially affected*, not confirmed exploitability; backports and configuration matter. With an unknown version, catalogued CVEs from the last four years appear as yellow speculative findings. The window uses publication dates or a conservative CVE-year fallback. `PR:L` requires verified anonymous access or explicit credentials, not merely `--defcreds`; elevated-permission entries are omitted when the version is unknown. Some Nexus, Grafana and Keycloak entries have additional prerequisites that version matching does not prove. The catalog focuses on High/Critical network issues other than pure DoS. Generic Docker Registry and gRPC have no product match; Kafka broker lacks an exact release and Keeper has no entries. UI-only targets use their own product/version. JSON includes ranges, fixes, CVSS and references.
+
+## Web UI coverage
+
+These are product-specific HTTP probes, not browser automation. UI login never proves backend credentials.
+
+| Module | Covered web UI / API | Surface |
+| --- | --- | --- |
+| `airflow` | Airflow webserver/API | Native |
+| `docker` | Portainer | Related panel |
+| `elastic` | Kibana, OpenSearch Dashboards | Related panels |
+| `gitlab` | GitLab web/API and Container Registry | Native |
+| `grafana` | Grafana web/API | Native |
+| `harbor` | Harbor portal/API | Native |
+| `jenkins` | Jenkins web/API | Native |
+| `kafka` | Kafbat UI, Provectus Kafka UI, AKHQ, Redpanda Console | Related panels |
+| `keycloak` | Realm/OIDC endpoints and token-authorized Admin API | Native web/API |
+| `kubeapi` | Kubernetes Dashboard | Related panel |
+| `minio` | MinIO Console | Related panel |
+| `mongodb` | mongo-express | Related panel |
+| `nexus` | Nexus Repository web/API | Native |
+| `postgres` | pgAdmin 4, PostgREST | Related UI/API |
+| `proxmox` | Proxmox VE web/API | Native |
+| `rabbitmq` | RabbitMQ Management UI/API | Native |
+| `redis` | Redis Insight | Related panel |
+
+Kafka also detects Kafka REST Proxy, Kafka Connect, ksqlDB and Schema Registry. Unbounded UI `--show-*`/`--dump` writes private JSONL files with resumable checkpoints under `.redposture/ui-exports/`; numeric limits keep output inline. Redis Insight has no native UI password; Basic authentication may belong to a proxy.
+
+## Credential spray
+
+`spray` verifies pairs or tokens only after product detection. `--modules` accepts a comma-separated list or `all`.
+
+```bash
+redposture spray -t targets.txt --modules airflow,grafana -u admin -p @passwords.txt -o spray-admin.txt
+redposture spray -t targets.txt --modules all --pairs pairs.txt --checkpoint spray.sqlite3 -o spray-pairs.txt
+redposture spray -t targets.txt --modules keycloak,kubeapi --tokens tokens.txt -o spray-tokens.txt
+```
+
+`-u/-p` accept literals or files (`@file` requires an existing file); `--pairs` splits at the first colon. Defaults: two attempts/s per origin, 60 seconds between attempts for the same account/origin. `--resume` does not repeat completed or interrupted attempts. Results expose supplied secrets; output and checkpoint files use mode `0600`. `--module-config` accepts auth/transport settings only. Docker Engine and Keycloak cannot verify username/password pairs; Portainer can.
+
+## Module examples
+
+Replace example targets and credentials. Add `--defcreds` or `--enum-cve` where supported. Modules with `--discover-max-bytes` default to 50 MiB per target and mark incomplete runs `partial`.
 
 ### Airflow
 
 ```bash
-redposture airflow -t targets.txt --enum-cve
-redposture airflow -t targets.txt --defcreds
 redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --show-dags --show-keys --show-connections --discover
 redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --dump
 redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --dump --dag example --key warehouse_password --connection warehouse
 ```
 
-Airflow reports anonymous `Dags/Keys/Connections allowed` separately from access
-after login. `--dump` reads DAG metadata/source, Variable values and Connection
-objects; without selectors it walks all three, with repeatable selectors it reads
-only those IDs. Output can contain secrets. A partial result is marked as such;
-the default dump budget is 50 MiB and five minutes per target.
+`--dump` reads DAG source, Variables and Connections; without selectors it reads all three. The default budget is 50 MiB and five minutes per target.
 
 ### ClickHouse
 
 ```bash
-redposture clickhouse -t targets.txt --enum-cve
-redposture clickhouse -t targets.txt --defcreds
 redposture clickhouse -t db.example -u auditor -p 'password' --show-databases --show-tables --discover
 ```
 
 ### Consul
 
 ```bash
-redposture consul -t targets.txt --enum-cve
 redposture consul -t http://consul.example:8500 --keys --services --agents
 redposture consul -t http://consul.example:8500 --token "$CONSUL_TOKEN" --key app/config --dump
 ```
@@ -231,7 +163,6 @@ redposture consul -t http://consul.example:8500 --token "$CONSUL_TOKEN" --key ap
 ### Docker
 
 ```bash
-redposture docker -t targets.txt --enum-cve
 redposture docker -t http://docker.example:2375 --containers --images --system
 redposture docker -t https://docker.example:2376 --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --containers
 ```
@@ -239,81 +170,45 @@ redposture docker -t https://docker.example:2376 --tls-ca ca.pem --tls-cert clie
 ### Elastic / OpenSearch
 
 ```bash
-redposture elastic -t targets.txt --enum-cve
-redposture elastic -t targets.txt --defcreds
-redposture elastic -t https://search.example:9200 -u auditor -p 'password' --cluster --user --discover
+redposture elastic -t https://search.example:9200 -u auditor -p 'password' --show-cluster --show-user --discover
 ```
 
 ### etcd
 
 ```bash
-redposture etcd -t targets.txt --enum-cve
-redposture etcd -t targets.txt --defcreds
 redposture etcd -t http://etcd.example:2379 -u root -p 'password' --show-keys 20 --dump 10
 ```
 
 ### GitLab
 
 ```bash
-redposture gitlab -t https://gitlab.example --enum-cve
-redposture gitlab -t https://gitlab.example --defcreds
-redposture gitlab -t https://gitlab.example --token "$GITLAB_TOKEN" --registry-token "$REGISTRY_TOKEN" --images
+redposture gitlab -t https://gitlab.example --token "$GITLAB_TOKEN" --registry-token "$REGISTRY_TOKEN" --show-images
 ```
 
-GitLab detects web/API and Container Registry separately: `--token` is for web/API,
-`--registry-token` for OCI; JSON nests OCI data in `container_registry`. Web login
-uses a fresh CSRF session per pair and stops at SSO, CAPTCHA or rate limiting.
-GitLab, Harbor, Nexus and Docker Registry show one product line followed by
-credentials and requested inventory. Output files contain four tab-separated
-fields without ANSI. `version:unknown` means no server version was disclosed;
-the OCI `registry/2.0` header is a protocol version, not a server release.
+`--token` authenticates to GitLab web/API; `--registry-token` authenticates to its Container Registry. SSO, CAPTCHA or rate limiting stops web credential attempts. `registry/2.0` identifies the OCI protocol, not the product version.
 
 ### Grafana
 
 ```bash
-redposture grafana -t targets.txt --enum-cve
-redposture grafana -t targets.txt --defcreds
-redposture grafana -t https://grafana.example -u auditor -p 'password' --show-datasources --enum-cve
+redposture grafana -t https://grafana.example -u auditor -p 'password' --show-datasources
 ```
-
-The public `/api/health` identifies Grafana and its version, but anonymous
-access is determined from a protected API resource.
 
 ### Keycloak
 
 ```bash
-redposture keycloak -t targets.txt --enum-cve
 redposture keycloak -t https://id.example/auth --enum-realms
 redposture keycloak -t https://id.example --token-file token.txt --show-realms --show-clients
 ```
 
-Keycloak requires a product-specific realm response and matching OIDC discovery;
-generic SSO pages are at most `probable` in debug/JSON. The Admin API supplies an exact
-version only when accessible. `--enum-cve` never guesses from a UI theme or URL.
-The public `master` realm is checked by default; `--realm` is repeatable and
-`--enum-realms` checks up to 32 common names and reports only realms confirmed by
-the public Keycloak and OIDC endpoints. With an authorized token, `--show-realms`
-reports brute-force protection, registration, HTTPS requirement and password policy;
-`--show-clients` reports client type, Direct Access Grants, implicit flow, redirect
-URIs and web origins. Denied or absent settings remain `unknown` rather than `False`.
-Admin inventory uses GET requests and never prints client secrets.
+`master` is checked by default; `--enum-realms` tests up to 32 candidate names. A token unlocks Admin API realm/client settings and may reveal the exact version. A generic SSO page or UI theme alone does not identify Keycloak or its version.
 
 ### Jenkins
 
 ```bash
-redposture jenkins -t targets.txt --enum-cve
-redposture jenkins -t targets.txt --defcreds
 redposture jenkins -t https://ci.example/jenkins -u auditor --api-token-file token.txt --show-jobs --show-builds 3 --show-plugins --show-nodes --show-queue --show-artifacts 20
 ```
 
-Detection combines Jenkins-specific API, identity, login-form, or version signals;
-generic login pages are not confirmed. `--defcreds` tries common weak pairs, not
-an installation password: Jenkins generates its initial admin password. A pair
-or API token is accepted only when the identity endpoint confirms authentication.
-Jobs, recent builds, plugins, agents, queue and artifact metadata are read-only;
-visibility depends on the account's permissions. `--show-artifacts` also lists
-recent builds and uses HEAD requests to obtain artifact sizes without downloading
-their contents. Each inventory flag accepts an optional count limit.
+Jenkins confirms credentials through its identity endpoint. `--show-artifacts` lists names and sizes without downloading content; visibility follows account permissions.
 
 ### gRPC
 
@@ -327,84 +222,47 @@ redposture grpc -t grpc.example --invoke /grpc.health.v1.Health/Check --data '{"
 
 ```bash
 redposture kafka -t targets.txt --show-topics
-redposture kafka -t targets.txt --defcreds
 redposture kafka -t kafka.example -u auditor -p 'password' --topic events --dump 10
 redposture kafka -t kafka.example -u producer -p 'password' --topic audit.events --write-message 'test event'
 redposture kafka -t http://kafka-ui.example:8080 -u auditor -p 'password' --show-clusters --show-topics --show-brokers --show-consumer-groups
 ```
 
-Kafka detects broker listeners and Kafbat/Provectus Kafka UI on explicit `host:port` targets automatically. Bare hosts also scan common UI ports. UI logins are verified through the UI identity API; broker SASL credentials are checked only against brokers. A UI login or generic HTTP response alone does not confirm the product. UI `--dump` without `--topic` walks all visible topic pages and writes the result to disk; incomplete reads are marked `partial`. Topic writes require a broker listener.
-Older Provectus UI versions without a cursor continue by partition offsets;
-the dump is complete only after reaching the topic's end-offset snapshot.
-For a disk-backed full UI read, use `kafka --dump [--topic NAME]` without a
-numeric limit. The private JSONL file and checkpoint are under
-`.redposture/ui-exports/`; interrupted reads resume automatically. `--dump N`
-keeps the bounded inline result. `--show-topics` without a count lists every
-visible topic; `--show-topics N` limits the list.
+Kafka UI and broker credentials are verified separately. `--show-topics` without a count lists all visible topics. UI `--dump` without `--topic` reads all visible topics to a resumable file; `--dump N` keeps a bounded inline result. Older Provectus UI versions page by partition offset up to an end-offset snapshot. Incomplete reads are marked `partial`.
 
-`--probe-write` works alone or with `--topic NAME`; it appends one audit marker to each probed topic. An inconclusive result is shown as `write:unknown`.
-`--write-message` sends one UTF-8 record; `--write-file` sends one binary record (up to 1 MiB). Both require `--topic`, and `--write-key` is optional. A lost broker acknowledgment is reported as unconfirmed and never retried, because the record may already be present.
+`--probe-write` appends an audit marker; `--write-message` or `--write-file` sends one record to `--topic` (binary limit: 1 MiB). A lost acknowledgment is unconfirmed and is never retried automatically.
 
 ### Keeper
 
 ```bash
 redposture keeper -t targets.txt
-redposture keeper -t targets.txt --defcreds --znode /app
 redposture keeper -t keeper.example -u auditor -p 'password' --show-znodes 20 --dump 10
 ```
 
-Keeper reports `(ddl access:Write/Read/Denied/Absent/Unknown)` for anonymous access
-to `/clickhouse/task_queue/ddl`. By default it reads the path and creates/deletes
-an empty ephemeral child that is **not** a DDL task. `Write` proves a znode write,
-not SQL execution; `Read` leaves write access unproved; `Absent` can also mean a
-custom DDL path. The probe can trigger Keeper watches. `--probe-write` separately
-tests create/delete under `/`.
+Keeper reports anonymous `ddl access:Write/Read/Denied/Absent/Unknown` for `/clickhouse/task_queue/ddl`. Its default write probe creates and deletes an empty ephemeral znode, **not** a DDL task; `Write` does not prove SQL execution. The probe can trigger watches.
 
-`--show-cluster` and `--show-hosts` read existing DDL tasks (formats 5–8). For
-`--create-user NAME --create-userpass PASSWORD`, Keeper uses worker IDs and a
-cluster from the newest valid task, queues a SHA-256-hashed `CREATE USER`, and
-reports success only after a worker confirms it. New tasks use minimal format 5
-without inheriting settings or initiator identity. `--grant-admin` then queues a
-separate `GRANT ALL ON *.* WITH GRANT OPTION` after successful creation.
-These operations change ClickHouse accounts:
+`--show-cluster`/`--show-hosts` read existing DDL tasks. `--create-user` queues a hashed `CREATE USER` and confirms success only after a worker response; `--grant-admin` then queues a separate grant. These operations change ClickHouse accounts:
 
 ```bash
 redposture keeper -t keeper.example:9181 --create-user audituser --create-userpass 'strong-password' --grant-admin
 ```
 
-Interactive mode requires one target and a terminal: choose clusters/workers by
-number or `a` for all, then confirm creation and each grant with `y`. Blank,
-`n`, EOF or Ctrl-C declines; selecting only some workers warns and affects only
-them.
-The password is not printed. `--yes` skips menus/prompts and can affect multiple
-targets; with multiple clusters, specify `--clickhouse-cluster`. If no usable DDL
-task exists, set `--clickhouse-host` and `--clickhouse-cluster` (optional
-`--clickhouse-port`, default 9000). A queue over 512 tasks also requires explicit
-host/cluster. Keeper never guesses ClickHouse hosts from its own IP, replica names,
-sessions, discovery paths or peers. `{cluster}` expands only when configured in
-ClickHouse; Redposture does not substitute it in DDL tasks.
+Interactive mode asks for cluster/worker selection and `y` confirmation. `--yes` skips prompts. Without a usable DDL task, set `--clickhouse-cluster` and `--clickhouse-host` (optional `--clickhouse-port`, default 9000); a queue above 512 tasks also needs explicit values. Keeper does not infer ClickHouse hosts from its own address. `{cluster}` expands only if configured in ClickHouse.
 
 ### KubeAPI
 
 ```bash
-redposture kubeapi -t targets.txt --enum-cve
-redposture kubeapi -t https://cluster.example:6443 --defcreds
 redposture kubeapi -t https://cluster.example:6443 --token "$KUBE_TOKEN" --secrets
 ```
 
 ### MinIO
 
 ```bash
-redposture minio -t targets.txt --enum-cve
-redposture minio -t targets.txt --defcreds
 redposture minio -t https://minio.example:9000 -u minioadmin -p 'password' --show-buckets --show-objects --discover
 ```
 
 ### MongoDB
 
 ```bash
-redposture mongodb -t targets.txt --enum-cve
-redposture mongodb -t targets.txt --defcreds
 redposture mongodb -t mongo.example -u auditor -p 'password' --show-databases --show-collections
 ```
 
@@ -412,34 +270,28 @@ redposture mongodb -t mongo.example -u auditor -p 'password' --show-databases --
 
 ```bash
 redposture oracle -t targets.txt --listener-dump
-redposture oracle -t oracle.example --service ORCLPDB1 --defcreds
 redposture oracle -t oracle.example --service ORCLPDB1 -u auditor -p 'password' --show-schemas --show-tables --privesc-check
 ```
 
-Oracle reuses the confirmed listener/service for credential checks. Its automatic limit is 8 concurrent targets; explicit `--workers` overrides it. `--defcreds` still checks every candidate, except further passwords for an account reported locked.
+Oracle needs the correct service name for database authentication. Its default limit is 8 concurrent targets; `--workers` overrides it.
 
 ### PostgreSQL
 
 ```bash
-redposture postgres -t targets.txt --enum-cve
-redposture postgres -t targets.txt --defcreds --stop-on-success
 redposture postgres -t db.example -u auditor -p 'password' --show-databases --show-tables --privesc-check
 ```
+
+PostgreSQL and ClickHouse `--os-shell` separate stdout/stderr and preview binary output; `:hex`, `:base64` and `:save` expose captured bytes.
 
 ### Proxmox
 
 ```bash
-redposture proxmox -t targets.txt --enum-cve
-redposture proxmox -t targets.txt --defcreds
 redposture proxmox -t https://pve.example:8006 -u auditor@pve -p 'password' --nodes --discover
 ```
-
-Without supplied credentials, a protected API does not produce token or password failure lines.
 
 ### Qdrant
 
 ```bash
-redposture qdrant -t targets.txt --enum-cve
 redposture qdrant -t http://qdrant.example:6333 --collections
 redposture qdrant -t http://qdrant.example:6333 --api-key "$QDRANT_API_KEY" --collection documents --dump 10
 ```
@@ -447,58 +299,41 @@ redposture qdrant -t http://qdrant.example:6333 --api-key "$QDRANT_API_KEY" --co
 ### RabbitMQ
 
 ```bash
-redposture rabbitmq -t targets.txt --enum-cve
-redposture rabbitmq -t targets.txt --defcreds
 redposture rabbitmq -t http://rabbitmq.example:15672 -u auditor -p 'password' --enum
 ```
 
 ### Redis / Valkey
 
 ```bash
-redposture redis -t targets.txt --enum-cve
-redposture redis -t targets.txt --defcreds
 redposture redis -t redis.example -u auditor -p 'password' --show-keys 20 --dump 10
 ```
 
 ### Harbor
 
 ```bash
-redposture harbor -t https://harbor.example --enum-cve
-redposture harbor -t https://harbor.example --defcreds
-redposture harbor -t https://harbor.example -u auditor -p 'password' --images
+redposture harbor -t https://harbor.example -u auditor -p 'password' --show-images
 ```
 
 ### Nexus
 
 ```bash
-redposture nexus -t https://nexus.example --enum-cve
-redposture nexus -t https://nexus.example --defcreds
-redposture nexus -t https://nexus.example -u auditor -p 'password' --assets
+redposture nexus -t https://nexus.example -u auditor -p 'password' --show-repositories --show-images --show-assets
+redposture nexus -t https://nexus.example -u auditor -p 'password' --asset '/team/app.jar'
 ```
 
 ### Docker Registry
 
 ```bash
-redposture docker-registry -t https://registry.example --enum-cve
-redposture docker-registry -t https://registry.example --defcreds
-redposture docker-registry -t https://registry.example -u auditor -p 'password' --images
+redposture docker-registry -t https://registry.example -u auditor -p 'password' --show-images
 ```
 
-`docker-registry` accepts only a plain OCI Registry fingerprint. Harbor, Nexus and
-GitLab require their product commands. Image, tag, metadata and download options
-are available on each product command; inaccessible inventory sections are omitted.
-On a protected `/v2/`, Basic pairs are checked even if the auth challenge is absent;
-only definitive results are printed.
+`docker-registry` accepts a plain OCI Registry; use `harbor`, `nexus` or `gitlab` for those products. `--show-images` lists Docker images; `nexus --show-repositories` lists Nexus storage repositories. `--show-tags` covers all accessible images unless `--repository NAME` narrows it. `nexus --asset` selects an asset without downloading it. Output follows help order: repositories, images, tags, manifests, metadata, assets, downloads. Protected `/v2/` Basic pairs can be checked even without an auth challenge.
 
 ### ZooKeeper
 
-`-u/-p` and `--defcreds` use digest ACL authentication or SASL DIGEST-MD5
-when the server requires it. A protected znode must confirm access; Kerberos
-ticket authentication is separate from password-pair checks.
+`-u/-p` and `--defcreds` use digest ACL or SASL DIGEST-MD5. A protected znode must confirm access; `credentials unverified` does not prove the password is wrong. Kerberos ticket authentication is separate.
 
 ```bash
-redposture zookeeper -t targets.txt --enum-cve
-redposture zookeeper -t targets.txt --defcreds --znode /app
 redposture zookeeper -t zk.example -u auditor -p 'password' --show-znodes 20 --dump 10
 ```
 
@@ -510,89 +345,7 @@ redposture exporters collect -t targets.txt --deep
 redposture exporters trigger -t targets.txt --callback-dns callback.example
 ```
 
-Trigger supports Redis, Postgres, Blackbox, Proxmox, MySQL, JSON, Elasticsearch,
-SNMP and IPMI exporters. All nine callback listeners start by default; `-e` selects
-exporter types and matching listeners, while `-s` selects listeners explicitly.
-For exporter `scan`, `collect` and `trigger`, `http://host` checks port 80 and
-`https://host` checks port 443. `--ports` overrides these defaults; an explicit
-port in the URL takes priority over `--ports`.
-Exporter HTTPS accepts self-signed certificates unless `--tls-ca file` is supplied.
-`--no-postgres-tls` disables Postgres callback TLS; `--no-with-listen` skips
-listeners. SNMP/IPMI use UDP. A trigger is confirmed only when its listener
-observes a callback. Percona MongoDB exporter is excluded: its `/scrape?target=`
-selects only preconfigured `--mongodb.uri` hosts.
-
-Trigger tries a default probe and a paced, bounded list of named profiles
-(`auth_module`, `module`, or SNMP `auth`) serially, continuing after callbacks
-because another profile may carry credentials. Repeated exporter errors stop the
-sweep. Use `--profiles-file` or exporter-specific flags such as
-`--mysql-auth-module`, `--elastic-auth-module` and `--snmp-auth` for custom
-profiles; Redis has no named profile. `CRED!` requires credential material
-actually received, not just SSRF. HTTP callbacks may carry Basic/Bearer/API keys;
-MySQL `mysql_native_password` yields a challenge-bound username, `auth_salt` and
-`auth_response` challenge response, never the plaintext password. SNMPv1/v2c
-yields a community;
-SNMPv3/IPMI confirm SSRF without claiming a password. `-check` can verify captured
-Redis/Postgres credentials.
-
-## Offline CVE enumeration
-
-`--enum-cve` compares confirmed products and exact versions with a bundled offline
-catalog; it makes no external requests or exploit attempts. Findings mean
-**potentially affected**, not proof of exploitability: backports and deployment settings matter.
-The catalog mainly covers High/Critical network CVEs with reliable version ranges
-for code execution, auth bypass, takeover, data/file access or SSRF, excluding
-pure DoS. `PR:L` normally needs anonymous access or verified **explicit** credentials;
-invalid credentials and `--defcreds` alone do not qualify. Selected Nexus
-script/licensing entries need elevated permissions, and Grafana Image Renderer
-needs a detected plugin and reachable renderer; other title prerequisites such as
-Enterprise SCIM or a write-enabled MinIO key are not proven by version matching.
-The Keycloak JWT grant entry additionally requires valid client credentials;
-a verified bearer token alone does not prove that prerequisite.
-
-Credential checks precede newest-first CVE findings. With an unknown or malformed
-version, a confirmed product shows catalogued CVEs from the last four years as
-yellow speculative findings: `Possibly CVE-… may affect this service`.
-This does not establish that its installed version is vulnerable. When a catalog
-entry has a publication date, the rolling four-year cutoff uses it. Otherwise
-the CVE ID year is used only when the entire year is inside that window; undated
-entries from the boundary year are omitted. `PR:L` still requires confirmed
-anonymous access or verified explicit credentials; entries requiring elevated
-permissions are omitted from unknown-version findings. A known vulnerable version
-continues to use the red `[!]` marker and `potentially affected` wording.
-`CVE's Enumeration` appears only when there are findings; otherwise status and
-reason remain in debug/JSON.
-
-```text
-GRAFANA         10.0.0.1        3000  [*] Grafana Service (auth required:False) (version:8.2.6)
-GRAFANA         10.0.0.1        3000  [*] CVE's Enumeration
-GRAFANA         10.0.0.1        3000  [!] CVE-2021-43798 potentially affected (HIGH 7.5) Unauthenticated path traversal and arbitrary file read
-```
-
-The bundled `2026-10-06` catalog contains 200 reviewed product/CVE records:
-
-| Product | CVEs | Product | CVEs |
-|---|---:|---|---:|
-| GitLab | 72 | Redis | 23 |
-| PostgreSQL | 23 | Airflow | 11 |
-| Grafana | 11 | Elasticsearch | 6 |
-| MongoDB | 7 | MinIO | 5 |
-| Nexus Repository | 10 | Qdrant | 5 |
-| RabbitMQ | 4 | ClickHouse | 3 |
-| Valkey | 3 | ZooKeeper | 2 |
-| Harbor | 2 | Oracle Database | 2 |
-| OpenSearch | 1 | Proxmox VE | 1 |
-| Grafana Enterprise SCIM | 1 | Grafana Image Renderer | 1 |
-| Consul | 1 | Docker Engine | 1 |
-| etcd | 1 | Kubernetes | 1 |
-| Keycloak | 3 | | |
-| **Total** | **200** | | |
-
-Elasticsearch/OpenSearch, Redis/Valkey, ZooKeeper/Keeper and Registry vendors are
-matched separately. Plain Docker Registry and gRPC are unsupported; Kafka lacks
-an exact broker version, and Keeper has no catalog matches. Version access may
-require auth; Oracle needs the Database version, not the listener version.
-`-f json` includes ranges, fixes, CVSS and references in `cve_enumeration`.
+Trigger supports Redis, Postgres, Blackbox, Proxmox, MySQL, JSON, Elasticsearch, SNMP and IPMI. It starts callback listeners; `-e` selects exporters, `-s` selects listeners, and `--profiles-file` or exporter-specific auth-module flags add profiles. `CRED!` requires captured credential material, not merely SSRF. MySQL `mysql_native_password` yields a challenge response, not plaintext; SNMPv3/IPMI do not reveal passwords. `-check` can verify captured Redis/Postgres credentials.
 
 ## Development and checks
 
@@ -601,25 +354,11 @@ git clone https://github.com/MelForze/Redposture.git
 cd Redposture
 python -m venv .venv
 source .venv/bin/activate
-pip install -e '.[dev]'
-pytest
-./scripts/check_ci_matrix.sh --worktree
+python -m pip install -e '.[dev]'
+bash scripts/check_before_push.sh --reuse-venvs
 ```
 
-CI locks are in `requirements/` (`scripts/update_ci_locks.sh`). Full QA and
-selected sections use the same local runner:
-
-```bash
-./scripts/run_full_local_qa.sh --list
-./scripts/run_full_local_qa.sh /tmp/redposture_qa_fuzz --section cli-fuzz,hypothesis
-./scripts/run_full_local_qa.sh /tmp/redposture_qa_full
-```
-
-Each section writes its own log and summary; Docker is required only for Docker
-sections. `./scripts/run_qa_handoff.sh versions` runs the separate version
-matrix. `./scripts/run_http_detection_qa.sh` writes a focused report under
-`.redposture/qa/`. `lab/`, `lab_tests/`, `qa_tests/` and `.redposture/` are
-excluded from Git.
+List local QA sections with `bash scripts/run_full_local_qa.sh --list`, or run all sections with `bash scripts/run_full_local_qa.sh /tmp/redposture_qa_full`.
 
 ## License
 

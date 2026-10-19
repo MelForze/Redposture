@@ -2681,14 +2681,19 @@ def test_zookeeper_verification_unavailable_is_one_aggregate_line() -> None:
     }
     lines = lifecycle_actions._format_credential_verification_records(record, "txt")
     assert len(lines) == 1
-    assert lines[0].endswith(
-        "[*] credential verification unavailable: no protected znode found; use --znode <protected-path>"
-    )
+    assert lines[0].endswith("[-] credential verification unavailable (no protected znodes for verification)")
     assert lifecycle_actions._format_credential_verification_records(record, "json") == []
 
     record["credential_attempts_skipped"] = 27
     skipped_line = lifecycle_actions._format_credential_verification_records(record, "txt")[0]
-    assert "27 pair(s) not attempted" in skipped_line
+    assert skipped_line.endswith(
+        "[-] credential verification unavailable (no protected znodes for verification) (27 pair(s) not attempted)"
+    )
+
+    record["credential_verification_reason"] = "probe timeout"
+    assert lifecycle_actions._format_credential_verification_records(record, "txt")[0].endswith(
+        "[-] credential verification unavailable (probe timeout) (27 pair(s) not attempted)"
+    )
 
 
 def test_digest_verifier_finds_protected_node_below_public_grandchild() -> None:
@@ -2815,8 +2820,23 @@ def test_zookeeper_denied_digest_pair_reports_access_not_password_validity() -> 
     lines = lifecycle_actions._format_credential_attempts_records(record, "txt")
 
     assert len(lines) == 1
-    assert "[-] admin:wrong (no access to tested znodes)" in lines[0]
+    assert "[-] admin:wrong (no access to protected znodes; credentials unverified)" in lines[0]
     assert lifecycle_actions._format_credential_attempts_records(record, "json") == []
+
+    explicit = {
+        **record,
+        "status": "open_no_auth",
+        "provided_credentials": True,
+        "provided_username": "admin",
+        "provided_password": "wrong",
+        "provided_credentials_ok": None,
+        "credential_verdict": "unverified_anonymous",
+        "credential_auth_probe_results": {"/": "ok", "/public/secure": "noauth"},
+        "attempted_credentials": [],
+    }
+    assert lifecycle_actions._format_record(explicit, "txt").endswith(
+        "[-] admin:wrong (no access to protected znodes; credentials unverified)"
+    )
 
 
 def test_detail_entry_and_auth_probe_helpers() -> None:
@@ -3879,7 +3899,11 @@ def test_audit_host_dump_query_dump_and_retry_fail_branches(monkeypatch: pytest.
 
 
 def test_formatting_remaining_text_branches() -> None:
-    assert zookeeper_stage._with_optional_znodes({"znode_count": None}, "line") == "line (znodes:unknown)"
+    assert zookeeper_stage._with_optional_znodes({"znode_count": None}, "line") == "line"
+    assert (
+        zookeeper_stage._with_optional_znodes({"znode_count": None, "znode_count_unknown": True}, "line")
+        == "line (znodes:unknown)"
+    )
 
     auth_failed_line = _format_record(
         {
@@ -5803,33 +5827,10 @@ def test_zookeeper_canonical_spec_auto_classifies_apache_without_rejecting_it(
 
 def test_zookeeper_credential_file_precedes_defaults_and_is_stably_deduplicated(tmp_path) -> None:
     credentials = tmp_path / "zookeeper.creds"
-    credentials.write_text("custom:secret\nadmin:admin\ncustom:secret\n", encoding="utf-8")
-    args = parse_args(
-        [
-            "zookeeper",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "2181",
-            "-u",
-            str(credentials),
-            "--defcreds",
-        ]
-    )
-
-    plan = lifecycle_stage.build_zookeeper_plan(args)
-    pairs = tuple((run.username, run.password) for run in plan.credential_runs)
-
-    assert pairs[:2] == (("custom", "secret"), ("admin", "admin"))
-    assert tuple(run.source for run in plan.credential_runs[:2]) == ("file", "file")
-    assert pairs[2:] == tuple(
-        sorted(
-            (pair for pair in lifecycle_stage._DEFAULT_CREDENTIALS if pair != ("admin", "admin")),
-            key=lambda pair: (pair[0].lower(), pair[1].lower()),
-        )
-    )
-    assert pairs.count(("custom", "secret")) == 1
-    assert pairs.count(("admin", "admin")) == 1
+    credentials.write_text("custom:secret\nadmin:admin\n", encoding="utf-8")
+    # NEXT_QA #4: a credential file (-u <file>) + --defcreds is rejected (no file-then-defaults layering).
+    with pytest.raises(SystemExit):
+        parse_args(["zookeeper", "-t", "127.0.0.1", "--port", "2181", "-u", str(credentials), "--defcreds"])
 
 
 def test_zookeeper_credential_file_preserves_password_bytes_into_digest_auth(
@@ -5903,28 +5904,9 @@ def test_zookeeper_credential_file_preserves_password_bytes_into_digest_auth(
 
 
 def test_zookeeper_explicit_default_pair_stays_provided_and_precedes_defaults() -> None:
-    args = parse_args(
-        [
-            "zookeeper",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "2181",
-            "-u",
-            "zk",
-            "-p",
-            "zookeeper",
-            "--defcreds",
-        ]
-    )
-
-    plan = lifecycle_stage.build_zookeeper_plan(args)
-    pairs = tuple((run.username, run.password) for run in plan.credential_runs)
-
-    assert plan.credential_runs[0].source == "provided"
-    assert pairs[0] == ("zk", "zookeeper")
-    assert pairs.count(("zk", "zookeeper")) == 1
-    assert len(pairs) == len(lifecycle_stage._DEFAULT_CREDENTIALS)
+    # NEXT_QA #4: explicit pair + --defcreds is rejected (no provided-precedes-defaults layering).
+    with pytest.raises(SystemExit):
+        parse_args(["zookeeper", "-t", "127.0.0.1", "--port", "2181", "-u", "zk", "-p", "zookeeper", "--defcreds"])
 
 
 def _run_zookeeper_defcreds_lifecycle(
@@ -6055,7 +6037,7 @@ def test_zookeeper_defcreds_checks_full_catalog_after_late_digest_success(
     rendered = lifecycle_actions._format_credential_attempts_records(record, "txt")
     assert len(rendered) == len(lifecycle_stage._DEFAULT_CREDENTIALS)
     assert any("[+] zk:zookeeper" in line for line in rendered)
-    assert any("[-] root:rootpass (no access to tested znodes)" in line for line in rendered)
+    assert any("[-] root:rootpass (no access to protected znodes; credentials unverified)" in line for line in rendered)
     assert all("[!]" not in line for line in rendered)
 
 
@@ -6209,24 +6191,14 @@ def test_zookeeper_credential_attempt_renderer_attaches_capabilities_only_to_sel
 def test_zookeeper_explicit_pair_matching_default_is_not_classified_as_weak(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    auth_attempts, data_calls, record = _run_zookeeper_defcreds_lifecycle(
-        monkeypatch,
-        accepted_pair=("zk", "zookeeper"),
-        explicit_pair=("zk", "zookeeper"),
-    )
-
-    expected = [
-        ("zk", "zookeeper"),
-        *sorted(
-            (pair for pair in lifecycle_stage._DEFAULT_CREDENTIALS if pair != ("zk", "zookeeper")),
-            key=lambda pair: (pair[0].lower(), pair[1].lower()),
-        ),
-    ]
-    assert auth_attempts == expected
-    assert data_calls == 1
-    assert record["status"] == "valid_credentials"
-    assert record["provided_credentials"] is True
-    assert record["defcreds_enabled"] is False
+    # NEXT_QA #4: supplying an explicit pair together with --defcreds is rejected at the CLI,
+    # so the "explicit pair matching a default is not weak" layering path is unreachable.
+    with pytest.raises(SystemExit):
+        _run_zookeeper_defcreds_lifecycle(
+            monkeypatch,
+            accepted_pair=("zk", "zookeeper"),
+            explicit_pair=("zk", "zookeeper"),
+        )
 
 
 def test_zookeeper_anonymous_access_checks_defcreds_then_uses_anonymous_data(
@@ -6244,3 +6216,7 @@ def test_zookeeper_anonymous_access_checks_defcreds_then_uses_anonymous_data(
     assert record["attempted_credentials"] == []
     assert record["credential_verification_status"] == "unavailable"
     assert record["credential_attempts_skipped"] == len(lifecycle_stage._DEFAULT_CREDENTIALS)
+    assert (
+        "no protected znodes for verification"
+        in lifecycle_actions._format_credential_verification_records(record, "txt")[0]
+    )

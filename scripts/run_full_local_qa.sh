@@ -16,9 +16,10 @@ usage() {
 Usage: scripts/run_full_local_qa.sh [artifact_dir] [--section NAME[,NAME...]] [--plan]
        scripts/run_full_local_qa.sh --list
 
-Without --section, run all standard QA sections. The heavy optional-real section
-must be selected alone. Repeat --section or separate names with commas to run
-only changed areas. Use a fresh artifact directory for each run.
+Without --section, run all standard QA sections and report every failed section
+at the end. The heavy optional-real section must be selected alone. Repeat
+--section or separate names with commas to run only changed areas. Use a fresh
+artifact directory for each run.
 EOF
 }
 
@@ -116,35 +117,22 @@ if [[ "$PLAN_ONLY" -eq 1 ]]; then
   exit 0
 fi
 
+# Reject a reused section before doing any work. Otherwise a long full run can
+# reach its final Docker section only to discover an old log in this directory.
+for section in "${SELECTED[@]}"; do
+  log="${ARTIFACT_DIR}/sections/${section}.log"
+  if [[ -e "$log" ]]; then
+    echo "[error] QA section already has a log: $log; use a fresh artifact directory" >&2
+    exit 2
+  fi
+done
+
 export REDPOSTURE_QA_PROJECT_PREFIX="${REDPOSTURE_QA_PROJECT_PREFIX:-redpostureqa$$}"
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-${REDPOSTURE_QA_PROJECT_PREFIX}-matrix}"
 if [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
   PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/.venv/bin/python}"
 else
   PYTHON_BIN="${PYTHON_BIN:-python3}"
-fi
-
-DOCKER_PROJECTS=()
-for section in "${SELECTED[@]}"; do
-  case "$section" in
-    focused-services)
-      DOCKER_PROJECTS+=("${REDPOSTURE_QA_PROJECT_PREFIX}-auth-matrix"
-        "${REDPOSTURE_QA_PROJECT_PREFIX}-minio-kubeapi" "${REDPOSTURE_QA_PROJECT_PREFIX}-cve-matrix")
-      ;;
-    docker-matrix) DOCKER_PROJECTS+=("${COMPOSE_PROJECT_NAME}") ;;
-    optional-real) DOCKER_PROJECTS+=("redposture-proxmox-real-qa") ;;
-  esac
-done
-if [[ ${#DOCKER_PROJECTS[@]} -gt 0 ]]; then
-  command -v docker >/dev/null
-  docker compose version >/dev/null
-  for project in "${DOCKER_PROJECTS[@]}"; do
-    if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ]] ||
-       [[ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" ]]; then
-      echo "[error] QA Compose project already exists: $project" >&2
-      exit 2
-    fi
-  done
 fi
 
 mkdir -p "${ARTIFACT_DIR}/sections"
@@ -183,9 +171,18 @@ execute_section() {
         --junitxml="${ARTIFACT_DIR}/local-output-load.xml"
       ;;
     focused-services)
-      PYTHON="${PYTHON_BIN}" ./scripts/run_minio_kubeapi_lab.sh
-      PYTHON="${PYTHON_BIN}" ./scripts/run_auth_service_matrix.sh
-      PYTHON="${PYTHON_BIN}" ./scripts/run_real_cve_matrix.sh
+      local focused_failed=0
+      local focused_script
+      for focused_script in run_minio_kubeapi_lab.sh run_auth_service_matrix.sh run_real_cve_matrix.sh; do
+        echo "== focused-services:${focused_script} =="
+        if PYTHON="${PYTHON_BIN}" "./scripts/${focused_script}"; then
+          echo "[passed] focused-services:${focused_script}"
+        else
+          echo "[error] focused-services:${focused_script} failed" >&2
+          focused_failed=1
+        fi
+      done
+      return "$focused_failed"
       ;;
     proxy)
       "${PYTHON_BIN}" -m pytest tests/test_proxy_end_to_end.py -q \
@@ -201,16 +198,49 @@ execute_section() {
   esac
 }
 
+check_section_prerequisites() {
+  local section="$1"
+  local projects=()
+  case "$section" in
+    focused-services)
+      projects=("${REDPOSTURE_QA_PROJECT_PREFIX}-auth-matrix"
+        "${REDPOSTURE_QA_PROJECT_PREFIX}-minio-kubeapi" "${REDPOSTURE_QA_PROJECT_PREFIX}-cve-matrix")
+      ;;
+    docker-matrix) projects=("${COMPOSE_PROJECT_NAME}") ;;
+    optional-real) projects=("redposture-proxmox-real-qa") ;;
+    *) return 0 ;;
+  esac
+  if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+    echo "[error] Docker Compose is unavailable for ${section}" >&2
+    return 2
+  fi
+  local project containers volumes
+  for project in "${projects[@]}"; do
+    if ! containers="$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ||
+       ! volumes="$(docker volume ls -q --filter "label=com.docker.compose.project=$project")"; then
+      echo "[error] cannot inspect QA Compose project: ${project}" >&2
+      return 2
+    fi
+    if [[ -n "$containers" || -n "$volumes" ]]; then
+      echo "[error] QA Compose project already exists: $project" >&2
+      return 2
+    fi
+  done
+}
+
+FAILED_SECTIONS=()
+section_index=0
 for section in "${SELECTED[@]}"; do
+  section_index=$((section_index + 1))
   log="${ARTIFACT_DIR}/sections/${section}.log"
   if [[ -e "$log" ]]; then
     echo "[error] QA section already has a log: $log; use a fresh artifact directory" >&2
     exit 2
   fi
-  echo "== ${section} =="
+  echo "== ${section} (${section_index}/${#SELECTED[@]}) =="
   started="$(date +%s)"
   set +e
-  ( set -e; execute_section "$section" ) 2>&1 | tee "$log"
+  ( set -e; check_section_prerequisites "$section"; execute_section "$section" ) 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
   set -e
   elapsed=$(( $(date +%s) - started ))
@@ -218,9 +248,36 @@ for section in "${SELECTED[@]}"; do
   [[ "$rc" -eq 0 ]] || status=failed
   printf '%s\t%s\t%d\t%d\t%s\n' "$section" "$status" "$rc" "$elapsed" "$log" >> "$SUMMARY"
   if [[ "$rc" -ne 0 ]]; then
-    echo "[error] ${section} failed; inspect $log" >&2
-    exit "$rc"
+    FAILED_SECTIONS+=("$section")
+    echo "[error] ${section} failed; continuing, inspect $log" >&2
+  else
+    echo "[passed] ${section} (${elapsed}s)"
   fi
 done
 
-echo "selected local QA sections passed; summary: ${SUMMARY}"
+REPORT="${ARTIFACT_DIR}/report.md"
+{
+  echo "# Local QA results"
+  echo
+  echo "| Section | Status | Exit | Seconds | Log |"
+  echo "| --- | --- | ---: | ---: | --- |"
+  while IFS=$'\t' read -r section status rc elapsed log; do
+    [[ "$section" == section ]] && continue
+    printf '| %s | %s | %s | %s | [log](sections/%s.log) |\n' "$section" "$status" "$rc" "$elapsed" "$section"
+  done < "$SUMMARY"
+  if [[ -f "${ARTIFACT_DIR}/service-matrix/service-summary.tsv" ]]; then
+    echo
+    echo "Docker service results: [service-summary.tsv](service-matrix/service-summary.tsv)."
+  fi
+  if [[ ${#FAILED_SECTIONS[@]} -gt 0 ]]; then
+    echo
+    echo "Failed sections: ${FAILED_SECTIONS[*]}. Full diagnostics are in their logs."
+  fi
+} > "$REPORT"
+
+if [[ ${#FAILED_SECTIONS[@]} -gt 0 ]]; then
+  echo "[error] failed sections: ${FAILED_SECTIONS[*]}" >&2
+  echo "QA report: ${REPORT}" >&2
+  exit 1
+fi
+echo "selected local QA sections passed; summary: ${SUMMARY}; report: ${REPORT}"

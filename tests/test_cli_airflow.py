@@ -12,8 +12,12 @@ def test_airflow_default_ports():
 
 
 def test_airflow_creds_and_defcreds_parse():
-    args = parse_args(["airflow", "-t", "127.0.0.1", "-u", "airflow", "-p", "airflow", "--defcreds"])
-    assert args.username == "airflow" and args.password == "airflow" and args.defcreds is True
+    # NEXT_QA #4: creds parse on their own; combining them with --defcreds is rejected.
+    args = parse_args(["airflow", "-t", "127.0.0.1", "-u", "airflow", "-p", "airflow"])
+    assert args.username == "airflow"
+    assert args.password == "airflow"
+    with pytest.raises(SystemExit):
+        parse_args(["airflow", "-t", "127.0.0.1", "-u", "airflow", "-p", "airflow", "--defcreds"])
 
 
 def test_airflow_output_format_and_file():

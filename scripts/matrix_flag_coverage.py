@@ -146,6 +146,7 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "show_clients": "Admin client inventory runs in the focused Keycloak suite.",
     },
     "jenkins": {
+        "discover": "Jenkins uses an ephemeral focused loopback stand; live discovery is covered there rather than in the Docker matrix.",
         "debug": "Jenkins diagnostics are covered by focused CLI and output tests.",
         "targets": "prefixed URL targets run in the focused Jenkins loopback suite.",
         "out_targets": "target exclusions are covered by the shared audit target tests.",

@@ -7,6 +7,173 @@
     "can_execute_commands": true,
     "can_read_data": true,
     "can_read_tables": true,
+    "content_discovery": {
+      "bytes_inspected": 4534,
+      "findings": [
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.api_clients[0].client_secret",
+          "source": "authenticated",
+          "type": "client_secret",
+          "value": "graf...2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.api_clients[1].client_secret",
+          "source": "authenticated",
+          "type": "client_secret",
+          "value": "prom...2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.api_clients[2].client_secret",
+          "source": "authenticated",
+          "type": "client_secret",
+          "value": "bill...2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.demo_accounts[0].password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "*****"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.demo_accounts[1].password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "********"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.demo_accounts[2].password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "serv...e123"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.demo_accounts[3].password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "repo...2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.demo_accounts[4].password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "auto...2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.integration_secrets[0].secret_value",
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "xoxb...oken"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.integration_secrets[0].secret_value",
+          "source": "authenticated",
+          "type": "slack_token",
+          "value": "xoxb...oken"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.integration_secrets[0].endpoint",
+          "source": "authenticated",
+          "type": "webhook",
+          "value": "http...CTED"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.integration_secrets[1].secret_value",
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "pd_d...2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.integration_secrets[2].secret_value",
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "ghp_...3456"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.service_tokens[0].token",
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "gfa_..._123"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.service_tokens[1].token",
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "ci_d..._456"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.service_tokens[2].token",
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "prom..._789"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.service_tokens[3].token",
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "am_o..._101"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.web_sessions[0].session_id",
+          "source": "authenticated",
+          "type": "session_cookie",
+          "value": "sess...2b7a"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.web_sessions[1].session_id",
+          "source": "authenticated",
+          "type": "session_cookie",
+          "value": "sess...2e11"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.web_sessions[2].session_id",
+          "source": "authenticated",
+          "type": "session_cookie",
+          "value": "sess...1b90"
+        }
+      ],
+      "source": "authenticated",
+      "status": "complete"
+    },
     "database": "postgres",
     "database_count": 1,
     "database_names": [

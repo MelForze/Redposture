@@ -1,5 +1,7 @@
 [
   {
+    "asset": null,
+    "asset_error": null,
     "assets": false,
     "auth_required": true,
     "auth_transport_attempts": 1,
@@ -20,11 +22,13 @@
     "gitlab_error": null,
     "gitlab_info": null,
     "gitlab_repositories": null,
+    "gitlab_repository_count": null,
     "gitlab_repository_details": null,
     "harbor": false,
     "harbor_artifacts": null,
     "harbor_error": "not harbor",
     "harbor_info": null,
+    "harbor_project_count": null,
     "harbor_projects": null,
     "harbor_repositories": null,
     "host": "127.0.0.1",
@@ -47,6 +51,7 @@
     "nexus_error": null,
     "nexus_info": null,
     "nexus_repositories": null,
+    "nexus_repository_count": null,
     "nexus_repository_details": null,
     "port": 15001,
     "probe_status": 401,
@@ -54,9 +59,12 @@
     "provided_credentials_ok": false,
     "provided_username": "admin",
     "repository": null,
+    "repository_tag_errors": null,
+    "repository_tags": null,
     "selected_repository_tags": null,
     "service": "docker-registry",
     "show_images": true,
+    "show_repositories": false,
     "show_tags": false,
     "stages": [
       {

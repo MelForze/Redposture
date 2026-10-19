@@ -31,7 +31,7 @@
         },
         {
           "error": null,
-          "message_count": 3,
+          "message_count": 4,
           "status": "success",
           "topic": "orders"
         },
@@ -66,7 +66,8 @@
       "orders": [
         "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
         "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
-        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}",
+        "<KAFKA_OFFSET> {\"order\":1,\"api_key\":\"kfk_live_AKIA7SECRET2026\",\"db\":\"postgres://admin:S3cret@db:5432/app\"}"
       ],
       "payments.events": [
         "<KAFKA_OFFSET> {\"payment_id\":\"pay-3001\",\"provider\":\"stripe\",\"status\":\"authorized\",\"amount\":149.00}",
@@ -199,7 +200,7 @@
         },
         {
           "error": null,
-          "message_count": 3,
+          "message_count": 4,
           "status": "success",
           "topic": "orders"
         },
@@ -234,7 +235,8 @@
       "orders": [
         "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
         "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
-        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}",
+        "<KAFKA_OFFSET> {\"order\":1,\"api_key\":\"kfk_live_AKIA7SECRET2026\",\"db\":\"postgres://admin:S3cret@db:5432/app\"}"
       ],
       "payments.events": [
         "<KAFKA_OFFSET> {\"payment_id\":\"pay-3001\",\"provider\":\"stripe\",\"status\":\"authorized\",\"amount\":149.00}",
@@ -367,7 +369,7 @@
         },
         {
           "error": null,
-          "message_count": 3,
+          "message_count": 4,
           "status": "success",
           "topic": "orders"
         },
@@ -402,7 +404,8 @@
       "orders": [
         "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
         "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
-        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}",
+        "<KAFKA_OFFSET> {\"order\":1,\"api_key\":\"kfk_live_AKIA7SECRET2026\",\"db\":\"postgres://admin:S3cret@db:5432/app\"}"
       ],
       "payments.events": [
         "<KAFKA_OFFSET> {\"payment_id\":\"pay-3001\",\"provider\":\"stripe\",\"status\":\"authorized\",\"amount\":149.00}",
@@ -535,7 +538,7 @@
         },
         {
           "error": null,
-          "message_count": 3,
+          "message_count": 4,
           "status": "success",
           "topic": "orders"
         },
@@ -570,7 +573,8 @@
       "orders": [
         "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
         "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
-        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}",
+        "<KAFKA_OFFSET> {\"order\":1,\"api_key\":\"kfk_live_AKIA7SECRET2026\",\"db\":\"postgres://admin:S3cret@db:5432/app\"}"
       ],
       "payments.events": [
         "<KAFKA_OFFSET> {\"payment_id\":\"pay-3001\",\"provider\":\"stripe\",\"status\":\"authorized\",\"amount\":149.00}",
@@ -703,7 +707,7 @@
         },
         {
           "error": null,
-          "message_count": 3,
+          "message_count": 4,
           "status": "success",
           "topic": "orders"
         },
@@ -738,7 +742,8 @@
       "orders": [
         "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
         "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
-        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}",
+        "<KAFKA_OFFSET> {\"order\":1,\"api_key\":\"kfk_live_AKIA7SECRET2026\",\"db\":\"postgres://admin:S3cret@db:5432/app\"}"
       ],
       "payments.events": [
         "<KAFKA_OFFSET> {\"payment_id\":\"pay-3001\",\"provider\":\"stripe\",\"status\":\"authorized\",\"amount\":149.00}",

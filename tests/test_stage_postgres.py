@@ -277,6 +277,19 @@ def test_postgres_open_no_auth_is_reported_only_on_detect_line_in_txt() -> None:
     assert json.loads(postgres._format_record(record, "json"))["status"] == "open_no_auth"
 
 
+def test_postgres_detection_version_is_reported_only_when_observed() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 5432,
+        "is_postgres": True,
+        "auth_required": False,
+        "server_version": "16.4",
+    }
+    assert postgres._format_detect_record(record, "txt").endswith("(version:16.4)")
+    assert json.loads(postgres._format_detect_record(record, "json"))["version"] == "16.4"
+    assert postgres._format_detect_record({**record, "server_version": None}, "txt").endswith("(version:unknown)")
+
+
 class _ConsoleCapture:
     instances: list[_ConsoleCapture] = []
 
@@ -689,6 +702,8 @@ def test_postgres_auth_failure_preserves_detect_evidence_and_txt_service(
     assert result.records[0]["detected_status"] == "auth_required"
     assert result.records[0]["deep_error"] == "auth transport failed"
     assert all("No POSTGRES service detected" not in line for line in emitted)
+    assert all("connection failed" not in line for line in emitted)
+    assert any("post-detection check failed" in line for line in emitted)
 
 
 def test_postgres_parsing_helpers_cover_error_status_and_data_rows() -> None:

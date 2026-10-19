@@ -2094,14 +2094,38 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
         else:
             reason = "topic metadata unavailable" if topics is None else "no topics available"
             lines.append(f"{prefix} [!] Write probe unavailable: {reason}")
+    rendered_dump_topics: set[str] = set()
+
+    def append_topic_dump(topic_name: str) -> None:
+        rendered_dump_topics.add(topic_name)
+        lines.append(f"{prefix} [*] Topic {topic_name}{_coverage_suffix(topic_name=topic_name)}")
+        topic_dump_messages = dump_results.get(topic_name, [])
+        topic_dump_error = dump_errors.get(topic_name, "")
+        if topic_dump_messages:
+            for message in topic_dump_messages:
+                lines.append(f"{prefix} {message}")
+            if topic_dump_error:
+                lines.append(f"{prefix} [!] partial: {topic_dump_error}")
+        elif topic_dump_error:
+            lines.append(f"{prefix} [-] {topic_dump_error}")
+        else:
+            lines.append(f"{prefix} <no messages>")
+
     if show_topics and topic_names:
         total = record.get("topic_count")
         if show_topics_limit is not None and isinstance(total, int) and total > len(displayed_topic_names):
             lines.append(f"{prefix} [*] Topics Enumeration (showing:{len(displayed_topic_names)} of {total})")
         else:
             lines.append(f"{prefix} [*] Topics Enumeration")
+        if dump and not query_topic:
+            dump_topics_header = f"{prefix} [*] Dump Topics"
+            if _max_messages_is_explicit(record):
+                dump_topics_header += f" (max:{max_messages})"
+            lines.append(dump_topics_header + _coverage_suffix())
         for item in displayed_topic_names:
             lines.append(f"{prefix} {item}{_topic_marker_suffix(item)}")
+            if dump and not query_topic and item in dump_topics:
+                append_topic_dump(item)
     # `--topic X` (without `--dump`) prints a standalone header + partition
     # info; `--topic X --dump` folds the partition info into the Dump header
     # to avoid the previous 3-line duplicate:
@@ -2148,21 +2172,12 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
             if _max_messages_is_explicit(record):
                 dump_topics_header += f" (max:{max_messages})"
             dump_topics_header += _coverage_suffix()
-            lines.append(dump_topics_header)
+            if not (show_topics and topic_names):
+                lines.append(dump_topics_header)
             if dump_topics:
                 for topic_name in dump_topics:
-                    lines.append(f"{prefix} [*] Topic {topic_name}{_coverage_suffix(topic_name=topic_name)}")
-                    topic_dump_messages = dump_results.get(topic_name, [])
-                    topic_dump_error = dump_errors.get(topic_name, "")
-                    if topic_dump_messages:
-                        for item in topic_dump_messages:
-                            lines.append(f"{prefix} {item}")
-                        if topic_dump_error:
-                            lines.append(f"{prefix} [!] partial: {topic_dump_error}")
-                    elif topic_dump_error:
-                        lines.append(f"{prefix} [-] {topic_dump_error}")
-                    else:
-                        lines.append(f"{prefix} <no messages>")
+                    if topic_name not in rendered_dump_topics:
+                        append_topic_dump(topic_name)
             elif dump_error:
                 lines.append(f"{prefix} [-] {_strip_debug_context(dump_error, debug=debug)}")
             else:

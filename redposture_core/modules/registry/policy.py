@@ -16,9 +16,6 @@ def validate_args(args: Any, console: Any, *, product: str = "registry") -> int 
     ):
         console.error("use either --token or --username/--password, not both")
         return 2
-    if bool(getattr(args, "show_tags", False)) and not getattr(args, "repository", None):
-        console.error("--show-tags requires --repository")
-        return 2
     if getattr(args, "tag", None) and not getattr(args, "repository", None):
         console.error("--tag requires --repository")
         return 2

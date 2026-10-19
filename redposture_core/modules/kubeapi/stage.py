@@ -21,7 +21,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 6443
-_DEFAULT_PORTS: tuple[int, ...] | None = (6443, 16443, 26443)
+_DEFAULT_PORTS: tuple[int, ...] | None = (6443, 16443, 26443, 8443, 9090)
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_kubeapi_host
 _KUBE_BASIC_PAIRS = (

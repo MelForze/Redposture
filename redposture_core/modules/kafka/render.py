@@ -7,6 +7,7 @@ import re
 from ...console import Console
 from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line
 from . import actions
+from .http_surfaces import product_name
 
 _nxc_prefix = actions._nxc_prefix
 
@@ -14,6 +15,11 @@ _nxc_prefix = actions._nxc_prefix
 def _render_colored_kafka_line(console: Console, line: str) -> bool:
     if (
         "Kafka UI" in line
+        or any(
+            name in line
+            for name in ("AKHQ", "Redpanda Console", "Kafka REST Proxy", "Kafka Connect", "ksqlDB", "Schema Registry")
+        )
+        or "Anonymous READ" in line
         or "Kafbat UI" in line
         or "Clusters Enumeration" in line
         or "Brokers Enumeration" in line
@@ -41,7 +47,11 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
                 CountColorRule(name, "red", zero_color="bright_green")
                 for name in ("clusters", "brokers", "topics", "groups", "messages")
             ),
-            extra_spans=lambda marker, right: [(0, len(right), "red")] if marker == "[+]" and ":" in right else [],
+            extra_spans=lambda marker, right: (
+                [(0, len(right), "red")]
+                if marker == "[+]" and (":" in right or right.startswith("Anonymous READ"))
+                else []
+            ),
         ):
             return True
     return actions._render_colored_kafka_line(console, line)
@@ -53,7 +63,9 @@ def _format_detect_record(record: dict, output_format: str) -> str:
     if output_format == "json":
         return ""
     vendor = record.get("ui_vendor")
-    product = "Kafbat UI" if vendor == "kafbat" else "Provectus Kafka UI" if vendor == "provectus" else "Kafka UI"
+    product = product_name(vendor) or (
+        "Kafbat UI" if vendor == "kafbat" else "Provectus Kafka UI" if vendor == "provectus" else "Kafka UI"
+    )
     required = record.get("auth_required")
     auth = "True" if required is True else "False" if required is False else "unknown"
     version = record.get("version") or "unknown"
@@ -109,6 +121,10 @@ def _format_ui_detail_records(record: dict, output_format: str) -> list[str]:
         return []
     prefix = _nxc_prefix(record)
     lines: list[str] = []
+    if record.get("kafka_interface") == "http_surface" and record.get("anonymous_read") is True:
+        lines.append(
+            f"{prefix} [+] Anonymous READ available through {product_name(record.get('ui_vendor')) or 'Kafka HTTP surface'}"
+        )
     export = record.get("ui_export")
     if isinstance(export, dict):
 
@@ -131,6 +147,33 @@ def _format_ui_detail_records(record: dict, output_format: str) -> list[str]:
         ("show_topics", "ui_topics", "Topics Enumeration", "name"),
         ("show_consumer_groups", "ui_consumer_groups", "Consumer Groups Enumeration", "name"),
     )
+    dumps = record.get("ui_dump_records") if record.get("dump") else None
+    pending_dumps = [item for item in dumps if isinstance(item, dict)] if isinstance(dumps, list) else []
+    emitted_dumps: set[int] = set()
+
+    def append_dump(item: dict) -> None:
+        cluster, topic = str(item.get("cluster") or ""), str(item.get("topic") or "")
+        messages = item.get("messages")
+        if not isinstance(messages, list):
+            messages = []
+        lines.append(
+            f"{prefix} [*] Dump Topic {cluster}/{topic} (messages:{len(messages)}) (max:{record.get('max_messages')})"
+        )
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            value = message.get("value")
+            shown_value = str(value).replace("\r", "\\r").replace("\n", "\\n") if value is not None else "<null>"
+            lines.append(
+                f"{prefix} partition:{message.get('partition')} offset:{message.get('offset')} value:{shown_value}"
+            )
+        if item.get("error"):
+            error = str(item["error"])
+            if error.startswith("legacy Kafka UI cannot prove message completeness"):
+                lines.append(f"{prefix} [*] Dump completeness unverified: legacy Kafka UI has no cursor")
+            else:
+                lines.append(f"{prefix} [-] {error}")
+
     for enabled, field, heading, name_field in sections:
         if not record.get(enabled):
             continue
@@ -146,41 +189,24 @@ def _format_ui_detail_records(record: dict, output_format: str) -> list[str]:
             name = str(item.get(name_field) or item.get("id") or "")
             if name:
                 lines.append(f"{prefix} {cluster + '/' if cluster else ''}{name}")
+                if field == "ui_topics":
+                    for index, dump_item in enumerate(pending_dumps):
+                        if (
+                            index not in emitted_dumps
+                            and str(dump_item.get("cluster") or "") == cluster
+                            and str(dump_item.get("topic") or "") == name
+                        ):
+                            append_dump(dump_item)
+                            emitted_dumps.add(index)
     if record.get("ui_topics_partial"):
         lines.append(f"{prefix} [*] Topics coverage:partial (reason:page unavailable or repeated)")
     if record.get("ui_consumer_groups_partial"):
         lines.append(f"{prefix} [*] Consumer groups coverage:partial (reason:page unavailable or repeated)")
     if record.get("dump"):
-        dumps = record.get("ui_dump_records")
-        if isinstance(dumps, list) and dumps:
-            for item in dumps:
-                if not isinstance(item, dict):
-                    continue
-                cluster, topic = str(item.get("cluster") or ""), str(item.get("topic") or "")
-                messages = item.get("messages")
-                if not isinstance(messages, list):
-                    messages = []
-                lines.append(
-                    f"{prefix} [*] Dump Topic {cluster}/{topic} "
-                    f"(messages:{len(messages)}) (max:{record.get('max_messages')})"
-                )
-                for message in messages:
-                    if not isinstance(message, dict):
-                        continue
-                    value = message.get("value")
-                    shown_value = (
-                        str(value).replace("\r", "\\r").replace("\n", "\\n") if value is not None else "<null>"
-                    )
-                    lines.append(
-                        f"{prefix} partition:{message.get('partition')} offset:{message.get('offset')} "
-                        f"value:{shown_value}"
-                    )
-                if item.get("error"):
-                    error = str(item["error"])
-                    if error.startswith("legacy Kafka UI cannot prove message completeness"):
-                        lines.append(f"{prefix} [*] Dump completeness unverified: legacy Kafka UI has no cursor")
-                    else:
-                        lines.append(f"{prefix} [-] {error}")
+        if pending_dumps:
+            for index, item in enumerate(pending_dumps):
+                if index not in emitted_dumps:
+                    append_dump(item)
         else:
             reason = "no accessible clusters or topics" if record.get("ui_clusters") else "no accessible clusters"
             lines.append(f"{prefix} [-] Dump unavailable: {reason}")

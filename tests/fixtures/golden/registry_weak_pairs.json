@@ -1,5 +1,7 @@
 [
   {
+    "asset": null,
+    "asset_error": null,
     "assets": false,
     "attempted_credentials": [
       {
@@ -209,6 +211,7 @@
     "nexus_error": null,
     "nexus_info": null,
     "nexus_repositories": null,
+    "nexus_repository_count": null,
     "nexus_repository_details": null,
     "port": 15001,
     "probe_status": 200,
@@ -216,9 +219,12 @@
     "provided_credentials_ok": true,
     "provided_username": "registry",
     "repository": null,
+    "repository_tag_errors": null,
+    "repository_tags": null,
     "selected_repository_tags": null,
     "service": "docker-registry",
     "show_images": false,
+    "show_repositories": false,
     "show_tags": false,
     "stages": [
       {

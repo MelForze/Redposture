@@ -1,5 +1,7 @@
 [
   {
+    "asset": null,
+    "asset_error": null,
     "assets": false,
     "auth_required": true,
     "auth_transport_attempts": 1,
@@ -74,6 +76,7 @@
     "nexus_error": null,
     "nexus_info": null,
     "nexus_repositories": null,
+    "nexus_repository_count": null,
     "nexus_repository_details": null,
     "port": 18280,
     "probe_status": 200,
@@ -81,9 +84,12 @@
     "provided_credentials_ok": true,
     "provided_username": "admin",
     "repository": null,
+    "repository_tag_errors": null,
+    "repository_tags": null,
     "selected_repository_tags": null,
     "service": "harbor",
     "show_images": true,
+    "show_repositories": false,
     "show_tags": false,
     "stages": [
       {

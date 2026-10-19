@@ -10,9 +10,13 @@ usage() {
 
 case "${1:-}" in
   lint)
+    echo "== lint: Ruff checks =="
     ruff check .
+    echo "== lint: Ruff format =="
     ruff format --check .
+    echo "== lint: mypy =="
     mypy
+    echo "== lint: CLI smoke =="
     python redposture.py --help >/dev/null
     ;;
   test)
@@ -22,12 +26,17 @@ case "${1:-}" in
     export COVERAGE_FILE="$coverage_dir/.coverage"
     coverage_json="$coverage_dir/coverage.json"
 
+    echo "== ${python_tag}: compile =="
     python -m coverage erase
     python -m py_compile redposture.py
     python -m compileall -q redposture_core tests
+    echo "== ${python_tag}: pytest and branch coverage =="
     python -m pytest -q --cov=redposture_core --cov-report=term-missing --cov-report="json:$coverage_json"
+    echo "== ${python_tag}: per-file coverage gate =="
     python scripts/check_coverage_per_file.py "$coverage_json" --min 70
+    echo "== ${python_tag}: focused coverage gate =="
     python scripts/check_quality_coverage.py "$coverage_json"
+    echo "== ${python_tag}: version smoke =="
     redposture --version
     ;;
   *)

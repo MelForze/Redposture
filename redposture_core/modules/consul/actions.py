@@ -3536,8 +3536,11 @@ def _auth_summary_line(record: dict[str, Any]) -> str | None:
         return f"[+] {label} {_scope_counts_suffix(auth_scopes)}"
     line = f"[-] {label} failed"
     if auth_error:
-        line += f" err={_clip(auth_error, 80)}"
-    if auth_scopes:
+        if auth_mode == "token" and auth_error == "Consul ACL token not found":
+            line += " (Token not found)"
+        else:
+            line += f" err={_clip(auth_error, 80)}"
+    if auth_scopes and auth_valid is not False:
         line += f" {_scope_bools_suffix(auth_scopes)}"
     return line
 
@@ -3575,7 +3578,7 @@ def _detail_lines(record: dict[str, Any], output_format: str, *, debug: bool = F
             lines.append(f"{prefix} [!] RCE! (EnableLocalScriptChecks:True) (EnableRemoteScriptChecks:True)")
 
     auth_scopes = as_dict(record.get("auth_scopes"))
-    if auth_scopes:
+    if auth_scopes and record.get("auth_valid") is not False:
         for item in _scope_status_detail_lines(prefix, auth_scopes):
             lines.append(item)
 
@@ -4007,6 +4010,7 @@ def _render_colored_consul_line(console: Console, line: str) -> bool:
         line,
         tag=_CONSUL_TAG,
         literals=(
+            ("(Token not found)", "bright_green"),
             ("(EnableLocalScriptChecks:True)", "red"),
             ("(EnableRemoteScriptChecks:True)", "red"),
             ("(local_script_checks:True)", "red"),

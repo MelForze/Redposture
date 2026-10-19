@@ -5243,12 +5243,12 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
 
         summary_label = "Discover Complete" if record.get("_discover_findings_streamed") else "Discover Secrets"
         summary_suffix = f" ({confidence_text})" if debug and confidence_text else ""
-        lines.append(
-            f"{prefix} [*] {summary_label} (status:{discover_status}) (findings:{len(findings)}){summary_suffix}"
-        )
         if findings and not record.get("_discover_findings_streamed"):
             for finding in findings:
                 lines.append(_format_elastic_discovery_finding(record.get("host"), record.get("port"), finding))
+        lines.append(
+            f"{prefix} [*] {summary_label} (status:{discover_status}) (findings:{len(findings)}){summary_suffix}"
+        )
 
         if inventory_unavailable:
             lines.append(f"{prefix} [-] Discover unavailable: index inventory access {inventory_status}")

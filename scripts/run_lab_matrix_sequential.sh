@@ -335,17 +335,17 @@ wait_minio_seed() {
 start_service() {
   local service="$1"
   local timeout
-  timeout="$("${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_service_policy.py" "${service}")"
+  timeout="$("${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_service_policy.py" "${service}")" || return 1
   if [ "${service}" = "valkey" ]; then
-    "${PYTHON_BIN}" "${LAB_DIR}/services/valkey/prepare.py"
+    "${PYTHON_BIN}" "${LAB_DIR}/services/valkey/prepare.py" || return 1
   fi
   if [ "${service}" = "minio" ]; then
-    "${PYTHON_BIN}" "${ROOT_DIR}/scripts/prepare_minio_qa_image.py"
+    "${PYTHON_BIN}" "${ROOT_DIR}/scripts/prepare_minio_qa_image.py" || return 1
   fi
   echo
   echo "== service:${service} up =="
   CURRENT_SERVICE="${service}"
-  snapshot_service_images "${service}"
+  snapshot_service_images "${service}" || return 1
   local started_at="${SECONDS}"
   set +e
   if [ "${service}" = "registry" ]; then
@@ -377,24 +377,26 @@ start_service() {
   fi
   if [ "${service}" = "gitlab" ]; then
     "${PYTHON_BIN}" scripts/bootstrap_gitlab_lab.py "${OUT_DIR}/gitlab-seed" \
-      --compose "${LAB_DIR}/services/gitlab/docker-compose.yml"
+      --compose "${LAB_DIR}/services/gitlab/docker-compose.yml" || return 1
   elif [ "${service}" = "registry-harbor" ]; then
-    "${PYTHON_BIN}" scripts/seed_real_vendors.py harbor http://127.0.0.1:18280 "${OUT_DIR}/harbor-seed"
+    "${PYTHON_BIN}" scripts/seed_real_vendors.py harbor http://127.0.0.1:18280 "${OUT_DIR}/harbor-seed" || return 1
   fi
 }
 
 stop_service() {
   local service="$1"
+  local rc=0
   echo "== service:${service} down =="
   if [ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" = "1" ]; then
-    compose_service "${service}" down --volumes
-    cleanup_service_images "${service}"
+    compose_service "${service}" down --volumes || rc=$?
+    cleanup_service_images "${service}" || rc=$?
   else
-    compose_service "${service}" down
+    compose_service "${service}" down || rc=$?
   fi
-  if [ "${CURRENT_SERVICE}" = "${service}" ]; then
+  if [ "${CURRENT_SERVICE}" = "${service}" ] && [ "$rc" -eq 0 ]; then
     CURRENT_SERVICE=""
   fi
+  return "$rc"
 }
 
 run_case() {
@@ -506,7 +508,8 @@ run_negative_cli_cases() {
   run_raw_case postgres fuzz_postgres_missing_targets 2 postgres -ot excluded.invalid --show-databases --pgadmin-server-password qa-only --sslmode verify-full --ssl-ca /nonexistent/postgres-ca.crt --ssl-cert /nonexistent/postgres-client.crt --ssl-key /nonexistent/postgres-client.key --ssl-server-name postgres.internal
   run_raw_case mongodb fuzz_mongodb_missing_targets 2 mongodb -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/mongodb-ca.crt --tls-cert-key /nonexistent/mongodb-client.pem
   run_raw_case oracle fuzz_oracle_missing_targets 2 oracle -ot excluded.invalid --service FREEPDB1
-  run_raw_case docker fuzz_docker_missing_targets 2 docker -ot excluded.invalid -u qa -p qa --defcreds --containers
+  run_raw_case docker fuzz_docker_missing_targets 2 docker -ot excluded.invalid -u qa -p qa --containers
+  run_raw_case docker fuzz_docker_defcreds_missing_targets 2 docker -ot excluded.invalid --defcreds --containers
   run_raw_case airflow fuzz_airflow_missing_targets 2 airflow -ot excluded.invalid --show-dags --dump --dag qa --key qa --connection qa
   run_raw_case clickhouse fuzz_clickhouse_missing_targets 2 clickhouse -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/clickhouse-ca.crt --tls-cert /nonexistent/clickhouse-client.crt --tls-key /nonexistent/clickhouse-client.key --tls-server-name clickhouse.internal
   run_raw_case redis fuzz_redis_missing_targets 2 redis -ot excluded.invalid --show-keys --tls --tls-ca /nonexistent/redis-ca.crt --tls-cert /nonexistent/redis-client.crt --tls-key /nonexistent/redis-client.key
@@ -520,11 +523,11 @@ run_negative_cli_cases() {
 
   run_raw_case docker-registry fuzz_registry_username_without_password 2 docker-registry -t 127.0.0.1 -u admin --images
   run_raw_case docker-registry fuzz_registry_token_basic_conflict 2 docker-registry -t 127.0.0.1 --token token -u admin -p admin --images
-  run_raw_case docker-registry fuzz_registry_show_tags_without_repository 2 docker-registry -t 127.0.0.1 --show-tags
+  run_raw_case docker-registry fuzz_registry_tag_without_repository 2 docker-registry -t 127.0.0.1 --show-tags --tag latest
   run_raw_case docker-registry fuzz_registry_metadata_without_tag 2 docker-registry -t 127.0.0.1 --repository redposture/demo-api --metadata
   run_raw_case docker-registry fuzz_registry_download_without_image 2 docker-registry -t 127.0.0.1 --download
-  run_raw_case harbor fuzz_harbor_option_surface 2 harbor -t "http://[invalid:url" --debug --port 80 --ports 80 --token invalid --defcreds --repository sample/app --show-tags --tag latest --metadata --inspect --image sample/app:latest --download --download-dir "${OUT_DIR}/harbor_downloads"
-  run_raw_case nexus fuzz_nexus_option_surface 2 nexus -t "http://[invalid:url" --debug --ports 8081 -u admin -p invalid --token invalid --defcreds --images --repository sample/app --show-tags --tag latest --metadata --inspect --image sample/app:latest --download --download-dir "${OUT_DIR}/nexus_downloads"
+  run_raw_case harbor fuzz_harbor_option_surface 2 harbor -t "http://[invalid:url" --debug --port 80 --ports 80 --token invalid --repository sample/app --show-tags --tag latest --metadata --inspect --image sample/app:latest --download --download-dir "${OUT_DIR}/harbor_downloads"
+  run_raw_case nexus fuzz_nexus_option_surface 2 nexus -t "http://[invalid:url" --debug --ports 8081 -u admin -p invalid --token invalid --images --repository sample/app --show-tags --tag latest --metadata --inspect --image sample/app:latest --download --download-dir "${OUT_DIR}/nexus_downloads"
   run_raw_case gitlab fuzz_gitlab_oci_option_surface 2 gitlab -t "http://[invalid:url" --defcreds --repository sample/app --show-tags --tag latest --metadata --inspect --image sample/app:latest --download --download-dir "${OUT_DIR}/gitlab_downloads"
 
   run_raw_case grafana fuzz_grafana_username_without_password 2 grafana -t 127.0.0.1 -u admin --show-datasource
@@ -621,7 +624,7 @@ run_registry_cases() {
   run_case docker-registry registry_open 0 docker-registry -t 127.0.0.1 --port 15000 --images
   run_case docker-registry registry_auth 0 docker-registry -t 127.0.0.1 --port 15001 -u admin -p admin --images
   run_case docker-registry registry_weak_pairs 0 docker-registry -t 127.0.0.1 --port 15001 --defcreds
-  run_case nexus registry_nexus 0 nexus -t 127.0.0.1 --port 15004 --assets
+  run_case nexus registry_nexus 0 nexus -t 127.0.0.1 --port 15004 --show-repositories --assets --asset /artifacts/sbom/redposture-api-2.6.0.spdx.json
   run_case nexus registry_nexus_weak_pairs 0 nexus -t 127.0.0.1 --port 15004 --defcreds
   run_case docker-registry registry_url_http 0 docker-registry -t "http://127.0.0.1:15000/v2/_catalog?n=1000" --images
   run_case docker-registry registry_url_https_transport_fallback 0 docker-registry -t "https://127.0.0.1:15000/v2/_catalog" --images
@@ -715,7 +718,7 @@ run_consul_cases() {
     echo "[error] consul tokens are empty" >&2
     return 1
   fi
-  run_case consul consul_open 0 consul -t 127.0.0.1 --port 8500 --dump
+  run_case consul consul_open 0 consul -t 127.0.0.1 --port 8500 --dump --discover
   run_case consul consul_acl_read 0 consul -t 127.0.0.1 --port 18500 --token "${consul_read_token}" --dump
   run_case consul consul_acl_mgmt 0 consul -t 127.0.0.1 --port 18500 --token "${consul_mgmt_token}" --dump
   run_case consul consul_url_hint_http 0 consul -t "http://127.0.0.1:8500/v1/status/leader" --dump
@@ -740,7 +743,7 @@ run_kubeapi_cases() {
     echo "[error] kubeapi tokens are empty" >&2
     return 1
   fi
-  run_case kubeapi kubeapi_open 0 kubeapi -t 127.0.0.1 --port 26443 --namespaces --pods
+  run_case kubeapi kubeapi_open 0 kubeapi -t 127.0.0.1 --port 26443 --namespaces --pods --discover
   run_case kubeapi kubeapi_default_pairs_without_basic 0 kubeapi -t 127.0.0.1 --port 26443 --defcreds
   run_case kubeapi kubeapi_auditor 0 kubeapi -t 127.0.0.1 --port 16443 --token "${kube_auditor_token}" --namespaces --pods
   run_case kubeapi kubeapi_admin 0 kubeapi -t 127.0.0.1 --port 16443 --token "${kube_admin_token}" --secrets
@@ -756,7 +759,10 @@ run_kubeapi_cases() {
 }
 
 run_postgres_cases() {
-  run_case postgres postgres_default 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --show-databases --show-tables --dump 20
+  run_case postgres postgres_default 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --show-databases --show-tables --dump 20 --discover
+  if is_extended_matrix; then
+    run_case postgres postgres_idempotency 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --show-databases --show-tables --dump 20 --discover
+  fi
   run_case postgres postgres_multi_ports 0 postgres -t 127.0.0.1 -u postgres -p postgres --ports "5432,25432,25433,25434,25435" --show-databases
   run_text_case postgres postgres_debug_smoke 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --debug
   if is_extended_matrix; then
@@ -770,16 +776,17 @@ run_postgres_cases() {
     # `attempted_credentials`; postgres render produces one `[-] user:pass`
     # line per attempt.
     run_case postgres postgres_extended_defcreds_both_fail 0 postgres -t 127.0.0.1 --port 25439 --defcreds
-    # P4-D idempotency twin of postgres_default.
-    run_case postgres postgres_idempotency 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --show-databases --show-tables --dump 20
     # P4-E fuzz: empty credentials must be rejected at parse time.
     run_case postgres fuzz_postgres_empty_credentials 2 postgres -t 127.0.0.1 -u "" -p "" --show-databases
   fi
 }
 
 run_mongodb_cases() {
-  run_case mongodb mongodb_open 0 mongodb -t 127.0.0.1 --port 27017 --show-databases --show-collections --show-indexes --dump 20
+  run_case mongodb mongodb_open 0 mongodb -t 127.0.0.1 --port 27017 --show-databases --show-collections --show-indexes --dump 20 --discover
   run_case mongodb mongodb_auth 0 mongodb -t 127.0.0.1 --port 27018 -u root -p root --show-databases --show-collections --dump 20
+  if is_extended_matrix; then
+    run_case mongodb mongodb_idempotency 0 mongodb -t 127.0.0.1 --port 27018 -u root -p root --show-databases --show-collections --dump 20
+  fi
   run_case mongodb mongodb_defcreds 0 mongodb -t 127.0.0.1 --port 27018 --defcreds --show-databases --show-collections
   run_case mongodb mongodb_multi_ports 0 mongodb -t 127.0.0.1 --ports "27017,37017,37018,37019,37020" --show-databases
   run_case mongodb mongodb_query_dump 0 mongodb -t 127.0.0.1 --port 27017 --database redposture --collection demo_accounts --query '{"role":"admin"}' --dump 10
@@ -787,8 +794,6 @@ run_mongodb_cases() {
   if is_extended_matrix; then
     run_case mongodb mongodb_extended_document_index_cmd 0 mongodb -t 127.0.0.1 --port 27017 --auth-db admin --database redposture --collection demo_accounts --document 1 --projection '{"username":1,"role":1}' --show-indexes 5 --index username_1 --nosql-cmd '{"dbStats":1}'
     run_case mongodb mongodb_extended_invalid_document_query 2 mongodb -t 127.0.0.1 --port 27017 --database redposture --collection demo_accounts --document 1 --query '{"role":"admin"}'
-    # P4-D idempotency twin of mongodb_auth (the cleaner of the two mongo bases).
-    run_case mongodb mongodb_idempotency 0 mongodb -t 127.0.0.1 --port 27018 -u root -p root --show-databases --show-collections --dump 20
     # P4-E fuzz: zero timeout must be rejected at parse.
     run_case mongodb fuzz_mongodb_zero_timeout 2 mongodb -t 127.0.0.1 --timeout 0 --show-databases
     run_case mongodb fuzz_mongodb_invalid_workers 2 mongodb -t 127.0.0.1 --workers abc --show-databases
@@ -799,7 +804,7 @@ run_mongodb_cases() {
 run_oracle_cases() {
   run_case oracle oracle_listener 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1
   run_case oracle oracle_sid_service_enum 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service-list FREEPDB1,FREE --sid-list FREE,ORCLCDB
-  run_case oracle oracle_auth 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --show-pdbs --show-users
+  run_case oracle oracle_auth 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --show-pdbs --show-users --discover
   run_case oracle oracle_defcreds 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 --defcreds --show-users
   local oracle_combo="${OUT_DIR}/oracle_combo.txt"
   printf "bad:bad\nredposture:OracleLab!2026\n" > "${oracle_combo}"
@@ -877,7 +882,10 @@ run_clickhouse_cases() {
 }
 
 run_redis_cases() {
-  run_case redis redis_default 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --show-keys --dump
+  run_case redis redis_default 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --show-keys --dump --discover
+  if is_extended_matrix; then
+    run_case redis redis_idempotency 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --show-keys --dump --discover
+  fi
   run_case redis redis_multi_ports 0 redis -t 127.0.0.1 -u redis -p redis --ports "6379,26380,26381,26382,26383" --show-keys
   run_text_case redis redis_debug_smoke 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --debug
   if is_extended_matrix; then
@@ -886,8 +894,6 @@ run_redis_cases() {
     # Force-paged dump (batch=1 -> one page per key). Exercises the SCAN-cursor streaming
     # loop end-to-end on a seeded keyspace and verifies that all keys still surface.
     run_case redis redis_extended_paged_dump 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --dump --dump-batch 1 --dump-delay 0
-    # P4-D idempotency twin of redis_default. Must produce identical normalized output.
-    run_case redis redis_idempotency 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --show-keys --dump
     # P4-C mutate-config: same case with different --show-keys values. Each must produce
     # exactly its N entries (or fewer when keyspace is smaller).
     run_case redis redis_mutate_show_keys_3 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --show-keys 3
@@ -903,7 +909,10 @@ run_redis_cases() {
 }
 
 run_etcd_cases() {
-  run_case etcd etcd_open 0 etcd -t 127.0.0.1 --port 2379 --show-keys --dump
+  run_case etcd etcd_open 0 etcd -t 127.0.0.1 --port 2379 --show-keys --dump --discover
+  if is_extended_matrix; then
+    run_case etcd etcd_idempotency 0 etcd -t 127.0.0.1 --port 2379 --show-keys --dump --discover
+  fi
   run_case etcd etcd_auth 0 etcd -t 127.0.0.1 --port 22379 --show-keys --dump
   run_case etcd etcd_auth_defcreds 0 etcd -t 127.0.0.1 --port 22379 --defcreds --show-keys
   run_case etcd etcd_auth_user_pass 0 etcd -t 127.0.0.1 --port 22379 -u root -p root --show-keys
@@ -917,8 +926,6 @@ run_etcd_cases() {
     # Force multi-page continuation (batch=2 -> ~6 pages for 11 seeded keys). Exercises
     # the `last_key + \0` continuation cursor and guarantees the full keyspace is dumped.
     run_case etcd etcd_extended_paged_dump 0 etcd -t 127.0.0.1 --port 2379 --dump --dump-batch 2 --dump-delay 0
-    # P4-D idempotency twin of etcd_open.
-    run_case etcd etcd_idempotency 0 etcd -t 127.0.0.1 --port 2379 --show-keys --dump
     # P4-E fuzz: garbage target URL must be rejected at parse.
     run_case etcd fuzz_etcd_garbage_target 2 etcd -t "not_a_real_url://[invalid]"
     run_case etcd fuzz_etcd_invalid_dump_batch 2 etcd -t 127.0.0.1 --port 2379 --dump --dump-batch -2
@@ -927,7 +934,7 @@ run_etcd_cases() {
 }
 
 run_qdrant_cases() {
-  run_case qdrant qdrant_default 0 qdrant -t 127.0.0.1 --port 6333 --collections --dump
+  run_case qdrant qdrant_default 0 qdrant -t 127.0.0.1 --port 6333 --collections --dump --discover
   run_case qdrant qdrant_url_http 0 qdrant -t "http://127.0.0.1:6333/collections?from=matrix" --collections --dump
   run_case qdrant qdrant_url_https_transport_fallback 0 qdrant -t "https://127.0.0.1:6333/collections" --collections
   run_case qdrant qdrant_multi_instance_urls 0 qdrant -t "http://127.0.0.1:6333/collections,http://127.0.0.1:26333/collections,http://127.0.0.1:26334/collections,http://127.0.0.1:26335/collections,http://127.0.0.1:26336/collections" --collections --dump
@@ -1018,7 +1025,10 @@ run_grpc_cases() {
 }
 
 run_kafka_cases() {
-  run_case kafka kafka_open 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
+  run_case kafka kafka_open 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50 --discover
+  if is_extended_matrix; then
+    run_case kafka kafka_idempotency 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50 --discover
+  fi
   run_case kafka kafka_auth 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
   run_case kafka kafka_multi_ports 0 kafka -t 127.0.0.1 --ports "9092,39092,39093,39094,39095" --show-topics --dump --max-messages 10
   run_text_case kafka kafka_debug_smoke 0 kafka -t 127.0.0.1 --port 9092 --debug
@@ -1035,8 +1045,6 @@ run_kafka_cases() {
     run_case kafka kafka_extended_dump_max_conflict 2 kafka -t 127.0.0.1 --port 9092 --dump 3 --max-messages 4
     run_case kafka kafka_extended_defcreds 0 kafka -t 127.0.0.1 --port 9092 --defcreds --show-topics
     run_case kafka kafka_extended_empty_password 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p "" --show-topics
-    # P4-D idempotency twin of kafka_open (must match base CLI exactly).
-    run_case kafka kafka_idempotency 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
     # Extended TLS: named topic dump + wrong password + P4-D idempotency.
     run_case kafka kafka_tls_extended_topic 0 kafka -t 127.0.0.1 --port 29093 -u admin -p admin --topic tls.orders --show-topics --dump 3
     run_case kafka kafka_tls_extended_bad_password 0 kafka -t 127.0.0.1 --port 29093 -u admin -p wrong --show-topics
@@ -1056,7 +1064,7 @@ run_kafka_cases() {
 }
 
 run_zookeeper_cases() {
-  run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --port 2181 --show-znodes --dump
+  run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --port 2181 --show-znodes --dump --discover
   run_case zookeeper zookeeper_multi_ports 0 zookeeper -t 127.0.0.1 --ports "2181,22181,22182,22183,22184" --show-znodes --dump
   run_text_case zookeeper zookeeper_debug_smoke 0 zookeeper -t 127.0.0.1 --port 2181 --debug
   if is_extended_matrix; then
@@ -1072,7 +1080,7 @@ run_zookeeper_auth_cases() {
 }
 
 run_keeper_cases() {
-  run_case keeper keeper_cluster 0 keeper -t 127.0.0.1 --port "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3
+  run_case keeper keeper_cluster 0 keeper -t 127.0.0.1 --port "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3 --discover
   if is_extended_matrix; then
     run_case keeper keeper_ddl_topology 0 keeper -t 127.0.0.1 --port 19181 --show-cluster --show-hosts
   fi
@@ -1121,12 +1129,39 @@ run_airflow_cases() {
   fi
 }
 
-run_service_block() {
+run_service_block() (
+  set -e
   local service="$1"
   local fn="$2"
+  CURRENT_SERVICE=""
+  trap cleanup_current_service EXIT
   start_service "${service}"
   "${fn}"
   stop_service "${service}"
+)
+
+SERVICE_SUMMARY="${OUT_DIR}/service-summary.tsv"
+MATRIX_FAILURES=()
+run_matrix_service() {
+  local service="$1" fn="$2" rc status started_at first_row mismatch_count
+  started_at="${SECONDS}"
+  first_row="$(( $(wc -l < "$STATUS_FILE") + 1 ))"
+  set +e
+  run_service_block "$service" "$fn"
+  rc=$?
+  set -e
+  mismatch_count="$(awk -F '\t' -v first="$first_row" 'NR >= first && $3 != $4 { count++ } END { print count+0 }' "$STATUS_FILE")"
+  if [ "$mismatch_count" -gt 0 ]; then
+    echo "[error] service:${service} has ${mismatch_count} case exit-code mismatch(es)" >&2
+    if [ "$rc" -eq 0 ]; then rc=1; fi
+  fi
+  status=passed
+  if [ "$rc" -ne 0 ]; then
+    status=failed
+    MATRIX_FAILURES+=("$service")
+    echo "[error] service:${service} failed (rc=${rc}); continuing with the next service" >&2
+  fi
+  printf '%s\t%s\t%d\t%d\n' "$service" "$status" "$rc" "$((SECONDS - started_at))" >> "$SERVICE_SUMMARY"
 }
 
 # The local QA runner owns startup/readiness and preserves existing containers.
@@ -1154,55 +1189,69 @@ set -e
 preflight_lab_environment
 cleanup_harbor_prepare_image
 printf "module\tlabel\texpected_exit\texit_code\tjson_path\tlog_path\n" > "${STATUS_FILE}"
+printf 'service\tstatus\texit_code\tduration_seconds\n' > "$SERVICE_SUMMARY"
 
 if is_extended_matrix; then
   run_negative_cli_cases
 fi
 
-run_service_block exporters run_exporters_cases
-run_service_block registry run_registry_cases
-run_service_block registry-harbor run_registry_harbor_cases
-run_service_block grafana run_grafana_cases
-run_service_block minio run_minio_cases
-run_service_block rabbitmq run_rabbitmq_cases
-run_service_block airflow run_airflow_cases
-run_service_block gitlab run_gitlab_cases
-run_service_block consul run_consul_cases
-run_service_block kubeapi run_kubeapi_cases
-run_service_block postgres run_postgres_cases
-run_service_block mongodb run_mongodb_cases
-run_service_block oracle run_oracle_cases
-run_service_block docker run_docker_cases
-run_service_block clickhouse run_clickhouse_cases
-run_service_block redis run_redis_cases
-run_service_block valkey run_valkey_cases
-run_service_block etcd run_etcd_cases
-run_service_block qdrant run_qdrant_cases
-run_service_block elastic run_elastic_cases
-run_service_block opensearch run_opensearch_cases
-run_service_block grpc run_grpc_cases
-run_service_block kafka run_kafka_cases
-run_service_block zookeeper run_zookeeper_cases
-run_service_block zookeeper-auth run_zookeeper_auth_cases
-run_service_block keeper run_keeper_cases
-run_service_block proxmox run_proxmox_cases
+run_matrix_service exporters run_exporters_cases
+run_matrix_service registry run_registry_cases
+run_matrix_service registry-harbor run_registry_harbor_cases
+run_matrix_service grafana run_grafana_cases
+run_matrix_service minio run_minio_cases
+run_matrix_service rabbitmq run_rabbitmq_cases
+run_matrix_service airflow run_airflow_cases
+run_matrix_service gitlab run_gitlab_cases
+run_matrix_service consul run_consul_cases
+run_matrix_service kubeapi run_kubeapi_cases
+run_matrix_service postgres run_postgres_cases
+run_matrix_service mongodb run_mongodb_cases
+run_matrix_service oracle run_oracle_cases
+run_matrix_service docker run_docker_cases
+run_matrix_service clickhouse run_clickhouse_cases
+run_matrix_service redis run_redis_cases
+run_matrix_service valkey run_valkey_cases
+run_matrix_service etcd run_etcd_cases
+run_matrix_service qdrant run_qdrant_cases
+run_matrix_service elastic run_elastic_cases
+run_matrix_service opensearch run_opensearch_cases
+run_matrix_service grpc run_grpc_cases
+run_matrix_service kafka run_kafka_cases
+run_matrix_service zookeeper run_zookeeper_cases
+run_matrix_service zookeeper-auth run_zookeeper_auth_cases
+run_matrix_service keeper run_keeper_cases
+run_matrix_service proxmox run_proxmox_cases
 if is_extended_matrix; then
-  run_service_block proxy-isolated run_proxy_isolated_cases
+  run_matrix_service proxy-isolated run_proxy_isolated_cases
 fi
 
 if [ "${REDPOSTURE_REVIEW_CAPTURE_TXT:-0}" = "1" ]; then
   echo "review TXT capture passed: ${STATUS_FILE}"
+  if [ "${#MATRIX_FAILURES[@]}" -gt 0 ]; then
+    echo "[error] failed services: ${MATRIX_FAILURES[*]}" >&2
+    exit 1
+  fi
   exit 0
 fi
 
-"${PYTHON_BIN}" "${VERIFY_SCRIPT}" --status-file "${STATUS_FILE}" --out-dir "${OUT_DIR}" --profile "${MATRIX_PROFILE}"
+if ! "${PYTHON_BIN}" "${VERIFY_SCRIPT}" --status-file "${STATUS_FILE}" --out-dir "${OUT_DIR}" --profile "${MATRIX_PROFILE}"; then
+  MATRIX_FAILURES+=("postrun")
+fi
 if is_extended_matrix; then
-  "${PYTHON_BIN}" "${ROOT_DIR}/scripts/matrix_flag_coverage.py" \
+  if ! "${PYTHON_BIN}" "${ROOT_DIR}/scripts/matrix_flag_coverage.py" \
     --matrix-script "${ROOT_DIR}/scripts/run_lab_matrix_sequential.sh" \
     --status-file "${STATUS_FILE}" \
-    --out "${OUT_DIR}/postrun_checks/flag-coverage.json"
+    --out "${OUT_DIR}/postrun_checks/flag-coverage.json"; then
+    MATRIX_FAILURES+=("flag-coverage")
+  fi
 fi
 
+if [ "${#MATRIX_FAILURES[@]}" -gt 0 ]; then
+  echo "[error] failed matrix stages: ${MATRIX_FAILURES[*]}" >&2
+  echo "Service summary: ${SERVICE_SUMMARY}" >&2
+  exit 1
+fi
 echo
 echo "Sequential matrix complete (${MATRIX_PROFILE})."
 echo "OUT_DIR=${OUT_DIR}"

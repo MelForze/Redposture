@@ -79,6 +79,35 @@ def test_record_line_appends_bucket_and_object_counts():
     assert line == "MINIO\t10.0.0.5\t19000\t [+] minioadmin (admin:False) (buckets:3) (objects:2)"
 
 
+def test_discover_streamed_auth_line_uses_inventory_sections_for_later_counts():
+    rec = _record(
+        credential_state="valid",
+        credential_results=[{"access_key": "minioadmin", "state": "valid"}],
+        admin_capability="confirmed",
+        _discover_auth_before_data=True,
+        buckets=[{"name": "bucket"}],
+        objects_count=3,
+    )
+    line = render._format_record(rec, "txt")
+    assert line == "MINIO\t10.0.0.5\t19000\t [+] minioadmin (admin:True)"
+    console = _Console()
+    assert render._render_colored_minio_line(console, line)
+    assert "<true_red>" in console.lines[0]
+
+
+def test_discover_streamed_auth_line_keeps_zero_bucket_count_in_inventory():
+    rec = _record(
+        credential_state="valid",
+        credential_results=[{"access_key": "minioadmin", "state": "valid"}],
+        admin_capability="confirmed",
+        _discover_auth_before_data=True,
+        buckets=[],
+    )
+    assert "(buckets:0)" not in render._format_record(rec, "txt")
+    lines = render._format_minio_detail_records(rec, "txt")
+    assert lines == ["MINIO\t10.0.0.5\t19000\t [*] Buckets Enumeration (Count:0)"]
+
+
 def test_record_line_counts_absent_without_enumeration():
     rec = _record(
         credential_state="valid",
@@ -101,7 +130,18 @@ def test_record_line_admin_boolean_mapping():
     assert "(admin:True)" in _admin("confirmed")
     assert "(admin:True)" in _admin("partial")
     assert "(admin:False)" in _admin("not_confirmed")
-    assert "(admin:unknown)" in _admin("unknown")
+    assert "(admin:unverified)" in _admin("unknown")
+
+
+def test_unverified_admin_capability_is_orange() -> None:
+    rec = _record(
+        credential_state="valid",
+        credential_results=[{"access_key": "k", "state": "valid"}],
+        admin_capability="unknown",
+    )
+    console = _Console()
+    render._render_colored_minio_line(console, render._format_record(rec, "txt"))
+    assert "<orange>admin:unverified</orange>" in console.lines[0]
 
 
 def test_record_line_empty_for_anonymous_or_invalid():
@@ -197,6 +237,9 @@ def test_discover_summary_line_clickhouse_style():
     assert f"{_PFX} [*] Discover Secrets (status:complete) (coverage:100.00%) (findings:2) (objects:3)" in lines
     assert f'{_PFX} [!] ApiKey Value="AKIA...MPLE" Place="creds/app.env$"' in lines
     assert f'{_PFX} [!] Pass Value="p***d" Place="creds/db.yml.db.pass"' in lines
+    assert lines.index(next(line for line in lines if "Discover Secrets (status:" in line)) > lines.index(
+        next(line for line in lines if 'Pass Value="p***d"' in line)
+    )
 
 
 def test_discover_summary_partial_with_zero_findings():

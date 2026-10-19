@@ -86,11 +86,13 @@ def _gitlab_options(
     *,
     project_filters: list[str] | None = None,
     clone: bool = False,
+    show_repositories: bool = False,
 ) -> dict[str, Any]:
     return {
         "project_filters": list(project_filters or []),
         "clone": clone,
         "clone_dir": "/tmp/gitlab-clones",
+        "show_repositories": show_repositories,
     }
 
 
@@ -497,7 +499,7 @@ def test_gitlab_valid_token_collects_capabilities_in_stable_order(
     record = gitlab.collect_gitlab_data(
         ctx,
         {"is_gitlab": True, "status": "valid_credentials", "https": True},
-        _gitlab_options(),
+        _gitlab_options(show_repositories=True),
     )
 
     assert paginated_tokens == [None, "valid"]

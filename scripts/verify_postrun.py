@@ -312,6 +312,7 @@ _EXTENDED_EXPECTED_LABELS = (
     "fuzz_mongodb_missing_targets",
     "fuzz_oracle_missing_targets",
     "fuzz_docker_missing_targets",
+    "fuzz_docker_defcreds_missing_targets",
     "fuzz_airflow_missing_targets",
     "fuzz_clickhouse_missing_targets",
     "fuzz_redis_missing_targets",
@@ -324,7 +325,7 @@ _EXTENDED_EXPECTED_LABELS = (
     "fuzz_proxmox_missing_targets",
     "fuzz_registry_username_without_password",
     "fuzz_registry_token_basic_conflict",
-    "fuzz_registry_show_tags_without_repository",
+    "fuzz_registry_tag_without_repository",
     "fuzz_registry_metadata_without_tag",
     "fuzz_harbor_missing_targets",
     "fuzz_nexus_missing_targets",
@@ -460,9 +461,14 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "registry_open": ("redposture/demo-api", "redposture/web-ui"),
     "registry_harbor": ("core/control-plane", "security/scanner-adapter"),
     "registry_gitlab": ("gitlab/project-api", "team/ops-sidecar"),
-    "registry_nexus": ("raw-internal", "raw-observability", "raw-security", "release-metadata.json"),
-    "gitlab_public": ("redposture-lab/public-api", "team-platform/ops-scripts"),
-    "gitlab_analyst": ("redposture-lab/security-reports", "redposture-lab/incident-timeline"),
+    "registry_nexus": (
+        "raw-internal",
+        "raw-observability",
+        "raw-security",
+        "/artifacts/sbom/redposture-api-2.6.0.spdx.json",
+    ),
+    "gitlab_public": ('"public_projects_count": 4',),
+    "gitlab_analyst": ('"token_projects_count": 6',),
     "consul_open": ("redposture/kafka/sasl_password", "svc-redposture-api", "gitlab-runner"),
     "consul_acl_read": ("redposture/kafka/sasl_password", "redposture/env", "lab-acl"),
     "consul_multi_instance_urls": ("redposture/kafka/sasl_password", "inventory/services/gitlab/url"),
@@ -1671,7 +1677,16 @@ _CAPABILITY_FIELDS_BY_MODULE: dict[str, tuple[str, ...]] = {
         "nexus_repositories",
         "nexus_assets",
     ),
-    "gitlab": ("version", "open_endpoints", "public_projects", "token_projects", "clone_results", "container_registry"),
+    "gitlab": (
+        "version",
+        "open_endpoints",
+        "public_projects",
+        "token_projects",
+        "public_projects_count",
+        "token_projects_count",
+        "clone_results",
+        "container_registry",
+    ),
     "grpc": ("services", "methods", "reflection_enabled", "invoke_result", "grpc_web_detected"),
     "proxmox": ("auth_method", "successful_endpoints", "nodes", "users", "added_user"),
     "grafana": ("server_version", "datasource_count", "datasources", "check_results"),
@@ -2492,6 +2507,7 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_exporters_trigger_json_listen_without_output": ("--format json with listeners enabled requires --output",),
     "fuzz_exporters_trigger_negative_listen_seconds": ("--listen-seconds must be > 0",),
     **{f"fuzz_{module}_missing_targets": (f"{module} requires -t/--targets",) for module in _MISSING_TARGET_MODULES},
+    "fuzz_docker_defcreds_missing_targets": ("docker requires -t/--targets",),
     "fuzz_registry_missing_targets": ("docker-registry requires -t/--targets",),
     "fuzz_airflow_missing_targets": ("targets are required",),
     "fuzz_harbor_option_surface": ("failed to parse targets",),
@@ -2499,7 +2515,7 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_gitlab_oci_option_surface": ("failed to parse targets",),
     "fuzz_registry_username_without_password": ("--username and --password must be set together",),
     "fuzz_registry_token_basic_conflict": ("use either --token or --username/--password, not both",),
-    "fuzz_registry_show_tags_without_repository": ("--show-tags requires --repository",),
+    "fuzz_registry_tag_without_repository": ("--tag requires --repository",),
     "fuzz_registry_metadata_without_tag": ("--metadata requires --repository and --tag",),
     "fuzz_registry_download_without_image": ("--download requires --image",),
     "fuzz_grafana_username_without_password": ("--password is required when --username is set",),
@@ -3031,13 +3047,21 @@ def _normalize_for_golden(
                     for data_key, data_value in sorted(value.items(), key=lambda item: str(item[0]))
                 }
                 continue
-            result[key] = _normalize_for_golden(
+            normalized_value = _normalize_for_golden(
                 value,
                 out_dir=out_dir,
                 module=effective_module,
                 label=label,
                 parent_key=key,
             )
+            if key == "content_discovery" and isinstance(normalized_value, dict):
+                findings = normalized_value.get("findings")
+                if isinstance(findings, list):
+                    normalized_value["findings"] = sorted(
+                        findings,
+                        key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                    )
+            result[key] = normalized_value
         return result
     if isinstance(payload, list):
         normalized = [

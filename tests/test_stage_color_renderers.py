@@ -132,6 +132,23 @@ def test_render_colored_redis_colors_auth_false_and_keys() -> None:
     _assert_parentheses_are_not_colored(console.paint_calls)
 
 
+def test_render_colored_redis_colors_known_version_orange() -> None:
+    console = _RecordingConsole()
+    line = "REDIS\t127.0.0.1\t6379\t [*] Redis Database (auth required:False) (version:7.4.11)"
+    assert _render_colored_redis_line(console, line) is True
+    assert _contains_paint(console.paint_calls, "(version:7.4.11)", "orange")
+    assert "\x1b[" not in line
+    _assert_parentheses_are_not_colored(console.paint_calls)
+
+
+def test_render_colored_redis_version_respects_no_color(capsys: pytest.CaptureFixture[str]) -> None:
+    line = "REDIS\t127.0.0.1\t6379\t [*] Redis Database (auth required:False) (version:7.4.11)"
+    assert _render_colored_redis_line(Console(no_color=True), line) is True
+    captured = capsys.readouterr().out
+    assert "(version:7.4.11)" in captured
+    assert "\x1b[" not in captured
+
+
 def test_legacy_mongodb_verifier_unavailable_uses_orange_value() -> None:
     console = _RecordingConsole()
     line = "MONGODB\t127.0.0.1\t27036\t [*] credential verification unavailable (reason:legacy MongoDB wire protocol)"
@@ -232,9 +249,9 @@ def test_render_colored_clickhouse_colors_caps_and_dbs() -> None:
 
 def test_render_colored_qdrant_colors_rce_and_idor() -> None:
     console = _RecordingConsole()
-    line = "QDRANT\t127.0.0.1\t6333\t [!] possible issue RCE! (idor:true) (collections:1)"
+    line = "QDRANT\t127.0.0.1\t6333\t [!] RCE:potential (idor:true) (collections:1)"
     assert _render_colored_qdrant_line(console, line) is True
-    assert _contains_paint(console.paint_calls, "RCE!", "orange")
+    assert _contains_paint(console.paint_calls, "RCE:potential", "orange")
     assert _contains_paint(console.paint_calls, "(idor:true)", "red")
     assert _contains_paint(console.paint_calls, "(collections:1)", "red")
 
@@ -258,6 +275,17 @@ def test_render_colored_consul_colors_detect_agent_count() -> None:
     )
     assert _render_colored_consul_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(agent:1)", "red")
+
+
+def test_consul_token_denial_and_postgres_version_colors() -> None:
+    console = _RecordingConsole()
+    assert _render_colored_consul_line(console, "CONSUL\t127.0.0.1\t8500\t [-] token auth failed (Token not found)")
+    assert _contains_paint(console.paint_calls, "(Token not found)", "bright_green")
+    assert _render_colored_postgres_line(
+        console, "POSTGRES\t127.0.0.1\t5432\t [*] Postgres Database (auth required:False) (version:16.4)"
+    )
+    assert _contains_paint(console.paint_calls, "(version:16.4)", "orange")
+    assert all("\x1b[" not in line for line in console.rendered_lines)
 
 
 def test_render_colored_elastic_colors_access_and_capabilities() -> None:
@@ -342,6 +370,13 @@ def test_render_colored_grafana_colors_datasources_and_auth() -> None:
     assert _contains_paint(console.paint_calls, "(datasources:4)", "red")
     assert _contains_paint(console.paint_calls, "(auth required:True)", "bright_green")
 
+    heading = _RecordingConsole()
+    assert _render_colored_grafana_line(
+        heading, "GRAFANA\t127.0.0.1\t3000\t [*] Datasources Enumeration (datasources:4)"
+    )
+    assert _contains_paint(heading.paint_calls, "Datasources Enumeration", "white")
+    assert _contains_paint(heading.paint_calls, "datasources:4", "red")
+
 
 def test_render_colored_gitlab_colors_login_page_and_repo_capabilities() -> None:
     console = _RecordingConsole()
@@ -369,7 +404,7 @@ def test_render_colored_proxmox_colors_capabilities_and_finding_payload() -> Non
     assert _render_colored_proxmox_line(console_caps, caps_line) is True
     assert _contains_paint(console_caps.paint_calls, "(adduser:false)", "bright_green")
     assert _contains_paint(console_caps.paint_calls, "(modify:true)", "red")
-    assert _contains_paint(console_caps.paint_calls, "(backup:unknown)", "yellow")
+    assert _contains_paint(console_caps.paint_calls, "(backup:unknown)", "orange")
     assert _contains_paint(console_caps.paint_calls, "(read:true)", "red")
 
     console_finding = _RecordingConsole()
@@ -380,6 +415,19 @@ def test_render_colored_proxmox_colors_capabilities_and_finding_payload() -> Non
         'Token Value="abc" Place="/access$.token"',
         "orange",
     )
+
+
+def test_proxmox_inventory_counts_and_discovered_names_use_airflow_palette() -> None:
+    for count, color in (("2", "true_red"), ("0", "bright_green"), ("unknown", "orange")):
+        console = _RecordingConsole()
+        assert _render_colored_proxmox_line(
+            console, f"PROXMOX\t127.0.0.1\t8006\t [*] Nodes Enumeration (Count:{count})"
+        )
+        assert _contains_paint(console.paint_calls, "Nodes Enumeration", "white")
+        assert _contains_paint(console.paint_calls, f"Count:{count}", color)
+    detail = _RecordingConsole()
+    assert _render_colored_proxmox_line(detail, "PROXMOX\t127.0.0.1\t8006\t pve1")
+    assert _contains_paint(detail.paint_calls, "pve1", "orange")
 
 
 def test_proxmox_unverified_credential_reason_is_orange() -> None:

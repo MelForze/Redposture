@@ -11,6 +11,9 @@
     "can_list_namespaces": true,
     "can_list_pods": null,
     "can_list_secrets": true,
+    "configmaps": [],
+    "configmaps_error": null,
+    "configmaps_partial": false,
     "credentials_source": "anonymous",
     "detection_signals": [
       "kubeapi.probe",

@@ -327,6 +327,31 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             result["jobs"] = [{"name": item["name"], "color": item.get("color")} for item in selected]
             result["jobs_access"] = "allowed"
             result["jobs_count"] = len(jobs)
+            if bool(getattr(args, "discover", False)):
+                job_configs: list[dict[str, Any]] = []
+                build_logs: list[dict[str, Any]] = []
+                build_envs: list[dict[str, Any]] = []
+                for item in selected[:20]:
+                    job_name = str(item["name"])
+                    path = "/job/" + quote(job_name, safe="")
+                    config_response = _get(client, base, path + "/config.xml", basic)
+                    if config_response.status == 200 and not config_response.error and not config_response.truncated:
+                        job_configs.append({"job": job_name, "config": config_response.text[:65536]})
+                    last = item.get("lastBuild")
+                    number = last.get("number") if isinstance(last, dict) else None
+                    if isinstance(number, int) and not isinstance(number, bool):
+                        log_response = _get(client, base, path + f"/{number}/consoleText", basic)
+                        if log_response.status == 200 and not log_response.error and not log_response.truncated:
+                            build_logs.append({"job": job_name, "build": number, "log": log_response.text[:65536]})
+                        env_response = _get(client, base, path + f"/{number}/injectedEnvVars/api/json", basic)
+                        env_data = _json_object(env_response)
+                        if env_data is not None:
+                            env_map = env_data.get("envMap")
+                            if isinstance(env_map, dict):
+                                build_envs.append({"job": job_name, "build": number, "env": env_map})
+                result["job_configs"] = job_configs
+                result["build_logs"] = build_logs
+                result["build_envs"] = build_envs
             if show_builds:
                 builds: list[dict[str, Any]] = []
                 artifacts: list[dict[str, Any]] = []

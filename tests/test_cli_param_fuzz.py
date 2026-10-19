@@ -338,10 +338,6 @@ def _curated_policy_cases() -> tuple[PolicyCase, ...]:
             for product in ("docker-registry", "harbor", "nexus")
         ),
         *(
-            _policy_case(product, "--show-tags requires --repository", "--show-tags")
-            for product in ("docker-registry", "harbor", "nexus")
-        ),
-        *(
             _policy_case(product, "--tag requires --repository", "--tag", "latest")
             for product in ("docker-registry", "harbor", "nexus")
         ),

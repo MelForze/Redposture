@@ -733,6 +733,20 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         # working access-key:secret pair. Redacted from JSON (see stage spec),
         # matching how minio already keeps attempted_credentials out of JSON.
         merged["credential_secret"] = getattr(credential, "password", None)
+        # The auth phase can be emitted immediately for --enum-cve/--discover.
+        # Probe read-only Admin API access now so that its first result already
+        # has a supported admin verdict, then reuse it in capabilities_record.
+        try:
+            cap = classify_admin_capability(client)
+        except Exception as exc:  # a failed Admin API must not erase a verified S3 credential
+            cap = AdminCapability(
+                capability="unknown",
+                identity_kind="unknown",
+                evidence={"probe_error": type(exc).__name__},
+            )
+        merged["admin_capability"] = cap.capability
+        merged["identity_kind"] = cap.identity_kind
+        merged["admin_evidence"] = cap.evidence
     return merged
 
 
@@ -742,10 +756,11 @@ def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     if str(prior.get("credential_state") or "") not in {"valid", "valid_but_restricted"}:
         return merged
     client = _client_for(ctx, ctx.credential)
-    cap = classify_admin_capability(client)
-    merged["admin_capability"] = cap.capability
-    merged["identity_kind"] = cap.identity_kind
-    merged["admin_evidence"] = cap.evidence
+    if "admin_capability" not in merged:
+        cap = classify_admin_capability(client)
+        merged["admin_capability"] = cap.capability
+        merged["identity_kind"] = cap.identity_kind
+        merged["admin_evidence"] = cap.evidence
     # The Admin API carries the authoritative server version; it overrides any
     # unauthenticated Server-header guess captured at detection time.
     admin_version = _admin_info_version(client.admin_info(signed=True))
@@ -753,9 +768,9 @@ def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         merged["version"] = admin_version
     admin_plane = (
         "ok"
-        if cap.capability in {"confirmed", "partial"}
+        if merged["admin_capability"] in {"confirmed", "partial"}
         else "denied"
-        if cap.capability == "not_confirmed"
+        if merged["admin_capability"] == "not_confirmed"
         else "unknown"
     )
     merged["permissions"] = {
@@ -984,13 +999,67 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             # counting as we go. Memory stays bounded to one page (~1000).
             fd, stream_path = tempfile.mkstemp(prefix="redposture-minio-objects-", suffix=".txt")
             count = 0
+            grouped = output_format == "txt" and (want_buckets or want_dump)
+            dump_rows = [item for item in merged.get("object_dumps", []) if isinstance(item, dict)]
+            emitted_dumps: set[int] = set()
+            dumps_by_object: dict[tuple[str, str], list[int]] = {}
+            for index, dump in enumerate(dump_rows):
+                key = (str(dump.get("bucket") or ""), str(dump.get("key") or ""))
+                dumps_by_object.setdefault(key, []).append(index)
+            bucket_details = {
+                str(item.get("name")): item
+                for item in merged.get("buckets", [])
+                if isinstance(item, dict) and item.get("name")
+            }
+            stream_prefix = f"MINIO\t{ctx.host or '?'}\t{int(ctx.port or 0)}\t"
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                if grouped:
+                    handle.write(f"{stream_prefix} [*] Buckets and Objects\n")
+                    for name in bucket_details:
+                        if name not in target_buckets:
+                            handle.write(f"{stream_prefix} {name}\n")
+                next_bucket = 0
+                active_bucket: str | None = None
+
+                def emit_bucket(name: str) -> None:
+                    wp = (merged.get("write_probe") or {}).get(name)
+                    suffix = f" (write:{wp.get('write')})" if isinstance(wp, dict) else ""
+                    handle.write(f"{stream_prefix} {name}{suffix}\n")
+
                 for obj in _enum.iter_objects_multi(client, target_buckets):
+                    if grouped and obj.bucket != active_bucket:
+                        while next_bucket < len(target_buckets) and target_buckets[next_bucket] != obj.bucket:
+                            emit_bucket(target_buckets[next_bucket])
+                            next_bucket += 1
+                        if next_bucket < len(target_buckets):
+                            emit_bucket(target_buckets[next_bucket])
+                            next_bucket += 1
+                        active_bucket = obj.bucket
                     handle.write(_render.object_stream_line(ctx.host, ctx.port, asdict(obj), output_format) + "\n")
                     count += 1
+                    if grouped:
+                        for index in dumps_by_object.get((obj.bucket, obj.key), []):
+                            if index not in emitted_dumps:
+                                dump = dump_rows[index]
+                                for line in _render.format_object_dump_lines(
+                                    merged, dump, labeled=bool(merged.get("object_dumps_labeled"))
+                                ):
+                                    handle.write(line + "\n")
+                                emitted_dumps.add(index)
+                if grouped:
+                    for bucket_name in target_buckets[next_bucket:]:
+                        emit_bucket(bucket_name)
+                    for index, dump in enumerate(dump_rows):
+                        if index not in emitted_dumps:
+                            for line in _render.format_object_dump_lines(
+                                merged, dump, labeled=bool(merged.get("object_dumps_labeled"))
+                            ):
+                                handle.write(line + "\n")
             merged["objects_streamed"] = True
             merged["objects_count"] = count
             merged["_stream_lines_file"] = stream_path
+            if grouped:
+                merged["_inventory_grouped_stream"] = True
         if want_discover:
             budget = _discover.Budget(
                 time_budget=getattr(args, "discover_time", None),

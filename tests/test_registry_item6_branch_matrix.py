@@ -50,6 +50,7 @@ def test_registry_detection_confirms_only_its_own_product(
         "_fetch_harbor_info",
         lambda *_args, **_kwargs: ({"harbor_version": "v2.11.1"}, None) if actual == "harbor" else (None, "not harbor"),
     )
+    monkeypatch.setattr(actions, "_fetch_nexus_repository_records", lambda *_args, **_kwargs: ([], None))
     ctx = SimpleNamespace(
         host="host",
         port=5000,

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core.cli_args import parse_args
+from redposture_core.console import Console
 from redposture_core.stage_runtime import (
     AuditCommandPlan,
     AuditCommandResult,
@@ -69,6 +70,303 @@ class _ConsoleRecorder:
 
     def error(self, message: str) -> None:
         self.errors.append(message)
+
+
+def test_multi_target_live_lines_stay_grouped_across_nested_workers(tmp_path: Path) -> None:
+    emitted: list[str] = []
+    first_data_started = threading.Event()
+    second_data_emitted = threading.Event()
+    output_path = tmp_path / "grouped.txt"
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="open_no_auth",
+            extra={"is_demo": True},
+        )
+
+    def data(ctx, record: AuditRecord) -> AuditRecord:
+        assert ctx.live_emit is not None
+        assert ctx.nested_scheduler is not None
+        if ctx.host == "first":
+            first_data_started.set()
+            assert second_data_emitted.wait(timeout=5)
+        else:
+            assert first_data_started.wait(timeout=5)
+
+        # A context created inside the shared nested pool must inherit the
+        # target's sink, even though it runs on a different thread.
+        def emit_nested(_item: int) -> None:
+            nested_ctx = runner._ctx(
+                ctx.host,
+                ctx.port,
+                ctx.target,
+                AuditCredentialRun(source="anonymous"),
+                phase="data",
+                run_deep_checks=True,
+                debug_emit=None,
+            )
+            assert nested_ctx.live_emit is not None
+            nested_ctx.live_emit((f"DEMO {ctx.host} nested",))
+
+        ctx.nested_scheduler.map_ordered((1,), emit_nested)
+        if ctx.host == "second":
+            second_data_emitted.set()
+        return AuditRecord.from_mapping({**record.to_dict(), "done": True}, module="demo", service="demo")
+
+    def render(record: AuditRecord) -> list[str]:
+        lines = [f"DEMO {record.host} detected"]
+        if record.extra.get("done"):
+            lines.append(f"DEMO {record.host} complete")
+        return lines
+
+    runner = AuditCommandRunner(
+        args=SimpleNamespace(discover=True, debug=False),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            data=data,
+            render=render,
+            is_detected=lambda record: record.extra.get("is_demo") is True,
+            deep_gate=lambda _record: (True, "run"),
+        ),
+        emit_line=emitted.append,
+    )
+    result = runner.run_plan(
+        AuditCommandPlan(
+            targets_by_port={1234: ("first", "second")},
+            output_path=str(output_path),
+            output_format="txt",
+            workers=2,
+        )
+    )
+
+    assert result.detected_count == 2
+    assert result.emitted_lines == 4  # phase-rendered lines; nested lines are hook-owned
+    assert output_path.read_text(encoding="utf-8").splitlines() == emitted
+    assert len(emitted) == 6
+    assert [line.split()[1] for line in emitted] in (
+        ["first"] * 3 + ["second"] * 3,
+        ["second"] * 3 + ["first"] * 3,
+    )
+    for host in ("first", "second"):
+        assert [line for line in emitted if f" {host} " in line] == [
+            f"DEMO {host} detected",
+            f"DEMO {host} nested",
+            f"DEMO {host} complete",
+        ]
+    assert "\x1b[" not in output_path.read_text(encoding="utf-8")
+
+
+def test_multi_target_json_keeps_one_record_per_target_without_live_lines(tmp_path: Path) -> None:
+    emitted: list[str] = []
+    output_path = tmp_path / "targets.jsonl"
+
+    def detect(ctx) -> AuditRecord:
+        assert ctx.live_emit is None
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="open_no_auth",
+            extra={"is_demo": True},
+        )
+
+    runner = AuditCommandRunner(
+        args=SimpleNamespace(discover=True, debug=False),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            render=lambda record: [f"DEMO {record.host} detected"],
+            is_detected=lambda record: record.extra.get("is_demo") is True,
+        ),
+        emit_line=emitted.append,
+    )
+    result = runner.run_plan(
+        AuditCommandPlan(
+            targets_by_port={1234: ("first", "second")},
+            output_path=str(output_path),
+            output_format="json",
+            workers=2,
+        )
+    )
+
+    saved = output_path.read_text(encoding="utf-8")
+    assert emitted == saved.splitlines()
+    assert {json.loads(line)["host"] for line in emitted} == {"first", "second"}
+    assert result.emitted_lines == 2
+    assert "\x1b[" not in saved
+
+
+def test_same_host_different_ports_form_separate_output_blocks(tmp_path: Path) -> None:
+    emitted: list[str] = []
+    first_port_started = threading.Event()
+    second_port_emitted = threading.Event()
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="open_no_auth",
+            extra={"is_demo": True},
+        )
+
+    def data(ctx, record: AuditRecord) -> AuditRecord:
+        assert ctx.live_emit is not None
+        if ctx.port == 6379:
+            first_port_started.set()
+            assert second_port_emitted.wait(timeout=5)
+        else:
+            assert first_port_started.wait(timeout=5)
+        ctx.live_emit((f"DEMO same:{ctx.port} data",))
+        if ctx.port == 6380:
+            second_port_emitted.set()
+        return AuditRecord.from_mapping({**record.to_dict(), "done": True}, module="demo", service="demo")
+
+    runner = AuditCommandRunner(
+        args=SimpleNamespace(discover=True, debug=False),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=6379,
+            detect=detect,
+            data=data,
+            render=lambda record: [
+                f"DEMO same:{record.port} detected",
+                *([f"DEMO same:{record.port} complete"] if record.extra.get("done") else []),
+            ],
+            is_detected=lambda record: record.extra.get("is_demo") is True,
+            deep_gate=lambda _record: (True, "run"),
+        ),
+        emit_line=emitted.append,
+    )
+    runner.run_plan(
+        AuditCommandPlan(
+            targets_by_port={6379: ("same",), 6380: ("same",)},
+            output_path=str(tmp_path / "same-host.txt"),
+            output_format="txt",
+            workers=2,
+        )
+    )
+    assert [line.split()[1] for line in emitted] in (
+        ["same:6379"] * 3 + ["same:6380"] * 3,
+        ["same:6380"] * 3 + ["same:6379"] * 3,
+    )
+    for port in (6379, 6380):
+        assert [line for line in emitted if f"same:{port}" in line] == [
+            f"DEMO same:{port} detected",
+            f"DEMO same:{port} data",
+            f"DEMO same:{port} complete",
+        ]
+
+
+def test_cancelled_multi_target_scan_drops_late_buffered_lines(tmp_path: Path) -> None:
+    blocked_started = threading.Event()
+    release_blocked = threading.Event()
+    blocked_finished = threading.Event()
+    emitted: list[str] = []
+    output_path = tmp_path / "cancelled.txt"
+
+    def detect(ctx) -> AuditRecord:
+        if ctx.host == "blocked":
+            assert ctx.live_emit is not None
+            ctx.live_emit(("DEMO blocked early",))
+            blocked_started.set()
+            try:
+                assert release_blocked.wait(timeout=5)
+                assert ctx.live_emit is not None
+                ctx.live_emit(("DEMO blocked late",))
+            finally:
+                blocked_finished.set()
+            return AuditRecord(
+                host=ctx.host,
+                port=ctx.port,
+                module="demo",
+                service="demo",
+                status="open_no_auth",
+                extra={"is_demo": True},
+            )
+        assert blocked_started.wait(timeout=5)
+        raise TypeError("contract violation")
+
+    runner = AuditCommandRunner(
+        args=SimpleNamespace(discover=True, debug=False),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            render=lambda record: [f"DEMO {record.host} detected"],
+            is_detected=lambda record: record.extra.get("is_demo") is True,
+        ),
+        emit_line=emitted.append,
+    )
+    with pytest.raises(TypeError, match="contract violation"):
+        runner.run_plan(
+            AuditCommandPlan(
+                targets_by_port={1234: ("blocked", "bad")},
+                output_path=str(output_path),
+                output_format="txt",
+                workers=2,
+            )
+        )
+    release_blocked.set()
+    assert blocked_finished.wait(timeout=5)
+    assert emitted == ["DEMO blocked early"]
+    assert output_path.read_text(encoding="utf-8").splitlines() == emitted
+
+
+def test_grouped_multi_target_no_color_and_saved_txt_have_no_ansi(tmp_path: Path, capsys) -> None:
+    output_path = tmp_path / "plain.txt"
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="open_no_auth",
+            extra={"is_demo": True},
+        )
+
+    runner = AuditCommandRunner(
+        args=SimpleNamespace(debug=False),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            render=lambda record: [f"DEMO\t{record.host}\t{record.port}\t[+] found"],
+            colorize=lambda console, line: console.render_tagged_payload_line(line, "DEMO"),
+            is_detected=lambda record: record.extra.get("is_demo") is True,
+            live_phase_output=True,
+        ),
+        console=Console(no_color=True),
+    )
+    runner.run_plan(
+        AuditCommandPlan(
+            targets_by_port={1234: ("first", "second")},
+            output_path=str(output_path),
+            output_format="txt",
+            workers=2,
+        )
+    )
+
+    stdout = capsys.readouterr().out
+    stored = output_path.read_text(encoding="utf-8")
+    assert stdout.count("[+] found") == 2
+    assert stored.count("[+] found") == 2
+    assert "\x1b[" not in stdout + stored
 
 
 def test_opt_in_live_phase_output_shows_service_before_interactive_data(tmp_path: Path) -> None:
@@ -2228,6 +2526,90 @@ def test_enum_cve_streams_service_and_findings_before_data_phase_without_duplica
     assert emitted.count("DEMO service detected") == 1
     assert sum("CVE's Enumeration" in line for line in emitted) == 1
     assert sum("CVE-2024-39877 potentially affected" in line for line in emitted) == 1
+
+
+def test_deferred_phase_output_uses_only_final_enriched_lines(tmp_path: Path) -> None:
+    emitted: list[str] = []
+    output_path = tmp_path / "deferred.txt"
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            {"host": ctx.host, "port": ctx.port, "is_demo": True, "status": "auth_required"},
+            module="demo",
+            service="demo",
+        )
+
+    def auth(_ctx, record: AuditRecord) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            {**record.to_dict(), "credential_state": "valid", "admin": "unknown"},
+            module="demo",
+            service="demo",
+        )
+
+    def capabilities(_ctx, record: AuditRecord) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            {**record.to_dict(), "admin": True, "version": "1.2.3"},
+            module="demo",
+            service="demo",
+        )
+
+    def data(ctx, record: AuditRecord) -> AuditRecord:
+        if ctx.live_emit is not None:
+            assert emitted == ["DEMO service version:1.2.3"]
+        return record
+
+    spec = ModuleAuditSpec(
+        module="demo",
+        label="DEMO",
+        default_port=1234,
+        detect=detect,
+        auth=auth,
+        capabilities=capabilities,
+        data=data,
+        is_detected=lambda record: record.extra.get("is_demo") is True,
+        credential_gate=lambda _credential, record: (record.extra.get("credential_state") == "valid", "verified"),
+        deep_gate=lambda record: (record.extra.get("credential_state") == "valid", "verified"),
+        render=lambda record: [
+            f"DEMO service version:{record.extra.get('version', 'unknown')}",
+            f"DEMO account admin:{record.extra.get('admin', 'unknown')}",
+        ],
+        defer_phase_output_until_final=True,
+    )
+    AuditCommandRunner(
+        args=SimpleNamespace(discover=True, enum_cve=False),
+        spec=spec,
+        emit_line=emitted.append,
+    ).run_plan(
+        AuditCommandPlan(
+            targets_by_port={1234: ("host",)},
+            output_format="txt",
+            output_path=str(output_path),
+            credential_runs=(AuditCredentialRun(username="user", password="pass"),),
+        )
+    )
+
+    assert emitted == ["DEMO service version:1.2.3", "DEMO account admin:True"]
+    assert output_path.read_text(encoding="utf-8").splitlines() == emitted
+    assert "\x1b[" not in output_path.read_text(encoding="utf-8")
+
+    json_lines: list[str] = []
+    json_path = tmp_path / "deferred.json"
+    AuditCommandRunner(
+        args=SimpleNamespace(discover=True, enum_cve=False),
+        spec=spec,
+        emit_line=json_lines.append,
+    ).run_plan(
+        AuditCommandPlan(
+            targets_by_port={1234: ("host",)},
+            output_format="json",
+            output_path=str(json_path),
+            credential_runs=(AuditCredentialRun(username="user", password="pass"),),
+        )
+    )
+    stored_json = json_path.read_text(encoding="utf-8")
+    assert "\x1b[" not in stored_json
+    assert len(stored_json.splitlines()) == 1
+    assert json.loads(stored_json)["version"] == "1.2.3"
 
 
 def test_audit_model_optional_fields_and_render_events_are_serialized() -> None:

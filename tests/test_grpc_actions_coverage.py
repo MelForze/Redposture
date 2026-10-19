@@ -144,7 +144,39 @@ def test_format_record_txt_and_json() -> None:
     assert grpc._format_record(rec, "json").startswith("{")
     assert isinstance(grpc._format_record(rec, "txt"), str)
     weak = {**rec, "status": "weak_default_creds", "auth_used": {"type": "token", "source": "defcreds"}}
-    assert grpc._format_record(weak, "txt").endswith("[+] token")
+    assert grpc._format_record(weak, "txt").endswith("[+] token accepted")
+
+
+def test_verified_token_line_is_distinct_from_rejected_token_and_red_when_confirmed() -> None:
+    class Console:
+        def __init__(self) -> None:
+            self.paint_calls: list[tuple[str, str]] = []
+
+        def _paint(self, value: str, color: str, _stream: object) -> str:
+            self.paint_calls.append((value, color))
+            return value
+
+        def plain(self, _message: str) -> None:
+            pass
+
+    record = {"host": "h", "port": 50051, "status": "valid_credentials", "auth_used": {"type": "token"}}
+    line = grpc._format_record(record, "txt")
+    assert line.endswith("[+] token accepted")
+    console = Console()
+    assert grpc._render_colored_grpc_line(console, line)
+    assert ("token accepted", "red") in console.paint_calls
+    assert "\x1b" not in line
+    attempts = {
+        "host": "h",
+        "port": 50051,
+        "attempted_credentials": [
+            {"status": "valid_credentials", "provided_credential_type": "token", "source": "provided"},
+            {"status": "invalid_credentials", "provided_credential_type": "token", "source": "default"},
+        ],
+    }
+    lines = grpc._format_credential_attempts_records(attempts, "txt")
+    assert lines[0].endswith("[+] token accepted")
+    assert lines[1].endswith("[-] token (source:default)")
 
 
 def test_format_record_renders_failed_token_type_and_source() -> None:

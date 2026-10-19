@@ -49,6 +49,77 @@
         "documents": 3
       }
     ],
+    "content_discovery": {
+      "bytes_inspected": 1475,
+      "findings": [
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.redposture.service_tokens.token",
+          "source": "anonymous",
+          "type": "generic_secret",
+          "value": "gfa_..._123"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.redposture.service_tokens.token",
+          "source": "anonymous",
+          "type": "generic_secret",
+          "value": "ci_d..._456"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.redposture.service_tokens.token",
+          "source": "anonymous",
+          "type": "generic_secret",
+          "value": "prom..._789"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.redposture.demo_accounts.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "*****"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.redposture.demo_accounts.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "********"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.redposture.demo_accounts.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "serv...e123"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.redposture.demo_accounts.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "repo...2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.redposture.demo_accounts.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "auto...2026"
+        }
+      ],
+      "source": "anonymous",
+      "status": "complete"
+    },
     "credential_state": null,
     "database": null,
     "database_count": 5,

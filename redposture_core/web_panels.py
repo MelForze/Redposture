@@ -29,6 +29,7 @@ UI_PORTS: dict[str, tuple[int, ...]] = {
     "elastic": (5601,),
     "redis": (5540,),
     "postgres": (80, 443),
+    "kubeapi": (8443, 9090),
     "minio": (9001,),
 }
 UI_PRODUCTS = {
@@ -39,13 +40,16 @@ UI_PRODUCTS = {
     "redis_insight": "Redis Insight",
     "pgadmin": "pgAdmin 4",
     "minio_console": "MinIO Console",
+    "kubernetes_dashboard": "Kubernetes Dashboard",
+    "postgrest": "PostgREST",
 }
 MODULE_PRODUCTS: dict[str, tuple[str, ...]] = {
     "docker": ("portainer",),
     "mongodb": ("mongo_express",),
     "elastic": ("kibana", "opensearch_dashboards"),
     "redis": ("redis_insight",),
-    "postgres": ("pgadmin",),
+    "postgres": ("pgadmin", "postgrest"),
+    "kubeapi": ("kubernetes_dashboard",),
     "minio": ("minio_console",),
 }
 _ANONYMOUS_PROBES = {
@@ -56,6 +60,8 @@ _ANONYMOUS_PROBES = {
     "redis_insight": "/api/databases",
     "pgadmin": "/browser/",
     "minio_console": "/api/v1/buckets",
+    "kubernetes_dashboard": "/",
+    "postgrest": "/",
 }
 _SUFFIXES = (
     "/api/system/status",
@@ -66,6 +72,7 @@ _SUFFIXES = (
     "/misc/ping",
     "/login",
     "/db",
+    "/api/v1/login/status",
 )
 _VERSION = re.compile(r"\b\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9._-]+)?\b")
 _CSRF = re.compile(r"name=['\"](?:csrf_token|_csrf)['\"][^>]*value=['\"]([^'\"]+)", re.I)
@@ -229,6 +236,20 @@ def _fingerprints(module: str, pool: HttpSessionPool, base: str) -> tuple[str, s
         ping = _get(pool, base, "/misc/ping")
         if _response_contains(login, "pgadmin") and ping.status == 200 and ping.text.strip().upper() == "PING":
             return "pgadmin", None, ["pgadmin_login", "pgadmin_ping"]
+        root = _get(pool, base, "/", headers={"Accept": "application/openapi+json"})
+        spec = _json(root)
+        if (
+            _header(root, "server").lower().startswith("postgrest/")
+            and "application/openapi+json" in _header(root, "content-type").lower()
+            and isinstance(spec, dict)
+            and spec.get("swagger") == "2.0"
+            and isinstance(spec.get("paths"), dict)
+        ):
+            return "postgrest", _version(_header(root, "server")), ["postgrest_server", "postgrest_openapi"]
+    elif module == "kubeapi":
+        home = _get(pool, base, "/")
+        if _response_contains(home, "<title>kubernetes dashboard</title>", "<kd-root"):
+            return "kubernetes_dashboard", None, ["dashboard_title", "dashboard_angular_root"]
     elif module == "minio":
         home = _get(pool, base, "/")
         session = _get(pool, base, "/api/v1/session")
@@ -254,6 +275,7 @@ def _candidate(ctx: Any, module: str) -> bool:
     target = getattr(ctx, "target", None)
     return (
         int(ctx.port) in UI_PORTS[module]
+        or getattr(target, "scheme", None) in {"http", "https"}
         or getattr(target, "explicit_port", None) is not None
         or getattr(ctx.args, "port", None) is not None
         or bool(getattr(ctx.args, "ports", None))
@@ -291,6 +313,27 @@ def detect_panel(module: str, ctx: Any) -> dict[str, Any] | None:
                     probe_path = f"/db/{quote(databases[0], safe='')}/"
             access = _get(pool, base, probe_path)
             auth_required = False if access.status == 200 else True if access.status in {401, 403} else None
+            anonymous_read: bool | None = None
+            if product == "kubernetes_dashboard":
+                # A public login page proves neither anonymous API access nor login.
+                auth_required = None
+            if product == "postgrest":
+                spec = _json(_get(pool, base, "/", headers={"Accept": "application/openapi+json"}))
+                paths = spec.get("paths") if isinstance(spec, dict) else None
+                table_paths = [
+                    name
+                    for name, methods in (paths.items() if isinstance(paths, dict) else ())
+                    if isinstance(name, str)
+                    and name.startswith("/")
+                    and name != "/"
+                    and isinstance(methods, dict)
+                    and "get" in methods
+                ]
+                if table_paths:
+                    probe_path = sorted(table_paths)[0]
+                    table = _get(pool, base, probe_path + "?limit=1")
+                    anonymous_read = table.status == 200 and isinstance(_json(table), list)
+                    auth_required = False if anonymous_read else True if table.status in {401, 403} else None
             if product == "pgadmin" and access.status == 200:
                 auth_required = urlsplit(access.final_url or "").path != urlsplit(base + "/browser/").path
             return {
@@ -298,7 +341,11 @@ def detect_panel(module: str, ctx: Any) -> dict[str, Any] | None:
                 "port": int(ctx.port),
                 "module": module,
                 "service": module,
-                "status": "open_no_auth" if auth_required is False else "auth_required",
+                "status": "open_no_auth"
+                if auth_required is False
+                else "auth_required"
+                if auth_required is True
+                else "unknown_auth",
                 "auth_required": auth_required,
                 "surface": "ui",
                 "ui_product": product,
@@ -310,6 +357,7 @@ def detect_panel(module: str, ctx: Any) -> dict[str, Any] | None:
                     "credential_state": "unverified",
                     "inventory": {},
                     "credential_probe_path": probe_path if product == "mongo_express" else None,
+                    "anonymous_read": anonymous_read,
                 },
                 "version": version,
                 "is_ui": True,
@@ -318,6 +366,7 @@ def detect_panel(module: str, ctx: Any) -> dict[str, Any] | None:
                 "credential_verification_status": (
                     "available"
                     if auth_required is True
+                    and product not in {"postgrest", "kubernetes_dashboard"}
                     and (
                         product != "redis_insight"
                         or (access.status == 401 and "basic" in _header(access, "www-authenticate").lower())
@@ -2051,6 +2100,132 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _render_grouped_panel_inventory(prefix: str, product: str, inventory: dict[str, Any]) -> tuple[list[str], set[str]]:
+    """Keep UI object values beside their listed resource without changing JSON."""
+    hierarchy = {
+        "minio_console": ("show_buckets", "show_objects"),
+        "mongo_express": ("show_databases", "show_collections"),
+        "pgadmin": ("show_databases", "show_tables"),
+        "redis_insight": (None, "show_keys"),
+    }.get(product)
+    if hierarchy is None:
+        return [], set()
+    parent_key, child_key = hierarchy
+    child = inventory.get(child_key)
+    parent = inventory.get(parent_key) if parent_key else None
+    dump = inventory.get("dump")
+    if (
+        not isinstance(child, dict)
+        or not isinstance(child.get("count"), int)
+        or not isinstance(child.get("items"), list)
+    ):
+        return [], set()
+    if not isinstance(parent, dict) and not (
+        isinstance(dump, dict) and isinstance(dump.get("count"), int) and isinstance(dump.get("records"), list)
+    ):
+        return [], set()
+
+    consumed = {child_key}
+    if (
+        parent_key is not None
+        and isinstance(parent, dict)
+        and isinstance(parent.get("count"), int)
+        and isinstance(parent.get("items"), list)
+    ):
+        consumed.add(parent_key)
+    else:
+        parent = None
+    if isinstance(dump, dict) and isinstance(dump.get("count"), int) and isinstance(dump.get("records"), list):
+        consumed.add("dump")
+    else:
+        dump = None
+    lines: list[str] = []
+
+    def clean(value: Any) -> str:
+        return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(value)).replace("\r", "\\r").replace("\n", "\\n")
+
+    for key in (parent_key, child_key, "dump"):
+        if key is None or key not in consumed:
+            continue
+        section = inventory[key]
+        lines.append(f"{prefix} [*] {key.replace('_', ' ').title()} Enumeration (count:{section.get('count', 0)})")
+
+    child_items = [str(item) for item in child["items"][:200]]
+    emitted_children: set[int] = set()
+    dump_rows = dump.get("records", []) if dump is not None else []
+    emitted_dumps: set[int] = set()
+    dumps_by_child: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    redis_targets: dict[str, str | None] = {}
+    for dump_index, entry in enumerate(dump_rows):
+        if not isinstance(entry, dict):
+            continue
+        if product == "minio_console":
+            target = str(entry.get("object") or "")
+        elif product == "mongo_express":
+            target = str(entry.get("collection") or "")
+        elif product == "pgadmin":
+            target = str(entry.get("table") or "")
+        else:
+            key = str(entry.get("key") or "")
+            if key not in redis_targets:
+                matches = [item for item in child_items if item == key or item.endswith("/" + key)]
+                redis_targets[key] = matches[0] if len(matches) == 1 else None
+            target = redis_targets[key] or ""
+        if target:
+            dumps_by_child.setdefault(target, []).append((dump_index, entry))
+
+    def append_dump(entry: dict[str, Any]) -> None:
+        if product == "minio_console":
+            content = (
+                f"base64:{entry['base64']}"
+                if "base64" in entry
+                else json.dumps(entry.get("content", ""), ensure_ascii=False)
+            )
+            shown = f"{entry.get('object', '')} {content}"
+        elif product == "mongo_express":
+            shown = f"{entry.get('collection', '')} {json.dumps(entry.get('content', ''), ensure_ascii=False)}"
+        elif product == "pgadmin":
+            shown = f"{entry.get('table', '')} {json.dumps(entry.get('row'), ensure_ascii=False)}"
+        else:
+            shown = (
+                f"{entry.get('key', '')} = {json.dumps(entry['value'], ensure_ascii=False)}"
+                if "value" in entry
+                else f"{entry.get('key', '')} ({entry.get('status', 'unavailable')})"
+            )
+        lines.append(f"{prefix} [+] {clean(shown)}")
+
+    def append_child(index: int, item: str) -> None:
+        emitted_children.add(index)
+        lines.append(f"{prefix} {clean(item)[:512]}")
+        for dump_index, entry in dumps_by_child.get(item, []):
+            if dump_index not in emitted_dumps:
+                append_dump(entry)
+                emitted_dumps.add(dump_index)
+
+    if parent is not None:
+        for parent_item in parent["items"][:200]:
+            name = str(parent_item)
+            lines.append(f"{prefix} {clean(name)[:512]}")
+            for index, item in enumerate(child_items):
+                if index not in emitted_children and item.startswith(name + "/"):
+                    append_child(index, item)
+    for index, item in enumerate(child_items):
+        if index not in emitted_children:
+            append_child(index, item)
+    for index, entry in enumerate(dump_rows):
+        if index not in emitted_dumps and isinstance(entry, dict):
+            append_dump(entry)
+    for key in (parent_key, child_key, "dump"):
+        if key is None or key not in consumed:
+            continue
+        section = inventory[key]
+        if section.get("partial"):
+            reason = clean(section.get("reason") or "")
+            suffix = f" (reason:{reason[:256]})" if reason else ""
+            lines.append(f"{prefix} [*] {key.replace('_', ' ')} coverage:partial{suffix}")
+    return lines, consumed
+
+
 def render_panel(record: dict[str, Any], label: str) -> list[str]:
     ui = record.get("ui") or {}
     product = str(record.get("ui_product") or "")
@@ -2060,6 +2235,8 @@ def render_panel(record: dict[str, Any], label: str) -> list[str]:
     version = ui.get("version") or "unknown"
     prefix = f"{label}\t{record.get('host') or '?'}\t{int(record.get('port') or 0)}\t"
     lines = [f"{prefix} [*] {name} (auth required:{auth_text}) (version:{version})"]
+    if product == "postgrest" and ui.get("anonymous_read") is True:
+        lines.append(f"{prefix} [+] Anonymous READ available through PostgREST")
     attempts = record.get("attempted_credentials")
     if not isinstance(attempts, list):
         attempts = [record]
@@ -2094,7 +2271,12 @@ def render_panel(record: dict[str, Any], label: str) -> list[str]:
         lines.append(f"{prefix} {marker} {user}:{password} (UI)")
     if blocked:
         lines.append(f"{prefix} [!] Credential attempts stopped: panel rate limit or lockout")
-    for key, value in (ui.get("inventory") or {}).items():
+    inventory = ui.get("inventory") or {}
+    grouped_lines, grouped_keys = _render_grouped_panel_inventory(prefix, product, inventory)
+    lines.extend(grouped_lines)
+    for key, value in inventory.items():
+        if key in grouped_keys:
+            continue
         if isinstance(value, dict) and isinstance(value.get("count"), int):
             lines.append(f"{prefix} [*] {key.replace('_', ' ').title()} Enumeration (count:{value['count']})")
             items = value.get("items", [])
@@ -2164,6 +2346,8 @@ def colorize_panel_line(console: Any, line: str, label: str) -> bool:
             return []
         if right.endswith(" (UI)") and match:
             return [(match.start(), match.end(), "red")]
+        if right.startswith("Anonymous READ"):
+            return [(0, len(right), "red")]
         return [(0, len(right), "true_red")]
 
     return render_colored_marker_line(

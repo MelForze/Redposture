@@ -110,6 +110,7 @@
     "status": "valid_credentials",
     "surface": "ui",
     "ui": {
+      "anonymous_read": null,
       "auth_required": true,
       "credential_probe_path": null,
       "credential_proof": "MinIO Console session",

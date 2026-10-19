@@ -147,9 +147,10 @@ def _format_discover_records(record: dict[str, Any], output_format: str) -> list
     status = str(report.get("status") or "unavailable")
     raw_findings = report.get("findings")
     findings: list[Any] = raw_findings if isinstance(raw_findings, list) else []
+    finding_count = len(findings)
     prefix = _prefix(record)
     summary_label = "Discover Complete" if record.get("_discover_findings_streamed") else "Discover Secrets"
-    lines = [f"{prefix} [*] {summary_label} (status:{status}) (findings:{len(findings)})"]
+    lines: list[str] = []
     if record.get("_discover_findings_streamed"):
         findings = []
     for finding in findings:
@@ -167,6 +168,7 @@ def _format_discover_records(record: dict[str, Any], output_format: str) -> list
                 place=place,
             )
         )
+    lines.append(f"{prefix} [*] {summary_label} (status:{status}) (findings:{finding_count})")
     reasons = report.get("partial_reasons")
     if isinstance(reasons, list) and reasons:
         lines.append(f"{prefix} [!] Discover {status}: {','.join(str(item) for item in reasons)}")
@@ -269,6 +271,70 @@ def _format_dump_records(record: dict[str, Any], output_format: str) -> list[str
     return lines
 
 
+def _format_grouped_inventory_records(record: dict[str, Any], output_format: str) -> list[str]:
+    """Attach DAG/variable/connection dump values to their inventory rows."""
+    sections = (
+        (_format_show_dags_records, "dag", record.get("dag_ids"), lambda item: str(item)),
+        (_format_show_keys_records, "variable", record.get("variable_keys"), lambda item: str(item)),
+        (
+            _format_show_connections_records,
+            "connection",
+            record.get("airflow_connections"),
+            lambda item: str(item.get("connection_id") or item.get("conn_id") or "") if isinstance(item, dict) else "",
+        ),
+    )
+    if output_format != "txt" or (record.get("discover_requested") and not record.get("dump_requested")):
+        return [
+            line for formatter, *_rest in sections for line in formatter(record, output_format)
+        ] + _format_dump_records(record, output_format)
+    report = record.get("dump_report")
+    entries = report.get("records") if isinstance(report, dict) else None
+    if not isinstance(entries, list) or not entries:
+        return [
+            line for formatter, *_rest in sections for line in formatter(record, output_format)
+        ] + _format_dump_records(record, output_format)
+    dump_lines = _format_dump_records(record, output_format)
+    lines: list[str] = []
+    dump_heading_pending = dump_lines[:1]
+    emitted: set[int] = set()
+    by_resource: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = {}
+    for index, entry in enumerate(entries):
+        if isinstance(entry, dict):
+            by_resource.setdefault((str(entry.get("kind") or ""), str(entry.get("id") or "")), []).append(
+                (index, entry)
+            )
+
+    def append_entry(entry: dict[str, Any]) -> None:
+        if dump_heading_pending:
+            lines.extend(dump_heading_pending)
+            dump_heading_pending.clear()
+        kind = str(entry.get("kind") or "unknown")
+        object_id = json.dumps(str(entry.get("id") or ""), ensure_ascii=False)
+        value = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        lines.append(f"{_prefix(record)} [+] {kind} Id={object_id} Value={value}")
+
+    for formatter, kind, raw_items, identity in sections:
+        rendered = formatter(record, output_format)
+        if not rendered:
+            continue
+        if not isinstance(raw_items, list) or not rendered[0].split("\t")[-1].startswith(" [*]"):
+            lines.extend(rendered)
+            continue
+        lines.append(rendered[0])
+        for row_line, item in zip(rendered[1:], raw_items, strict=False):
+            lines.append(row_line)
+            for index, entry in by_resource.get((kind, identity(item)), []):
+                if index not in emitted:
+                    append_entry(entry)
+                    emitted.add(index)
+        lines.extend(rendered[1 + len(raw_items) :])
+    for index, entry in enumerate(entries):
+        if index not in emitted and isinstance(entry, dict):
+            append_entry(entry)
+    lines.extend(dump_lines[1 + len(entries) :])
+    return lines
+
+
 def _console_aligned_line(line: str) -> str:
     """Align Airflow console columns while keeping stored TXT records as TSV."""
 
@@ -341,10 +407,7 @@ __all__ = [
     "_format_detect_record",
     "_format_record",
     "_format_credential_attempts_records",
-    "_format_show_dags_records",
-    "_format_show_keys_records",
-    "_format_show_connections_records",
-    "_format_dump_records",
+    "_format_grouped_inventory_records",
     "_format_discover_records",
     "_render_colored_airflow_line",
 ]

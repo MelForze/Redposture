@@ -47,6 +47,12 @@ fi
 mkdir -p "$OUT_DIR" || exit 2
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 REPORT="$OUT_DIR/report.md"
+echo "Pre-push report: $REPORT"
+if [[ "$REUSE_VENVS" -eq 1 ]]; then
+  echo "Python environments: reuse installed .ci-venvs"
+else
+  echo "Python environments: install locked dependencies"
+fi
 
 {
   echo "# Local pre-push check"
@@ -60,25 +66,48 @@ REPORT="$OUT_DIR/report.md"
 } > "$REPORT"
 git status --short > "$OUT_DIR/git-status.txt"
 
+show_progress() {
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      "== "*|"All checks passed!"|"Required test coverage"*|"per-file coverage"*|"focused coverage"*|"Success: no issues"*|"Found "*" error"*|"redposture "*)
+        printf '[%s] %s\n' "$(date +%H:%M:%S)" "$line"
+        ;;
+      *)
+        if [[ "$line" =~ \[[[:space:]]*[0-9]+%\] ]]; then
+          printf '[%s] %s\n' "$(date +%H:%M:%S)" "$line"
+        fi
+        ;;
+    esac
+  done
+}
+
+step_index=0
 run_step() {
   local name="$1"
   shift
   local started result elapsed command_text
+  local -a pipeline_status
+  step_index=$((step_index + 1))
   started="$(date +%s)"
   printf -v command_text '%q ' "$@"
-  printf '== %s ==\n%s\n' "$name" "$command_text"
-  if "$@" > "$OUT_DIR/$name.log" 2>&1; then
-    result=0
-  else
-    result=$?
+  printf '\n== [%d/2] %s ==\nCommand: %s\nLog: %s/%s.log\n' \
+    "$step_index" "$name" "$command_text" "$OUT_DIR" "$name"
+  "$@" 2>&1 | tee "$OUT_DIR/$name.log" | show_progress
+  pipeline_status=("${PIPESTATUS[@]}")
+  result="${pipeline_status[0]}"
+  if [[ "${pipeline_status[1]}" -ne 0 || "${pipeline_status[2]}" -ne 0 ]]; then
+    result=2
   fi
   elapsed=$(( $(date +%s) - started ))
   printf '| %s | %s | %s | [%s.log](%s.log) |\n' "$name" "$result" "$elapsed" "$name" "$name" >> "$REPORT"
-  tail -n 8 "$OUT_DIR/$name.log"
   if [[ "$result" -ne 0 ]]; then
+    printf '[failed] %s (exit %s, %ss). Last 20 log lines:\n' "$name" "$result" "$elapsed" >&2
+    tail -n 20 "$OUT_DIR/$name.log" >&2
     printf 'Stopped at %s. Report: %s\n' "$name" "$REPORT" >&2
     return "$result"
   fi
+  printf '[passed] %s (%ss)\n' "$name" "$elapsed"
 }
 
 run_step diff-check git diff --check HEAD -- || exit $?

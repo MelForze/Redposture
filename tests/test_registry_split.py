@@ -154,16 +154,10 @@ def test_registry_default_candidates_include_expanded_weak_pairs_without_duplica
 def test_explicit_registry_pair_precedes_matching_default_without_duplicate(
     command: str, username: str, password: str
 ) -> None:
-    args = parse_args([command, "-t", "host", "-u", username, "-p", password, "--defcreds"])
-    plan = (
-        gitlab_stage.build_gitlab_plan(args)
-        if command == "gitlab"
-        else oci_stage.build_registry_plan(args, product=command)
-    )
-    matching = [run for run in plan.credential_runs if (run.username, run.password) == (username, password)]
-    assert len(matching) == 1
-    assert plan.credential_runs[0] == matching[0]
-    assert matching[0].source == "provided"
+    # NEXT_QA #4: --defcreds is standalone; combining it with an explicit -u/-p pair is
+    # rejected at the CLI (the former "explicit pair precedes defaults" layering is gone).
+    with pytest.raises(SystemExit):
+        parse_args([command, "-t", "host", "-u", username, "-p", password, "--defcreds"])
 
 
 def test_generic_registry_rejects_confirmed_harbor_and_harbor_accepts_it(monkeypatch: pytest.MonkeyPatch) -> None:

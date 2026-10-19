@@ -7,9 +7,11 @@ import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, TextIO
 
 from .console import is_console_no_color, should_use_color
+from .mysql_native_hash import mysql_native_hashcat
 from .progress import suspend_active_progress_for_output
 from .utils import utc_now_iso
 
@@ -91,6 +93,7 @@ _PRIORITY_KEYS = (
     "token",
     "community",
     "auth_plugin",
+    "hashcat",
     "auth_salt",
     "auth_response",
     "error",
@@ -130,6 +133,8 @@ class AttemptLogger:
         self._lock = threading.Lock()
         self._text_fh: Any | None = None
         self._text_path: str | None = None
+        self._mysql_hash_path: Path | None = None
+        self._mysql_hash_seen: set[str] = set()
         self._console_stream_overrides: list[tuple[object, TextIO]] = []
         self._trigger_callback_mode = False
         self._trigger_callback_targets: tuple[str, ...] = ()
@@ -215,6 +220,19 @@ class AttemptLogger:
             self._text_fh = open(path, "w", encoding="utf-8")
             self._text_path = path
 
+    def set_mysql_hash_output(self, output_path: str) -> Path:
+        """Enable a sidecar for captured mysql_native_password responses."""
+        path = Path(output_path)
+        sidecar = path.with_name(path.stem + ".mysql.hashes.hashcat")
+        with self._lock:
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(sidecar, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(descriptor, 0o600)
+            os.close(descriptor)
+            self._mysql_hash_path = sidecar
+            self._mysql_hash_seen.clear()
+        return sidecar
+
     def write_text_line(self, line: str) -> None:
         with self._lock:
             self._write_text_line_locked(line)
@@ -234,6 +252,10 @@ class AttemptLogger:
         for key, value in fields.items():
             if value is not None:
                 event[key] = value
+        if self._trigger_callback_mode and event.get("username") not in (None, ""):
+            mysql_hash = mysql_native_hashcat(event)
+            if mysql_hash is not None:
+                event["hashcat"] = mysql_hash
 
         line = self._format_event(event, clip_width=None)
         line_full = line
@@ -241,6 +263,7 @@ class AttemptLogger:
         with self._lock:
             console_stream = self._console_stream_locked()
             self._record_trigger_callback_event(event)
+            self._write_mysql_hash_locked(event)
             if (
                 self._trigger_callback_mode
                 and self._trigger_deduplicate
@@ -254,6 +277,19 @@ class AttemptLogger:
             if self._text_fh is not None:
                 self._text_fh.write(line_full + "\n")
                 self._text_fh.flush()
+
+    def _write_mysql_hash_locked(self, event: dict[str, Any]) -> None:
+        path = self._mysql_hash_path
+        if path is None or not self._trigger_callback_mode:
+            return
+        line = mysql_native_hashcat(event)
+        if line is None or line in self._mysql_hash_seen:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "a", encoding="ascii") as handle:
+            handle.write(line + "\n")
+        self._mysql_hash_seen.add(line)
 
     def _trigger_callback_signature(self, event: dict[str, Any]) -> tuple[str, ...] | None:
         service = str(event.get("service") or "").strip().lower()
@@ -386,9 +422,7 @@ class AttemptLogger:
             or (
                 event.get("service") == "mysql"
                 and username not in (None, "")
-                and event.get("auth_plugin") == "mysql_native_password"
-                and isinstance(event.get("auth_response"), str)
-                and len(event["auth_response"]) == 40
+                and mysql_native_hashcat(event) is not None
             )
             or event.get("api_key") not in (None, "")
             or event.get("token") not in (None, "")

@@ -8,24 +8,28 @@ import inspect
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from . import audit_models as _audit_models
-from . import web_panels
+from . import data_discovery, web_panels
 from .audit_config import AuditConfig
 from .audit_models import StageTrace
 from .clients.tls_cache import tls_context_cache_stats
 from .cve import CveCatalog, ProductResolver, enumerate_record, load_catalog, render_finding_lines
+from .discovery_rendering import discovery_color_spans
 from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle
 from .rendering import (
     format_report_line_for_console,
     normalize_report_line_for_storage,
+    render_colored_marker_line,
     sanitize_report_line,
     suppress_redundant_auth_requirement,
 )
@@ -63,6 +67,9 @@ _DEFAULT_AUDIT_WORKERS = 64
 _LARGE_AUDIT_WORKERS = 128
 _DEFAULT_NESTED_WORKERS = 32
 _LARGE_NESTED_WORKERS = 64
+_TARGET_LIVE_EMIT: ContextVar[Callable[[Iterable[str]], None] | None] = ContextVar(
+    "audit_target_live_emit", default=None
+)
 
 
 def _merge_debug_events(*records: dict[str, Any]) -> list[str]:
@@ -428,6 +435,62 @@ class LineOutputSink:
                 self._handle = None
 
 
+class _TargetLineBuffer:
+    """Keep live lines from one target together until its pipeline completes.
+
+    Nested scheduler jobs inherit the target context and can write from other
+    threads, so the buffer must be shared and synchronized. Spooling bounds RAM
+    for large discovery output without changing the single-target live path.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._file: Any = None
+        self._closed = False
+
+    def emit_many(self, lines: Iterable[str]) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            for line in lines:
+                if not line:
+                    continue
+                if self._file is None:
+                    self._file = tempfile.SpooledTemporaryFile(mode="w+t", encoding="utf-8", max_size=1024 * 1024)
+                # Sanitize before writing: an embedded newline in target data
+                # must not become a second report line when the spool is read.
+                self._file.write(sanitize_report_line(line) + "\n")
+
+    def drain_to(self, sink: LineOutputSink) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            handle = self._file
+            self._file = None
+        if handle is None:
+            return
+        try:
+            handle.seek(0)
+            batch: list[str] = []
+            for line in handle:
+                batch.append(line.rstrip("\n"))
+                if len(batch) >= 1000:
+                    sink.emit_many(batch)
+                    batch.clear()
+            if batch:
+                sink.emit_many(batch)
+        finally:
+            handle.close()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+
+
 def _build_colored_emit(console: Any, colorize: Callable[[Any, str], bool] | None) -> Callable[[str], None]:
     """Build a stdout emitter that colorizes marker lines via the spec's explicit
     `colorize` hook, falling back to plain output. The colorizer no-ops (returns
@@ -436,6 +499,15 @@ def _build_colored_emit(console: Any, colorize: Callable[[Any, str], bool] | Non
 
     def emit(line: str) -> None:
         line = format_report_line_for_console(line)
+        if "Discover Secrets" in line or (" Value=" in line and " Place=" in line):
+            tag = line.split(None, 1)[0]
+            if render_colored_marker_line(
+                console,
+                line,
+                tag=tag,
+                extra_spans=discovery_color_spans,
+            ):
+                return
         if colorize is not None and colorize(console, line):
             return
         console.plain(line)
@@ -556,6 +628,15 @@ class ModuleAuditSpec:
     # interim ``version:-`` line followed by a second, corrected service line
     # while discovery/CVE output is streamed.
     defer_detect_output_until_auth: bool = False
+    # Some modules enrich their service/credential lines in later phases.
+    # An append-only live stream cannot replace those provisional lines, so
+    # emit the stable detection after capabilities and the remaining complete
+    # record after the target lifecycle finishes.
+    defer_phase_output_until_final: bool = False
+    # A module may have a stable service/auth verdict after capabilities while
+    # its data phase streams findings. Emit that verdict before entering data,
+    # then append only newly rendered inventory/summary lines at completion.
+    emit_capabilities_before_data: bool = False
     # Optional module-specific product/version resolver for offline CVE
     # enumeration. The shared resolver covers standard record fields.
     cve_product_resolver: ProductResolver | None = None
@@ -2036,9 +2117,17 @@ class AuditCommandRunner:
             lines = []
         if output_format != "txt":
             return lines
+        if self.spec.module in data_discovery.DISCOVERY_MODULES:
+            lines.extend(data_discovery.render_discovery(self.spec.module, record.to_dict()))
         lines = suppress_redundant_auth_requirement(lines)
         cve_lines = render_finding_lines(record.to_dict(), label=self.spec.label, host=record.host, port=record.port)
         if cve_lines:
+            if (
+                self.spec.defer_phase_output_until_final
+                and len(lines) > 1
+                and lines[1].split("\t")[-1].lstrip().startswith(("[+]", "[-]"))
+            ):
+                return [*lines[:2], *cve_lines, *lines[2:]]
             return [*lines[:1], *cve_lines, *lines[1:]]
         return lines
 
@@ -2234,6 +2323,24 @@ class AuditCommandRunner:
         debug = bool(getattr(self.args, "debug", False))
         raw_debug_emit = getattr(self.args, "debug_emit", None) if debug else None
         cancelled = threading.Event()
+        group_live_output = plan.output_format == "txt" and target_count > 1
+        target_buffers: dict[int, _TargetLineBuffer] = {}
+        target_buffers_lock = threading.Lock()
+
+        def _run_target(item: tuple[int, str, int, ScanTargetSpec | None]) -> _AuditPipelineOutcome:
+            if not group_live_output:
+                return self._run_target_pipeline(item[1], item[2], item[3], plan.credential_runs, debug_emit)
+            buffer = _TargetLineBuffer()
+            with target_buffers_lock:
+                if cancelled.is_set():
+                    buffer.close()
+                    raise RuntimeError("audit cancelled")
+                target_buffers[item[0]] = buffer
+            token = _TARGET_LIVE_EMIT.set(buffer.emit_many)
+            try:
+                return self._run_target_pipeline(item[1], item[2], item[3], plan.credential_runs, debug_emit)
+            finally:
+                _TARGET_LIVE_EMIT.reset(token)
 
         def _debug_emit(message: str) -> None:
             # BoundedScheduler deliberately detaches active daemon workers on
@@ -2353,13 +2460,7 @@ class AuditCommandRunner:
         try:
             for (_idx, _host, _port, _target), outcome in scheduler.iter_completed(
                 plan.iter_target_specs(),
-                lambda item: self._run_target_pipeline(
-                    item[1],
-                    item[2],
-                    item[3],
-                    plan.credential_runs,
-                    debug_emit,
-                ),
+                _run_target,
             ):
                 detected_count += int(outcome.detected)
                 total_deep_candidates += int(outcome.deep_candidate)
@@ -2371,13 +2472,33 @@ class AuditCommandRunner:
                 if outcome.detected:
                     progress.add_total(1)
                     progress.advance(1)
-                _finalize_record(outcome.record)
-                for surface_record in outcome.additional_records:
-                    _finalize_record(surface_record)
+                with target_buffers_lock:
+                    target_buffer = target_buffers.pop(_idx, None)
+                try:
+                    if target_buffer is not None:
+                        target_buffer.drain_to(sink)
+                    _finalize_record(outcome.record)
+                    for surface_record in outcome.additional_records:
+                        _finalize_record(surface_record)
+                finally:
+                    if target_buffer is not None:
+                        target_buffer.close()
         except BaseException:
             cancelled.set()
             raise
         finally:
+            with target_buffers_lock:
+                remaining_buffers = tuple(target_buffers.values())
+                target_buffers.clear()
+            for buffer in remaining_buffers:
+                try:
+                    if cancelled.is_set():
+                        # Preserve lines that were already produced before a
+                        # fatal interruption, as the former live sink did.
+                        # Draining also closes the buffer against late workers.
+                        buffer.drain_to(sink)
+                finally:
+                    buffer.close()
             progress.close()
         if debug_emit is not None:
             debug_emit(
@@ -2492,7 +2613,7 @@ class AuditCommandRunner:
             credential_runs=credential_runs,
             lifecycle_state=lifecycle_state,
             nested_scheduler=self._nested_scheduler,
-            live_emit=getattr(self, "_live_emit", None),
+            live_emit=_TARGET_LIVE_EMIT.get() or getattr(self, "_live_emit", None),
         )
 
     def _register_lifecycle_state(self, state: Any) -> None:
@@ -2655,10 +2776,10 @@ class AuditCommandRunner:
     ) -> _AuditPipelineOutcome:
         """Run one target's entire lifecycle in a single scheduler worker."""
 
-        phase_emit: Callable[[AuditRecord, bool], None] | None = None
+        phase_emit: Callable[..., None] | None = None
         phase_line_counts: Counter[str] = Counter()
         phase_emitted_lines = 0
-        live_emit = getattr(self, "_live_emit", None)
+        live_emit = _TARGET_LIVE_EMIT.get() or getattr(self, "_live_emit", None)
         if (
             (
                 bool(getattr(self.args, "discover", False))
@@ -2671,10 +2792,27 @@ class AuditCommandRunner:
             render_plan = build_render_plan(self.spec.render_module) if self.spec.render_module is not None else None
             debug = bool(getattr(self.args, "debug", False))
 
-            def _emit_phase(record: AuditRecord, include_cve: bool = False) -> None:
+            def _emit_phase(
+                record: AuditRecord,
+                include_cve: bool = False,
+                *,
+                final: bool = False,
+                detect_only: bool = False,
+                before_data: bool = False,
+            ) -> None:
                 nonlocal phase_emitted_lines
+                if self.spec.defer_phase_output_until_final and not (final or detect_only or before_data):
+                    return
                 phase_record = self._with_cve_enumeration(record) if include_cve else record
+                if bool(getattr(self.args, "discover", False)) and self.spec.module in data_discovery.DISCOVERY_MODULES:
+                    phase_record = AuditRecord.from_mapping(
+                        data_discovery.project_discovery_output(self.args, phase_record.to_dict()),
+                        module=self.spec.module,
+                        service=phase_record.service or self.spec.module,
+                    )
                 rendered = self._render_record(phase_record, render_plan, "txt", debug)
+                if detect_only:
+                    rendered = rendered[:1]
                 current_counts: Counter[str] = Counter()
                 new_lines: list[str] = []
                 for line in rendered:
@@ -2744,8 +2882,15 @@ class AuditCommandRunner:
             debug_emit,
             phase_emit,
         )
+        if bool(getattr(self.args, "discover", False)) and self.spec.module in data_discovery.DISCOVERY_MODULES:
+            payload = final_record.to_dict()
+            payload["content_discovery"] = data_discovery.inspect_record(self.spec.module, payload)
+            payload = data_discovery.project_discovery_output(self.args, payload)
+            final_record = AuditRecord.from_mapping(
+                payload, module=self.spec.module, service=final_record.service or self.spec.module
+            )
         if phase_emit is not None:
-            phase_emit(final_record, True)
+            phase_emit(final_record, True, final=True)
             payload = final_record.to_dict()
             payload["_self_emitted"] = True
             payload["_self_emitted_lines"] = phase_emitted_lines
@@ -2808,7 +2953,7 @@ class AuditCommandRunner:
         detect_outcome: _AuditDetectOutcome,
         credential_runs: tuple[AuditCredentialRun, ...],
         debug_emit: Callable[[str], None] | None,
-        phase_emit: Callable[[AuditRecord, bool], None] | None = None,
+        phase_emit: Callable[..., None] | None = None,
     ) -> AuditRecord:
         try:
             return self._safe_record(
@@ -2915,7 +3060,7 @@ class AuditCommandRunner:
         debug_emit: Callable[[str], None] | None,
         lifecycle_state: Any = None,
         runtime_stage_telemetry: bool = False,
-        phase_emit: Callable[[AuditRecord, bool], None] | None = None,
+        phase_emit: Callable[..., None] | None = None,
     ) -> AuditRecord:
         if self._host_stage_is_monolithic:
             return self._run_monolithic_deep_lifecycle(
@@ -3120,8 +3265,14 @@ class AuditCommandRunner:
             accepted=credentials_verified,
         )
         if phase_emit is not None:
-            phase_emit(record, False)
-            phase_emit(record, True)
+            if self.spec.emit_capabilities_before_data:
+                phase_emit(record, False, before_data=True)
+                phase_emit(record, True, before_data=True)
+            else:
+                if self.spec.defer_phase_output_until_final:
+                    phase_emit(record, False, detect_only=True)
+                phase_emit(record, False)
+                phase_emit(record, True)
         data_ctx = self._ctx(
             host,
             port,
@@ -3184,7 +3335,7 @@ class AuditCommandRunner:
         credential_runs: tuple[AuditCredentialRun, ...],
         debug_emit: Callable[[str], None] | None,
         lifecycle_state: Any,
-        phase_emit: Callable[[AuditRecord, bool], None] | None = None,
+        phase_emit: Callable[..., None] | None = None,
     ) -> AuditRecord:
         """Run each monolithic credential attempt once with actions enabled.
 

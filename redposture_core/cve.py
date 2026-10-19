@@ -786,6 +786,22 @@ def _finding_recency_key(item: Mapping[str, Any]) -> tuple[int, int, str]:
     return (-int(year), -int(sequence), str(item.get("product") or ""))
 
 
+_SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+
+
+def _cve_finding_sort_key(finding: Mapping[str, Any]) -> tuple[int, int, float]:
+    """Order CVE findings for display: known matches first, then version-unknown
+    (speculative) ones; within each group by severity (CRITICAL→HIGH→…) and score↓.
+    Only the output order changes — the finding set is untouched."""
+    unknown = 1 if finding.get("version_assessment") == "unknown" else 0
+    severity_rank = _SEVERITY_ORDER.get(str(finding.get("severity") or "").upper(), 4)
+    try:
+        score = float(finding.get("score") or 0)
+    except (TypeError, ValueError):
+        score = 0.0
+    return (unknown, severity_rank, -score)
+
+
 def render_finding_lines(payload: Mapping[str, Any], *, label: str, host: str, port: int) -> list[str]:
     enumeration = payload.get("cve_enumeration")
     if not isinstance(enumeration, Mapping):
@@ -797,9 +813,8 @@ def render_finding_lines(payload: Mapping[str, Any], *, label: str, host: str, p
     # combined with tabs shifted CVE rows farther right than their service row.
     prefix = f"{label}\t{host}\t{int(port)}\t "
     lines: list[str] = [f"{prefix}[*] CVE's Enumeration"]
-    for finding in findings:
-        if not isinstance(finding, Mapping):
-            continue
+    ordered = sorted((item for item in findings if isinstance(item, Mapping)), key=_cve_finding_sort_key)
+    for finding in ordered:
         if finding.get("version_assessment") == "unknown":
             lines.append(
                 f"{prefix}[!] Possibly {finding.get('id')} may affect this service "

@@ -1187,14 +1187,35 @@ def test_render_colored_qdrant_line_covers_marker_spans() -> None:
 
     console = _FakeConsole()
     assert qdrant._render_colored_qdrant_line(console, "hello") is False
-    line = "QDRANT  \t127.0.0.1\t6333\t [+] anonymous access (auth required:False) (collections:3) (idor:true) RCE!"
+    line = "QDRANT  \t127.0.0.1\t6333\t [!] RCE:potential (auth required:False) (collections:3) (idor:true)"
     assert qdrant._render_colored_qdrant_line(console, line) is True
     assert console.lines
     rendered = console.lines[-1]
-    assert "<white>anonymous access (</white><red>auth required:False</red>" in rendered
+    assert "<white>" in rendered and "<red>auth required:False</red>" in rendered
     assert "<red>collections:3</red>" in rendered
     assert "<red>idor:true</red>" in rendered
-    assert "<orange>RCE!</orange>" in rendered
+    assert "<orange>RCE:potential</orange>" in rendered
+
+
+def test_api_key_and_potential_rce_are_separate_and_do_not_claim_execution() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 6333,
+        "status": "open_auth",
+        "collections_count": 0,
+        "ghsa_f632_vm87_2m2f": {"assessment": "potentially_vulnerable", "version_affected": True},
+    }
+    auth_line = qdrant._format_record(record, "txt")
+    detail_lines = qdrant._format_detail_records(record, "txt")
+    assert auth_line.endswith("[+] API key accepted (collections:0)")
+    assert "anonymous:blocked" not in auth_line
+    assert "RCE" not in auth_line
+    assert any("[!] RCE:potential (CVE-2026-25628" in line for line in detail_lines)
+    assert all("execute:True" not in line and "RCE!" not in line for line in detail_lines)
+    assert "\x1b" not in auth_line + "".join(detail_lines)
+    assert json.loads(qdrant._format_record(record, "json")) == record
+    unaffected = {**record, "ghsa_f632_vm87_2m2f": {"assessment": "not_affected_version"}}
+    assert not any("RCE:potential" in line for line in qdrant._format_detail_records(unaffected, "txt"))
 
 
 def test_call_audit_qdrant_host_with_stage_debug_fail_path(monkeypatch: pytest.MonkeyPatch) -> None:

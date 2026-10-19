@@ -66,7 +66,8 @@ def _admin_text(record: dict[str, Any]) -> str:
         return "True"
     if capability == "not_confirmed":
         return "False"
-    return "unknown"
+    # A failed or unreachable Admin API probe is not proof of a non-admin user.
+    return "unverified"
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
@@ -93,12 +94,12 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     parts = [f"(admin:{_admin_text(record)})"]
     # A present list means the corresponding flag ran; show the count (even 0).
     buckets = record.get("buckets")
-    if isinstance(buckets, list):
+    if isinstance(buckets, list) and not record.get("_discover_auth_before_data"):
         parts.append(f"(buckets:{len(buckets)})")
     # Objects are streamed to a file (not held in the record); the count is
     # captured while streaming, so `(objects:N)` still shows the real total.
     objects_count = record.get("objects_count")
-    if isinstance(objects_count, int):
+    if isinstance(objects_count, int) and not record.get("_discover_auth_before_data"):
         parts.append(f"(objects:{objects_count})")
     # `credential_secret` is a TXT-only echo of the accepted secret (redacted from
     # JSON alongside attempted_credentials); an operator needs the working pair.
@@ -236,16 +237,27 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
         return []
     prefix = _prefix(record)
     lines: list[str] = []
+    grouped_stream = bool(record.get("_inventory_grouped_stream"))
+    dumps = record.get("object_dumps")
+    dump_rows = [item for item in dumps if isinstance(item, dict)] if isinstance(dumps, list) else []
+    emitted_dumps: set[int] = set()
     write_probe = record.get("write_probe")
     write_probe = write_probe if isinstance(write_probe, dict) else {}
     buckets = [b for b in (record.get("buckets") or []) if isinstance(b, dict) and b.get("name")]
-    if buckets:
+    if isinstance(record.get("buckets"), list):
         lines.append(f"{prefix} [*] Buckets Enumeration (Count:{len(buckets)})")
-        for bucket in buckets:
+        for bucket in [] if grouped_stream else buckets:
             name = bucket["name"]
             wp = write_probe.get(name)
             suffix = f" (write:{wp.get('write')})" if isinstance(wp, dict) else ""
             lines.append(f"{prefix} {name}{suffix}")
+            if not record.get("objects_streamed"):
+                for index, dump in enumerate(dump_rows):
+                    if str(dump.get("bucket")) == str(name):
+                        lines.extend(
+                            format_object_dump_lines(record, dump, labeled=bool(record.get("object_dumps_labeled")))
+                        )
+                        emitted_dumps.add(index)
     elif write_probe:
         # --probe-write without --show-buckets: dedicated write-probe section.
         lines.append(f"{prefix} [*] Write Probe (Count:{len(write_probe)})")
@@ -264,6 +276,10 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
     # over common severity/type/value/place finding lines. The same
     # formatters are reused for real-time (self-emitted) discovery output.
     host, port = record.get("host"), record.get("port")
+    if not record.get("_discover_findings_streamed"):
+        for finding in record.get("secret_findings") or []:
+            if isinstance(finding, dict):
+                lines.append(format_finding_line(host, port, finding))
     if record.get("discover_requested"):
         lines.append(
             format_discover_summary(
@@ -275,37 +291,16 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
                 objects_scanned=int(record.get("discover_objects_scanned") or 0),
             )
         )
-    if not record.get("_discover_findings_streamed"):
-        for finding in record.get("secret_findings") or []:
-            if isinstance(finding, dict):
-                lines.append(format_finding_line(host, port, finding))
     reasons = record.get("discover_partial_reasons") or []
     if reasons:
         lines.append(f"{prefix} [!] Discover partial: {','.join(str(r) for r in reasons)}")
-    dumps = record.get("object_dumps")
-    if isinstance(dumps, list):
+    if isinstance(dumps, list) and not grouped_stream:
         # A bucket-wide dump labels each object with a `=== bucket/key ===` header so
         # the concatenated content stays legible; a single --object dump does not.
         labeled = bool(record.get("object_dumps_labeled"))
-        for dump in dumps:
-            if not isinstance(dump, dict):
-                continue
-            # The object key is target-controlled; the `=== bucket/key ===` header
-            # has no structural tabs, so the central emit scrubber would not reach
-            # it — sanitise the name here. The raw content below is left as-is (the
-            # whole point of --dump is to show it verbatim).
-            b = sanitize_report_payload(str(dump.get("bucket", "?")))
-            k = sanitize_report_payload(str(dump.get("key", "?")))
-            size = dump.get("size", 0)
-            if labeled:
-                lines.append(f"=== {b}/{k} ({size}) ===")
-            else:
-                lines.append(f"{prefix} [*] Dump {b}/{k} (size:{size})")
-            # Raw object content, one line per line, without the MINIO tag prefix.
-            if "base64" in dump:
-                lines.append(f"base64:{dump['base64']}")
-            else:
-                lines.extend(str(dump.get("content") or "").splitlines())
+        for index, dump in enumerate(dumps):
+            if isinstance(dump, dict) and index not in emitted_dumps:
+                lines.extend(format_object_dump_lines(record, dump, labeled=labeled))
     downloads = record.get("object_downloads")
     if isinstance(downloads, list):
         for download in downloads:
@@ -326,12 +321,27 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
     return lines
 
 
+def format_object_dump_lines(record: dict[str, Any], dump: dict[str, Any], *, labeled: bool) -> list[str]:
+    # Object names are target-controlled; the bare header bypasses the common
+    # tab-separated emit scrubber, so sanitize it here as well.
+    b = sanitize_report_payload(str(dump.get("bucket", "?")))
+    k = sanitize_report_payload(str(dump.get("key", "?")))
+    size = dump.get("size", 0)
+    heading = f"=== {b}/{k} ({size}) ===" if labeled else f"{_prefix(record)} [*] Dump {b}/{k} (size:{size})"
+    if "base64" in dump:
+        return [heading, f"base64:{dump['base64']}"]
+    return [heading, *str(dump.get("content") or "").splitlines()]
+
+
 _DISCOVER_STATUS_RE = re.compile(r"\(status:([a-z_]+)\)")
 _DISCOVER_COVERAGE_RE = re.compile(r"\(coverage:([0-9.]+)%\)")
 _DISCOVER_FINDINGS_RE = re.compile(r"\(findings:(\d+)\)")
 
 
 def _minio_extra_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
+    if "admin:unverified" in payload:
+        start = payload.index("admin:unverified")
+        return [(start, start + len("admin:unverified"), "orange")]
     for verdict in ("unavailable", "interrupted"):
         marker = f"Credential verification {verdict}"
         if marker in payload:

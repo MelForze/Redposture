@@ -167,7 +167,9 @@ def test_kubeapi_http_tls_required_upgrades_and_reuses_self_signed_https(
         assert "namespaces unavailable: anonymous access denied" in result.stdout
         assert "pods unavailable: anonymous access denied" in result.stdout
         assert "auth required:False" not in result.stdout
-        assert server.plaintext_requests == 1
+        # The URL target preflight probes /, then protocol detection probes
+        # /version. The remaining requests reuse the upgraded HTTPS origin.
+        assert server.plaintext_requests == 2
         assert server.tls_requests == ["/version", "/api/v1/namespaces", "/api/v1/pods"]
     finally:
         server.shutdown()

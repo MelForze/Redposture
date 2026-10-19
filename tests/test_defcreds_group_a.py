@@ -13,10 +13,16 @@ import redposture_core.stage_grafana as grafana
 import redposture_core.stage_grpc as grpc
 import redposture_core.stage_kafka as kafka
 from redposture_core.cli_args import parse_args
-from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun
+from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner
+
+# `--defcreds` is a standalone curated-default spray — it is mutually exclusive
+# with any supplied credential (explicit pair, credential file, or token). The former
+# "provided/file/token → defaults" layering is removed, so combining them is now rejected
+# at the CLI. These tests cover the new contract: --defcreds alone yields the deduplicated
+# default set; combining it with any supplied credential exits with an error.
 
 
-def _run_key(run: AuditCredentialRun) -> tuple[str, str | None, str | None]:
+def _run_key(run: Any) -> tuple[str, str | None, str | None]:
     if run.token is not None:
         return "token", run.token, None
     return "basic", run.username, run.password
@@ -57,125 +63,111 @@ def _basic_defaults(module_name: str) -> list[tuple[str, str]]:
         ("kafka", kafka.build_kafka_plan),
     ],
 )
-def test_credential_file_is_followed_by_defaults_once_with_stable_deduplication(
-    tmp_path: Path,
+def test_defcreds_alone_yields_deduplicated_default_set(
     module_name: str,
     build_plan: Callable[[Any], AuditCommandPlan],
 ) -> None:
-    credentials = tmp_path / f"{module_name}.creds"
-    credentials.write_text("alice:one\nadmin:admin\nalice:one\n", encoding="utf-8")
-    args = parse_args([module_name, "-t", "127.0.0.1", "-u", str(credentials), "--defcreds"])
-
+    args = parse_args([module_name, "-t", "127.0.0.1", "--defcreds"])
     runs = build_plan(args).credential_runs
 
-    assert [(run.username, run.password, run.source) for run in runs[:2]] == [
-        ("alice", "one", "file"),
-        ("admin", "admin", "file"),
-    ]
-    assert sum(_run_key(run) == ("basic", "admin", "admin") for run in runs) == 1
-    assert all(run.source == "default" for run in runs[2:])
+    assert runs and all(run.source == "default" for run in runs)
+    keys = [_run_key(run) for run in runs]
+    assert len(keys) == len(set(keys))  # deduplicated
     if module_name == "grpc":
-        expected_default_keys = [("token", token, None) for token in grpc._DEFAULT_BEARER_TOKENS] + [
-            ("basic", username, password)
-            for username, password in sorted(
-                grpc._DEFAULT_BASIC_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
-            )
-            if (username, password) != ("admin", "admin")
-        ]
+        expected = {("token", token, None) for token in grpc._DEFAULT_BEARER_TOKENS} | {
+            ("basic", username, password) for username, password in grpc._DEFAULT_BASIC_CREDENTIALS
+        }
     else:
-        expected_default_keys = [
-            ("basic", username, password)
-            for username, password in sorted(
-                _basic_defaults(module_name), key=lambda pair: (pair[0].lower(), pair[1].lower())
-            )
-            if (username, password) != ("admin", "admin")
-        ]
-    assert [_run_key(run) for run in runs[2:]] == expected_default_keys
+        expected = {("basic", username, password) for username, password in _basic_defaults(module_name)}
+    assert set(keys) == expected
 
 
 @pytest.mark.parametrize(
-    ("module_name", "build_plan", "token_option", "token_source"),
+    ("module_name", "token_option"),
     [
-        ("elastic", elastic.build_elastic_plan, "--apitoken", "token"),
-        ("grafana", grafana.build_grafana_plan, "--apitoken", "provided"),
-        ("grpc", grpc.build_grpc_plan, "--token", "provided"),
+        ("elastic", "--apitoken"),
+        ("grafana", "--apitoken"),
+        ("grpc", "--token"),
     ],
 )
-def test_token_precedes_credential_file_and_defaults(
-    tmp_path: Path,
-    module_name: str,
-    build_plan: Callable[[Any], AuditCommandPlan],
-    token_option: str,
-    token_source: str,
+def test_defcreds_rejects_supplied_token(module_name: str, token_option: str) -> None:
+    with pytest.raises(SystemExit):
+        parse_args([module_name, "-t", "127.0.0.1", token_option, "secret-token", "--defcreds"])
+
+
+@pytest.mark.parametrize(
+    ("module_name", "credential_option", "value"),
+    [
+        ("proxmox", "--pveapitoken", "audit@pve!reader=secret"),
+        ("gitlab", "--registry-token", "secret-token"),
+        ("minio", "--session-token", "secret-token"),
+        ("postgres", "--pgadmin-server-password", "secret-password"),
+    ],
+)
+def test_defcreds_rejects_product_specific_credentials(
+    module_name: str, credential_option: str, value: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    with pytest.raises(SystemExit) as error:
+        parse_args([module_name, "-t", "127.0.0.1", "--defcreds", credential_option, value])
+    assert error.value.code == 2
+    diagnostic = capsys.readouterr().err
+    assert credential_option in diagnostic
+    assert value not in diagnostic
+
+
+@pytest.mark.parametrize(
+    ("credential_option", "value"),
+    [
+        ("--user-list", "users.txt"),
+        ("--pass-list", "passwords.txt"),
+        ("--combo-list", "combos.txt"),
+        ("--spray-passwords", None),
+    ],
+)
+def test_oracle_defcreds_rejects_wordlists_and_spray_order(
+    credential_option: str, value: str | None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = ["oracle", "-t", "127.0.0.1", "--defcreds", credential_option]
+    if value is not None:
+        args.append(value)
+    with pytest.raises(SystemExit) as error:
+        parse_args(args)
+    assert error.value.code == 2
+    diagnostic = capsys.readouterr().err
+    assert credential_option in diagnostic
+    if value is not None:
+        assert value not in diagnostic
+
+
+@pytest.mark.parametrize("credential_option", ["--user-list", "--pass-list", "--combo-list"])
+def test_oracle_wordlist_without_defcreds_remains_available(credential_option: str) -> None:
+    parsed = parse_args(["oracle", "-t", "127.0.0.1", credential_option, "candidates.txt"])
+    assert getattr(parsed, credential_option.removeprefix("--").replace("-", "_")) == "candidates.txt"
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ["clickhouse", "elastic", "etcd", "grafana", "grpc", "kafka"],
+)
+def test_defcreds_rejects_credential_file(tmp_path: Path, module_name: str) -> None:
     credentials = tmp_path / f"{module_name}.creds"
-    credentials.write_text("alice:one\nbob:two\n", encoding="utf-8")
-    args = parse_args(
-        [
-            module_name,
-            "-t",
-            "127.0.0.1",
-            token_option,
-            "secret-token",
-            "-u",
-            str(credentials),
-            "--defcreds",
-        ]
-    )
-
-    runs = build_plan(args).credential_runs
-
-    assert (runs[0].token, runs[0].source) == ("secret-token", token_source)
-    assert [(run.username, run.password, run.source) for run in runs[1:3]] == [
-        ("alice", "one", "file"),
-        ("bob", "two", "file"),
-    ]
-    assert all(run.source == "default" for run in runs[3:])
+    credentials.write_text("alice:one\nadmin:admin\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        parse_args([module_name, "-t", "127.0.0.1", "-u", str(credentials), "--defcreds"])
 
 
 @pytest.mark.parametrize(
-    ("module_name", "build_plan"),
-    [
-        ("clickhouse", clickhouse.build_clickhouse_plan),
-        ("elastic", elastic.build_elastic_plan),
-        ("etcd", etcd.build_etcd_plan),
-        ("grafana", grafana.build_grafana_plan),
-        ("grpc", grpc.build_grpc_plan),
-        ("kafka", kafka.build_kafka_plan),
-    ],
+    "module_name",
+    ["clickhouse", "elastic", "etcd", "grafana", "grpc", "kafka"],
 )
-def test_explicit_pair_overlapping_defaults_stays_provided(
-    module_name: str,
-    build_plan: Callable[[Any], AuditCommandPlan],
-) -> None:
-    args = parse_args(
-        [
-            module_name,
-            "-t",
-            "127.0.0.1",
-            "-u",
-            "admin",
-            "-p",
-            "admin",
-            "--defcreds",
-        ]
-    )
-
-    matching = [
-        run
-        for run in build_plan(args).credential_runs
-        if run.token is None and (run.username, run.password) == ("admin", "admin")
-    ]
-
-    assert matching == [AuditCredentialRun(username="admin", password="admin", source="provided")]
+def test_defcreds_rejects_explicit_pair(module_name: str) -> None:
+    with pytest.raises(SystemExit):
+        parse_args([module_name, "-t", "127.0.0.1", "-u", "admin", "-p", "admin", "--defcreds"])
 
 
-def test_etcd_runtime_passes_file_and_defaults_as_one_source_aware_batch(
+def test_etcd_runtime_passes_defaults_as_one_source_aware_batch(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    credentials = tmp_path / "etcd.creds"
-    credentials.write_text("root:root\napp:secret\n", encoding="utf-8")
     batches: list[list[dict[str, Any]] | None] = []
 
     def fake_audit(
@@ -214,20 +206,7 @@ def test_etcd_runtime_passes_file_and_defaults_as_one_source_aware_batch(
         }
 
     monkeypatch.setattr(etcd, "_audit_etcd_host", fake_audit)
-    args = parse_args(
-        [
-            "etcd",
-            "-t",
-            "127.0.0.1",
-            "--port",
-            "2379",
-            "-u",
-            str(credentials),
-            "--defcreds",
-            "--format",
-            "json",
-        ]
-    )
+    args = parse_args(["etcd", "-t", "127.0.0.1", "--port", "2379", "--defcreds", "--format", "json"])
     plan = etcd.build_etcd_plan(args)
     AuditCommandRunner(
         args=args,
@@ -237,21 +216,9 @@ def test_etcd_runtime_passes_file_and_defaults_as_one_source_aware_batch(
 
     nonempty_batches = [batch for batch in batches if batch]
     assert len(nonempty_batches) == 1
-    assert [(item["username"], item["password"], item["source"]) for item in nonempty_batches[0]] == [
-        ("root", "root", "file"),
-        ("app", "secret", "file"),
-        ("admin", "admin", "default"),
-        ("admin", "changeme", "default"),
-        ("admin", "etcd", "default"),
-        ("admin", "password", "default"),
-        ("etcd", "etcd", "default"),
-        ("etcd", "password", "default"),
-        ("root", "12345678", "default"),
-        ("root", "admin", "default"),
-        ("root", "etcd", "default"),
-        ("root", "password", "default"),
-        ("root", "rootpass", "default"),
-        ("service", "service", "default"),
-        ("user", "password", "default"),
-        ("user", "user", "default"),
-    ]
+    batch = nonempty_batches[0]
+    # --defcreds alone: one batch of curated defaults only (no provided/file source), deduplicated.
+    assert all(item["source"] == "default" for item in batch)
+    pairs = [(item["username"], item["password"]) for item in batch]
+    assert len(pairs) == len(set(pairs))
+    assert set(pairs) == set(etcd._ETCD_DEFAULT_CREDS)

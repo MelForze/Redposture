@@ -65,6 +65,8 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     lines: list[str] = []
     if surface in {"web", "web_and_registry"}:
         display_record = dict(record)
+        public_count = display_record.get("public_projects_count")
+        token_count = display_record.get("token_projects_count")
         stages = record.get("stages")
         data_ran = isinstance(stages, list) and any(
             isinstance(stage, dict) and stage.get("stage_name") == "data" for stage in stages
@@ -88,6 +90,10 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                 access = record.get("token_access")
                 payload += f" (projects:{len(access) if isinstance(access, list) else 0})"
             lines.append(f"{prefix}{payload}")
+        if isinstance(public_count, int) and not isinstance(public_count, bool):
+            lines.append(f"{prefix} [*] Public Projects (projects:{public_count})")
+        if isinstance(token_count, int) and not isinstance(token_count, bool) and record.get("token_valid") is True:
+            lines.append(f"{prefix} [*] Token Projects (projects:{token_count})")
     nested = _registry_payload(record)
     if nested is not None:
         if surface == "web_and_registry":

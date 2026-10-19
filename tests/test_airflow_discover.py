@@ -857,10 +857,10 @@ def test_discover_cli_spec_policy_and_txt_render() -> None:
         },
     }
     lines = render._format_discover_records(record, "txt")
-    assert "Discover Secrets (status:partial) (findings:1)" in lines[0]
-    assert "(logs:" not in lines[0]
-    assert "(bytes:" not in lines[0]
-    assert '[!] Pass Value="secret123" Place="example/manual/extract/try:1/map:-1$"' in lines[1]
+    assert '[!] Pass Value="secret123" Place="example/manual/extract/try:1/map:-1$"' in lines[0]
+    assert "Discover Secrets (status:partial) (findings:1)" in lines[1]
+    assert "(logs:" not in lines[1]
+    assert "(bytes:" not in lines[1]
     assert "Discover partial: max_logs" in lines[2]
     assert render._format_discover_records(record, "json") == []
 

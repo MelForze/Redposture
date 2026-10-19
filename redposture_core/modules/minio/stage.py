@@ -59,7 +59,12 @@ def build_minio_spec(args: Any) -> ModuleAuditSpec:
 
     def _capabilities(ctx: Any, record: Any) -> AuditRecord:
         prior = record.to_dict() if hasattr(record, "to_dict") else dict(record)
-        return AuditRecord.from_mapping(actions.capabilities_record(ctx, prior), module="minio", service="minio")
+        result = actions.capabilities_record(ctx, prior)
+        if bool(getattr(ctx.args, "discover", False)):
+            # The credential verdict is complete before data starts streaming
+            # secrets. Inventory totals, if requested too, get their own lines.
+            result["_discover_auth_before_data"] = True
+        return AuditRecord.from_mapping(result, module="minio", service="minio")
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
         prior = record.to_dict() if hasattr(record, "to_dict") else dict(record)
@@ -86,6 +91,8 @@ def build_minio_spec(args: Any) -> ModuleAuditSpec:
         # render each attempt, instead of stopping at the first accepted one.
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
         credential_attempt_detail_fields=("credential_state",),
+        defer_phase_output_until_final=True,
+        emit_capabilities_before_data=bool(getattr(args, "discover", False)),
     )
 
 
