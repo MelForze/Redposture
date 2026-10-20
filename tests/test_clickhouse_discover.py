@@ -444,6 +444,28 @@ def test_checkpoint_is_target_aware_and_atomic(tmp_path: Path) -> None:
     assert first.is_complete("chunk") is True
 
 
+@pytest.mark.parametrize(
+    "state",
+    ["corrupt", ["a", "b"], {"chunks": ["x"]}, {"chunks": "nope"}, {"findings": []}, {"coverage": "bad"}],
+)
+def test_resume_rejects_structurally_corrupt_checkpoint_without_rewriting(tmp_path: Path, state: object) -> None:
+    path = tmp_path / "checkpoint.json"
+    content = json.dumps({"schema_version": 1, "targets": {"target:9000": state}})
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid checkpoint"):
+        CheckpointStore(path, "target:9000", resume=True)
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_resume_can_replace_legacy_null_target_when_updating(tmp_path: Path) -> None:
+    path = tmp_path / "checkpoint.json"
+    path.write_text(json.dumps({"schema_version": 1, "targets": {"target:9000": None}}), encoding="utf-8")
+    store = CheckpointStore(path, "target:9000", resume=True)
+    assert store.is_complete("chunk") is False
+    store.update(chunk_id="chunk", chunk={"status": "complete"})
+    assert store.is_complete("chunk") is True
+
+
 def test_resource_failure_splits_chunk_without_sampling_or_losing_coverage(tmp_path: Path) -> None:
     class SplitClient:
         def __init__(self) -> None:

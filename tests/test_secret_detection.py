@@ -47,6 +47,14 @@ def test_url_credentials_detected():
     assert "url_credentials" in detectors
 
 
+def test_long_non_url_value_does_not_stall_discovery() -> None:
+    from time import perf_counter
+
+    started = perf_counter()
+    assert not sd.scan_value("a" * 120_000, object_path="$.value")
+    assert perf_counter() - started < 2.0
+
+
 # --- key-name detection over nested containers ------------------------------
 
 

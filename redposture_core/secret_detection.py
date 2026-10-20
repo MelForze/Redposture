@@ -155,7 +155,9 @@ def _entropy(value: str) -> float:
 
 
 def _url_credential(text: str) -> Iterable[str]:
-    for match in re.finditer(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"']+", text):
+    # Only try the beginning of a scheme. Retrying at every position inside
+    # a long non-URL token makes ordinary discovery values quadratic.
+    for match in re.finditer(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s\"']+", text):
         candidate = match.group(0)
         try:
             parsed = urlsplit(candidate)

@@ -44,6 +44,17 @@ class CheckpointStore:
             raise ValueError(f"unsupported checkpoint schema in {self.path}")
         if not isinstance(raw.get("targets"), dict):
             raise ValueError(f"invalid checkpoint targets in {self.path}")
+        for key, state in raw["targets"].items():
+            if state is None:
+                # Older checkpoints could contain a null target; preserve the
+                # existing empty-state behavior for this harmless case.
+                continue
+            if not isinstance(key, str) or not isinstance(state, dict):
+                raise ValueError(f"invalid checkpoint target in {self.path}")
+            if any(
+                field in state and not isinstance(state[field], dict) for field in ("chunks", "findings", "coverage")
+            ):
+                raise ValueError(f"invalid checkpoint target in {self.path}")
         return raw
 
     def _write_document(self, document: dict[str, Any]) -> None:
@@ -76,9 +87,10 @@ class CheckpointStore:
     def update(self, *, chunk_id: str | None = None, chunk: dict[str, Any] | None = None, **values: Any) -> None:
         with self._lock:
             document = self._read_document()
-            target = document["targets"].setdefault(
-                self.target_key, {"status": "running", "chunks": {}, "findings": {}, "coverage": {}}
-            )
+            target = document["targets"].get(self.target_key)
+            if target is None:
+                target = {"status": "running", "chunks": {}, "findings": {}, "coverage": {}}
+                document["targets"][self.target_key] = target
             target.update(values)
             if chunk_id is not None and chunk is not None:
                 target.setdefault("chunks", {})[chunk_id] = chunk

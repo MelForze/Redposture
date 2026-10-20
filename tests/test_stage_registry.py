@@ -73,6 +73,14 @@ def test_parse_www_authenticate() -> None:
     assert params["service"] == "registry"
 
 
+def test_parse_www_authenticate_long_unmatched_token_is_bounded() -> None:
+    from time import perf_counter
+
+    started = perf_counter()
+    assert registry._parse_www_authenticate("Bearer " + "a" * 100_000) == ("bearer", {})
+    assert perf_counter() - started < 2.0
+
+
 def test_registry_fingerprint_rejects_generic_login_and_auth_pages() -> None:
     assert registry._registry_probe_has_fingerprint(200, b"<html>Sign in</html>", {}) is False
     assert registry._registry_probe_has_fingerprint(401, b'{"error":"unauthorized"}', {}) is False

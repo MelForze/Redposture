@@ -31,7 +31,10 @@ case "${1:-}" in
     python -m py_compile redposture.py
     python -m compileall -q redposture_core tests
     echo "== ${python_tag}: pytest and branch coverage =="
-    python -m pytest -q --cov=redposture_core --cov-report=term-missing --cov-report="json:$coverage_json"
+    # Keep the active test visible and fail with thread stacks instead of
+    # leaving a CI worker blocked indefinitely on a deadlocked test.
+    python -u -m pytest -vv -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true \
+      --cov=redposture_core --cov-report=term-missing --cov-report="json:$coverage_json"
     echo "== ${python_tag}: per-file coverage gate =="
     python scripts/check_coverage_per_file.py "$coverage_json" --min 70
     echo "== ${python_tag}: focused coverage gate =="

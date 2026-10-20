@@ -8,7 +8,6 @@ import inspect
 import json
 import os
 import sys
-import tempfile
 import threading
 import time
 from collections import Counter
@@ -433,62 +432,6 @@ class LineOutputSink:
             if self._handle is not None:
                 self._handle.close()
                 self._handle = None
-
-
-class _TargetLineBuffer:
-    """Keep live lines from one target together until its pipeline completes.
-
-    Nested scheduler jobs inherit the target context and can write from other
-    threads, so the buffer must be shared and synchronized. Spooling bounds RAM
-    for large discovery output without changing the single-target live path.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._file: Any = None
-        self._closed = False
-
-    def emit_many(self, lines: Iterable[str]) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            for line in lines:
-                if not line:
-                    continue
-                if self._file is None:
-                    self._file = tempfile.SpooledTemporaryFile(mode="w+t", encoding="utf-8", max_size=1024 * 1024)
-                # Sanitize before writing: an embedded newline in target data
-                # must not become a second report line when the spool is read.
-                self._file.write(sanitize_report_line(line) + "\n")
-
-    def drain_to(self, sink: LineOutputSink) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            handle = self._file
-            self._file = None
-        if handle is None:
-            return
-        try:
-            handle.seek(0)
-            batch: list[str] = []
-            for line in handle:
-                batch.append(line.rstrip("\n"))
-                if len(batch) >= 1000:
-                    sink.emit_many(batch)
-                    batch.clear()
-            if batch:
-                sink.emit_many(batch)
-        finally:
-            handle.close()
-
-    def close(self) -> None:
-        with self._lock:
-            self._closed = True
-            if self._file is not None:
-                self._file.close()
-                self._file = None
 
 
 def _build_colored_emit(console: Any, colorize: Callable[[Any, str], bool] | None) -> Callable[[str], None]:
@@ -1982,6 +1925,7 @@ _HTTP_DETECTION_MODULES = frozenset(
         "grafana",
         "keycloak",
         "jenkins",
+        "vault",
         "kubeapi",
         "minio",
         "proxmox",
@@ -2323,20 +2267,16 @@ class AuditCommandRunner:
         debug = bool(getattr(self.args, "debug", False))
         raw_debug_emit = getattr(self.args, "debug_emit", None) if debug else None
         cancelled = threading.Event()
-        group_live_output = plan.output_format == "txt" and target_count > 1
-        target_buffers: dict[int, _TargetLineBuffer] = {}
-        target_buffers_lock = threading.Lock()
+
+        def _emit_target_live(lines: Iterable[str]) -> None:
+            # A long-running target must publish its confirmed findings while
+            # other targets are still active. The sink serializes each batch
+            # across threads and tees it to the console and TXT output.
+            if not cancelled.is_set():
+                sink.emit_many(lines)
 
         def _run_target(item: tuple[int, str, int, ScanTargetSpec | None]) -> _AuditPipelineOutcome:
-            if not group_live_output:
-                return self._run_target_pipeline(item[1], item[2], item[3], plan.credential_runs, debug_emit)
-            buffer = _TargetLineBuffer()
-            with target_buffers_lock:
-                if cancelled.is_set():
-                    buffer.close()
-                    raise RuntimeError("audit cancelled")
-                target_buffers[item[0]] = buffer
-            token = _TARGET_LIVE_EMIT.set(buffer.emit_many)
+            token = _TARGET_LIVE_EMIT.set(_emit_target_live if plan.output_format == "txt" else None)
             try:
                 return self._run_target_pipeline(item[1], item[2], item[3], plan.credential_runs, debug_emit)
             finally:
@@ -2472,33 +2412,13 @@ class AuditCommandRunner:
                 if outcome.detected:
                     progress.add_total(1)
                     progress.advance(1)
-                with target_buffers_lock:
-                    target_buffer = target_buffers.pop(_idx, None)
-                try:
-                    if target_buffer is not None:
-                        target_buffer.drain_to(sink)
-                    _finalize_record(outcome.record)
-                    for surface_record in outcome.additional_records:
-                        _finalize_record(surface_record)
-                finally:
-                    if target_buffer is not None:
-                        target_buffer.close()
+                _finalize_record(outcome.record)
+                for surface_record in outcome.additional_records:
+                    _finalize_record(surface_record)
         except BaseException:
             cancelled.set()
             raise
         finally:
-            with target_buffers_lock:
-                remaining_buffers = tuple(target_buffers.values())
-                target_buffers.clear()
-            for buffer in remaining_buffers:
-                try:
-                    if cancelled.is_set():
-                        # Preserve lines that were already produced before a
-                        # fatal interruption, as the former live sink did.
-                        # Draining also closes the buffer against late workers.
-                        buffer.drain_to(sink)
-                finally:
-                    buffer.close()
             progress.close()
         if debug_emit is not None:
             debug_emit(

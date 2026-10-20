@@ -1249,7 +1249,9 @@ def _parse_www_authenticate(header_value: str) -> tuple[str, dict[str, str]]:
 
     scheme, params_raw = raw.split(" ", 1)
     params: dict[str, str] = {}
-    for match in re.finditer(r'([A-Za-z][A-Za-z0-9_-]*)="([^"]*)"', params_raw):
+    # A key cannot begin inside another key. Without this boundary, an
+    # unmatched long token is rescanned at every character (quadratic time).
+    for match in re.finditer(r'(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*)="([^"]*)"', params_raw):
         key = match.group(1).strip().lower()
         value = match.group(2).strip()
         if key:

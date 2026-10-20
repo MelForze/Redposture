@@ -216,7 +216,10 @@ def _format_show_dags_records(record: dict[str, Any], output_format: str) -> lis
         return [f"{prefix} [-] Airflow DAGs unavailable: {error}"]
     lines = [f"{prefix} [*] Airflow DAGs (dags:{len(dags)})"]
     lines.extend(f"{prefix} [+] DAG Id={json.dumps(dag, ensure_ascii=False)}" for dag in dags)
-    if error or record.get("dag_ids_truncated"):
+    # A requested --show-dags N limit is not an incomplete API read. The
+    # collector retains dag_ids_truncated for JSON callers, while TXT reports
+    # partial coverage only when a page actually failed.
+    if error:
         lines.append(f"{prefix} [*] Airflow DAGs coverage:partial")
     return lines
 

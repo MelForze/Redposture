@@ -40,6 +40,24 @@ def test_show_dags_and_dump_render_values_and_partial_status() -> None:
     assert any("private" in value and "orange" in value for value in console.lines)
 
 
+def test_show_dags_explicit_limit_does_not_claim_partial_coverage() -> None:
+    record = _record(
+        show_dags_requested=True,
+        dag_ids=["a", "b", "c", "d", "e"],
+        dag_ids_total=12,
+        dag_ids_truncated=True,
+    )
+    lines = render._format_show_dags_records(record, "txt")
+    assert len(lines) == 6
+    assert not any("coverage:partial" in line for line in lines)
+
+
+def test_show_dags_page_error_still_marks_partial_coverage() -> None:
+    record = _record(show_dags_requested=True, dag_ids=["a"], dag_ids_error="http_502")
+    lines = render._format_show_dags_records(record, "txt")
+    assert lines[-1] == f"{_PFX} [*] Airflow DAGs coverage:partial"
+
+
 class _Console:
     def __init__(self):
         self.lines = []

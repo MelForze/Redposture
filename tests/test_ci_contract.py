@@ -59,6 +59,15 @@ def test_local_tox_and_github_ci_delegate_to_shared_runner() -> None:
     assert "run_mutation_smoke.py" in (ROOT / "scripts/run_output_quality_audit.py").read_text(encoding="utf-8")
 
 
+def test_ci_pytest_reports_and_exits_on_a_stalled_test() -> None:
+    runner = (ROOT / "scripts/run_ci_job.sh").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "python -u -m pytest -vv" in runner
+    assert "-o faulthandler_timeout=180" in runner
+    assert "-o faulthandler_exit_on_timeout=true" in runner
+    assert "timeout-minutes: 30" in workflow
+
+
 def test_supported_python_versions_match_metadata_and_ci() -> None:
     project = tomlkit.parse((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

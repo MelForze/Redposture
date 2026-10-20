@@ -42,6 +42,8 @@ def test_nightly_quality_runs_only_fast_cli_fuzz_and_free_threaded_contracts() -
     assert "schedule:" in workflow
     assert "bash scripts/run_cli_param_fuzz.sh" in workflow
     assert 'python-version: "3.13t"' in workflow
+    assert "hatchling editables==0.6" in workflow
+    assert "python -m pip install --no-deps --no-build-isolation -e ." in workflow
     assert 'Py_GIL_DISABLED") == 1' in workflow
     assert "scripts/run_mutation_smoke.py" not in workflow
     assert "tests/test_concurrency_stress.py" not in workflow

@@ -72,7 +72,7 @@ class _ConsoleRecorder:
         self.errors.append(message)
 
 
-def test_multi_target_live_lines_stay_grouped_across_nested_workers(tmp_path: Path) -> None:
+def test_multi_target_live_lines_keep_each_targets_order_across_nested_workers(tmp_path: Path) -> None:
     emitted: list[str] = []
     first_data_started = threading.Event()
     second_data_emitted = threading.Event()
@@ -150,10 +150,6 @@ def test_multi_target_live_lines_stay_grouped_across_nested_workers(tmp_path: Pa
     assert result.emitted_lines == 4  # phase-rendered lines; nested lines are hook-owned
     assert output_path.read_text(encoding="utf-8").splitlines() == emitted
     assert len(emitted) == 6
-    assert [line.split()[1] for line in emitted] in (
-        ["first"] * 3 + ["second"] * 3,
-        ["second"] * 3 + ["first"] * 3,
-    )
     for host in ("first", "second"):
         assert [line for line in emitted if f" {host} " in line] == [
             f"DEMO {host} detected",
@@ -161,6 +157,148 @@ def test_multi_target_live_lines_stay_grouped_across_nested_workers(tmp_path: Pa
             f"DEMO {host} complete",
         ]
     assert "\x1b[" not in output_path.read_text(encoding="utf-8")
+
+
+def test_multi_target_discover_publishes_lines_before_either_target_finishes(tmp_path: Path) -> None:
+    emitted: list[str] = []
+    output_path = tmp_path / "discover-live.txt"
+    both_waiting = threading.Event()
+    release = threading.Event()
+    waiting = 0
+    waiting_lock = threading.Lock()
+    errors: list[BaseException] = []
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(host=ctx.host, port=ctx.port, module="demo", service="demo", status="auth_required")
+
+    def auth(ctx, _prior) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="valid_credentials",
+            extra={"authenticated": True},
+        )
+
+    def data(ctx, prior: AuditRecord) -> AuditRecord:
+        nonlocal waiting
+        assert ctx.live_emit is not None
+        ctx.live_emit((f"DEMO {ctx.host} finding",))
+        with waiting_lock:
+            waiting += 1
+            if waiting == 2:
+                both_waiting.set()
+        assert release.wait(timeout=10)
+        return AuditRecord.from_mapping({**prior.to_dict(), "done": True}, module="demo", service="demo")
+
+    def render(record: AuditRecord) -> list[str]:
+        lines = [f"DEMO {record.host} detected"]
+        if record.extra.get("authenticated"):
+            lines.append(f"DEMO {record.host} authenticated")
+        if record.extra.get("done"):
+            lines.append(f"DEMO {record.host} done")
+        return lines
+
+    runner = AuditCommandRunner(
+        args=SimpleNamespace(discover=True, debug=False),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            auth=auth,
+            data=data,
+            render=render,
+            is_detected=lambda _record: True,
+            deep_gate=lambda _record: (True, "run"),
+        ),
+        emit_line=emitted.append,
+    )
+
+    def run() -> None:
+        try:
+            runner.run_plan(
+                AuditCommandPlan(
+                    targets_by_port={1234: ("first", "second")},
+                    credential_runs=(AuditCredentialRun(username="user", password="pass", source="provided"),),
+                    output_path=str(output_path),
+                    output_format="txt",
+                    workers=2,
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert both_waiting.wait(timeout=10)
+        before_release = output_path.read_text(encoding="utf-8").splitlines()
+        assert before_release == emitted
+        for host in ("first", "second"):
+            assert [line for line in before_release if f" {host} " in line] == [
+                f"DEMO {host} detected",
+                f"DEMO {host} authenticated",
+                f"DEMO {host} finding",
+            ]
+        assert "\x1b[" not in output_path.read_text(encoding="utf-8")
+    finally:
+        release.set()
+        worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert not errors
+    assert output_path.read_text(encoding="utf-8").splitlines() == emitted
+    for host in ("first", "second"):
+        assert [line for line in emitted if f" {host} " in line] == [
+            f"DEMO {host} detected",
+            f"DEMO {host} authenticated",
+            f"DEMO {host} finding",
+            f"DEMO {host} done",
+        ]
+
+
+def test_multi_target_large_live_finding_stream_has_no_drops_or_duplicates(tmp_path: Path) -> None:
+    emitted: list[str] = []
+    output_path = tmp_path / "many-findings.txt"
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(host=ctx.host, port=ctx.port, module="demo", service="demo", status="open_no_auth")
+
+    def data(ctx, record: AuditRecord) -> AuditRecord:
+        assert ctx.live_emit is not None
+        for start in range(0, 500, 25):
+            ctx.live_emit(f"DEMO {ctx.host} finding:{index}" for index in range(start, start + 25))
+        return record
+
+    runner = AuditCommandRunner(
+        args=SimpleNamespace(discover=True, debug=False),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            data=data,
+            render=lambda record: [f"DEMO {record.host} detected"],
+            is_detected=lambda _record: True,
+            deep_gate=lambda _record: (True, "run"),
+        ),
+        emit_line=emitted.append,
+    )
+    runner.run_plan(
+        AuditCommandPlan(
+            targets_by_port={1234: ("first", "second")},
+            output_path=str(output_path),
+            output_format="txt",
+            workers=2,
+        )
+    )
+
+    assert output_path.read_text(encoding="utf-8").splitlines() == emitted
+    for host in ("first", "second"):
+        assert [line for line in emitted if f" {host} finding:" in line] == [
+            f"DEMO {host} finding:{index}" for index in range(500)
+        ]
 
 
 def test_multi_target_json_keeps_one_record_per_target_without_live_lines(tmp_path: Path) -> None:
@@ -206,7 +344,7 @@ def test_multi_target_json_keeps_one_record_per_target_without_live_lines(tmp_pa
     assert "\x1b[" not in saved
 
 
-def test_same_host_different_ports_form_separate_output_blocks(tmp_path: Path) -> None:
+def test_same_host_different_ports_keep_each_ports_output_order(tmp_path: Path) -> None:
     emitted: list[str] = []
     first_port_started = threading.Event()
     second_port_emitted = threading.Event()
@@ -257,10 +395,6 @@ def test_same_host_different_ports_form_separate_output_blocks(tmp_path: Path) -
             output_format="txt",
             workers=2,
         )
-    )
-    assert [line.split()[1] for line in emitted] in (
-        ["same:6379"] * 3 + ["same:6380"] * 3,
-        ["same:6380"] * 3 + ["same:6379"] * 3,
     )
     for port in (6379, 6380):
         assert [line for line in emitted if f"same:{port}" in line] == [

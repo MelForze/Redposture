@@ -12,6 +12,7 @@ import pytest
 
 import redposture_core.stage_elastic as elastic_stage
 from redposture_core.audit_models import AuditRecord
+from redposture_core.modules.elastic import actions as elastic_actions
 from redposture_core.stage_elastic import (
     ElasticAuthProbeResult,
     _audit_elastic_host,
@@ -36,6 +37,18 @@ from redposture_core.stage_elastic import (
     run_elastic_stage,
 )
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
+
+
+def test_untrusted_json_with_huge_integer_does_not_crash_elastic_parsers() -> None:
+    payload = b'{"number":' + b"9" * 100_000 + b"}"
+    headers = {"Content-Type": "application/json"}
+    assert elastic_actions._looks_like_elastic_root(200, payload, headers) == (False, None)
+    assert isinstance(elastic_actions._parse_elastic_error(200, payload), dict)
+    assert elastic_actions._classify_detect_probe("/", 200, payload, headers, None)["signal_kind"] in {
+        "neutral",
+        "negative",
+    }
+    assert elastic_actions._parse_visible_indices(payload, cat=False) is None
 
 
 def _elastic_stage_record(

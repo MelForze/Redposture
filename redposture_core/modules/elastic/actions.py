@@ -610,7 +610,7 @@ def _request_with_tls_fallback(
 def _load_json_dict(payload: bytes) -> dict[str, Any] | None:
     try:
         parsed = json.loads(payload.decode("utf-8", errors="replace"))
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(parsed, dict):
         return None
@@ -660,7 +660,7 @@ def _load_json_dict_loose(payload: bytes, headers: dict[str, str] | None = None)
     candidate = text[start : end + 1]
     try:
         parsed = json.loads(candidate)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return None
     if isinstance(parsed, dict):
         return parsed
@@ -670,7 +670,7 @@ def _load_json_dict_loose(payload: bytes, headers: dict[str, str] | None = None)
 def _load_json_list(payload: bytes) -> list[Any] | None:
     try:
         parsed = json.loads(payload.decode("utf-8", errors="replace"))
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(parsed, list):
         return None
