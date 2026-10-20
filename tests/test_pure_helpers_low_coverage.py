@@ -150,8 +150,10 @@ def test_consul_is_connection_timeout_fail_record_unrelated_error() -> None:
     assert consul_actions._is_connection_timeout_fail_record(rec) is False
 
 
-def test_consul_count_kv_keys_counts_only_strings_in_list() -> None:
-    assert consul_actions._count_kv_keys(["a", "b", 1, None]) == 2
+def test_consul_count_kv_keys_requires_string_only_list() -> None:
+    assert consul_actions._count_kv_keys(["a", "b"]) == 2
+    assert consul_actions._count_kv_keys(["a", "b", 1, None]) is None
+    assert consul_actions._count_kv_keys([1, None]) is None
     assert consul_actions._count_kv_keys([]) == 0
     assert consul_actions._count_kv_keys({"a": 1}) is None
     assert consul_actions._count_kv_keys("string") is None

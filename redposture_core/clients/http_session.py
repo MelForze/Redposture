@@ -208,6 +208,8 @@ class HttpSessionPool:
             if bucket:
                 connection = bucket.pop()
                 connection.timeout = timeout
+                if connection.sock is not None:
+                    connection.sock.settimeout(timeout)
                 self._stats["reused"] += 1
                 return connection, True
         return self._new_connection(key, timeout), False

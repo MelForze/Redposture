@@ -649,7 +649,7 @@ def test_kubeapi_rejects_generic_kubernetes_looking_payloads(
     assert record["is_kubeapi"] is False
 
 
-def test_kubeapi_correlated_auth_status_confirms_service_without_deep_probe(
+def test_kubeapi_correlated_auth_status_confirms_service_and_probes_resource_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -672,20 +672,17 @@ def test_kubeapi_correlated_auth_status_confirms_service_without_deep_probe(
         )
 
     monkeypatch.setattr(kubeapi, "_api_get_json", fake_api)
-    monkeypatch.setattr(
-        kubeapi,
-        "_probe_namespace_access",
-        lambda *_args, **_kwargs: pytest.fail("correlated auth status already classified access"),
-    )
 
     record = kubeapi.detect_kubeapi(
         _ctx(kubeapi.KubeApiLifecycleState(), port=6443, target_scheme="https", insecure=True),
         _kube_options(show_namespaces=True, show_pods=True),
     )
 
-    assert calls == ["/version", "/api"]
+    assert calls == ["/version", "/api", "/api/v1/namespaces?limit=1", "/api/v1/pods?limit=1"]
     assert record["status"] == "auth_required"
     assert record["auth_required"] is True
+    assert record["can_list_namespaces"] is False
+    assert record["can_list_pods"] is False
 
 
 def test_kubeapi_mixed_auth_status_pair_is_a_service_signature(

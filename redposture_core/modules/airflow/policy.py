@@ -26,6 +26,14 @@ def validate_args(args: Any, console: Any) -> int | None:
     if not getattr(args, "dump", False) and any(getattr(args, name, None) for name in ("dag", "key", "connection")):
         console.error("--dag, --key and --connection require --dump")
         return 2
+    source_ids = getattr(args, "dagsource", None)
+    if source_ids:
+        if any(not str(value).strip() for value in source_ids):
+            console.error("--dagsource must not be empty")
+            return 2
+        if not (getattr(args, "dump", False) or getattr(args, "show_dagsources", False)):
+            console.error("--dagsource requires --show-dagsources or --dump")
+            return 2
     return validate_discovery_budget(args, console)
 
 

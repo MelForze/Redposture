@@ -31,6 +31,7 @@ if [ "${PROFILE}" = "min" ]; then
   "${PYTHON_BIN}" -m pip install \
     'pytest==8.3.0' \
     'pytest-socket==0.8.1' \
+    'hypothesis==6.112.0' \
     'hatchling==1.24.0' \
     'tomlkit==0.13.2'
   "${PYTHON_BIN}" -m pip install --no-deps --no-build-isolation "${ROOT_DIR}"

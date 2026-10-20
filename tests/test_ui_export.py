@@ -4,11 +4,53 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from redposture_core.ui_export import UIExport
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_ui_export_auto_resume_closes_probe_connection(tmp_path, monkeypatch, complete):
+    connections = []
+    original_connect = sqlite3.connect
+
+    class Connection(sqlite3.Connection):
+        closed = False
+
+        def close(self):
+            self.closed = True
+            return super().close()
+
+    def connect(*args, **kwargs):
+        connection = original_connect(*args, factory=Connection, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    with UIExport(str(tmp_path), "http://qa", "portainer", resume=None) as writer:
+        writer.finish(complete=complete)
+    with UIExport(str(tmp_path), "http://qa", "portainer", resume=None):
+        assert len(connections) == 3
+        assert connections[1].closed is True
+        assert connections[2].closed is False
+    assert all(connection.closed for connection in connections)
+
+
+def test_ui_export_auto_resume_closes_probe_on_invalid_checkpoint(tmp_path, monkeypatch):
+    with UIExport(str(tmp_path), "http://qa", "portainer", resume=None) as writer:
+        checkpoint = writer.database
+    original_connect = sqlite3.connect
+    connection = original_connect(checkpoint)
+    connection.execute("DROP TABLE meta")
+    connection.commit()
+    monkeypatch.setattr(sqlite3, "connect", lambda *_args, **_kwargs: connection)
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        UIExport(str(tmp_path), "http://qa", "portainer", resume=None)
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
 
 
 def test_ui_export_resume_is_idempotent_and_private(tmp_path: Path) -> None:

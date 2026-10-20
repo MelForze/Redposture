@@ -50,6 +50,17 @@ if [ -d "${OUT_DIR}" ] && [ -n "$(ls -A "${OUT_DIR}")" ]; then
   exit 2
 fi
 mkdir -p "${OUT_DIR}/logs" "${OUT_DIR}/json"
+if [ "${MATRIX_PROFILE}" = "extended" ]; then
+  # Fail static parser/mapping drift before snapshots, preparation or Docker.
+  "${PYTHON_BIN}" "${ROOT_DIR}/scripts/matrix_flag_coverage.py" \
+    --matrix-script "${ROOT_DIR}/scripts/run_lab_matrix_sequential.sh" \
+    --out "${OUT_DIR}/flag-coverage-plan.json"
+  # Focused contract + real HTTP loopback emulator coverage, not vendor stands.
+  "${PYTHON_BIN}" -m pytest -q \
+    tests/test_token_audit_modules.py tests/test_token_api_http_integration.py \
+    tests/test_nomad_jupyter_execute.py tests/test_execution_websocket.py tests/test_nomad_jupyter_execute_http.py \
+    --junitxml="${OUT_DIR}/focused-token-apis.xml"
+fi
 if [ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" = "1" ]; then
   "${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_owned_images.py" snapshot-refs \
     "${OUT_DIR}/images/harbor-prepare.json" goharbor/prepare:v2.11.1
@@ -140,6 +151,8 @@ compose_service() {
       "${PYTHON_BIN}" "${LAB_DIR}/services/registry-harbor-real/prepare_version.py" \
         v2.11.1 "${OUT_DIR}/stands/harbor" >>"${OUT_DIR}/logs/harbor-prepare.log" 2>&1 || return 1
     fi
+    "${PYTHON_BIN}" "${ROOT_DIR}/scripts/prepare_harbor_qa_compose.py" "${compose_file}" \
+      >>"${OUT_DIR}/logs/harbor-prepare.log" 2>&1 || return 1
     local override
     override="$(qa_compose_override "${service}" "${compose_file}")" || return 1
     docker compose -p "${COMPOSE_PROJECT_NAME:-redposture-matrix-harbor}" -f "${compose_file}" -f "${override}" "$@"
@@ -336,6 +349,8 @@ start_service() {
   local service="$1"
   local timeout
   timeout="$("${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_service_policy.py" "${service}")" || return 1
+  CURRENT_SERVICE="${service}"
+  snapshot_service_images "${service}" || return 1
   if [ "${service}" = "valkey" ]; then
     "${PYTHON_BIN}" "${LAB_DIR}/services/valkey/prepare.py" || return 1
   fi
@@ -344,8 +359,6 @@ start_service() {
   fi
   echo
   echo "== service:${service} up =="
-  CURRENT_SERVICE="${service}"
-  snapshot_service_images "${service}" || return 1
   local started_at="${SECONDS}"
   set +e
   if [ "${service}" = "registry" ]; then
@@ -615,6 +628,24 @@ run_exporters_cases() {
     run_case exporters exporters_collect_resume_checkpoint 0 exporters collect -t 127.0.0.1 -p "19100,19121" --exporters node --resume --checkpoint-file "${collect_checkpoint}" --save-responses-dir "${OUT_DIR}/collect_extended_resume"
     run_text_case exporters exporters_collect_debug_smoke 0 exporters collect -t 127.0.0.1 -p "19100" --exporters node --debug
     run_case exporters exporters_trigger_extended_controls 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19187" --exporters postgres --services postgres --postgres-port 15432 --postgres-auth-module userpass --no-postgres-tls --listen-seconds 2
+    run_text_case exporters exporters_trigger_mysql_hashcat 0 exporters trigger -t http://127.0.0.1:19104 -e mysql --callback-dns host.docker.internal --mysql-auth-module client --mysql-port 13306 --listen-seconds 1 --export-hashcat "${OUT_DIR}/mysql.hashes"
+    "${PYTHON_BIN}" - "${OUT_DIR}/mysql.hashes" <<'PY_MYSQL_HASHCAT'
+import pathlib
+import re
+import sys
+
+from redposture_core.mysql_native_hash import mysql_native_scramble
+
+path = pathlib.Path(sys.argv[1])
+lines = path.read_text(encoding="ascii").splitlines()
+assert lines and len(lines) == len(set(lines)), "missing or duplicate MySQL hashes"
+assert path.stat().st_mode & 0o777 == 0o600
+for line in lines:
+    assert re.fullmatch(r"\$mysqlna\$[0-9a-f]{40}\*[0-9a-f]{40}", line), line
+    salt, response = line.removeprefix("$mysqlna$").split("*")
+    assert mysql_native_scramble("MysqlExporter2026!", bytes.fromhex(salt)).hex() == response
+print(f"MySQL hashcat export verified: {len(lines)} hash(es)")
+PY_MYSQL_HASHCAT
     run_case exporters exporters_trigger_without_listener 1 exporters trigger -t 127.0.0.1 --callback-ip 192.0.2.1 -p "19187" --no-with-listen --exporters postgres --services postgres --postgres-auth-module userpass --no-postgres-tls
     run_text_case exporters exporters_trigger_debug_smoke 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121" --no-with-listen --exporters blackbox --debug
   fi
@@ -1126,6 +1157,13 @@ run_airflow_cases() {
   if is_extended_matrix; then
     run_case airflow airflow_connections 0 airflow -t 127.0.0.1 --port 18080 -u airflow -p airflow --show-connections
     run_case airflow airflow_multi_ports 0 airflow -t 127.0.0.1 --ports 18080,18081 --show-keys
+    run_case airflow airflow_dagsources 0 airflow -t http://127.0.0.1:18080 -u airflow -p airflow --show-dagsources --dump
+    local airflow_source_token
+    if [ "${REDPOSTURE_REVIEW_CAPTURE_TXT:-0}" = "1" ]; then
+      "${PYTHON_BIN}" "${ROOT_DIR}/redposture.py" airflow -t http://127.0.0.1:18080 -u airflow -p airflow --show-dagsources --dump --format json --output "${OUT_DIR}/json/airflow_dagsources.json" >/dev/null
+    fi
+    airflow_source_token="$("${PYTHON_BIN}" -c 'import json,sys; rows=json.load(open(sys.argv[1])); row=rows[0] if isinstance(rows,list) else rows; assert row["dag_sources"] and row["dump_report"]["status"] == "complete"; records=row["dump_report"]["records"]; assert records and all(r["kind"] == "dag_source" and isinstance(r["source"],str) for r in records); assert any("sourceSecret123" in r["source"] for r in records); print(row["dag_sources"][0]["source_id"])' "${OUT_DIR}/json/airflow_dagsources.json")"
+    run_case airflow airflow_dagsource_selected 0 airflow -t http://127.0.0.1:18080 -u airflow -p airflow --dagsource "${airflow_source_token}" --dump
   fi
 }
 

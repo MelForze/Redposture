@@ -1,0 +1,94 @@
+services:
+  vault:
+    profiles: [vault]
+    image: hashicorp/vault:1.21.0
+    cap_add: [IPC_LOCK]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_ADDR: http://127.0.0.1:8200
+      VAULT_TOKEN: root
+    ports: ["127.0.0.1:28200:8200"]
+    mem_limit: 384m
+    healthcheck:
+      test: [CMD, vault, status]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  vault-uninitialized:
+    profiles: [vault]
+    image: hashicorp/vault:1.21.0
+    command: [server, -config=/etc/vault/qa.hcl]
+    volumes: ["./vault-uninitialized.hcl:/etc/vault/qa.hcl:ro"]
+    environment:
+      VAULT_ADDR: http://127.0.0.1:8200
+    ports: ["127.0.0.1:28201:8200"]
+    mem_limit: 256m
+    healthcheck:
+      test: [CMD-SHELL, 'vault status -format=json | grep -q initialized']
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  nomad:
+    profiles: [nomad]
+    image: hashicorp/nomad:1.10.1
+    command: [agent, -config=/etc/nomad/qa.hcl]
+    volumes: ["./nomad.hcl:/etc/nomad/qa.hcl:ro"]
+    ports: ["127.0.0.1:24646:4646"]
+    mem_limit: 384m
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- http://127.0.0.1:4646/v1/status/leader | grep -q 4647']
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  nomad-open:
+    profiles: [nomad]
+    image: hashicorp/nomad:1.10.1
+    command: [agent, -server, -bootstrap-expect=1, -data-dir=/tmp/nomad, -bind=0.0.0.0]
+    ports: ["127.0.0.1:24647:4646"]
+    mem_limit: 384m
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- http://127.0.0.1:4646/v1/status/leader | grep -q 4647']
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  jupyter:
+    profiles: [jupyter]
+    build:
+      context: .
+      dockerfile: Dockerfile.jupyter
+    image: redposture-jupyter-qa:2.17.0
+    environment:
+      JUPYTER_TOKEN: qa-jupyter-token
+    ports: ["127.0.0.1:28888:8888"]
+    mem_limit: 384m
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/api')"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  nomad-execute:
+    profiles: [nomad-execute]
+    image: hashicorp/nomad:1.10.1
+    user: "65534:65534"
+    command: [agent, -config=/etc/nomad/qa.hcl]
+    volumes: ["./nomad-execute.hcl:/etc/nomad/qa.hcl:ro", "./nomad-keepalive.json:/etc/nomad/keepalive.json:ro"]
+    ports: ["127.0.0.1:24648:4646"]
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- http://127.0.0.1:4646/v1/status/leader | grep -q 4647']
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  jupyter-open:
+    profiles: [jupyter]
+    image: redposture-jupyter-qa:2.17.0
+    command: [jupyter, server, --allow-root, --ip=0.0.0.0, --no-browser, --ServerApp.root_dir=/notebooks, --IdentityProvider.token=]
+    ports: ["127.0.0.1:28889:8888"]
+    mem_limit: 384m
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/api/status')"]
+      interval: 2s
+      timeout: 2s
+      retries: 60

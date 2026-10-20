@@ -241,7 +241,9 @@ for section in "${SELECTED[@]}"; do
   started="$(date +%s)"
   set +e
   ( set -e; check_section_prerequisites "$section"; execute_section "$section" ) 2>&1 | tee "$log"
-  rc=${PIPESTATUS[0]}
+  pipeline_status=("${PIPESTATUS[@]}")
+  rc=${pipeline_status[0]}
+  if [[ "$rc" -eq 0 ]]; then rc=${pipeline_status[1]}; fi
   set -e
   elapsed=$(( $(date +%s) - started ))
   status=passed

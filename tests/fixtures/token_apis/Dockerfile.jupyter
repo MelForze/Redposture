@@ -1,0 +1,5 @@
+FROM python:3.12-slim
+RUN python -m pip install --no-cache-dir jupyter_server==2.17.0 ipykernel==6.30.1
+WORKDIR /notebooks
+COPY example.ipynb /notebooks/reports/example.ipynb
+CMD ["jupyter", "server", "--allow-root", "--ip=0.0.0.0", "--no-browser", "--ServerApp.root_dir=/notebooks"]

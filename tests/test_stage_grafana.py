@@ -315,7 +315,11 @@ def test_slow_grafana_login_does_not_erase_health_detection(monkeypatch: pytest.
 def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_grafana._http_request",
-        lambda *_args, **_kwargs: (200, '{"id":1,"login":"admin","isGrafanaAdmin":true}', {}),
+        lambda *_args, **kwargs: (
+            (200, '{"id":1,"login":"admin","isGrafanaAdmin":true}', {})
+            if (kwargs.get("headers") or {}).get("Authorization")
+            else (401, "{}", {})
+        ),
     )
     ok, error = _verify_credentials("127.0.0.1", 3000, 1.0, "admin", "admin")
     assert (ok, error) == (True, None)
@@ -1370,7 +1374,7 @@ def test_fix_e2e_grafana_apitoken_flows_through_and_verifies_via_bearer(
         if path == "/api/user":
             auth = (headers or {}).get("Authorization", "")
             if auth == "Bearer glsa-valid-token":
-                return 200, '{"login":"admin"}', {}
+                return 200, '{"id":1,"login":"admin","isGrafanaAdmin":true}', {}
             return 401, "", {}
         if path == "/api/datasources":
             return 200, "[]", {}
@@ -1454,7 +1458,7 @@ def test_grafana_defcreds_falls_back_after_api_token_transport_error(
     assert "token transport failure" in record["auth_attempts"][0]["error"]
     assert datasource_headers == [None, winning_header]
     lines = _format_auth_attempt_detail_records(record, "txt")
-    assert lines[0].endswith("[-] API token (source:apitoken)")
+    assert lines[0].endswith("[-] API token (source:apitoken) (unverified: token transport failure)")
     assert all("must-not-appear" not in line for line in lines)
 
 

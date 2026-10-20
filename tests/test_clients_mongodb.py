@@ -313,7 +313,9 @@ def test_mongo_audit_client_fallbacks_and_close_quietly() -> None:
 
         def command(self, command):
             if command == "hello":
-                raise RuntimeError("no hello")
+                from pymongo.errors import OperationFailure
+
+                raise OperationFailure("no such command: hello", code=59)
             return {"ok": 1, "ismaster": True, "minWireVersion": 0, "maxWireVersion": 21}
 
         def __getitem__(self, name: str):

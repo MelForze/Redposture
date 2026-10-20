@@ -112,6 +112,14 @@ def _format_inventory_records(record: dict[str, Any], output_format: str) -> lis
         lines.extend(
             f"{prefix} [*] Clients Name={realm} (access:{status})" for realm, status in sorted(denied_clients.items())
         )
+    if record.get("clients_partial"):
+        lines.append(f"{prefix} [*] Clients coverage:partial")
+        errors = record.get("clients_errors")
+        if isinstance(errors, dict):
+            lines.extend(
+                f"{prefix} [*] Clients Realm={json.dumps(realm, ensure_ascii=False)} (reason:{reason})"
+                for realm, reason in sorted(errors.items())
+            )
     return lines
 
 
@@ -155,6 +163,9 @@ def _render_colored_keycloak_line(console: Console, line: str) -> bool:
             RegexColorRule(r"\(access:unknown\)", "orange"),
             RegexColorRule(r"\(realm:[^)]+\)", "orange"),
             RegexColorRule(r"\((?:realms|clients|redirect URIs|web origins):unknown\)", "orange"),
+            RegexColorRule(r"coverage:partial", "orange"),
+            RegexColorRule(r'Realm="(?:\\.|[^"\\])*"', "orange"),
+            RegexColorRule(r"\(reason:[^)]+\)", "orange"),
         ),
         extra_spans=lambda marker, payload: (
             [(0, payload.find(" ("), "orange")]

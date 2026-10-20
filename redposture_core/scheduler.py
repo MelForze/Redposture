@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import heapq
 import itertools
 import queue
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
@@ -207,6 +209,164 @@ class BoundedScheduler(Generic[T, R]):
                 pool.close()
             else:
                 pool.cancel()
+
+    def iter_expanding(
+        self,
+        items: Iterable[T],
+        worker: Callable[[T], R],
+        children: Callable[[T, R], Iterable[T]],
+    ) -> Iterator[tuple[T, R]]:
+        """Schedule finite dependent jobs as their parent finishes, in one pool.
+
+        Children have priority over fresh roots. Only max_inflight parents can
+        contribute pending children at once; callers bound per-parent fanout.
+        """
+        pool: _DaemonWorkerPool[T, R] = _DaemonWorkerPool(
+            max_workers=self.max_workers,
+            max_inflight=self.max_inflight,
+            worker=worker,
+            key_fn=None,
+            per_key_limit=self.max_inflight,
+        )
+        source = iter(items)
+        pending: deque[T] = deque()
+        exhausted = False
+        inflight = 0
+        sequence = itertools.count()
+        complete = False
+        try:
+            while True:
+                while inflight < self.max_inflight:
+                    if pending:
+                        item = pending.popleft()
+                    elif not exhausted:
+                        try:
+                            item = next(source)
+                        except StopIteration:
+                            exhausted = True
+                            continue
+                    else:
+                        break
+                    pool.submit(_Task(next(sequence), item))
+                    inflight += 1
+                if not inflight:
+                    complete = True
+                    return
+                outcome = pool.results.get()
+                inflight -= 1
+                if outcome.error is not None:
+                    raise outcome.error
+                value = cast(R, outcome.value)
+                pending.extend(children(outcome.item, value))
+                yield outcome.item, value
+        finally:
+            if complete:
+                pool.close()
+            else:
+                pool.cancel()
+
+    def iter_paused(
+        self,
+        items: Iterable[T],
+        worker: Callable[[T], Generator[float, None, R]],
+        *,
+        cancelled: threading.Event | None = None,
+    ) -> Iterator[tuple[T, R]]:
+        """Run bounded resumable jobs; yielded delays never occupy workers.
+
+        Contexts and generators stay attached to a job across pool threads.
+        max_inflight also bounds parked lifecycle state and open connections.
+        """
+        states: dict[int, tuple[T, Context, Generator[float, None, R] | None]] = {}
+        parked: list[tuple[float, int]] = []
+        source = enumerate(items)
+        exhausted = False
+        running: set[int] = set()
+        finished = False
+        abandoned = threading.Event()
+
+        def step(index: int) -> tuple[bool, Any]:
+            item, context, generator = states[index]
+            if generator is None:
+                generator = context.run(worker, item)
+                states[index] = (item, context, generator)
+            try:
+                if abandoned.is_set() or (cancelled is not None and cancelled.is_set()):
+                    return True, None
+                try:
+                    return False, context.run(next, generator)
+                except StopIteration as done:
+                    return True, done.value
+            finally:
+                # Cancellation can occur during a blocking next(). If that call
+                # later yields, nobody will resume it: close in its own Context.
+                if abandoned.is_set() or (cancelled is not None and cancelled.is_set()):
+                    context.run(generator.close)
+
+        pool: _DaemonWorkerPool[int, tuple[bool, Any]] = _DaemonWorkerPool(
+            max_workers=self.max_workers,
+            max_inflight=self.max_inflight,
+            worker=step,
+            key_fn=None,
+            per_key_limit=self.max_inflight,
+        )
+        try:
+            while True:
+                if cancelled is not None and cancelled.is_set():
+                    return
+                while len(running) < self.max_workers:
+                    if parked and parked[0][0] <= time.monotonic():
+                        _, index = heapq.heappop(parked)
+                    elif not exhausted and len(states) < self.max_inflight:
+                        try:
+                            index, item = next(source)
+                        except StopIteration:
+                            exhausted = True
+                            continue
+                        states[index] = (item, copy_context(), None)
+                    else:
+                        break
+                    running.add(index)
+                    pool.submit(_Task(index=index, item=index))
+                if not states and exhausted:
+                    finished = True
+                    return
+                timeout = 0.05
+                if parked:
+                    timeout = min(timeout, max(0.001, parked[0][0] - time.monotonic()))
+                try:
+                    outcome = pool.results.get(timeout=timeout)
+                except queue.Empty:
+                    continue
+                running.remove(outcome.index)
+                if outcome.error is not None:
+                    raise outcome.error
+                done, value = cast(tuple[bool, Any], outcome.value)
+                if done:
+                    item, _, _ = states.pop(outcome.index)
+                    yield item, cast(R, value)
+                else:
+                    heapq.heappush(parked, (time.monotonic() + max(0.0, float(value)), outcome.index))
+        finally:
+            abandoned.set()
+            if finished:
+                pool.close()
+            else:
+                pool.cancel()
+            # Close idle and just-completed continuations. An executing call
+            # owns its Context and closes itself in step's finally on return.
+            cleanup_error: BaseException | None = None
+            for _index, (_item, context, generator) in list(states.items()):
+                if generator is not None and not getattr(generator, "gi_running", False):
+                    try:
+                        context.run(generator.close)
+                    except BaseException as exc:  # noqa: BLE001 - close every independent lifecycle
+                        if isinstance(exc, RuntimeError) and "already entered" in str(exc):
+                            continue
+                        if cleanup_error is None:
+                            cleanup_error = exc
+            if cleanup_error is not None:
+                raise cleanup_error
 
     def map_ordered(
         self,

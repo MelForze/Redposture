@@ -18,13 +18,19 @@ fi
 echo "== Redis, Grafana and PostgreSQL CVE boundaries =="
 set +e
 PYTHON="${PYTHON_BIN}" ./scripts/run_real_cve_matrix.sh 2>&1 | tee "${ARTIFACT_DIR}/cve-boundaries.log"
-boundary_rc=${PIPESTATUS[0]}
+pipeline_status=("${PIPESTATUS[@]}")
+boundary_rc=${pipeline_status[0]}
+if [[ "${boundary_rc}" -eq 0 ]]; then boundary_rc=${pipeline_status[1]}; fi
 echo "== Airflow and Elasticsearch release detection =="
 "${PYTHON_BIN}" scripts/run_extended_version_matrix.py "${ARTIFACT_DIR}/extended" 2>&1 | tee "${ARTIFACT_DIR}/extended.log"
-extended_rc=${PIPESTATUS[0]}
+pipeline_status=("${PIPESTATUS[@]}")
+extended_rc=${pipeline_status[0]}
+if [[ "${extended_rc}" -eq 0 ]]; then extended_rc=${pipeline_status[1]}; fi
 echo "== Other real-service release pairs and module actions =="
 "${PYTHON_BIN}" scripts/run_service_version_matrix.py "${ARTIFACT_DIR}/compatibility" 2>&1 | tee "${ARTIFACT_DIR}/compatibility.log"
-compatibility_rc=${PIPESTATUS[0]}
+pipeline_status=("${PIPESTATUS[@]}")
+compatibility_rc=${pipeline_status[0]}
+if [[ "${compatibility_rc}" -eq 0 ]]; then compatibility_rc=${pipeline_status[1]}; fi
 set -e
 
 "${PYTHON_BIN}" - "${ARTIFACT_DIR}" "${boundary_rc}" "${extended_rc}" "${compatibility_rc}" <<'PY'

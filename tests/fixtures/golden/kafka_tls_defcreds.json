@@ -4,7 +4,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "12345678",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "admin"
@@ -12,7 +12,7 @@
       {
         "error": null,
         "password": "admin",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": true,
         "source": "default",
         "status": "weak_default_creds",
         "username": "admin"
@@ -20,7 +20,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "admin-secret",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "admin"
@@ -28,7 +28,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "changeme",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "admin"
@@ -36,7 +36,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "kafka",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "admin"
@@ -44,7 +44,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "password",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "admin"
@@ -52,7 +52,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "broker",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "broker"
@@ -60,7 +60,7 @@
       {
         "error": null,
         "password": "brokerpass",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": true,
         "source": "default",
         "status": "weak_default_creds",
         "username": "broker"
@@ -68,7 +68,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "client",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "client"
@@ -76,7 +76,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "admin",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "kafka"
@@ -84,7 +84,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "changeme",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "kafka"
@@ -92,7 +92,7 @@
       {
         "error": null,
         "password": "kafka",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": true,
         "source": "default",
         "status": "weak_default_creds",
         "username": "kafka"
@@ -100,7 +100,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "password",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "kafka"
@@ -108,7 +108,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "zookeeper",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "kafka"
@@ -116,7 +116,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "password",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "service"
@@ -124,7 +124,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "service",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "service"
@@ -132,7 +132,7 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "password",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "user"
@@ -140,12 +140,13 @@
       {
         "error": "SASL auth failed: Authentication failed: Invalid username or password",
         "password": "user",
-        "provided_credentials_ok": null,
+        "provided_credentials_ok": false,
         "source": "default",
         "status": "auth_required",
         "username": "user"
       }
     ],
+    "auth_flow": "sasl_fallback",
     "auth_required": true,
     "cluster_permissions": {
       "create": true,
@@ -212,7 +213,7 @@
     "partial": false,
     "port": 29093,
     "provided_credentials": false,
-    "provided_credentials_ok": null,
+    "provided_credentials_ok": true,
     "provided_password": null,
     "provided_username": "admin",
     "query_topic": null,

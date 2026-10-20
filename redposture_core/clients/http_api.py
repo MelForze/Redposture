@@ -370,6 +370,15 @@ def _redirect_metadata(request_url: str, final_url: str) -> tuple[str, ...]:
     return (request_url,) if final_url != request_url else ()
 
 
+def check_http_body_complete(response: Any, received: int) -> None:
+    """Sized HTTPResponse.read silently accepts EOF; check its remaining framing."""
+    remaining = getattr(response, "length", None)
+    if isinstance(remaining, int) and remaining > 0:
+        raise ConnectionError(
+            f"unexpected EOF: incomplete HTTP response body ({received} bytes received, {remaining} more expected)"
+        )
+
+
 def normalize_http_error(exc: BaseException) -> str:
     text = str(exc).strip()
     if text.startswith("<urlopen error ") and text.endswith(">"):
@@ -507,7 +516,7 @@ def _decode_chunked_body(body: bytes, *, allow_partial: bool = False) -> bytes:
 
 
 def _parse_http_response_bytes_detailed(
-    raw: bytes, *, response_cap: int, truncated: bool = False
+    raw: bytes, *, response_cap: int, truncated: bool = False, method: str = "GET"
 ) -> tuple[int, dict[str, str], bytes, bool]:
     header_bytes, separator, body = raw.partition(b"\r\n\r\n")
     if not separator:
@@ -524,9 +533,20 @@ def _parse_http_response_bytes_detailed(
         key, value = line.split(":", 1)
         headers[key.strip()] = value.strip()
     header_lookup = {key.lower(): value for key, value in headers.items()}
-    if header_lookup.get("transfer-encoding", "").strip().lower() == "chunked":
-        body = _decode_chunked_body(body, allow_partial=truncated)
     cap = max(0, int(response_cap))
+    if method.upper() == "HEAD" or int(parts[1]) in {204, 304}:
+        body = b""
+    elif header_lookup.get("transfer-encoding", "").strip().lower() == "chunked":
+        body = _decode_chunked_body(body, allow_partial=truncated)
+    elif "content-length" in header_lookup:
+        expected = int(header_lookup["content-length"])
+        if expected < 0:
+            raise ValueError("invalid Content-Length")
+        if not truncated and len(body) <= cap and len(body) < expected:
+            raise ConnectionError(
+                f"unexpected EOF: incomplete HTTP response body ({len(body)} bytes received, {expected} expected)"
+            )
+        body = body[:expected]
     if len(body) > cap:
         body = body[:cap]
         truncated = True
@@ -633,6 +653,7 @@ class HttpApiClient:
                                 break
                             fh.write(chunk)
                             size += len(chunk)
+                        check_http_body_complete(resp, size)
                 return HttpResponse(status, b"", response_headers)
 
         response = follow_redirects(
@@ -737,6 +758,8 @@ class HttpApiClient:
                 except TypeError:
                     payload = resp.read()
                 truncated = len(payload) > response_cap
+                if not truncated and request.method.upper() != "HEAD":
+                    check_http_body_complete(resp, len(payload))
                 if truncated:
                     payload = payload[:response_cap]
                 final_url = _response_final_url(resp, request.url)
@@ -766,8 +789,18 @@ class HttpApiClient:
                     payload = exc.read(read_size)
                 except TypeError:
                     payload = exc.read()
-            except Exception:
-                payload = b""
+                if len(payload) <= response_cap and request.method.upper() != "HEAD":
+                    check_http_body_complete(exc, len(payload))
+            except Exception as read_error:
+                exc.close()
+                return HttpResponse(
+                    status=0,
+                    body=b"",
+                    headers={},
+                    error=normalize_http_error(read_error),
+                    request_url=request.url,
+                    final_url=request.url,
+                )
             exc.close()
             truncated = len(payload) > response_cap
             if truncated:
@@ -883,6 +916,7 @@ class HttpApiClient:
                 response_raw,
                 response_cap=max(0, int(self.config.response_size_cap)),
                 truncated=response_truncated,
+                method=req.get_method(),
             )
             return HttpResponse(
                 status=status,

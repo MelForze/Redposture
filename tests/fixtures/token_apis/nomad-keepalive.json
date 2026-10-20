@@ -1,0 +1,18 @@
+{
+  "ID": "redposture-qa-keepalive",
+  "Name": "redposture-qa-keepalive",
+  "Type": "batch",
+  "Datacenters": ["*"],
+  "TaskGroups": [{
+    "Name": "qa",
+    "Count": 1,
+    "RestartPolicy": {"Attempts": 0, "Mode": "fail"},
+    "Tasks": [{
+      "Name": "hold",
+      "Driver": "raw_exec",
+      "Config": {"command": "/bin/sh", "args": ["-c", "sleep 600"]},
+      "Env": {"DATABASE_PASSWORD": "nomad-lab-password"},
+      "Resources": {"CPU": 100, "MemoryMB": 32}
+    }]
+  }]
+}

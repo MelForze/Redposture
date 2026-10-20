@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_version": "2026-10-16",
+  "catalog_version": "2026-10-20",
   "entries": [
     {
       "id": "CVE-2017-15720",
@@ -5780,6 +5780,131 @@
       ],
       "verified_at": "2026-10-12",
       "published_at": "2025-04-03"
+    },
+    {
+      "id": "CVE-2024-7594",
+      "product": "hashicorp_vault",
+      "title": "Vault SSH certificate principal bypass (requires SSH signing role with unset valid_principals/default_user)",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "1.7.7",
+          "fixed": "1.17.6"
+        }
+      ],
+      "references": [
+        "https://discuss.hashicorp.com/t/hcsec-2024-20-vault-ssh-secrets-engine-configuration-did-not-restrict-valid-principals-by-default/70251",
+        "https://www.cve.org/CVERecord?id=CVE-2024-7594",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-7594"
+      ],
+      "verified_at": "2026-10-20",
+      "published_at": "2024-09-26"
+    },
+    {
+      "id": "CVE-2024-7594",
+      "product": "hashicorp_vault_enterprise",
+      "title": "Vault Enterprise SSH certificate principal bypass (requires SSH signing role with unset valid_principals/default_user)",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "1.7.7",
+          "fixed": "1.15.15"
+        },
+        {
+          "introduced": "1.16.0",
+          "fixed": "1.16.10"
+        },
+        {
+          "introduced": "1.17.0",
+          "fixed": "1.17.6"
+        }
+      ],
+      "references": [
+        "https://discuss.hashicorp.com/t/hcsec-2024-20-vault-ssh-secrets-engine-configuration-did-not-restrict-valid-principals-by-default/70251",
+        "https://www.cve.org/CVERecord?id=CVE-2024-7594",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-7594"
+      ],
+      "verified_at": "2026-10-20",
+      "published_at": "2024-09-26"
+    },
+    {
+      "id": "CVE-2025-4922",
+      "product": "hashicorp_nomad",
+      "title": "Nomad ACL policy lookup applies incorrect rules to workload jobs",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "1.4.0",
+          "fixed": "1.10.2"
+        }
+      ],
+      "references": [
+        "https://discuss.hashicorp.com/t/hcsec-2025-12-nomad-vulnerable-to-incorrect-acl-policy-lookup-attached-to-a-job/75396",
+        "https://www.cve.org/CVERecord?id=CVE-2025-4922",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-4922"
+      ],
+      "verified_at": "2026-10-20",
+      "published_at": "2025-06-11"
+    },
+    {
+      "id": "CVE-2025-4922",
+      "product": "hashicorp_nomad_enterprise",
+      "title": "Nomad Enterprise ACL policy lookup applies incorrect rules to workload jobs",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "1.4.0",
+          "fixed": "1.8.14"
+        },
+        {
+          "introduced": "1.9.0",
+          "fixed": "1.9.10"
+        },
+        {
+          "introduced": "1.10.0",
+          "fixed": "1.10.2"
+        }
+      ],
+      "references": [
+        "https://discuss.hashicorp.com/t/hcsec-2025-12-nomad-vulnerable-to-incorrect-acl-policy-lookup-attached-to-a-job/75396",
+        "https://www.cve.org/CVERecord?id=CVE-2025-4922",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-4922"
+      ],
+      "verified_at": "2026-10-20",
+      "published_at": "2025-06-11"
+    },
+    {
+      "id": "CVE-2026-35397",
+      "product": "jupyter_server",
+      "title": "Jupyter Server sibling-directory traversal (requires overlapping root directory names)",
+      "severity": "HIGH",
+      "score": 7.1,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:L",
+      "impact": "file_read",
+      "affected": [
+        {
+          "last_affected": "2.17.0"
+        }
+      ],
+      "references": [
+        "https://github.com/jupyter-server/jupyter_server/security/advisories/GHSA-5789-5fc7-67v3",
+        "https://www.cve.org/CVERecord?id=CVE-2026-35397",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-35397"
+      ],
+      "verified_at": "2026-10-20",
+      "published_at": "2026-05-05"
     }
   ]
 }

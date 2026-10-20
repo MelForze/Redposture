@@ -44,7 +44,7 @@ jobs:
           python-version: "3.13t"
       - name: Install smoke dependencies
         run: |
-          python -m pip install pytest pytest-socket hatchling editables==0.6
+          python -m pip install pytest pytest-socket hypothesis hatchling editables==0.6
           python -m pip install --no-deps --no-build-isolation -e .
       - name: Verify free-threaded runtime and concurrency contracts
         run: |

@@ -19,10 +19,13 @@ started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 set +e
 if [ "${MODE}" = "full" ]; then
   ./scripts/run_full_local_qa.sh "${ARTIFACT_DIR}/full" 2>&1 | tee "${ARTIFACT_DIR}/console.log"
+  pipeline_status=("${PIPESTATUS[@]}")
 else
   ./scripts/run_version_qa.sh "${ARTIFACT_DIR}/versions" 2>&1 | tee "${ARTIFACT_DIR}/console.log"
+  pipeline_status=("${PIPESTATUS[@]}")
 fi
-run_rc=${PIPESTATUS[0]}
+run_rc=${pipeline_status[0]}
+if [[ "${run_rc}" -eq 0 ]]; then run_rc=${pipeline_status[1]}; fi
 set -e
 finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 

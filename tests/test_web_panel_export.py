@@ -32,7 +32,7 @@ def _response(value: object, status: int = 200) -> HttpResponse:
         ("minio_console", {"show_buckets": True}, {"buckets"}),
         ("minio_console", {"show_objects": True}, {"objects"}),
         ("minio_console", {"dump": True}, {"content"}),
-        ("kibana", {"discover": True}, {"documents"}),
+        ("kibana", {"discover": True}, set()),
         ("pgadmin", {"show_tables": True}, {"tables"}),
         ("pgadmin", {"dump": True}, {"rows"}),
     ],

@@ -8,6 +8,7 @@ import re
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from typing import Any, Literal
 from urllib.parse import urlparse, urlunsplit
 
@@ -237,6 +238,16 @@ class StreamingTargetPlan:
             self.include_matrix_ports_for_bare_explicit_targets and spec.scheme is None and port_int in matrix_port_set
         )
 
+    @cached_property
+    def _explicit_specs_by_port(self) -> dict[int, tuple[ScanTargetSpec, ...]]:
+        grouped: dict[int, list[ScanTargetSpec]] = {}
+        for entry in self._entries:
+            if isinstance(entry, _ListTargetEntry):
+                for spec in entry.specs:
+                    if spec.explicit_port is not None:
+                        grouped.setdefault(int(spec.explicit_port), []).append(spec)
+        return {port: tuple(specs) for port, specs in grouped.items()}
+
     def iter_specs_for_port(self, port: int, matrix_ports: tuple[int, ...]) -> Iterator[ScanTargetSpec]:
         """Yield specs whose effective port matches ``port``.
 
@@ -247,6 +258,17 @@ class StreamingTargetPlan:
         """
         matrix_port_set = {int(matrix_port) for matrix_port in matrix_ports}
         port_int = int(port)
+        if port_int not in matrix_port_set:
+            # Only explicit matches can use this port. Avoid N literals for
+            # every distinct port while preserving input order and bare dedup.
+            seen: set[str] = set()
+            for spec in self._explicit_specs_by_port.get(port_int, ()):
+                if spec.scheme is None:
+                    if spec.host in seen:
+                        continue
+                    seen.add(spec.host)
+                yield spec
+            return
         literal_bare_hosts = {
             spec.host
             for entry in self._entries

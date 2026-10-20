@@ -68,9 +68,6 @@ def standard_export_selection(args: Any, product: str) -> set[str]:
             selected.add("objects")
         if getattr(args, "dump", False) is True and not getattr(args, "object", None):
             selected.add("content")
-    elif product in {"kibana", "opensearch_dashboards"}:
-        if getattr(args, "discover", False) is True:
-            selected.add("documents")
     elif product == "pgadmin":
         if getattr(args, "show_databases", False) is True:
             selected.add("databases")
@@ -131,7 +128,7 @@ def _portainer(
             endpoint_id = endpoint["Id"]
             yield f"environment:{endpoint_id}", "environments", endpoint
             for category, route in (
-                ("containers", "containers/json"),
+                ("containers", "containers/json?all=1"),
                 ("images", "images/json"),
                 ("networks", "networks"),
                 ("volumes", "volumes"),

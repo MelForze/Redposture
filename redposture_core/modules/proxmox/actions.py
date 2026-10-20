@@ -342,6 +342,13 @@ def _proxmox_request(
         )
         if error is None:
             return status, payload, response_headers, None
+        if method.upper() not in {"GET", "HEAD"}:
+            return (
+                status,
+                payload,
+                response_headers,
+                f"{error}; outcome uncertain; retry suppressed for {method.upper()}",
+            )
         last_error = error
         if attempt >= attempts - 1:
             break

@@ -327,8 +327,31 @@ class MongoAuditClient:
     def hello(self) -> dict[str, Any]:
         try:
             result = _command(self.client, "admin", "hello")
-        except Exception:
-            result = _command(self.client, "admin", "isMaster")
+        except Exception as exc:
+            try:
+                from pymongo.errors import OperationFailure, ProtocolError, ServerSelectionTimeoutError
+            except ImportError:
+                # Embedded callers may supply a client without the optional
+                # driver. Preserve their actual failure rather than masking it.
+                raise exc from None
+
+            # Only an unsupported command justifies the legacy spelling. A
+            # selection/socket timeout must not receive a second full budget.
+            if isinstance(exc, OperationFailure) and exc.code == 59:
+                result = _command(self.client, "admin", "isMaster")
+            else:
+                # PyMongo wraps wire errors in ServerSelectionTimeoutError;
+                # retain the actual protocol failure instead of triggering
+                # the runtime's longer retry for genuine network timeouts.
+                if isinstance(exc, ServerSelectionTimeoutError):
+                    topology = getattr(self.client, "topology_description", None)
+                    descriptions = getattr(topology, "server_descriptions", None)
+                    if callable(descriptions):
+                        for server in descriptions().values():
+                            error = getattr(server, "error", None)
+                            if isinstance(error, ProtocolError):
+                                raise MongoClientError(f"mongodb protocol error: {error}") from exc
+                raise
         if not isinstance(result, dict):
             raise MongoNotMongoError("hello did not return a document")
         if not is_mongodb_hello_response(result):

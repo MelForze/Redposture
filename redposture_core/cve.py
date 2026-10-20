@@ -445,6 +445,9 @@ def resolve_products(module: str, payload: Mapping[str, Any]) -> list[DetectedPr
         "grafana": ("grafana", "Grafana", "server_version"),
         "keycloak": ("keycloak", "Keycloak", "version"),
         "jenkins": ("jenkins", "Jenkins", "version"),
+        "vault": ("hashicorp_vault", "HashiCorp Vault", "version"),
+        "nomad": ("hashicorp_nomad", "HashiCorp Nomad", "version"),
+        "jupyter": ("jupyter_server", "Jupyter Server", "version"),
         "kubeapi": ("kubernetes", "Kubernetes", "version"),
         "minio": ("minio", "MinIO", "version"),
         "mongodb": ("mongodb", "MongoDB", "server_version"),
@@ -456,6 +459,13 @@ def resolve_products(module: str, payload: Mapping[str, Any]) -> list[DetectedPr
     }
     if module in version_fields:
         key, name, field = version_fields[module]
+        if module in {"vault", "nomad"}:
+            enterprise = payload.get("enterprise")
+            if enterprise is True:
+                key += "_enterprise"
+                name += " Enterprise"
+            elif enterprise is not False and payload.get(field):
+                key += "_edition_unknown"
         version_products = [_product(key, name, payload.get(field))]
         if module == "jenkins":
             plugins = payload.get("plugins")

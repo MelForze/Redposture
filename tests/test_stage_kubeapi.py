@@ -291,6 +291,7 @@ def test_kubeapi_auth_required_skips_requested_anonymous_resource_probes(
     namespace_status: int,
     namespace_error: str,
 ) -> None:
+    monkeypatch.setattr(kube, "_probe_pod_access", lambda *a, **kw: (False, namespace_status, namespace_error))
     monkeypatch.setattr(
         kube,
         "_api_get_json",
@@ -366,10 +367,11 @@ def test_kubeapi_auth_required_skips_requested_anonymous_resource_probes(
         assert not any("authentication required" in line for line in lines)
         assert all("Namespaces" not in line and "Pods" not in line and "Secrets" not in line for line in lines)
     else:
-        assert pod_calls == [True]
+        assert pod_calls == []  # Reuse the bounded probe's conclusive denial.
         assert secret_calls == [True]
-        assert exec_calls == [True]
-        assert any("anonymous access:limited" in line for line in lines)
+        assert exec_calls == []  # No namespace can be resolved for the pod.
+        assert any("auth required:True" in line for line in lines)
+        assert any("namespaces access:False" in line and "pods access:False" in line for line in lines)
         assert not any("auth required:False" in line for line in lines)
         assert any("Namespaces" in line for line in lines)
         assert any("namespaces unavailable: anonymous access denied" in line for line in lines)
@@ -435,14 +437,18 @@ def test_anonymous_limited_json_keeps_auth_and_access_fields() -> None:
         "port": 6443,
         "status": "anonymous_limited",
         "version": "v1.27.5",
-        "auth_required": False,
+        "auth_required": True,
         "anonymous_access": "limited",
+        "can_list_namespaces": False,
+        "can_list_pods": False,
     }
 
     rendered = json.loads(kube._format_detect_record(record, "json"))
 
-    assert rendered["auth_required"] is False
+    assert rendered["auth_required"] is True
     assert rendered["anonymous_access"] == "limited"
+    assert rendered["can_list_namespaces"] is False
+    assert rendered["can_list_pods"] is False
 
 
 def test_audit_kubeapi_targets_json_output_is_machine_readable(monkeypatch, tmp_path) -> None:
@@ -590,6 +596,11 @@ def test_audit_kubeapi_host_open_no_auth_with_tls_fallback_and_exec(monkeypatch:
 def test_audit_kubeapi_host_uses_token_when_anonymous_is_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         kube,
+        "_probe_pod_access",
+        lambda ctx, state, options, **kw: (bool(kw.get("token")), 200 if kw.get("token") else 403, None),
+    )
+    monkeypatch.setattr(
+        kube,
         "_api_get_json",
         lambda _host, _port, path, _timeout, **_kwargs: (
             200,
@@ -631,7 +642,7 @@ def test_audit_kubeapi_host_uses_token_when_anonymous_is_denied(monkeypatch: pyt
     assert record["status"] == "auth_valid"
     assert record["auth_mode"] == "token"
     assert record["auth_valid"] is True
-    assert record["auth_required"] is False
+    assert record["auth_required"] is True
     assert record["anonymous_access"] == "limited"
     assert record["namespaces"] == ["default", "kube-system"]
 

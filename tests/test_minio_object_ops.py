@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from redposture_core.clients.minio_api import MinioResponse, S3Error
@@ -90,12 +91,12 @@ def test_data_record_dump_whole_bucket(monkeypatch):
 
 
 def test_data_record_download_single_object(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)  # download writes to ./<bucket>/<key>
+    monkeypatch.chdir(tmp_path)  # download paths namespace endpoint and exact key identities
     _install_client(monkeypatch, MinioResponse(http_status=200, headers={}, body=b"BODYDATA"))
     out = actions.data_record(_ctx(object="bulk/a/b.bin", download=True), {"detection_status": "confirmed"})
-    dest = tmp_path / "bulk" / "a" / "b.bin"
+    dest = Path(out["object_downloads"][0]["path"])
     assert dest.read_bytes() == b"BODYDATA"
-    assert out["object_downloads"] == [{"bucket": "bulk", "key": "a/b.bin", "path": "bulk/a/b.bin", "size": 8}]
+    assert out["object_downloads"] == [{"bucket": "bulk", "key": "a/b.bin", "path": str(dest), "size": 8}]
 
 
 def test_data_record_download_whole_bucket(monkeypatch, tmp_path):
@@ -103,8 +104,7 @@ def test_data_record_download_whole_bucket(monkeypatch, tmp_path):
     _fake_bucket_objects(monkeypatch, "one.bin", "d/two.bin")
     _install_client(monkeypatch, MinioResponse(http_status=200, headers={}, body=b"XX"))
     out = actions.data_record(_ctx(bucket="bulk", download=True), {"detection_status": "confirmed"})
-    assert (tmp_path / "bulk" / "one.bin").read_bytes() == b"XX"
-    assert (tmp_path / "bulk" / "d" / "two.bin").read_bytes() == b"XX"
+    assert all(Path(item["path"]).read_bytes() == b"XX" for item in out["object_downloads"])
     assert [d["key"] for d in out["object_downloads"]] == ["one.bin", "d/two.bin"]
 
 
@@ -157,8 +157,7 @@ def test_data_record_download_without_target_walks_all_buckets(monkeypatch, tmp_
     )
     out = actions.data_record(_ctx(download=True), {"detection_status": "confirmed"})
     assert [item["bucket"] for item in out["object_downloads"]] == ["one", "two"]
-    assert (tmp_path / "one" / "a.txt").read_bytes() == b"file"
-    assert (tmp_path / "two" / "a.txt").read_bytes() == b"file"
+    assert all(Path(item["path"]).read_bytes() == b"file" for item in out["object_downloads"])
 
 
 def test_data_record_dump_reports_inaccessible_bucket_listing(monkeypatch):

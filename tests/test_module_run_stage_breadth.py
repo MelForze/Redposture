@@ -16,6 +16,44 @@ RUN_CASES = {
     "elastic": ["elastic", "-t", "127.0.0.1"],
     "grafana": ["grafana", "-t", "127.0.0.1"],
     "keycloak": ["keycloak", "-t", "127.0.0.1"],
+    "vault": [
+        "vault",
+        "-t",
+        "http://127.0.0.1/prefix",
+        "--token",
+        "qa-token",
+        "--show-mounts",
+        "--show-auth",
+        "--discover",
+        "--mount",
+        "secret/",
+    ],
+    "nomad": [
+        "nomad",
+        "-t",
+        "http://127.0.0.1/prefix",
+        "--token",
+        "qa-token",
+        "--show-jobs",
+        "--show-nodes",
+        "--show-members",
+        "--namespace",
+        "payments",
+        "--discover",
+    ],
+    "jupyter": [
+        "jupyter",
+        "-t",
+        "http://127.0.0.1/prefix",
+        "--token",
+        "qa-token",
+        "--show-contents",
+        "--show-sessions",
+        "--show-kernels",
+        "--path",
+        "reports",
+        "--discover",
+    ],
     "jenkins": ["jenkins", "-t", "127.0.0.1"],
     "gitlab": ["gitlab", "-t", "127.0.0.1"],
     "consul": ["consul", "-t", "127.0.0.1"],
@@ -128,6 +166,11 @@ def test_package_stage_run_functions_cover_runner_plan_path(monkeypatch, module_
 
     assert rc == 0
     assert calls, module_name
+    if module_name in {"vault", "nomad", "jupyter"}:
+        assert calls[0].credential_runs[0].token == "qa-token"
+        assert calls[0].target_plan is not None
+        assert args.discover is True
+        assert any(getattr(args, "show_" + name, False) for name in ("mounts", "jobs", "contents"))
 
 
 def test_grpc_stage_debug_openapi_and_output_error_branches(monkeypatch, tmp_path) -> None:

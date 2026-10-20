@@ -254,6 +254,105 @@ def list_dag_ids(client: AirflowClient, generation: str, *, limit: int | None = 
     }
 
 
+def list_dag_sources(
+    client: AirflowClient,
+    generation: str,
+    *,
+    source_ids: list[str] | None = None,
+    max_items: int = 10_000,
+    max_seconds: float = 300.0,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """List API source handles without downloading code.
+
+    Airflow 2 uses signed file tokens shared by DAGs in the same file. Airflow 3
+    authorizes source reads per DAG, so its handles must not be merged by path.
+    """
+    prefix = "/api/v2" if generation == "v2" else "/api/v1"
+    deadline = time.monotonic() + max_seconds
+    collection = _collection(client, f"{prefix}/dags", "dags", max_items, deadline, cancelled=cancelled)
+    reasons: list[str] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    seen_dags: set[tuple[str, str]] = set()
+    if not collection.complete:
+        reasons.append(f"dag_sources_list:{collection.error or 'item_limit'}")
+    for dag in collection.items:
+        if cancelled is not None and cancelled():
+            raise NestedSchedulerCancelled("Airflow source inventory cancelled")
+        if time.monotonic() >= deadline:
+            reasons.append("max_time")
+            break
+        dag_id = dag.get("dag_id")
+        if not isinstance(dag_id, str) or not dag_id:
+            reasons.append("dag_sources:missing_dag_id")
+            continue
+        data = dict(dag)
+        source_id = dag_id if generation == "v2" else dag.get("file_token")
+        if generation != "v2" and (not isinstance(source_id, str) or not source_id):
+            # Some 2.x list responses omit file_token; details expose the same
+            # signed handle without requesting the source body.
+            detail = client.get(f"{prefix}/dags/{_component(dag_id)}/details")
+            if detail.http_status == 404 and not detail.transport_error:
+                detail = client.get(f"{prefix}/dags/{_component(dag_id)}")
+            payload = (
+                detail.json()
+                if detail.http_status == 200 and not detail.truncated and not detail.transport_error
+                else None
+            )
+            if isinstance(payload, dict):
+                data.update(payload)
+                source_id = payload.get("file_token")
+        if not isinstance(source_id, str) or not source_id:
+            reasons.append(f"dag_source:{dag_id}:missing_file_token")
+            continue
+        if source_id not in by_id:
+            by_id[source_id] = {
+                "source_id": source_id,
+                "file_token": source_id if generation != "v2" else None,
+                "fileloc": data.get("fileloc") or data.get("relative_fileloc"),
+                "dag_ids": [],
+            }
+        if (source_id, dag_id) not in seen_dags:
+            seen_dags.add((source_id, dag_id))
+            by_id[source_id]["dag_ids"].append(dag_id)
+    if source_ids:
+        for source_id in dict.fromkeys(source_ids):
+            if source_id not in by_id:
+                reasons.append(f"source_not_listed:{source_id}")
+        sources = [by_id[source_id] for source_id in dict.fromkeys(source_ids) if source_id in by_id]
+    else:
+        sources = list(by_id.values())
+    return {
+        "status": "partial" if reasons else "complete",
+        "sources": sources,
+        "count": len(sources),
+        "partial_reasons": list(dict.fromkeys(reasons)),
+    }
+
+
+def _read_dag_source(
+    client: AirflowClient, prefix: str, source_id: str, max_bytes: int
+) -> tuple[str | None, str | None]:
+    response = client.get(
+        f"{prefix}/dagSources/{_component(source_id)}",
+        extra_headers={"Accept": "application/json"},
+        response_size_cap=max_bytes,
+    )
+    if response.transport_error:
+        return None, "transport_error"
+    if response.http_status != 200:
+        return None, f"http_{response.http_status}"
+    if response.truncated:
+        return None, "response_truncated"
+    data = response.json()
+    if isinstance(data, dict) and isinstance(data.get("content"), str):
+        return data["content"], None
+    content_type = next((value.lower() for key, value in response.headers.items() if key.lower() == "content-type"), "")
+    if "text/plain" in content_type:
+        return response.body.decode("utf-8", "replace"), None
+    return None, "invalid_source"
+
+
 def dump_airflow(
     client: AirflowClient,
     generation: str,
@@ -261,6 +360,9 @@ def dump_airflow(
     dags: list[str] | None = None,
     keys: list[str] | None = None,
     connections: list[str] | None = None,
+    sources: list[str] | None = None,
+    all_sources: bool = False,
+    source_inventory: dict[str, Any] | None = None,
     max_bytes: int = 50 * 1024 * 1024,
     max_seconds: float = 300.0,
     max_items: int = 10_000,
@@ -273,7 +375,7 @@ def dump_airflow(
     """
     prefix = "/api/v2" if generation == "v2" else "/api/v1"
     deadline = time.monotonic() + max_seconds
-    selected = any((dags, keys, connections))
+    selected = any((dags, keys, connections, sources, all_sources))
     requested: dict[str, list[tuple[str, dict[str, Any] | None]]] = {}
     reasons: list[str] = []
     records: list[dict[str, Any]] = []
@@ -305,6 +407,24 @@ def dump_airflow(
         if not collection.complete:
             add_reason(f"{kind}_list:{collection.error or 'item_limit'}")
 
+    if sources:
+        requested["dag_source"] = [(name, None) for name in dict.fromkeys(sources)]
+    elif all_sources:
+        inventory = (
+            source_inventory
+            if source_inventory is not None
+            else list_dag_sources(
+                client,
+                generation,
+                max_items=max_items,
+                max_seconds=max(0.0, deadline - time.monotonic()),
+                cancelled=cancelled,
+            )
+        )
+        requested["dag_source"] = [(item["source_id"], item) for item in inventory.get("sources", [])]
+        for reason in inventory.get("partial_reasons", []):
+            add_reason(reason)
+
     for kind, entries in requested.items():
         for object_id, listed in entries:
             if cancelled is not None and cancelled():
@@ -318,6 +438,21 @@ def dump_airflow(
                     else "max_time"
                 )
                 break
+            if kind == "dag_source":
+                content, error = _read_dag_source(client, prefix, object_id, max_bytes - bytes_used)
+                if error is not None:
+                    add_reason(f"dag_source:{object_id}:{error}")
+                    continue
+                source_record: dict[str, Any] = {"kind": kind, "id": object_id, "source": content}
+                if listed is not None:
+                    source_record.update({key: listed.get(key) for key in ("file_token", "fileloc", "dag_ids")})
+                encoded_size = len(json.dumps(source_record, ensure_ascii=False).encode("utf-8"))
+                if bytes_used + encoded_size > max_bytes:
+                    add_reason("max_bytes")
+                    break
+                records.append(source_record)
+                bytes_used += encoded_size
+                continue
             endpoint = "dags" if kind == "dag" else "variables" if kind == "variable" else "connections"
             path = f"{prefix}/{endpoint}/{_component(object_id)}"
             response = client.get(path, response_size_cap=min(2 * 1024 * 1024, max_bytes - bytes_used))

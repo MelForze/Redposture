@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, quote_plus, urlsplit
 from xml.etree import ElementTree
 
 from ...clients.http_api import http_response_requires_https
@@ -75,16 +75,27 @@ _MINIO_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     _MINIO_REAL_DEFAULT_CREDENTIALS + _MINIO_HEURISTIC_DEFAULT_CREDENTIALS
 )
 
-_S3_MARKERS = (b"ListAllMyBucketsResult", b"ListBucketResult", b"<Error>", b"<Code>")
+
+def _has_s3_xml_shape(body: bytes) -> bool:
+    try:
+        root = ElementTree.fromstring(body)
+    except (ElementTree.ParseError, ValueError, LookupError):
+        return False
+    for namespace in ("", "{http://s3.amazonaws.com/doc/2006-03-01/}"):
+        if root.tag in {f"{namespace}ListAllMyBucketsResult", f"{namespace}ListBucketResult"}:
+            return True
+        if root.tag == f"{namespace}Error":
+            code = root.findtext(f"{namespace}Code", "").strip()
+            return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9:._-]*", code))
+    return False
 
 
 def _has_s3_shape(resp: MinioResponse) -> bool:
-    if resp.transport_error:
+    if resp.transport_error or resp.truncated:
         return False
     if resp.error is not None and resp.error.code:
         return True
-    body = resp.body or b""
-    return any(marker in body for marker in _S3_MARKERS)
+    return _has_s3_xml_shape(resp.body or b"")
 
 
 def _server_is_minio(resp: MinioResponse) -> bool:
@@ -138,17 +149,17 @@ def _is_s3_request_on_console_port(resp: MinioResponse) -> bool:
 
 
 def _health_live(resp: MinioResponse) -> bool:
-    return not resp.transport_error and resp.http_status in {200, 204}
+    # MinIO's live probe has an empty body. A login page or catch-all JSON/XML
+    # returned with HTTP 200 is not an independent health signal.
+    return not resp.transport_error and not resp.truncated and resp.http_status in {200, 204} and not resp.body.strip()
 
 
 def _admin_plane(resp: MinioResponse) -> bool:
-    # Admin API present when the admin path answers with an S3/MinIO error
-    # (403/AccessDenied) rather than a plain 404.
-    if resp.transport_error:
+    if resp.transport_error or resp.truncated:
         return False
     if resp.http_status == 404:
         return False
-    return resp.http_status in {401, 403} or (resp.error is not None and bool(resp.error.code))
+    return _has_s3_shape(resp) or (resp.http_status == 200 and _is_admin_info_response(resp.body))
 
 
 def detect_minio(client: MinioClient) -> MinioDetection:
@@ -184,8 +195,14 @@ def detect_minio(client: MinioClient) -> MinioDetection:
         "server_version": _server_header_version(root),
     }
 
-    strong_signals = sum(1 for flag in (health_ok, admin_ok, server_minio) if flag)
-    if s3_shape and strong_signals >= 1 and (health_ok or admin_ok or (server_minio and strong_signals >= 2)):
+    # A generic S3 server/gateway can deny EVERY path, including /minio/admin/.
+    # Treat Admin as an independent product signal only for typed server info,
+    # or its JSON error envelope alongside the distinct S3 XML root surface.
+    independent_admin = admin_ok and (
+        _is_admin_info_response(admin.body)
+        or (admin.error is not None and admin.body.lstrip().startswith(b"{") and _has_s3_xml_shape(root.body))
+    )
+    if s3_shape and (health_ok or server_minio or independent_admin):
         return MinioDetection(
             status="confirmed",
             api_endpoint=client.base_url,
@@ -273,12 +290,22 @@ def _is_admin_info_response(body: bytes) -> bool:
     return isinstance(data, dict) and isinstance(data.get("servers"), list)
 
 
-def _signed_credential_verdict(resp: MinioResponse, access_key: str | None, *, admin: bool = False) -> CredentialResult:
+def _signed_credential_verdict(
+    resp: MinioResponse,
+    access_key: str | None,
+    *,
+    admin: bool = False,
+    expected_shape: Callable[[bytes], bool] | None = None,
+) -> CredentialResult:
     if resp.transport_error:
         return CredentialResult(state="transient_failure", access_key=access_key)
     if 200 <= resp.http_status < 300:
-        valid_shape = _is_admin_info_response(resp.body) if admin else _is_service_bucket_listing(resp.body)
-        state = "valid" if resp.http_status == 200 and valid_shape else "verification_unavailable"
+        shape = expected_shape or (_is_admin_info_response if admin else _is_service_bucket_listing)
+        state = (
+            "valid"
+            if resp.http_status == 200 and not resp.truncated and shape(resp.body)
+            else "verification_unavailable"
+        )
         return CredentialResult(state=state, access_key=access_key)
     code = resp.error.code if resp.error is not None else ""
     if code in _INVALID_CRED_CODES:
@@ -289,21 +316,130 @@ def _signed_credential_verdict(resp: MinioResponse, access_key: str | None, *, a
     return CredentialResult(state="verification_unavailable", access_key=access_key, error_code=code or None)
 
 
-def verify_credential(client: MinioClient) -> CredentialResult:
-    resp = client.get_service_root(signed=True)
-    access_key = getattr(client, "access_key", None)
+def _credential_probe_debug(
+    client: MinioClient,
+    probe: str,
+    resp: MinioResponse,
+    result: CredentialResult,
+    debug_emit: Callable[[str], None] | None,
+) -> None:
+    if debug_emit is None:
+        return
+
+    def safe(value: Any, limit: int = 256) -> str:
+        text = str(value or "-")
+        for secret in (getattr(client, "secret_key", None), getattr(client, "session_token", None)):
+            if secret:
+                for variant in {str(secret), quote(str(secret), safe=""), quote_plus(str(secret))}:
+                    text = text.replace(variant, "<redacted>")
+        # JSON quoting keeps embedded newlines, terminal escapes and proxy error
+        # pages on a single diagnostic line. Never log request auth headers.
+        return json.dumps(text[:limit], ensure_ascii=True)
+
+    content_type = next((v for k, v in resp.headers.items() if k.lower() == "content-type"), "-")
+    details = (
+        f"minio auth probe={probe} HTTP={resp.http_status} content_type={safe(content_type, 80)} "
+        f"s3_code={safe(resp.error.code if resp.error else None, 80)} verdict={result.state} "
+        f"final_url={safe(resp.final_url or resp.request_url)} truncated={resp.truncated}"
+    )
     if resp.transport_error:
-        return CredentialResult(state="transient_failure", access_key=access_key)
-    if _is_minio_console(resp) or _is_s3_request_on_console_port(resp):
-        # Some proxies redirect even a signed GET / to the browser UI. Verify
-        # against the confirmed API listener's Admin endpoint instead.
-        return _signed_credential_verdict(client.admin_info(signed=True), access_key, admin=True)
-    result = _signed_credential_verdict(resp, access_key)
-    if result.state == "verification_unavailable" and callable(getattr(client, "admin_info", None)):
-        # A reverse proxy may block signed S3 GET / while forwarding the MinIO
-        # Admin API. Only a shaped Admin response or MinIO S3 error decides the
-        # credential; generic 200/403/HTML remains inconclusive.
-        return _signed_credential_verdict(client.admin_info(signed=True), access_key, admin=True)
+        details += f" transport_error={safe(resp.transport_error)}"
+    elif result.state == "verification_unavailable":
+        details += f" body={safe(resp.body.decode('utf-8', errors='replace'))}"
+    debug_emit(details)
+
+
+def _credential_account_shape(body: bytes) -> bool:
+    payload = _json_object(body)
+    if payload is not None:
+        # madmin.AccountInfo uses exported Go names in released MinIO builds;
+        # accept the lower-camel variant too, with the same typed fields.
+        payload = {str(key).lower(): value for key, value in payload.items()}
+    return bool(
+        payload
+        and isinstance(payload.get("accountname"), str)
+        and payload["accountname"]
+        and isinstance(payload.get("policy"), dict)
+        and isinstance(payload.get("server"), dict)
+        and (payload.get("buckets") is None or isinstance(payload.get("buckets"), list))
+    )
+
+
+def _bucket_location_shape(body: bytes) -> bool:
+    try:
+        root = ElementTree.fromstring(body)
+    except (ElementTree.ParseError, ValueError, LookupError):
+        return False
+    return root.tag in {
+        "LocationConstraint",
+        "{http://s3.amazonaws.com/doc/2006-03-01/}LocationConstraint",
+    } and not len(root)
+
+
+def verify_credential(
+    client: MinioClient,
+    *,
+    known_bucket: str | None = None,
+    debug_emit: Callable[[str], None] | None = None,
+) -> CredentialResult:
+    access_key = getattr(client, "access_key", None)
+
+    def probe(
+        name: str, operation: Callable[..., MinioResponse], shape: Callable[[bytes], bool], *, signed: bool = True
+    ) -> CredentialResult:
+        response = operation(signed=signed)
+        verdict = _signed_credential_verdict(response, access_key, expected_shape=shape)
+        debug_result = verdict
+        if not signed and verdict.state in {"valid", "valid_but_restricted", "invalid"}:
+            # An unsigned AccessDenied says nothing about the candidate secret.
+            debug_result = replace(
+                verdict, state="anonymous_access" if verdict.state == "valid" else "anonymous_denied"
+            )
+        _credential_probe_debug(client, name, response, debug_result, debug_emit)
+        return verdict
+
+    result = probe("s3_root", client.get_service_root, _is_service_bucket_listing)
+    if result.state in {"valid", "valid_but_restricted", "invalid", "transient_failure"}:
+        return result
+    if callable(getattr(client, "admin_info", None)):
+        result = probe("admin_info", client.admin_info, _is_admin_info_response)
+        if result.state in {"valid", "valid_but_restricted", "invalid"}:
+            return result
+
+    fallbacks: list[tuple[str, Callable[..., MinioResponse], Callable[[bytes], bool]]] = []
+    if callable(getattr(client, "account_info", None)):
+        fallbacks.append(("account_info", client.account_info, _credential_account_shape))
+    if known_bucket and callable(getattr(client, "bucket_location", None)):
+        fallbacks.append(
+            ("bucket_location", lambda **kw: client.bucket_location(known_bucket, **kw), _bucket_location_shape)
+        )
+    for name, operation, shape in fallbacks:
+        result = probe(name, operation, shape)
+        if result.state == "invalid":
+            return result
+        if result.state not in {"valid", "valid_but_restricted"}:
+            continue
+        # Public buckets and gateway caches can return the same well-formed
+        # data for any secret. Require rejection of a deliberately bad signature
+        # on the SAME endpoint before claiming the candidate is authenticated.
+        probe(name + "_anonymous_control", operation, shape, signed=False)
+        control_client = client.invalid_signature_client()
+        control_operation = (
+            control_client.account_info
+            if name == "account_info"
+            else lambda control_client=control_client, **kw: control_client.bucket_location(str(known_bucket), **kw)
+        )
+        control = probe(name + "_invalid_signature_control", control_operation, shape)
+        if control.state == "invalid":
+            # These operations don't prove permission to list all buckets.
+            return CredentialResult(state="valid_but_restricted", access_key=access_key)
+        result = CredentialResult(
+            state="verification_unavailable", access_key=access_key, error_code="signature_control_inconclusive"
+        )
+        if debug_emit is not None:
+            debug_emit(
+                f"minio auth probe={name} verdict=verification_unavailable reason=signature_control_inconclusive"
+            )
     return result
 
 
@@ -693,7 +829,12 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     if not (getattr(credential, "username", None) and getattr(credential, "password", None)):
         return dict(prior)
     client = _client_for(ctx, credential)
-    result = verify_credential(client)
+    verifier_options: dict[str, Any] = {}
+    if getattr(ctx.args, "bucket", None):
+        verifier_options["known_bucket"] = ctx.args.bucket
+    if bool(getattr(ctx.args, "debug", False)) and callable(getattr(ctx, "debug_emit", None)):
+        verifier_options["debug_emit"] = ctx.debug_emit
+    result = verify_credential(client, **verifier_options)
     state = getattr(ctx, "lifecycle_state", None)
     if (
         result.state in {"verification_unavailable", "transient_failure"}
@@ -702,7 +843,7 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         and state.try_https_upgrade()
     ):
         client = _client_for(ctx, credential)
-        result = verify_credential(client)
+        result = verify_credential(client, **verifier_options)
     merged = dict(prior)
     anonymous_open = prior.get("auth_required") is False or str(prior.get("anonymous") or "") in {
         "anonymous_list_ok",
@@ -785,7 +926,7 @@ def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
 
 
 def _split_object_ref(ref: Any) -> tuple[str | None, str | None]:
-    text = str(ref or "").strip().lstrip("/")
+    text = str(ref or "").lstrip("/")
     if "/" not in text:
         return None, None
     bucket, key = text.split("/", 1)
@@ -840,7 +981,8 @@ def _run_object_op(
     """--dump / --download for one --object or every object in --bucket.
 
     Read-only GET, bounded per object by max_bytes. Downloads are written to
-    ``./<bucket>/<key>`` (the bucket folder is created if missing)."""
+    ``./minio-downloads/<endpoint-id>/<bucket-id>/<key-id>``. Existing files
+    are preserved with a numeric suffix; hashes retain exact endpoint/key identity."""
     import os
 
     errors: list[str] = []
@@ -900,12 +1042,12 @@ def _run_object_op(
                 }
             )
         if want_download:
-            # ./<bucket>/<key>; key may contain '/', which nests real subfolders.
-            dest = os.path.join(o_bucket, *o_key.split("/"))
+            from ...download_paths import identity_component, write_unique_file
+
+            root = os.path.join("minio-downloads", identity_component(str(getattr(client, "base_url", "unknown"))))
+            dest = os.path.join(root, identity_component(o_bucket), identity_component(o_key))
             try:
-                os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-                with open(dest, "wb") as handle:
-                    handle.write(body)
+                dest = write_unique_file(dest, body)
             except OSError as exc:
                 errors.append(f"{o_bucket}/{o_key}: write failed ({exc})")
                 continue
@@ -971,9 +1113,10 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             max_bytes=100 * 1024 * 1024,
         )
 
+    listing_errors: list[str] = []
     bucket_infos: list[Any] | None = None
     if want_buckets:
-        bucket_infos = list(_enum.iter_buckets(client))
+        bucket_infos = list(_enum.iter_buckets(client, on_error=listing_errors.append))
         merged["buckets"] = [asdict(b) for b in bucket_infos]
 
     target_buckets: list[str] = []
@@ -984,7 +1127,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             target_buckets = [str(bucket)]
         else:
             if bucket_infos is None:
-                bucket_infos = list(_enum.iter_buckets(client))
+                bucket_infos = list(_enum.iter_buckets(client, on_error=listing_errors.append))
             target_buckets = [b.name for b in bucket_infos]
 
     if want_probe:
@@ -1026,7 +1169,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                     suffix = f" (write:{wp.get('write')})" if isinstance(wp, dict) else ""
                     handle.write(f"{stream_prefix} {name}{suffix}\n")
 
-                for obj in _enum.iter_objects_multi(client, target_buckets):
+                for obj in _enum.iter_objects_multi(client, target_buckets, on_error=listing_errors.append):
                     if grouped and obj.bucket != active_bucket:
                         while next_bucket < len(target_buckets) and target_buckets[next_bucket] != obj.bucket:
                             emit_bucket(target_buckets[next_bucket])
@@ -1065,7 +1208,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 time_budget=getattr(args, "discover_time", None),
                 max_total_bytes=getattr(args, "discover_max_bytes", 50 * 1024 * 1024),
             )
-            scan_iter = _enum.iter_objects_multi(client, target_buckets)
+            scan_iter = _enum.iter_objects_multi(client, target_buckets, on_error=listing_errors.append)
 
             # Findings are streamed immediately. Detection/auth and the final summary
             # are emitted by the common staged runtime so every discovery module has
@@ -1099,17 +1242,21 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             # 100% on a complete run; when a budget cap truncated the scan the
             # `status:partial` + partial reasons flag that the denominator itself
             # may be incomplete, so the two axes stay honest together.
+            coverage_percent: float | None
             if result.coverage_complete or candidates_count == 0:
                 coverage_percent = 100.0
             else:
                 coverage_percent = 100.0 * result.objects_scanned / candidates_count
-            status = "complete" if result.coverage_complete else "partial"
+            if listing_errors:
+                coverage_percent = None
+                result.partial_reasons.extend(error for error in listing_errors if error not in result.partial_reasons)
+            status = "complete" if result.coverage_complete and not listing_errors else "partial"
             merged["discover_requested"] = True
             merged["secret_candidates"] = result.candidates
             merged["secret_findings"] = result.findings
             merged["discover_partial_reasons"] = result.partial_reasons
             merged["discover_coverage"] = status
-            merged["discover_coverage_percent"] = round(coverage_percent, 2)
+            merged["discover_coverage_percent"] = round(coverage_percent, 2) if coverage_percent is not None else None
             merged["discover_candidates_count"] = candidates_count
             merged["discover_findings_count"] = len(result.findings)
             merged["discover_objects_scanned"] = result.objects_scanned
@@ -1117,6 +1264,9 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
 
             if self_emit:
                 merged["_discover_findings_streamed"] = True
+    if listing_errors:
+        merged["listing_errors"] = list(dict.fromkeys(listing_errors))
+        merged["inventory_coverage"] = "partial"
     return merged
 
 

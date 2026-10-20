@@ -1195,11 +1195,11 @@ def _pg_query_readable_tables(sock: socket.socket) -> tuple[list[str] | None, st
     for row in rows:
         if len(row) < 2:
             continue
-        schema = str(row[0] or "").strip()
-        name = str(row[1] or "").strip()
+        schema = str(row[0] or "")
+        name = str(row[1] or "")
         if not schema or not name:
             continue
-        tables.append(f"{schema}.{name}")
+        tables.append(_pg_display_identifier_path([schema, name]))
     return tables, None
 
 
@@ -1298,7 +1298,7 @@ def _pg_parse_identifier_part(raw: str) -> str | None:
 def _pg_display_identifier_path(parts: list[str]) -> str:
     display_parts: list[str] = []
     for part in parts:
-        if _PG_IDENT_RE.fullmatch(part):
+        if _PG_IDENT_RE.fullmatch(part) and part == part.lower():
             display_parts.append(part)
         else:
             display_parts.append(_pg_quote_ident(part))

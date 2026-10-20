@@ -269,12 +269,12 @@ def test_minio_object_stream_groups_buckets_objects_and_dumps(monkeypatch: pytes
     monkeypatch.setattr(
         minio_enumerate,
         "iter_buckets",
-        lambda _client: [minio_enumerate.BucketInfo(name="alpha"), minio_enumerate.BucketInfo(name="beta")],
+        lambda _client, **_kwargs: [minio_enumerate.BucketInfo(name="alpha"), minio_enumerate.BucketInfo(name="beta")],
     )
     monkeypatch.setattr(
         minio_enumerate,
         "iter_objects_multi",
-        lambda _client, _buckets: iter(
+        lambda _client, _buckets, **_kwargs: iter(
             [
                 minio_enumerate.ObjectInfo(bucket="alpha", key="one", size=1),
                 minio_enumerate.ObjectInfo(bucket="beta", key="two", size=1),

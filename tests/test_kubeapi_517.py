@@ -139,7 +139,7 @@ def test_direct_session_reuses_connection_and_reopens_after_truncation(monkeypat
     ("namespace_access", "namespace_status", "expected_access", "expected_auth", "expected_status"),
     [
         (True, 200, "open", False, "open_no_auth"),
-        (False, 403, "limited", False, "anonymous_limited"),
+        (False, 403, "limited", True, "anonymous_limited"),
         (False, 401, "disabled", True, "auth_required"),
         (None, 0, "unknown", None, "detected"),
     ],
@@ -152,6 +152,7 @@ def test_anonymous_access_classification(
     expected_auth: bool | None,
     expected_status: str,
 ) -> None:
+    monkeypatch.setattr(kube, "_probe_pod_access", lambda *a, **kw: (namespace_access, namespace_status, None))
     ctx = _ctx()
     monkeypatch.setattr(
         kube,
@@ -216,7 +217,7 @@ def test_post_transport_error_does_not_switch_scheme(monkeypatch: pytest.MonkeyP
     assert state.use_https is False
 
 
-def test_mixed_auth_statuses_confirm_kubeapi_without_namespace_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mixed_auth_statuses_confirm_kubeapi_and_check_resource_access(monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _ctx()
     calls: list[str] = []
 
@@ -226,11 +227,18 @@ def test_mixed_auth_statuses_confirm_kubeapi_without_namespace_probe(monkeypatch
         return code, _status(code), {}, None
 
     monkeypatch.setattr(kube, "_lifecycle_get_json_with_retries", request)
-    monkeypatch.setattr(kube, "_probe_namespace_access", lambda *_args, **_kwargs: pytest.fail("duplicate probe"))
+    namespace_probes = []
+
+    def probe_namespaces(*args, **kwargs):
+        namespace_probes.append(True)
+        return False, 403, "Forbidden"
+
+    monkeypatch.setattr(kube, "_probe_namespace_access", probe_namespaces)
 
     record = kube.detect_kubeapi(ctx, _options())
 
-    assert calls == ["/version", "/api"]
+    assert calls == ["/version", "/api", "/api/v1/pods?limit=1"]
+    assert namespace_probes == [True]
     assert record["is_kubeapi"] is True
     assert record["anonymous_access"] == "limited"
 
@@ -250,7 +258,7 @@ def test_api_is_checked_after_version_oversize(monkeypatch: pytest.MonkeyPatch) 
 
     record = kube.detect_kubeapi(ctx, _options())
 
-    assert calls == ["/version", "/api"]
+    assert calls == ["/version", "/api", "/api/v1/pods?limit=1"]
     assert record["is_kubeapi"] is True
 
 

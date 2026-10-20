@@ -421,14 +421,20 @@ def _render_validate_complete_row(
     credential_hits: int,
     unique_hits: int | None = None,
     ok: bool,
+    unreadable_files: int = 0,
 ) -> None:
     tag = f"{'VALIDATE':<8}"
     prefix = f"\t{_clip(host, 64)}\t{_clip(port, 16)}\t"
     mark = "[+]" if ok else "[!]"
     mark_color = "green" if ok else "red"
-    message = f"validate complete: lines={total_lines} credential_hits={credential_hits}"
+    if unreadable_files:
+        mark, mark_color = "[!]", "orange"
+    status = "incomplete" if unreadable_files else "complete"
+    message = f"validate {status}: lines={total_lines} credential_hits={credential_hits}"
     if unique_hits is not None:
         message += f" unique_hits={unique_hits}"
+    if unreadable_files:
+        message += f" unreadable_files={unreadable_files}"
     row = (
         f"{out._paint(tag, 'blue', sys.stdout)}"
         f"{out._paint(prefix, 'white', sys.stdout)}"

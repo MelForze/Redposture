@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ class UIExport:
             )
             if candidates:
                 candidate = candidates[0]
-                with sqlite3.connect(candidate) as previous_connection:
+                with closing(sqlite3.connect(candidate)) as previous_connection:
                     row = previous_connection.execute("SELECT value FROM meta WHERE key='complete'").fetchone()
                 if row is None or row[0] != "True":
                     self.database = candidate

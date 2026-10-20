@@ -18,6 +18,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -29,6 +30,7 @@ from redposture_core.cli_args import parse_args
 from redposture_core.module_registry import AUDIT_MODULE_NAMES
 from redposture_core.stage_runtime import AuditCommandRunner
 
+TOKEN_API_PRODUCTS = ("vault", "nomad", "jupyter")
 HTTP_PRODUCTS = (
     "airflow",
     "consul",
@@ -39,6 +41,9 @@ HTTP_PRODUCTS = (
     "grafana",
     "jenkins",
     "keycloak",
+    "vault",
+    "nomad",
+    "jupyter",
     "kubeapi",
     "minio",
     "proxmox",
@@ -48,6 +53,7 @@ HTTP_PRODUCTS = (
     "harbor",
     "nexus",
 )
+CROSS_ORIGIN_HTTP_PRODUCTS = tuple(product for product in HTTP_PRODUCTS if product not in TOKEN_API_PRODUCTS)
 HTTP_API_SUFFIXES = {
     "airflow": "/api/v1/version",
     "consul": "/v1/status/leader",
@@ -58,6 +64,9 @@ HTTP_API_SUFFIXES = {
     "grafana": "/api/health",
     "jenkins": "/api/json",
     "keycloak": "/realms/master/.well-known/openid-configuration",
+    "vault": "/v1/sys/health",
+    "nomad": "/v1/agent/self",
+    "jupyter": "/api/status",
     "kubeapi": "/version",
     "minio": "/minio/health/live",
     "proxmox": "/api2/json/version",
@@ -152,6 +161,64 @@ def _http_response(product: str, path: str, *, proxy_headers: bool = False, orig
             payload = {"keys": []}
         elif path == "/admin/serverinfo":
             status, payload = 401, {"error": "unauthorized"}
+    elif product == "vault":
+        # The public health API identifies the product; protected mount and
+        # token-self endpoints retain their distinct real response shapes.
+        payload = {
+            "initialized": True,
+            "sealed": False,
+            "standby": False,
+            "version": "1.21.0",
+            "enterprise": False,
+            "cluster_name": "qa-vault",
+            "cluster_id": "00000000-0000-4000-8000-000000000001",
+        }
+        if path in {"/v1/sys/mounts", "/v1/sys/auth"}:
+            status, payload = 403, {"errors": ["permission denied"]}
+        elif path == "/v1/auth/token/lookup-self":
+            status, payload = 403, {"errors": ["invalid token"]}
+        elif path == "/v1/sys/seal-status":
+            payload = {
+                "type": "shamir",
+                "initialized": True,
+                "sealed": False,
+                "t": 1,
+                "n": 1,
+                "progress": 0,
+                "version": "1.21.0",
+            }
+    elif product == "nomad":
+        payload = {
+            "config": {"Version": {"Version": "1.10.1"}, "ACL": {"Enabled": True}},
+            "stats": {"nomad": {"server": "true"}},
+        }
+        if path == "/v1/status/leader":
+            payload = json.dumps("127.0.0.1:4647")
+        elif path in {"/v1/jobs", "/v1/nodes", "/v1/agent/members"}:
+            status, payload = 403, "Permission denied"
+            headers["Content-Type"] = "text/plain"
+        elif path == "/v1/acl/token/self":
+            status, payload = 403, "ACL token not found"
+            headers["Content-Type"] = "text/plain"
+        elif path == "/ui/":
+            payload = '<title>Nomad</title><meta name="nomad-ui/config/environment">'
+            headers["Content-Type"] = "text/html"
+    elif product == "jupyter":
+        payload = {"version": "2.17.0"}
+        if path == "/api/status":
+            payload = {
+                "connections": 0,
+                "kernels": 0,
+                "started": "2026-10-20T00:00:00Z",
+                "last_activity": "2026-10-20T00:00:00Z",
+            }
+        elif path in {"/api/kernels", "/api/sessions"}:
+            payload = []
+        elif path == "/api/contents":
+            payload = {"type": "directory", "name": "", "path": "", "content": [], "format": "json", "writable": True}
+        elif path == "/login":
+            payload = '<title>Jupyter Server</title><form id="login_form"><input name="_xsrf"></form>'
+            headers["Content-Type"] = "text/html"
     elif product == "kubeapi":
         payload = {"major": "1", "minor": "27", "gitVersion": "v1.27.5", "gitCommit": "abc123"}
         if path == "/api":
@@ -367,7 +434,13 @@ class _Server(socketserver.ThreadingTCPServer):
 
 @contextmanager
 def _product_server(
-    product: str, *, proxy_headers: bool = False, prefix: str = "", compressed: bool = False
+    product: str,
+    *,
+    proxy_headers: bool = False,
+    prefix: str = "",
+    compressed: bool = False,
+    redirect_from: str | None = None,
+    relative_redirect: bool = False,
 ) -> Iterator[tuple[int, list[bytes]]]:
     requests: list[bytes] = []
 
@@ -386,7 +459,19 @@ def _product_server(
                         requests.append(data)
                     else:
                         requests.append(initial)
-                    if prefix and not (path == prefix or path.startswith(prefix + "/")):
+                    if redirect_from is not None and not (path == prefix or path.startswith(prefix + "/")):
+                        endpoint = (
+                            path[len(redirect_from) :]
+                            if redirect_from and path.startswith(redirect_from + "/")
+                            else path
+                        )
+                        location = prefix + endpoint
+                        if not relative_redirect:
+                            location = f"http://127.0.0.1:{server.server_address[1]}" + location
+                        self.request.sendall(
+                            f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode()
+                        )
+                    elif prefix and not (path == prefix or path.startswith(prefix + "/")):
                         self.request.sendall(
                             b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n"
                             b"Connection: close\r\n\r\nnot found"
@@ -505,9 +590,7 @@ def _detect(
     if verify_foreign or with_cve:
         extra += ["--enum-cve"]
     if verify_foreign or with_credentials:
-        if module == "gitlab":
-            extra += ["--token", "qa-token"]
-        elif module == "keycloak":
+        if module in {"gitlab", "keycloak", "vault", "nomad", "jupyter"}:
             extra += ["--token", "qa-token"]
         elif module == "qdrant":
             extra += ["--api-key", "qa-token"]
@@ -531,6 +614,10 @@ def _detect(
     )
     package = module.replace("-", "_")
     stage = importlib.import_module(f"redposture_core.modules.{package}.stage")
+    if module in TOKEN_API_PRODUCTS:
+        # The public runner validates token arguments before planning. Preserve
+        # that boundary here so --token really reaches the auth hook.
+        assert stage.policy.validate_args(args, SimpleNamespace(error=pytest.fail)) is None
     spec = getattr(stage, f"build_{package}_spec")(args)
     # Preserve production detection/auth/state/cleanup. On lifecycle modules,
     # replace inventory hooks with no-ops rather than setting them to None:
@@ -547,7 +634,7 @@ def _detect(
 
 
 def test_wire_corpus_covers_exactly_all_audit_modules() -> None:
-    assert len(PRODUCTS) == len(set(PRODUCTS)) == 26
+    assert len(PRODUCTS) == len(set(PRODUCTS)) == 29
     assert set(PRODUCTS) == set(AUDIT_MODULE_NAMES)
 
 
@@ -628,7 +715,7 @@ def test_http_detection_json_has_comparable_product_evidence(product: str) -> No
     assert record["detection_signals"]
 
 
-@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+@pytest.mark.parametrize("product", CROSS_ORIGIN_HTTP_PRODUCTS)
 def test_http_product_detects_read_only_redirect_to_confirmed_origin(product: str) -> None:
     with _product_server(product, proxy_headers=True) as (destination_port, destination_requests):
         with _redirect_server(destination_port) as (source_port, source_paths):
@@ -637,7 +724,7 @@ def test_http_product_detects_read_only_redirect_to_confirmed_origin(product: st
     assert detected, record
 
 
-@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+@pytest.mark.parametrize("product", CROSS_ORIGIN_HTTP_PRODUCTS)
 def test_http_product_detects_redirect_with_explicit_prefix(product: str) -> None:
     with _product_server(product, proxy_headers=True, prefix="/edge/app") as (destination_port, destination_requests):
         with _redirect_server(destination_port) as (source_port, source_paths):
@@ -646,7 +733,7 @@ def test_http_product_detects_redirect_with_explicit_prefix(product: str) -> Non
     assert detected, record
 
 
-@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+@pytest.mark.parametrize("product", CROSS_ORIGIN_HTTP_PRODUCTS)
 def test_credentials_use_confirmed_redirect_origin_without_revisiting_source(product: str) -> None:
     source_requests: list[bytes] = []
     with _product_server(product, proxy_headers=True, prefix="/edge/app") as (destination_port, _requests):
@@ -660,11 +747,18 @@ def test_credentials_use_confirmed_redirect_origin_without_revisiting_source(pro
     assert not any(
         marker in request.lower()
         for request in source_requests
-        for marker in (b"authorization:", b"private-token:", b"x-api-key:", b"x-consul-token:")
+        for marker in (
+            b"authorization:",
+            b"private-token:",
+            b"x-api-key:",
+            b"x-consul-token:",
+            b"x-vault-token:",
+            b"x-nomad-token:",
+        )
     ), (product, source_requests)
 
 
-@pytest.mark.parametrize("product", HTTP_PRODUCTS)
+@pytest.mark.parametrize("product", CROSS_ORIGIN_HTTP_PRODUCTS)
 def test_redirect_to_new_mount_keeps_product_and_credentials(product: str) -> None:
     source_requests: list[bytes] = []
     with _product_server(product, proxy_headers=True, prefix="/edge/app") as (destination_port, destination_requests):
@@ -682,7 +776,14 @@ def test_redirect_to_new_mount_keeps_product_and_credentials(product: str) -> No
     assert not any(
         marker in request.lower()
         for request in source_requests
-        for marker in (b"authorization:", b"private-token:", b"x-api-key:", b"x-consul-token:")
+        for marker in (
+            b"authorization:",
+            b"private-token:",
+            b"x-api-key:",
+            b"x-consul-token:",
+            b"x-vault-token:",
+            b"x-nomad-token:",
+        )
     ), (product, source_requests)
 
 
@@ -761,3 +862,59 @@ def test_actual_detector_rejects_other_products_over_the_network(module: str, pr
         assert record["cve_enumeration"]["findings"] == [], record
         assert record["cve_enumeration"]["reason"] == "service_not_confirmed", record
     assert detected is (module == product), (module, product, record)
+
+
+@pytest.mark.parametrize("product", TOKEN_API_PRODUCTS)
+@pytest.mark.parametrize("scenario", ("origin", "prefix", "credentials", "mount"))
+def test_token_api_cross_origin_redirect_is_blocked_before_auth(product: str, scenario: str) -> None:
+    # These modules explicitly disallow cross-origin redirects. Exercise the
+    # same four routing shapes as the permissive products without weakening
+    # the registry/cross-product corpus or sending the supplied token onward.
+    source_requests: list[bytes] = []
+    prefix = "/edge/app" if scenario in {"prefix", "credentials"} else ""
+    destination_prefix = "/edge/app" if scenario == "mount" else prefix
+    with _product_server(product, proxy_headers=True, prefix=destination_prefix) as (
+        destination_port,
+        destination_requests,
+    ):
+        with _redirect_server(
+            destination_port, source_requests, destination_prefix=destination_prefix if scenario == "mount" else ""
+        ) as (source_port, source_paths):
+            detected, record = _detect(product, source_port, with_credentials=True, with_cve=True, target_path=prefix)
+    assert source_paths and source_requests
+    assert not destination_requests
+    assert not detected and record["detection_status"] in {"not_service", "probable", "transport_failure"}
+    assert not record.get("attempted_credentials")
+    assert record["cve_enumeration"]["findings"] == []
+    assert not any(
+        marker in request.lower()
+        for request in source_requests
+        for marker in (b"authorization:", b"x-vault-token:", b"x-nomad-token:")
+    )
+
+
+@pytest.mark.parametrize("product", TOKEN_API_PRODUCTS)
+@pytest.mark.parametrize("relative_redirect", (True, False))
+@pytest.mark.parametrize("source_prefix", ("", "/source"))
+def test_token_api_same_origin_redirect_preserves_detection_auth_and_mount(
+    product: str, relative_redirect: bool, source_prefix: str
+) -> None:
+    with _product_server(
+        product,
+        proxy_headers=True,
+        prefix="/edge/app",
+        redirect_from=source_prefix,
+        relative_redirect=relative_redirect,
+    ) as (port, requests):
+        detected, record = _detect(product, port, with_credentials=True, with_cve=True, target_path=source_prefix)
+    assert detected and record["detection_status"] == "confirmed", record
+    paths = [
+        request.split(b" ", 2)[1].decode("ascii")
+        for request in requests
+        if request.startswith((b"GET ", b"HEAD ", b"POST "))
+    ]
+    assert any(path.startswith("/edge/app/") for path in paths)
+    token_header = {"vault": b"x-vault-token:", "nomad": b"x-nomad-token:", "jupyter": b"authorization:"}[product]
+    assert any(
+        token_header in request.lower() and request.split(b" ", 2)[1].startswith(b"/edge/app/") for request in requests
+    )

@@ -381,7 +381,8 @@ def _stream_dump_redis_keys(
     burst, this interleaves enumeration and value reads: SCAN until ``batch`` keys are
     buffered, dump that page, pause ``delay_ms`` milliseconds, then continue from the same
     cursor. This paces the load on the server (so large keyspaces are less likely to knock
-    it over) and bounds the keyspace held in memory to one page at a time. Sorting is
+    it over) and buffers value reads one page at a time. A raw-key set deduplicates SCAN
+    repeats across pages. Sorting is
     therefore per page rather than global. ``limit`` caps the total number of dumped
     entries; ``None`` dumps everything.
     """
@@ -389,6 +390,7 @@ def _stream_dump_redis_keys(
     delay_seconds = max(0, delay_ms) / 1000.0
     entries: list[dict[str, str | None]] = []
     pending: list[str | bytes] = []
+    seen: set[bytes] = set()
     cursor = "0"
     rounds = 0
 
@@ -418,7 +420,12 @@ def _stream_dump_redis_keys(
         if not isinstance(scan_batch, list):
             return entries, f"unexpected SCAN keys payload: {type(scan_batch).__name__}"
 
-        pending.extend(item if isinstance(item, bytes) else str(item) for item in scan_batch)
+        for item in scan_batch:
+            key = item if isinstance(item, bytes) else str(item)
+            identity = key if isinstance(key, bytes) else key.encode("utf-8")
+            if identity not in seen:
+                seen.add(identity)
+                pending.append(key)
         cursor = next_cursor
 
         while len(pending) >= page_size:

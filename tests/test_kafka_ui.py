@@ -667,7 +667,7 @@ def test_ui_color_contract() -> None:
         console, "KAFKA\t127.0.0.1\t8080\t [*] Kafbat UI (auth required:True) (version:1.4.2)"
     )
     assert "bright_green" in console.line
-    assert "orange" in console.line
+    assert "<white>) (version:1.4.2)</white>" in console.line
     assert kafka_render._render_colored_kafka_line(
         console, "KAFKA\t127.0.0.1\t8080\t [*] Clusters Enumeration (clusters:0)"
     )
@@ -863,8 +863,8 @@ def test_direct_ui_rendering_covers_detection_credentials_and_inventory() -> Non
     assert kafka_render._format_record(record, "txt") == ""
     credential_lines = kafka_render._format_credential_attempts_records(record, "txt")
     assert len(credential_lines) == 2
-    assert credential_lines[0].endswith("[+] admin:secret")
-    assert credential_lines[1].endswith("[-] admin:bad")
+    assert credential_lines[0].endswith("[+] admin:secret (UI)")
+    assert credential_lines[1].endswith("[-] admin:bad (UI)")
     lines = kafka_render._format_ui_detail_records(record, "txt")
     assert [
         name for name in ("Clusters", "Brokers", "Topics", "Consumer Groups") if any(name in line for line in lines)

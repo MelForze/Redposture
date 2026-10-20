@@ -22,6 +22,7 @@ from .discover import (
     dump_airflow,
     list_connections,
     list_dag_ids,
+    list_dag_sources,
     list_variable_keys,
 )
 from .types import AirflowCapabilities, AirflowDetection, AnonymousResult, CredentialResult, ResourceAccess
@@ -710,12 +711,20 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     dump_requested = bool(getattr(ctx.args, "dump", False))
     show_dags_value = getattr(ctx.args, "show_dags", False)
     show_dags_requested = bool(show_dags_value)
+    show_dagsources_requested = bool(getattr(ctx.args, "show_dagsources", False))
     show_keys_value = getattr(ctx.args, "show_keys", False)
     show_keys_requested = bool(show_keys_value)
     show_connections_value = getattr(ctx.args, "show_connections", False)
     show_connections_requested = bool(show_connections_value)
     if not any(
-        (discover_requested, dump_requested, show_dags_requested, show_keys_requested, show_connections_requested)
+        (
+            discover_requested,
+            dump_requested,
+            show_dags_requested,
+            show_dagsources_requested,
+            show_keys_requested,
+            show_connections_requested,
+        )
     ):
         return merged
     if discover_requested:
@@ -724,6 +733,8 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         merged["dump_requested"] = True
     if show_dags_requested:
         merged["show_dags_requested"] = True
+    if show_dagsources_requested:
+        merged["show_dagsources_requested"] = True
     if show_keys_requested:
         merged["show_keys_requested"] = True
     if show_connections_requested:
@@ -734,6 +745,8 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     if prior.get("credential_proof_surface") == "web" and prior.get("auth_required") is True:
         if show_dags_requested:
             merged["dag_ids_error"] = "api_credentials_unverified"
+        if show_dagsources_requested:
+            merged["dag_sources_error"] = "api_credentials_unverified"
         if show_keys_requested:
             merged["variable_keys_error"] = "api_credentials_unverified"
         if show_connections_requested:
@@ -763,6 +776,8 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             else None
         )
         if credential_ok and token is None:
+            if show_dagsources_requested:
+                merged["dag_sources_error"] = "bearer_token_unavailable"
             if discover_requested:
                 merged["discover_report"] = {
                     "status": "unavailable",
@@ -812,6 +827,26 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 merged["dag_ids_error"] = dags["error"]
         elif prior.get("auth_required") is True:
             merged["dag_ids_error"] = "authentication_required"
+    source_inventory = None
+    if show_dagsources_requested:
+        if can_read:
+            nested_scheduler = getattr(ctx, "nested_scheduler", None)
+            source_inventory = list_dag_sources(
+                client,
+                generation,
+                source_ids=getattr(ctx.args, "dagsource", None),
+                max_seconds=float(getattr(ctx.args, "discover_time", None) or 300.0),
+                cancelled=(lambda: bool(getattr(nested_scheduler, "cancelled", False)))
+                if nested_scheduler is not None
+                else None,
+            )
+            merged["dag_sources"] = source_inventory["sources"]
+            merged["dag_sources_count"] = source_inventory["count"]
+            merged["dag_sources_partial"] = source_inventory["status"] != "complete"
+            if source_inventory["partial_reasons"]:
+                merged["dag_sources_error"] = "; ".join(source_inventory["partial_reasons"])
+        else:
+            merged["dag_sources_error"] = "authentication_required"
     if show_keys_requested:
         if can_read:
             keys = list_variable_keys(client, generation, limit=show_keys_limit)
@@ -835,7 +870,7 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         elif prior.get("auth_required") is True:
             merged["connections_error"] = "authentication_required"
     if dump_requested:
-        if can_read:
+        if can_read or getattr(ctx.args, "dagsource", None):
             nested_scheduler = getattr(ctx, "nested_scheduler", None)
             merged["dump_report"] = dump_airflow(
                 client,
@@ -843,6 +878,9 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 dags=getattr(ctx.args, "dag", None),
                 keys=getattr(ctx.args, "key", None),
                 connections=getattr(ctx.args, "connection", None),
+                sources=getattr(ctx.args, "dagsource", None),
+                all_sources=show_dagsources_requested,
+                source_inventory=source_inventory,
                 max_bytes=int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024)),
                 max_seconds=float(getattr(ctx.args, "discover_time", None) or 300.0),
                 cancelled=(lambda: bool(getattr(nested_scheduler, "cancelled", False)))
@@ -871,15 +909,12 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     if discover_requested and callable(live_emit):
         from . import render
 
-        if not dump_requested:
-            keys_lines = render._format_show_keys_records(merged, "txt")
-            connections_lines = render._format_show_connections_records(merged, "txt")
-            if keys_lines:
-                live_emit(keys_lines)
-                merged["_show_keys_streamed"] = True
-            if connections_lines:
-                live_emit(connections_lines)
-                merged["_show_connections_streamed"] = True
+        inventory_lines = render._format_grouped_inventory_records(merged, "txt")
+        if inventory_lines:
+            live_emit(inventory_lines)
+            merged["_inventory_streamed"] = True
+            merged["_show_keys_streamed"] = bool(show_keys_requested)
+            merged["_show_connections_streamed"] = bool(show_connections_requested)
         live_emit([f"AIRFLOW\t{ctx.host}\t{int(ctx.port)}\t [*] Discover Secrets"])
 
     def _on_finding(finding: dict[str, Any]) -> None:

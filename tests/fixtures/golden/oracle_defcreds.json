@@ -256,7 +256,112 @@
     "transport_mode": "tcp",
     "users": [
       {
+        "username": "ANONYMOUS"
+      },
+      {
+        "username": "APPQOSSYS"
+      },
+      {
+        "username": "AUDSYS"
+      },
+      {
+        "username": "BAASSYS"
+      },
+      {
+        "username": "DBSFWUSER"
+      },
+      {
+        "username": "DBSNMP"
+      },
+      {
+        "username": "DGPDB_INT"
+      },
+      {
+        "username": "DIP"
+      },
+      {
+        "username": "DVF"
+      },
+      {
+        "username": "DVSYS"
+      },
+      {
+        "username": "EXPIRED_USER"
+      },
+      {
+        "username": "GGSHAREDCAP"
+      },
+      {
+        "username": "GGSYS"
+      },
+      {
+        "username": "GSMADMIN_INTERNAL"
+      },
+      {
+        "username": "GSMCATUSER"
+      },
+      {
+        "username": "GSMUSER"
+      },
+      {
+        "username": "LBACSYS"
+      },
+      {
+        "username": "LIMITED"
+      },
+      {
+        "username": "LOCKED_USER"
+      },
+      {
+        "username": "OUTLN"
+      },
+      {
+        "username": "PDBADMIN"
+      },
+      {
+        "username": "PRIVESC"
+      },
+      {
+        "username": "READONLY"
+      },
+      {
+        "username": "REDPOSTURE"
+      },
+      {
+        "username": "REMOTE_SCHEDULER_AGENT"
+      },
+      {
         "username": "SCOTT"
+      },
+      {
+        "username": "SYS"
+      },
+      {
+        "username": "SYS$UMF"
+      },
+      {
+        "username": "SYSBACKUP"
+      },
+      {
+        "username": "SYSDG"
+      },
+      {
+        "username": "SYSKM"
+      },
+      {
+        "username": "SYSRAC"
+      },
+      {
+        "username": "SYSTEM"
+      },
+      {
+        "username": "VECSYS"
+      },
+      {
+        "username": "XDB"
+      },
+      {
+        "username": "XS$NULL"
       }
     ],
     "wallet_findings": []

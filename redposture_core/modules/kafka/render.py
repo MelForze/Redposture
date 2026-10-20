@@ -31,13 +31,14 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
         or "Dump coverage:partial" in line
         or "Dump completeness unverified" in line
         or "UI Export" in line
+        or line.rstrip().endswith(" (UI)")
     ):
         if render_colored_marker_line(
             console,
             line,
             tag="KAFKA",
             regexes=(
-                RegexColorRule(r"\(version:[^)]+\)", "orange"),
+                RegexColorRule(r"\(version:unknown\)", "orange"),
                 RegexColorRule(r"coverage:partial", "orange"),
                 RegexColorRule(r"Dump completeness unverified:[^\n]+", "orange"),
                 RegexColorRule(r"\(reason:[^)]+\)", "orange"),
@@ -48,13 +49,19 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
                 for name in ("clusters", "brokers", "topics", "groups", "messages")
             ),
             extra_spans=lambda marker, right: (
-                [(0, len(right), "red")]
+                []
+                if marker in {"[+]", "[-]"} and right.endswith(" (UI)")
+                else [(0, len(right), "red")]
                 if marker == "[+]" and (":" in right or right.startswith("Anonymous READ"))
                 else []
             ),
         ):
             return True
     return actions._render_colored_kafka_line(console, line)
+
+
+def _ui_suffix(record: dict) -> str:
+    return " (UI)" if record.get("ui_vendor") in {None, "", "kafbat", "provectus", "akhq", "redpanda_console"} else ""
 
 
 def _format_detect_record(record: dict, output_format: str) -> str:
@@ -69,7 +76,7 @@ def _format_detect_record(record: dict, output_format: str) -> str:
     required = record.get("auth_required")
     auth = "True" if required is True else "False" if required is False else "unknown"
     version = record.get("version") or "unknown"
-    return f"{_nxc_prefix(record)} [*] {product} (auth required:{auth}) (version:{version})"
+    return f"{_nxc_prefix(record)} [*] {product} (auth required:{auth}) (version:{version}){_ui_suffix(record)}"
 
 
 def _format_record(record: dict, output_format: str) -> str:
@@ -88,7 +95,7 @@ def _format_record(record: dict, output_format: str) -> str:
     if username is None and password is None:
         return ""
     marker = "[+]" if status in {"valid_credentials", "weak_default_creds"} else "[-]"
-    return f"{_nxc_prefix(record)} {marker} {username or ''}:{password or ''}"
+    return f"{_nxc_prefix(record)} {marker} {username or ''}:{password or ''}{_ui_suffix(record)}"
 
 
 def _format_credential_attempts_records(record: dict, output_format: str) -> list[str]:
@@ -106,7 +113,9 @@ def _format_credential_attempts_records(record: dict, output_format: str) -> lis
         if item.get("status") not in {"valid_credentials", "weak_default_creds", "invalid_credentials"}:
             continue
         marker = "[+]" if item.get("status") in {"valid_credentials", "weak_default_creds"} else "[-]"
-        lines.append(f"{_nxc_prefix(record)} {marker} {item.get('username') or ''}:{item.get('password') or ''}")
+        lines.append(
+            f"{_nxc_prefix(record)} {marker} {item.get('username') or ''}:{item.get('password') or ''}{_ui_suffix(record)}"
+        )
     return lines
 
 

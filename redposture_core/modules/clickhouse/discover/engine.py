@@ -250,31 +250,80 @@ def run_discovery(
     session_queue: queue.Queue[Any] = queue.Queue()
     for available_session in available_sessions:
         session_queue.put(available_session)
-    tables_by_name = {(table.database, table.name): table for table, _columns in table_jobs}
+
+    unknown_next: dict[str, ScanChunk] = {}
+    resumed_originals: dict[str, ScanChunk] = {}
+    saved_chunks = state.get("chunks") or {}
+
+    def following(chunk: ScanChunk) -> ScanChunk:
+        return ScanChunk(
+            chunk.database, chunk.table, chunk.columns, chunk.partition_id, chunk.offset + chunk.limit, chunk.limit
+        )
+
+    def restore(chunk: ScanChunk, successor: ScanChunk | None):
+        """Restore completed ranges, split leaves and the unknown-size frontier.
+
+        Split ranges are deterministic, so schema-v1 checkpoints written before
+        explicit frontier metadata can also be resumed without replaying leaves.
+        Only the rightmost leaf may continue beyond its original parent range.
+        """
+        saved = saved_chunks.get(chunk.chunk_id)
+        while isinstance(saved, dict) and saved.get("status") == "complete":
+            if successor is None or saved.get("rows_scanned") != chunk.limit:
+                return
+            chunk = successor
+            successor = following(chunk)
+            saved = saved_chunks.get(chunk.chunk_id)
+        if isinstance(saved, dict):
+            if saved.get("status") == "error":
+                for column_name in chunk.columns:
+                    item = coverage[_coverage_key(chunk.database, chunk.table, column_name)]
+                    item["failed_chunks"] = max(0, int(item.get("failed_chunks") or 0) - 1)
+                    item["status"] = "pending"
+            if saved.get("status") == "split" and chunk.limit > 1:
+                left_size = max(1, chunk.limit // 2)
+                left = ScanChunk(
+                    chunk.database, chunk.table, chunk.columns, chunk.partition_id, chunk.offset, left_size
+                )
+                right = ScanChunk(
+                    chunk.database,
+                    chunk.table,
+                    chunk.columns,
+                    chunk.partition_id,
+                    chunk.offset + left_size,
+                    chunk.limit - left_size,
+                )
+                yield from restore(left, None)
+                yield from restore(right, successor)
+                return
+            if saved.get("status") == "budget_partial":
+                next_offset = saved.get("next_offset")
+                if isinstance(next_offset, int) and chunk.offset < next_offset < chunk.offset + chunk.limit:
+                    remaining = ScanChunk(
+                        chunk.database,
+                        chunk.table,
+                        chunk.columns,
+                        chunk.partition_id,
+                        next_offset,
+                        chunk.offset + chunk.limit - next_offset,
+                    )
+                    resumed_parents[remaining.chunk_id] = chunk.chunk_id
+                    resumed_originals[remaining.chunk_id] = chunk
+                    if successor is not None:
+                        unknown_next[remaining.chunk_id] = successor
+                    yield remaining
+                    return
+        if successor is not None:
+            unknown_next[chunk.chunk_id] = successor
+        yield chunk
 
     def initial_chunks():
         for table, columns in table_jobs:
             for chunk in _planned_chunks(table, columns, max(1, config.chunk_rows)):
                 if budget_reason is not None:
                     return
-                if store.is_complete(chunk.chunk_id):
-                    continue
-                saved = (state.get("chunks") or {}).get(chunk.chunk_id)
-                if isinstance(saved, dict) and saved.get("status") == "budget_partial":
-                    next_offset = saved.get("next_offset")
-                    if isinstance(next_offset, int) and chunk.offset < next_offset < chunk.offset + chunk.limit:
-                        remaining = ScanChunk(
-                            chunk.database,
-                            chunk.table,
-                            chunk.columns,
-                            chunk.partition_id,
-                            next_offset,
-                            chunk.offset + chunk.limit - next_offset,
-                        )
-                        resumed_parents[remaining.chunk_id] = chunk.chunk_id
-                        yield remaining
-                        continue
-                yield chunk
+                successor = following(chunk) if table.total_rows is None and not table.partitions else None
+                yield from restore(chunk, successor)
 
     def read_one(chunk: ScanChunk):
         if bool(getattr(nested_scheduler, "cancelled", False)):
@@ -322,6 +371,9 @@ def run_discovery(
                         right_size,
                     ),
                 )
+                successor = unknown_next.pop(chunk.chunk_id, None)
+                if successor is not None:
+                    unknown_next[children[-1].chunk_id] = successor
                 for column_name in chunk.columns:
                     coverage[_coverage_key(chunk.database, chunk.table, column_name)]["total_chunks"] += 1
                 store.update(
@@ -423,21 +475,23 @@ def run_discovery(
         )
         parent_id = resumed_parents.get(chunk.chunk_id)
         if parent_id is not None:
-            store.update(chunk_id=parent_id, chunk={"status": "complete"}, findings=findings, coverage=coverage)
-        table = tables_by_name[(chunk.database, chunk.table)]
-        if table.total_rows is None and not table.partitions and len(result.rows) == chunk.limit:
+            original = resumed_originals[chunk.chunk_id]
+            parent_payload = {
+                **chunk_payload,
+                "offset": original.offset,
+                "limit": original.limit,
+                "rows_scanned": chunk.offset - original.offset + len(rows),
+            }
+            store.update(chunk_id=parent_id, chunk=parent_payload, findings=findings, coverage=coverage)
+        successor = unknown_next.pop(chunk.chunk_id, None)
+        if successor is not None and len(result.rows) == chunk.limit:
             for column_name in chunk.columns:
                 coverage[_coverage_key(chunk.database, chunk.table, column_name)]["total_chunks"] += 1
-            return (
-                ScanChunk(
-                    chunk.database,
-                    chunk.table,
-                    chunk.columns,
-                    chunk.partition_id,
-                    chunk.offset + chunk.limit,
-                    chunk.limit,
-                ),
-            )
+            unknown_next[successor.chunk_id] = following(successor)
+            # The completed range plus rows_scanned is an explicit durable
+            # continuation/EOF marker; restore also understands older records.
+            store.update(findings=findings, coverage=coverage, inventory=inventory_payload)
+            return (successor,)
         return ()
 
     if nested_scheduler is None or len(available_sessions) == 1:
@@ -477,7 +531,9 @@ def run_discovery(
         )
         if item["coverage_percent"] == 100.0 and int(item.get("failed_chunks") or 0) == 0:
             item["status"] = "complete"
-    incomplete = bool(inventory_errors or scan_errors or budget_reason)
+    incomplete = bool(inventory_errors or scan_errors or budget_reason) or any(
+        item.get("status") not in {"complete", "excluded", "unsupported_type"} for item in coverage.values()
+    )
     searchable = [item for item in coverage.values() if item.get("status") not in {"excluded", "unsupported_type"}]
     total_chunks = sum(int(item.get("total_chunks") or 0) for item in searchable)
     completed_chunks = sum(int(item.get("completed_chunks") or 0) for item in searchable)

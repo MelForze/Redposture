@@ -1328,6 +1328,7 @@ def _parse_fetch_response(
     expected_partition: int,
     max_messages: int,
     api_version: int = KAFKA_FETCH_API_VERSION,
+    progress: dict[str, int] | None = None,
 ) -> tuple[list[tuple[int, str]] | None, str | None]:
     """Parse a Fetch v10 response.
 
@@ -1414,6 +1415,8 @@ def _parse_fetch_response(
                         f"high_watermark={high_watermark}, "
                         f"log_start_offset={log_start_offset})"
                     )
+                if progress is not None:
+                    progress["high_watermark"] = high_watermark
                 entries = _parse_message_set_entries(records, max_messages)
                 if not entries and records:
                     # Broker returned records bytes but our parser produced
@@ -1526,33 +1529,50 @@ def _read_partition_messages_on_leader(
     if earliest_offset is None:
         return [], correlation, None
 
-    fetch_payload = _send_kafka_request(
-        leader_sock,
-        api_key=KAFKA_FETCH,
-        api_version=fetch_api_version,
-        correlation_id=correlation,
-        client_id=KAFKA_CLIENT_ID,
-        body=_build_fetch_request_body(
-            topic,
-            partition,
-            earliest_offset,
-            max_bytes=KAFKA_FETCH_MAX_BYTES,
+    items: list[str] = []
+    next_offset = earliest_offset
+    snapshot_end: int | None = None
+    while len(items) < remaining:
+        try:
+            fetch_payload = _send_kafka_request(
+                leader_sock,
+                api_key=KAFKA_FETCH,
+                api_version=fetch_api_version,
+                correlation_id=correlation,
+                client_id=KAFKA_CLIENT_ID,
+                body=_build_fetch_request_body(
+                    topic, partition, next_offset, max_bytes=KAFKA_FETCH_MAX_BYTES, api_version=fetch_api_version
+                ),
+            )
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            return items, correlation + 1, _friendly_error_from_exception(exc)
+        progress: dict[str, int] = {}
+        fetch_items, fetch_error = _parse_fetch_response(
+            fetch_payload,
+            correlation,
+            expected_partition=partition,
+            max_messages=remaining - len(items),
             api_version=fetch_api_version,
-        ),
-    )
-    fetch_items, fetch_error = _parse_fetch_response(
-        fetch_payload,
-        correlation,
-        expected_partition=partition,
-        max_messages=remaining,
-        api_version=fetch_api_version,
-    )
-    correlation += 1
-    if fetch_error:
-        return [], correlation, fetch_error
-    if not fetch_items:
-        return [], correlation, None
-    items = [f"p{partition}@{offset} {text}" for offset, text in fetch_items[:remaining]]
+            progress=progress,
+        )
+        correlation += 1
+        if fetch_error:
+            return items, correlation, fetch_error
+        if snapshot_end is None:
+            snapshot_end = progress.get("high_watermark")
+        accepted = [
+            (offset, text)
+            for offset, text in fetch_items or []
+            if offset >= next_offset and (snapshot_end is None or offset < snapshot_end)
+        ]
+        if not accepted:
+            if snapshot_end is not None and next_offset < snapshot_end:
+                return items, correlation, "Fetch made no progress before partition high watermark (partial dump)"
+            return items, correlation, None
+        items.extend(f"p{partition}@{offset} {text}" for offset, text in accepted)
+        next_offset = max(offset for offset, _text in accepted) + 1
+        if snapshot_end is None or next_offset >= snapshot_end:
+            break
     return items, correlation, None
 
 
@@ -2449,10 +2469,9 @@ def _read_topic_messages(
                         max_messages - len(out),
                         fetch_api_version=fetch_api_version,
                     )
+                    out.extend(items)
                     if err:
                         partition_errors.append(f"p{partition}: {err}")
-                        continue
-                    out.extend(items)
                 return corr
 
             # 1) Per-leader connections for partitions with a known leader.

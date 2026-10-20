@@ -124,8 +124,8 @@ def test_clickhouse_real_stage_propagates_actions_and_http_defaults(
         assert call["show_tables_limit"] == 3
         assert call["show_columns"] is True
         assert call["show_columns_limit"] == 4
-        assert call["table_targets"] == ["analytics.events", "analytics.users"]
-        assert call["table_columns"] == ["id", "Name"]
+        assert call["table_targets"] == ["analytics.events", "analytics.users", "ANALYTICS.events"]
+        assert call["table_columns"] == ["id", "Name", "name"]
         assert call["dump_table_rows"] is True
         assert call["dump_row_limit"] == 5
         assert call["execute_command"] == "id"

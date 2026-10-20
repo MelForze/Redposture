@@ -569,6 +569,9 @@ _ROOT_HELP_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("grafana", "login and datasources"),
             ("jenkins", "jobs, builds, plugins"),
             ("keycloak", "realms, tokens, clients"),
+            ("vault", "seal state, tokens, secret engines"),
+            ("nomad", "ACL, tokens, jobs and nodes"),
+            ("jupyter", "notebooks, sessions and kernels"),
             ("kubeapi", "namespaces and workloads"),
             ("proxmox", "nodes, VMs, storage"),
             ("rabbitmq", "users, queues, permissions"),
@@ -628,6 +631,9 @@ def build_parser() -> argparse.ArgumentParser:
         "oracle": "Discovery / Dump",
         "postgres": "Discovery / Dump",
         "jenkins": "Inventory",
+        "vault": "Inventory",
+        "nomad": "Inventory",
+        "jupyter": "Inventory",
     }
     for name in sorted(DISCOVERY_MODULES):
         subparser = subparsers.choices.get(name)

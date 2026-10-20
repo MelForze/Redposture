@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -194,6 +196,89 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
 }
 
 
+# These are focused contract/loopback emulator mappings, not vendor stands.
+# Keep destinations explicit so newly added flags still fail the static gate.
+_FOCUSED_COMMON = frozenset(
+    {
+        "debug",
+        "targets",
+        "out_targets",
+        "port",
+        "ports",
+        "output",
+        "output_format",
+        "token",
+        "token_file",
+        "discover_time",
+        "discover_max_bytes",
+        "tls_ca",
+        "tls_cert",
+        "tls_key",
+        "discover",
+    }
+)
+_FOCUSED_ACTIONS = {
+    "vault": _FOCUSED_COMMON | {"defcreds", "show_mounts", "show_auth", "mount"},
+    "nomad": _FOCUSED_COMMON
+    | {
+        "show_jobs",
+        "show_nodes",
+        "show_members",
+        "namespace",
+        "execute",
+        "execute_timeout",
+        "execute_max_bytes",
+        "allocation",
+        "task",
+        "probe_submit",
+    },
+    "jupyter": _FOCUSED_COMMON
+    | {
+        "show_contents",
+        "show_sessions",
+        "show_kernels",
+        "show_terminals",
+        "path",
+        "execute",
+        "execute_timeout",
+        "execute_max_bytes",
+        "execute_via",
+        "kernel",
+    },
+}
+_FOCUSED_TESTS = (
+    "tests/test_token_audit_modules.py",
+    "tests/test_token_api_http_integration.py",
+    "tests/test_nomad_jupyter_execute.py",
+    "tests/test_execution_websocket.py",
+    "tests/test_nomad_jupyter_execute_http.py",
+)
+
+
+def _focused_evidence(path: Path) -> set[str]:
+    try:
+        cases = list(ET.parse(path).getroot().iter("testcase"))
+    except (OSError, ET.ParseError):
+        return set()
+    if not cases or any(case.find(tag) is not None for case in cases for tag in ("failure", "error", "skipped")):
+        return set()
+    result = set()
+    for module in _FOCUSED_ACTIONS:
+        if any(
+            "test_real_http_runner_prefix_tls_token_inventory_and_discovery[" in str(case.get("name"))
+            and re.search(r"(?:\[|-)" + module + r"(?:-|\])", str(case.get("name")))
+            for case in cases
+        ):
+            if module in {"nomad", "jupyter"} and not any(
+                str(case.get("name", "")).startswith("test_execute_http_contract[")
+                and module in str(case.get("name", ""))
+                for case in cases
+            ):
+                continue
+            result.add(module)
+    return result
+
+
 def _logical_shell_lines(text: str) -> list[str]:
     lines: list[str] = []
     buffer = ""
@@ -309,7 +394,11 @@ def _read_status_labels(path: Path | None) -> set[str] | None:
 
 
 def build_coverage_report(script_path: Path, *, status_file: Path | None = None) -> dict[str, Any]:
-    cases = parse_matrix_cases(script_path.read_text(encoding="utf-8"))
+    script_text = script_path.read_text(encoding="utf-8")
+    cases = parse_matrix_cases(script_text)
+    focused_bound = all(test in script_text and (ROOT_DIR / test).is_file() for test in _FOCUSED_TESTS)
+    focused_executed = _focused_evidence(status_file.parent / "focused-token-apis.xml") if status_file else set()
+    focused: dict[str, list[dict[str, str]]] = {}
     labels = _read_status_labels(status_file)
     if labels is not None:
         cases = [case for case in cases if case.label in labels]
@@ -329,6 +418,18 @@ def build_coverage_report(script_path: Path, *, status_file: Path | None = None)
             if any(option in command_present for option in option_strings):
                 covered[command_key].extend(option_strings)
                 continue
+            if action.dest in _FOCUSED_ACTIONS.get(command_key, ()) and focused_bound:
+                if status_file is None or command_key in focused_executed:
+                    focused.setdefault(command_key, []).append(
+                        {
+                            "dest": action.dest,
+                            "options": ",".join(option_strings),
+                            "status": "planned" if status_file is None else "passed",
+                            "kind": "focused contracts and loopback emulator (not vendor integration)",
+                            "tests": ",".join(_FOCUSED_TESTS),
+                        }
+                    )
+                    continue
             reason = _COMMON_EXCLUDED_DESTS.get(action.dest) or command_exclusions.get(action.dest)
             if reason:
                 excluded[command_key].append(
@@ -357,6 +458,8 @@ def build_coverage_report(script_path: Path, *, status_file: Path | None = None)
         "commands": sorted(parsers),
         "covered_options": covered,
         "excluded_actions": excluded,
+        "focused_actions": focused,
+        "coverage_kind": "planned" if status_file is None else "executed",
         "missing_actions": missing,
         "summary": {
             "total_parser_actions": total_actions,

@@ -19,32 +19,12 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACT = Path("/tmp") / f"redposture_output_qa_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-AUDIT_MODULES = (
-    "airflow",
-    "clickhouse",
-    "consul",
-    "docker",
-    "elastic",
-    "etcd",
-    "gitlab",
-    "grafana",
-    "grpc",
-    "kafka",
-    "keeper",
-    "kubeapi",
-    "minio",
-    "mongodb",
-    "oracle",
-    "postgres",
-    "proxmox",
-    "qdrant",
-    "rabbitmq",
-    "redis",
-    "docker-registry",
-    "harbor",
-    "nexus",
-    "zookeeper",
-)
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from redposture_core.module_registry import AUDIT_MODULE_NAMES  # noqa: E402
+
+AUDIT_MODULES = AUDIT_MODULE_NAMES
 
 
 @dataclass(frozen=True)
@@ -162,6 +142,7 @@ def _run_stage(stage: Stage, artifact: Path, docker_available: bool, docker_reas
     junit_path = artifact / f"{stage.name}.xml" if stage.pytest else None
     command = list(stage.command)
     if junit_path is not None:
+        junit_path.unlink(missing_ok=True)
         command.extend(("--junitxml", str(junit_path)))
     display = shlex.join(command)
     reason: str | None
@@ -202,8 +183,21 @@ def _run_stage(stage: Stage, artifact: Path, docker_available: bool, docker_reas
         reason = str(exc)
         log_path.write_text(f"ERROR: {exc}\n", encoding="utf-8")
     duration = round(time.monotonic() - started, 3)
-    counts, failures = _pytest_counts(junit_path) if junit_path is not None else ({}, [])
-    module_counts = _pytest_module_counts(junit_path) if junit_path is not None else {}
+    counts: dict[str, int] = {}
+    failures: list[dict[str, str]] = []
+    module_counts: dict[str, dict[str, int]] = {}
+    if junit_path is not None:
+        try:
+            if not junit_path.is_file():
+                raise ValueError("missing current JUnit report")
+            counts, failures = _pytest_counts(junit_path)
+            module_counts = _pytest_module_counts(junit_path)
+            if not sum(counts.values()):
+                raise ValueError("empty current JUnit report")
+        except (OSError, ValueError, ET.ParseError) as exc:
+            counts, failures, module_counts = {}, [], {}
+            status = "failed"
+            reason = f"{reason + '; ' if reason else ''}JUnit artifact error: {exc}"
     return StageResult(
         name=stage.name,
         category=stage.category,
@@ -224,12 +218,16 @@ def _run_stage(stage: Stage, artifact: Path, docker_available: bool, docker_reas
 
 
 def _module_from_nodeid(nodeid: str) -> str:
-    match = re.search(r"\[([a-z][a-z0-9_]*)(?:-|\])", nodeid)
-    if match and match.group(1) in AUDIT_MODULES:
-        return match.group(1)
     lowered = nodeid.lower()
-    for module in AUDIT_MODULES:
-        if module in lowered:
+    # Longer command names win, so docker-registry never becomes docker.
+    modules = sorted(AUDIT_MODULES, key=len, reverse=True)
+    parameters = re.findall(r"\[([^\]]+)\]", lowered)
+    for parameter in parameters:
+        for module in modules:
+            if parameter == module or parameter.startswith(module + "-") or parameter.endswith("-" + module):
+                return module
+    for module in modules:
+        if re.search(r"(?<![a-z0-9])" + re.escape(module) + r"(?![a-z0-9])", lowered):
             return module
     return "shared"
 

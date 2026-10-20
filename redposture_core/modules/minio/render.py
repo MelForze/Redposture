@@ -214,12 +214,13 @@ def format_finding_line(host: Any, port: Any, finding: dict[str, Any]) -> str:
 
 
 def format_discover_summary(
-    host: Any, port: Any, *, status: str, coverage_percent: float, findings: int, objects_scanned: int
+    host: Any, port: Any, *, status: str, coverage_percent: float | None, findings: int, objects_scanned: int
 ) -> str:
     """The clickhouse-style `[*] Discover Secrets (...)` summary line."""
+    coverage = "unknown" if coverage_percent is None else f"{float(coverage_percent):.2f}%"
     return (
         f"{_prefix_hp(host, port)} [*] Discover Secrets (status:{status}) "
-        f"(coverage:{float(coverage_percent):.2f}%) (findings:{int(findings)}) (objects:{int(objects_scanned)})"
+        f"(coverage:{coverage}) (findings:{int(findings)}) (objects:{int(objects_scanned)})"
     )
 
 
@@ -286,7 +287,7 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
                 host,
                 port,
                 status=str(record.get("discover_coverage") or "unknown"),
-                coverage_percent=float(record.get("discover_coverage_percent") or 0.0),
+                coverage_percent=record.get("discover_coverage_percent"),
                 findings=int(record.get("discover_findings_count") or len(record.get("secret_findings") or [])),
                 objects_scanned=int(record.get("discover_objects_scanned") or 0),
             )
@@ -310,6 +311,9 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
                 f"{prefix} [+] downloaded {download.get('bucket', '?')}/{download.get('key', '?')}"
                 f" -> {download.get('path', '?')} (size:{download.get('size', 0)})"
             )
+    for listing_error in record.get("listing_errors") or []:
+        lines.append(f"{prefix} [!] inventory partial: {listing_error}")
+
     op_error = record.get("object_op_error")
     if op_error:
         lines.append(f"{prefix} [!] object error: {op_error}")
@@ -339,6 +343,8 @@ _DISCOVER_FINDINGS_RE = re.compile(r"\(findings:(\d+)\)")
 
 
 def _minio_extra_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
+    if payload.startswith("inventory partial:"):
+        return [(0, len(payload), "orange")]
     if "admin:unverified" in payload:
         start = payload.index("admin:unverified")
         return [(start, start + len("admin:unverified"), "orange")]

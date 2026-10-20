@@ -19,11 +19,13 @@ from .cli_modules.gitlab import configure_gitlab_parser
 from .cli_modules.grafana import configure_grafana_parser
 from .cli_modules.grpc import configure_grpc_parser
 from .cli_modules.jenkins import configure_jenkins_parser
+from .cli_modules.jupyter import configure_jupyter_parser
 from .cli_modules.keeper import configure_keeper_parser
 from .cli_modules.keycloak import configure_keycloak_parser
 from .cli_modules.kubeapi import configure_kubeapi_parser
 from .cli_modules.minio import configure_minio_parser
 from .cli_modules.mongodb import MongoDBHelpFormatter, configure_mongodb_parser
+from .cli_modules.nomad import configure_nomad_parser
 from .cli_modules.oci_registry import (
     configure_docker_registry_parser,
     configure_harbor_parser,
@@ -35,6 +37,7 @@ from .cli_modules.proxmox import configure_proxmox_parser
 from .cli_modules.qdrant import configure_qdrant_parser
 from .cli_modules.rabbitmq import configure_rabbitmq_parser
 from .cli_modules.spray import configure_spray_parser
+from .cli_modules.vault import configure_vault_parser
 from .cli_modules.zookeeper import configure_zookeeper_parser
 
 COMMAND_LISTEN = "listen"
@@ -52,6 +55,9 @@ COMMAND_PROXMOX = "proxmox"
 COMMAND_GRAFANA = "grafana"
 COMMAND_KEYCLOAK = "keycloak"
 COMMAND_JENKINS = "jenkins"
+COMMAND_NOMAD = "nomad"
+COMMAND_JUPYTER = "jupyter"
+COMMAND_VAULT = "vault"
 COMMAND_GITLAB = "gitlab"
 COMMAND_CONSUL = "consul"
 COMMAND_QDRANT = "qdrant"
@@ -128,6 +134,9 @@ _STAGE_RUNNER_MODULES: dict[str, str] = {
     COMMAND_GRAFANA: "redposture_core.modules.grafana.stage",
     COMMAND_KEYCLOAK: "redposture_core.modules.keycloak.stage",
     COMMAND_JENKINS: "redposture_core.modules.jenkins.stage",
+    COMMAND_NOMAD: "redposture_core.modules.nomad.stage",
+    COMMAND_JUPYTER: "redposture_core.modules.jupyter.stage",
+    COMMAND_VAULT: "redposture_core.modules.vault.stage",
     COMMAND_GITLAB: "redposture_core.modules.gitlab.stage",
     COMMAND_CONSUL: "redposture_core.modules.consul.stage",
     COMMAND_QDRANT: "redposture_core.modules.qdrant.stage",
@@ -295,6 +304,24 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Audit Jenkins access, jobs, builds, plugins, and CVEs.",
         runner_attr="run_jenkins_stage",
         configure_parser=_make_configurator(configure_jenkins_parser, _HTTP_MODULE_HELPERS),
+    ),
+    CommandSpec(
+        name=COMMAND_NOMAD,
+        help="Audit HashiCorp Nomad access, tokens and visible resources.",
+        runner_attr="run_nomad_stage",
+        configure_parser=_make_configurator(configure_nomad_parser, _HTTP_MODULE_HELPERS),
+    ),
+    CommandSpec(
+        name=COMMAND_JUPYTER,
+        help="Audit Jupyter Server access, tokens and visible resources.",
+        runner_attr="run_jupyter_stage",
+        configure_parser=_make_configurator(configure_jupyter_parser, _HTTP_MODULE_HELPERS),
+    ),
+    CommandSpec(
+        name=COMMAND_VAULT,
+        help="Audit HashiCorp Vault seal state, token access, and visible secret engines.",
+        runner_attr="run_vault_stage",
+        configure_parser=_make_configurator(configure_vault_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_PROXMOX,

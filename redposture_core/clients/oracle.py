@@ -698,7 +698,7 @@ class OracleAuditClient:
     def list_users(self) -> list[dict[str, Any]]:
         for sql in (
             "select username, account_status, default_tablespace, profile from dba_users order by username",
-            "select username, account_status, default_tablespace, profile from all_users order by username",
+            "select username from all_users order by username",
             "select user as username from dual",
         ):
             try:
@@ -1025,15 +1025,17 @@ class OracleAuditClient:
             return directory_path
         return str(path)
 
-    def scheduler_read_file(self, path: str, *, max_bytes: int = 32767) -> dict[str, Any]:
+    def scheduler_read_file(self, path: str, *, max_bytes: int = 32767, offset: int = 0) -> dict[str, Any]:
         try:
             stage = self._data_pump_directory()
             stage_dir = str(stage.get("directory_path") or "").rstrip("/")
             stage_name = f"rp_read_{uuid.uuid4().hex[:10]}.txt"
             source_path = self._resolve_scheduler_path(path)
-            command = (
-                f"head -c {int(max_bytes)} -- {shlex.quote(source_path)} > {shlex.quote(stage_dir + '/' + stage_name)}"
-            )
+            source = shlex.quote(source_path)
+            read_command = f"head -c {int(max_bytes)} -- {source}"
+            if offset > 0:
+                read_command = f"tail -c +{int(offset) + 1} -- {source} | head -c {int(max_bytes)}"
+            command = f"{read_command} > {shlex.quote(stage_dir + '/' + stage_name)}"
             exec_result = self.scheduler_exec(command)
             if not exec_result.get("ok"):
                 return {"method": "scheduler_readback", "ok": False, "data": None, "error": exec_result.get("error")}

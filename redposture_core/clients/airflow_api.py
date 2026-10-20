@@ -17,6 +17,8 @@ from http.cookies import SimpleCookie
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urljoin, urlsplit
 
+from .http_api import format_http_authority
+
 if TYPE_CHECKING:
     from .http_session import HttpSessionPool
 
@@ -130,7 +132,7 @@ class AirflowClient:
 
     @property
     def base_url(self) -> str:
-        return f"{self.scheme}://{self.host}:{self.port}"
+        return f"{self.scheme}://{format_http_authority(self.host, self.port)}"
 
     def _auth_header(self) -> dict[str, str]:
         if self.bearer_token:

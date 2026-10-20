@@ -638,12 +638,12 @@ def test_data_record_streams_objects_to_tempfile_across_all_buckets(monkeypatch:
     monkeypatch.setattr(
         _enum,
         "iter_buckets",
-        lambda client, limit=None: [_enum.BucketInfo(name="b1"), _enum.BucketInfo(name="b2")],
+        lambda client, limit=None, on_error=None: [_enum.BucketInfo(name="b1"), _enum.BucketInfo(name="b2")],
     )
 
     seen: dict[str, object] = {}
 
-    def fake_multi(client, buckets, *, prefix="", limit=None, page_size=1000):
+    def fake_multi(client, buckets, *, prefix="", limit=None, page_size=1000, on_error=None):
         seen["buckets"] = list(buckets)
         seen["limit"] = limit
         yield _enum.ObjectInfo(bucket="b1", key="k1", size=1)
@@ -692,7 +692,9 @@ def test_data_record_write_probe_runs_on_all_buckets(monkeypatch: pytest.MonkeyP
     from redposture_core.modules.minio import enumerate as _enum
 
     monkeypatch.setattr(
-        _enum, "iter_buckets", lambda client, limit=None: [_enum.BucketInfo(name="rw"), _enum.BucketInfo(name="ro")]
+        _enum,
+        "iter_buckets",
+        lambda client, limit=None, on_error=None: [_enum.BucketInfo(name="rw"), _enum.BucketInfo(name="ro")],
     )
     captured: dict[str, object] = {}
 
@@ -732,7 +734,7 @@ def test_data_record_discover_computes_coverage_percent(monkeypatch: pytest.Monk
     from redposture_core.modules.minio import discover as _disc
     from redposture_core.modules.minio import enumerate as _enum
 
-    monkeypatch.setattr(_enum, "iter_buckets", lambda client, limit=None: [_enum.BucketInfo(name="b1")])
+    monkeypatch.setattr(_enum, "iter_buckets", lambda client, limit=None, on_error=None: [_enum.BucketInfo(name="b1")])
     monkeypatch.setattr(_enum, "iter_objects_multi", lambda *a, **k: iter([]))
 
     result = _disc.DiscoverResult(
@@ -784,7 +786,7 @@ def test_data_record_discover_streams_findings_live_in_txt(monkeypatch: pytest.M
     from redposture_core.modules.minio import discover as _disc
     from redposture_core.modules.minio import enumerate as _enum
 
-    monkeypatch.setattr(_enum, "iter_buckets", lambda client, limit=None: [_enum.BucketInfo(name="b1")])
+    monkeypatch.setattr(_enum, "iter_buckets", lambda client, limit=None, on_error=None: [_enum.BucketInfo(name="b1")])
     monkeypatch.setattr(_enum, "iter_objects_multi", lambda *a, **k: iter([]))
 
     findings = [
@@ -855,7 +857,7 @@ def test_data_record_discover_batches_when_no_live_sink(monkeypatch: pytest.Monk
     from redposture_core.modules.minio import discover as _disc
     from redposture_core.modules.minio import enumerate as _enum
 
-    monkeypatch.setattr(_enum, "iter_buckets", lambda client, limit=None: [])
+    monkeypatch.setattr(_enum, "iter_buckets", lambda client, limit=None, on_error=None: [])
     monkeypatch.setattr(_enum, "iter_objects_multi", lambda *a, **k: iter([]))
     monkeypatch.setattr(
         _disc,

@@ -675,9 +675,22 @@ def _collect_oracle_data(
         target_table = table
         if not target_schema or not target_table:
             table_rows = as_list(data.get("tables"))
+            if target_table:
+                table_rows = [row for row in table_rows if str(row.get("table_name") or "") == target_table]
+                current_schema = str(context.get("current_schema") or context.get("session_user") or "")
+                current_matches = [
+                    row for row in table_rows if str(row.get("owner") or row.get("schema_name") or "") == current_schema
+                ]
+                if current_matches:
+                    table_rows = current_matches
+                if len(table_rows) > 1:
+                    data["error"] = "ambiguous table owner; specify --schema"
+                    table_rows = []
             if table_rows:
-                target_schema = str(table_rows[0].get("owner") or table_rows[0].get("schema_name") or "")
-                target_table = str(table_rows[0].get("table_name") or "")
+                target_schema = target_schema or str(
+                    table_rows[0].get("owner") or table_rows[0].get("schema_name") or ""
+                )
+                target_table = target_table or str(table_rows[0].get("table_name") or "")
         if target_schema and target_table:
             data["rows"] = [
                 {"schema": target_schema, "table": target_table, "row": row}
@@ -766,6 +779,8 @@ def _download_oracle_file(
     bytes_written = resume_offset
     mode = "a" if resume_offset else "w"
     chunks = 0
+    error: str | None = None
+    finished = False
     with target.open(mode, encoding="utf-8") as fh:
         while chunks < max_chunks:
             if fs_mode in {"auto", "directory"}:
@@ -774,11 +789,12 @@ def _download_oracle_file(
                 except Exception:
                     if fs_mode == "directory":
                         raise
-                    chunk = client.scheduler_read_file(remote_path, max_bytes=chunk_size)
+                    chunk = client.scheduler_read_file(remote_path, max_bytes=chunk_size, offset=bytes_written)
             else:
-                chunk = client.scheduler_read_file(remote_path, max_bytes=chunk_size)
+                chunk = client.scheduler_read_file(remote_path, max_bytes=chunk_size, offset=bytes_written)
             if not chunk.get("ok"):
                 if bytes_written > resume_offset:
+                    error = str(chunk.get("error") or "download failed")
                     break
                 return {
                     "method": chunk.get("method") or "chunked_download",
@@ -790,21 +806,26 @@ def _download_oracle_file(
                 }
             data = str(chunk.get("data") or "")
             if not data:
+                finished = True
                 break
             fh.write(data)
             bytes_written += len(data.encode("utf-8"))
             chunks += 1
             if len(data.encode("utf-8")) < chunk_size:
+                finished = True
                 break
+    if not finished and error is None:
+        error = "download chunk limit reached before EOF"
     return {
         "method": "chunked_download",
-        "ok": True,
+        "ok": finished and error is None,
+        "partial": not finished,
         "downloaded_to": str(target),
         "bytes": bytes_written,
         "resume_offset": resume_offset,
         "resumed": resume_offset > 0,
         "chunks": chunks,
-        "error": None,
+        "error": error,
     }
 
 
@@ -1119,6 +1140,8 @@ def _audit_oracle_host(
 
     for attempt in range(attempts):
         client: OracleAuditClient | None = None
+        active_client: OracleAuditClient | None = None
+        active_client_owned = False
         try:
             probe_errors: list[str] = []
             cached_probe = probe_state.get("oracle_detection") if probe_state is not None else None
@@ -1424,43 +1447,44 @@ def _audit_oracle_host(
                 )
                 return record
 
-            data = _collect_oracle_data(
-                active_client,
-                host=host,
-                port=port,
-                protocol=selected_protocol,
-                insecure=insecure,
-                listener_dump=False,
-                nne_check=nne_check,
-                show_pdbs=show_pdbs,
-                show_users=show_users,
-                show_roles=show_roles,
-                show_privs=show_privs,
-                show_schemas=show_schemas,
-                show_tables=show_tables,
-                schema=schema,
-                table=table,
-                dump_rows=dump_rows,
-                dump_limit=dump_limit,
-                query=query,
-                privesc_check=privesc_check,
-                privesc_chain=privesc_chain,
-                exec_cmd=exec_cmd,
-                exec_method=exec_method,
-                reverse_shell=reverse_shell,
-                reverse_shell_type=reverse_shell_type,
-                fs_mode=fs_mode,
-                os_read=os_read,
-                os_write=os_write,
-                download=download,
-                delete=delete,
-                wallet_search=wallet_search,
-                hashes=hashes,
-                sensitive_scan=sensitive_scan,
-                dblink_check=dblink_check,
-            )
-            if active_client_owned:
-                active_client.close()
+            try:
+                data = _collect_oracle_data(
+                    active_client,
+                    host=host,
+                    port=port,
+                    protocol=selected_protocol,
+                    insecure=insecure,
+                    listener_dump=False,
+                    nne_check=nne_check,
+                    show_pdbs=show_pdbs,
+                    show_users=show_users,
+                    show_roles=show_roles,
+                    show_privs=show_privs,
+                    show_schemas=show_schemas,
+                    show_tables=show_tables,
+                    schema=schema,
+                    table=table,
+                    dump_rows=dump_rows,
+                    dump_limit=dump_limit,
+                    query=query,
+                    privesc_check=privesc_check,
+                    privesc_chain=privesc_chain,
+                    exec_cmd=exec_cmd,
+                    exec_method=exec_method,
+                    reverse_shell=reverse_shell,
+                    reverse_shell_type=reverse_shell_type,
+                    fs_mode=fs_mode,
+                    os_read=os_read,
+                    os_write=os_write,
+                    download=download,
+                    delete=delete,
+                    wallet_search=wallet_search,
+                    hashes=hashes,
+                    sensitive_scan=sensitive_scan,
+                    dblink_check=dblink_check,
+                )
+            except Exception as exc:
+                data = {"error": normalize_oracle_error(exc), "partial": True}
             if listener_dump:
                 data["listener_dump"] = record["listener_dump"]
             record.update(data)
@@ -1497,7 +1521,9 @@ def _audit_oracle_host(
                 break
             time.sleep(_retry_delay(attempt))
         finally:
-            if client is not None:
+            if active_client_owned and active_client is not None:
+                active_client.close()
+            if client is not None and (not active_client_owned or client is not active_client):
                 client.close()
 
     record.update(

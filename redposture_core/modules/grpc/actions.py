@@ -357,6 +357,8 @@ def _access_from_grpc_status(
         return _ACCESS_UNSUPPORTED
     if grpc_status is None:
         return _ACCESS_UNKNOWN
+    if grpc_status not in {_GRPC_OK, 5}:
+        return _ACCESS_UNKNOWN
     return _ACCESS_AUTHENTICATED if used_credentials else _ACCESS_ANONYMOUS
 
 
@@ -762,7 +764,9 @@ def _auth_attempt_success(grpc_status: int | None, is_grpc: bool) -> bool:
         return False
     if grpc_status is None:
         return False
-    return True
+    # The capability probe deliberately requests an absent Reflection symbol,
+    # whose NOT_FOUND response proves that the method handled the request.
+    return grpc_status in {_GRPC_OK, 5}
 
 
 def _try_credentials(
@@ -1209,8 +1213,8 @@ def _audit_grpc_host(
     )
     reflection_analysis_satisfied = False
     health_analysis_satisfied = False
-    reflection_deep_challenge_seen = False
-    health_deep_challenge_seen = False
+    reflection_deep_rejection_seen = False
+    health_deep_rejection_seen = False
     if analysis_performed:
         cap_started = time.monotonic()
         current_auth_candidate = auth_used
@@ -1271,7 +1275,7 @@ def _audit_grpc_host(
                 _ACCESS_UNSUPPORTED,
             }
             if reflection_status in _GRPC_AUTH_CODES:
-                reflection_deep_challenge_seen = True
+                reflection_deep_rejection_seen |= reflection_status == 16
                 _session_state.reflection_deep_auth_required = True
                 _session_state.reflection_auth_used = None
             services = list(reflection.get("services") or [])
@@ -1312,7 +1316,7 @@ def _audit_grpc_host(
             _ACCESS_UNSUPPORTED,
         }
         if protocol_flavor == "grpc-web" and primary_health_status in _GRPC_AUTH_CODES:
-            health_deep_challenge_seen = True
+            health_deep_rejection_seen |= primary_health_status == 16
             _session_state.health_deep_auth_required = True
             _session_state.health_auth_used = None
         health_checks.append(
@@ -1352,7 +1356,7 @@ def _audit_grpc_host(
                     _ACCESS_UNSUPPORTED,
                 }
                 if descriptor_status in _GRPC_AUTH_CODES:
-                    reflection_deep_challenge_seen = True
+                    reflection_deep_rejection_seen |= descriptor_status == 16
                     _session_state.reflection_deep_auth_required = True
                     _session_state.reflection_auth_used = None
                 descriptor_blobs.extend(
@@ -1398,7 +1402,7 @@ def _audit_grpc_host(
                     _ACCESS_UNSUPPORTED,
                 }
                 if protocol_flavor == "grpc-web" and health_entry.get("grpc_status") in _GRPC_AUTH_CODES:
-                    health_deep_challenge_seen = True
+                    health_deep_rejection_seen |= health_entry.get("grpc_status") == 16
                     _session_state.health_deep_auth_required = True
                     _session_state.health_auth_used = None
                 health_checks.append(
@@ -1420,7 +1424,7 @@ def _audit_grpc_host(
                 provided_credentials_ok = True
                 auth_used = dict(reflection_provisional_auth)
                 status = "valid_credentials"
-            elif reflection_deep_challenge_seen:
+            elif reflection_deep_rejection_seen:
                 provided_credentials_ok = False
                 status = "invalid_credentials"
 
@@ -1432,7 +1436,7 @@ def _audit_grpc_host(
                 provided_credentials_ok = True
                 auth_used = dict(health_provisional_auth)
                 status = "valid_credentials"
-            elif health_deep_challenge_seen:
+            elif health_deep_rejection_seen:
                 provided_credentials_ok = False
                 status = "invalid_credentials"
 
@@ -1459,7 +1463,7 @@ def _audit_grpc_host(
                     used_credentials=bool(invoke_auth_header),
                 )
             if invoke_access == _ACCESS_AUTH_REQUIRED:
-                if invoke_auth_header:
+                if invoke_auth_header and invoke_result.get("grpc_status") == 16:
                     provided_credentials_ok = False
                     status = "invalid_credentials"
             elif invoke_access == _ACCESS_AUTHENTICATED:

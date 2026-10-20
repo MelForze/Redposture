@@ -485,6 +485,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         names: list[str] = []
         settings_by_name: dict[str, dict[str, Any]] = {}
         clients_access: dict[str, str] = {}
+        clients_errors: dict[str, str] = {}
         limit = getattr(ctx.args, "show_clients", None)
         max_count = int(limit) if isinstance(limit, int) and not isinstance(limit, bool) else 10_000
         any_access = False
@@ -506,11 +507,13 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 if response.status != 200 or response.error:
                     if offset == 0:
                         clients_access[realm] = "denied" if response.status in {401, 403} else "unknown"
+                    clients_errors[realm] = "transport error" if response.error else f"HTTP {response.status}"
                     break
                 data = _json_list(response)
                 if data is None:
                     if offset == 0:
                         clients_access[realm] = "unknown"
+                    clients_errors[realm] = "response truncated" if response.truncated else "invalid collection"
                     break
                 any_access = True
                 page_names = tuple(
@@ -519,6 +522,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                     if isinstance(item, dict) and isinstance(item.get("clientId"), str)
                 )
                 if page_names in seen_pages:
+                    clients_errors[realm] = "pagination repeated a page"
                     break
                 seen_pages.add(page_names)
                 names.extend(f"{realm}/{name}" for name in page_names)
@@ -537,4 +541,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             result["client_settings"] = [settings_by_name[name] for name in selected_names if name in settings_by_name]
         if clients_access:
             result["clients_access"] = clients_access
+        result["clients_partial"] = bool(clients_errors)
+        if clients_errors:
+            result["clients_errors"] = clients_errors
     return result

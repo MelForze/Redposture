@@ -222,11 +222,18 @@ def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
         found.extend(SecretMatch("url_credentials", "high", path, value) for value in _url_credential(text))
     path_field = _normalize_secret_key(path.rsplit(".", 1)[-1])
     if "high_entropy" in enabled and not _NON_SECRET_FIELD_RE.search(path_field):
+        explicit_values = {match.value for match in found}
+        # Candidate length is bounded at256. Substring membership therefore
+        # depends on that bound, not on the number of earlier findings.
+        value_lengths = sorted({len(value) for value in explicit_values if len(value) <= 256})
         for candidate in _WORD_RE.findall(text):
-            if any(
-                match.detector != "high_entropy"
-                and (match.value == candidate or ("=" in candidate and match.value in candidate))
-                for match in found
+            if candidate in explicit_values:
+                continue
+            if "=" in candidate and any(
+                candidate[start : start + length] in explicit_values
+                for length in value_lengths
+                if length <= len(candidate)
+                for start in range(len(candidate) - length + 1)
             ):
                 continue
             classes = sum(

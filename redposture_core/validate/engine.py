@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -268,11 +269,13 @@ def run_validation(
     suppressed_value_counters: dict[str, int] = {}
     gated_non_debug_hits = 0
     unlimited = max_lines <= 0
+    read_errors = 0
 
     for file_path in files:
         try:
             body = file_path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
+            read_errors += 1
             out.warn(f"skip file={file_path}: {exc}")
             continue
 
@@ -386,8 +389,9 @@ def run_validation(
             credential_hits=0,
             unique_hits=0,
             ok=True,
+            unreadable_files=read_errors,
         )
-        return 0
+        return 2 if read_errors else 0
 
     grouped_matches = _group_validate_matches(matches, group_counts)
     render_started_at = time.monotonic()
@@ -449,6 +453,7 @@ def run_validation(
         credential_hits=hit_count,
         unique_hits=unique_hits,
         ok=False,
+        unreadable_files=read_errors,
     )
     data_ms = int((time.monotonic() - render_started_at) * 1000)
     if debug:
@@ -458,6 +463,8 @@ def run_validation(
         out.debug(
             f"stage_timing_summary status=hits attempts=1/1 detect_ms={detect_ms} data_ms={data_ms} total_ms={total_ms}"
         )
+    if read_errors:
+        return 2
     if fail_on_creds:
         return 1
     return 0
@@ -526,30 +533,32 @@ class ValidationRecordAccumulator:
         self._suppressed_value_counters: dict[str, int] = {}
         self._raw_group_counts: dict[tuple[str, str, str, str, str], int] = {}
         self._shown_group_counts: dict[tuple[str, str, str, str, str], int] = {}
+        self._source_urls: set[str] = set()
+        self._record_pairs: dict[int, list[tuple[str, str]]] = {}
+        self._record_credentials: dict[int, tuple[list[str], list[str], list[str]]] = {}
         self.matches_raw: list[dict[str, str | int]] = []
         self.matches_shown: list[dict[str, str | int]] = []
 
+    def _shown_records(self) -> Iterator[dict[str, str | int]]:
+        seen: set[int] = set()
+        for hit in self.matches_shown:
+            record_no = int(hit["record_no"])
+            if record_no not in seen:
+                seen.add(record_no)
+                yield hit
+
     def vulnerable_targets_from_shown_hits(self) -> tuple[list[str], list[str]]:
         hosts: set[str] = set()
-        urls: set[str] = set()
-        for host, port, _exporter, endpoint, _reason in self._shown_group_counts:
-            host_text = str(host or "").strip()
-            port_text = str(port or "").strip()
-            endpoint_text = str(endpoint or "").strip()
-            if not host_text or host_text == "-" or not port_text.isdigit():
-                continue
-            if not endpoint_text.startswith("/"):
-                continue
-            urls.add(f"http://{format_http_host(host_text)}:{int(port_text)}{endpoint_text}")
+        urls = self._source_urls
         hosts.update(row[0] for row in self.vulnerable_login_rows_from_shown_hits() if row[0] != "-")
         return sorted(hosts), sorted(urls)
 
     def vulnerable_login_rows_from_shown_hits(self) -> list[tuple[str, str, str]]:
         rows: list[tuple[str, str, str]] = []
         seen: set[tuple[str, str, str]] = set()
-        for hit in self.matches_shown:
+        for hit in self._shown_records():
             host, _port = _vulnerable_source_host_port(hit)
-            for username, password in _extract_vulnerable_login_pairs_from_hit(hit):
+            for username, password in self._record_pairs[int(hit["record_no"])]:
                 row = (host, username, password)
                 if row in seen:
                     continue
@@ -562,16 +571,21 @@ class ValidationRecordAccumulator:
         users = [row[1] for row in login_rows]
         passwords = [row[2] for row in login_rows]
         api_keys: list[str] = []
-        for hit in self.matches_shown:
-            _hit_users, _hit_passwords, hit_api_keys = _extract_vulnerable_credentials_from_hit(hit)
+        for hit in self._shown_records():
+            _hit_users, _hit_passwords, hit_api_keys = self._record_credentials[int(hit["record_no"])]
             api_keys.extend(_vulnerable_source_api_keys(hit, hit_api_keys))
         return _vulnerable_dedupe(users), _vulnerable_dedupe(passwords), _vulnerable_dedupe(api_keys)
 
     def vulnerable_findings_from_shown_hits(self) -> list[dict[str, object]]:
         findings: list[dict[str, object]] = []
         seen: set[tuple[str, str, str, str, str, str, str, str]] = set()
+        record_reasons: set[tuple[int, str]] = set()
         for hit in self.matches_shown:
-            users, passwords, api_keys = _extract_vulnerable_credentials_from_hit(hit)
+            record_reason = (int(hit["record_no"]), str(hit.get("reason") or "-"))
+            if record_reason in record_reasons:
+                continue
+            record_reasons.add(record_reason)
+            users, passwords, api_keys = self._record_credentials[int(hit["record_no"])]
             source_api_keys = _vulnerable_source_api_keys(hit, api_keys)
             if not users and not passwords and not source_api_keys:
                 continue
@@ -664,7 +678,6 @@ class ValidationRecordAccumulator:
                 "line_no": int(hit.get("line_no") or 1),
                 "reason": reason,
                 "sample": sample,
-                "body": body,
                 "host": host,
                 "port": port,
                 "exporter": exporter,
@@ -681,7 +694,16 @@ class ValidationRecordAccumulator:
                 continue
             self.shown_hit_count += 1
             self._shown_group_counts[group_key] = int(self._shown_group_counts.get(group_key, 0)) + 1
+            source_url = str(record.get("url") or "")
+            if not source_url and host != "-" and port.isdigit() and endpoint.startswith("/"):
+                source_url = f"http://{format_http_host(host)}:{int(port)}{endpoint}"
+            if source_url:
+                self._source_urls.add(source_url)
             if self._unlimited or len(self.matches_shown) < self._max_lines:
+                if self._record_no not in self._record_credentials:
+                    extraction_hit = {**hit_payload, "body": body}
+                    self._record_pairs[self._record_no] = _extract_vulnerable_login_pairs_from_hit(extraction_hit)
+                    self._record_credentials[self._record_no] = _extract_vulnerable_credentials_from_hit(extraction_hit)
                 self.matches_shown.append(hit_payload)
 
         self.hit_count = self.shown_hit_count

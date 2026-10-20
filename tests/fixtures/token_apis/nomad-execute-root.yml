@@ -1,0 +1,7 @@
+services:
+  nomad-execute:
+    user: "0:0"
+    privileged: true
+    cgroup: private
+    entrypoint: [/bin/sh, -c]
+    command: ["mount -o remount,rw /sys/fs/cgroup && mkdir -p /sys/fs/cgroup/agent && echo $$$$ > /sys/fs/cgroup/agent/cgroup.procs && exec /bin/nomad agent -config=/etc/nomad/qa.hcl"]

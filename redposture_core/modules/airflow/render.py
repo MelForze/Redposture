@@ -224,6 +224,29 @@ def _format_show_dags_records(record: dict[str, Any], output_format: str) -> lis
     return lines
 
 
+def _format_show_dagsources_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format != "txt" or not record.get("show_dagsources_requested"):
+        return []
+    sources = record.get("dag_sources")
+    error = record.get("dag_sources_error")
+    prefix = _prefix(record)
+    if not isinstance(sources, list):
+        if error and error != "authentication_required":
+            return [f"{prefix} [-] Airflow DAG Sources unavailable: {error}"]
+        return []
+    lines = [f"{prefix} [*] Airflow DAG Sources (sources:{len(sources)})"]
+    for source in sources:
+        source_id = json.dumps(source.get("source_id"), ensure_ascii=False)
+        path = json.dumps(source.get("fileloc"), ensure_ascii=False)
+        dags = json.dumps(source.get("dag_ids") or [], ensure_ascii=False)
+        lines.append(f"{prefix} [+] DAG Source Id={source_id} File={path} Dags={dags}")
+    if error:
+        lines.append(
+            f"{prefix} [*] Airflow DAG Sources coverage:partial reasons={json.dumps(error, ensure_ascii=False)}"
+        )
+    return lines
+
+
 def _format_show_connections_records(record: dict[str, Any], output_format: str) -> list[str]:
     if (
         output_format != "txt"
@@ -276,8 +299,16 @@ def _format_dump_records(record: dict[str, Any], output_format: str) -> list[str
 
 def _format_grouped_inventory_records(record: dict[str, Any], output_format: str) -> list[str]:
     """Attach DAG/variable/connection dump values to their inventory rows."""
+    if output_format == "txt" and record.get("_inventory_streamed"):
+        return []
     sections = (
         (_format_show_dags_records, "dag", record.get("dag_ids"), lambda item: str(item)),
+        (
+            _format_show_dagsources_records,
+            "dag_source",
+            record.get("dag_sources"),
+            lambda item: str(item.get("source_id") or ""),
+        ),
         (_format_show_keys_records, "variable", record.get("variable_keys"), lambda item: str(item)),
         (
             _format_show_connections_records,
@@ -374,6 +405,8 @@ def _render_colored_airflow_line(console: Console, line: str) -> bool:
             RegexColorRule(r"\(connections:[1-9]\d*\)", "true_red"),
             RegexColorRule(r"\(dags:0\)", "bright_green"),
             RegexColorRule(r"\(dags:[1-9]\d*\)", "true_red"),
+            RegexColorRule(r"\(sources:0\)", "bright_green"),
+            RegexColorRule(r"\(sources:[1-9]\d*\)", "true_red"),
             RegexColorRule(r"\(records:0\)", "bright_green"),
             RegexColorRule(r"\(records:[1-9]\d*\)", "true_red"),
             RegexColorRule(r"\(status:(?:partial|unavailable)\)", "orange"),
@@ -394,7 +427,16 @@ def _render_colored_airflow_line(console: Console, line: str) -> bool:
                 [(0, len(payload), "orange")]
                 if marker == "[+]"
                 and payload.startswith(
-                    ("Variable Name=", "Connection Id=", "DAG Id=", "dag Id=", "variable Id=", "connection Id=")
+                    (
+                        "Variable Name=",
+                        "Connection Id=",
+                        "DAG Id=",
+                        "DAG Source Id=",
+                        "dag Id=",
+                        "dag_source Id=",
+                        "variable Id=",
+                        "connection Id=",
+                    )
                 )
                 else []
             ),

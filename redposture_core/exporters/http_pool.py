@@ -9,7 +9,7 @@ import urllib.parse
 from contextlib import contextmanager
 from typing import Any
 
-from ..clients.http_api import HttpResponse
+from ..clients.http_api import HttpResponse, check_http_body_complete
 from ..clients.http_redirects import follow_redirects
 from ..clients.tls_cache import shared_client_ssl_context
 
@@ -72,6 +72,8 @@ class HTTPConnectionPool:
                 if not bucket:
                     self._idle.pop(key, None)
                 conn.timeout = timeout
+                if conn.sock is not None:
+                    conn.sock.settimeout(timeout)
                 return conn
         if scheme == "https":
             return http.client.HTTPSConnection(host, port, timeout=timeout, context=self._tls_context)
@@ -183,6 +185,8 @@ class HTTPConnectionPool:
                 truncated = len(raw) > max_bytes
                 if truncated:
                     raw = raw[:max_bytes]
+            if not truncated:
+                check_http_body_complete(response, len(raw))
             # A capped read leaves the remainder of a keep-alive response on
             # the socket. Returning that connection to the pool makes the
             # next request fail with ``ResponseNotReady`` or consume stale

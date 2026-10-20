@@ -129,6 +129,7 @@ def test_http_pool_reuses_connection_and_keeps_identity_headers_separate(monkeyp
     class _Connection:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             self.timeout = 1.0
+            self.sock = None
             self.requests: list[dict[str, str]] = []
             self.closed = False
             connections.append(self)
@@ -161,6 +162,7 @@ def test_http_pool_reopens_stale_and_truncated_connections(monkeypatch: pytest.M
     class _Connection:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             self.timeout = 1.0
+            self.sock = None
             self.closed = False
             connections.append(self)
 
@@ -192,6 +194,7 @@ def test_http_pool_follows_post_redirect_and_stops_on_loop(monkeypatch: pytest.M
     class _Connection:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             self.timeout = 1.0
+            self.sock = None
 
         def request(self, method: str, _path: str, **_kwargs: Any) -> None:
             requests.append(method)
@@ -215,6 +218,7 @@ def test_http_pool_follows_bounded_same_origin_redirect(monkeypatch: pytest.Monk
     class _Connection:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             self.timeout = 1.0
+            self.sock = None
 
         def request(self, _method: str, path: str, **_kwargs: Any) -> None:
             paths.append(path)

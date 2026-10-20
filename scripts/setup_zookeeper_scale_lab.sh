@@ -102,15 +102,31 @@ run_zkcli_script() {
   local src_file="$1"
   local remote_file="$2"
   docker cp "${src_file}" "${CONTAINER_ID}:${remote_file}" >/dev/null
-  docker exec "${CONTAINER_ID}" bash -lc '
+  local output
+  if ! output="$(docker exec "${CONTAINER_ID}" bash -lc '
     set -euo pipefail
     if command -v zkCli.sh >/dev/null 2>&1; then
       ZKCLI="zkCli.sh"
     else
       ZKCLI="$(echo /apache-zookeeper-*/bin/zkCli.sh)"
     fi
-    "$ZKCLI" -server 127.0.0.1:2181 < "'"${remote_file}"'" >/tmp/rp_zk_seed.log 2>&1 || true
-  '
+    set +e
+    "$ZKCLI" -server 127.0.0.1:2181 < "'"${remote_file}"'" >/tmp/rp_zk_seed.log 2>&1
+    rc=$?
+    cat /tmp/rp_zk_seed.log
+    exit "$rc"
+  ')"; then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  printf '%s\n' "$output"
+  # zkCli may exit zero after command-level errors. NodeExists is expected
+  # when explicitly reusing data; all other failed commands invalidate seed.
+  if printf '%s\n' "$output" | grep -vE 'NodeExists|Node already exists:' | grep -iE 'KeeperErrorCode|Exception|ERROR|ConnectionLoss|Authentication failed' >/dev/null; then
+    echo "[error] ZooKeeper seed/verification command failed" >&2
+    return 1
+  fi
+
 }
 
 echo "[*] preparing seed namespace: ${SEED_PATH}"
@@ -144,22 +160,30 @@ for ((start = 1; start <= ZNODE_COUNT; start += CHUNK_SIZE)); do
   created_total="${end}"
   now_ts="$(date +%s)"
   elapsed=$((now_ts - START_TS))
-  echo "[*] chunk=${chunk_idx} seeded=${created_total}/${ZNODE_COUNT} elapsed=${elapsed}s"
+  echo "[*] chunk=${chunk_idx} processed=${created_total}/${ZNODE_COUNT} elapsed=${elapsed}s"
 done
 
 LAST_NODE="$(printf '%s/item_%07d' "${SEED_PATH}" "${ZNODE_COUNT}")"
 VERIFY_FILE="${TMP_DIR}/verify.zk"
 cat >"${VERIFY_FILE}" <<EOF
 get ${LAST_NODE}
+stat ${SEED_PATH}
 quit
 EOF
-run_zkcli_script "${VERIFY_FILE}" "/tmp/rp_zk_verify.zk"
+VERIFY_OUTPUT="$(run_zkcli_script "${VERIFY_FILE}" "/tmp/rp_zk_verify.zk")" || exit 1
+printf '%s\n' "${VERIFY_OUTPUT}"
+ACTUAL_COUNT="$(printf '%s\n' "${VERIFY_OUTPUT}" | awk -F= '/^[[:space:]]*numChildren[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); count=$2} END {print count}')"
+if ! [[ "${ACTUAL_COUNT}" =~ ^[0-9]+$ ]] || [[ "${ACTUAL_COUNT}" -ne "${ZNODE_COUNT}" ]]; then
+  echo "[error] seed count mismatch: expected=${ZNODE_COUNT} actual=${ACTUAL_COUNT:-unknown}" >&2
+  exit 1
+fi
 
 TOTAL_TS="$(date +%s)"
 echo
 echo "[+] zookeeper-scale is ready"
 echo "    profile:        ${PROFILE}"
 echo "    target_count:   ${ZNODE_COUNT}"
+echo "    actual_count:   ${ACTUAL_COUNT}"
 echo "    host:           127.0.0.1"
 echo "    port:           ${ZK_SCALE_PORT}"
 echo "    seed_path:      ${SEED_PATH}"

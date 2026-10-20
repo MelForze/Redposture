@@ -209,6 +209,18 @@ def configure_trigger_parser(
         elif title == "Redis exporter":
             assert check_action is not None
             group._group_actions.append(check_action)
+        elif title == "MySQL exporter":
+            group.add_argument(
+                "--export-hashcat",
+                nargs="?",
+                const="mysql_hashes.hashcat",
+                default=None,
+                metavar="file",
+                help=(
+                    "Save unique mysql_native_password hashes for hashcat mode 11200; "
+                    "default file: mysql_hashes.hashcat. Requires MySQL callbacks and listeners."
+                ),
+            )
         if title in profile_flags:
             flag, destination, parameter = profile_flags[title]
             group.add_argument(

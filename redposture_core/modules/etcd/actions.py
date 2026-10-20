@@ -1124,7 +1124,7 @@ def _audit_etcd_host(
                     "error": "service is not etcd",
                 }
 
-            if auth_token is not None and selected_credential is not None:
+            if selected_credential is not None and (auth_token is not None or v2_basic_auth is not None):
                 status = "weak_default_creds" if selected_credential.get("default") else "valid_credentials"
             elif auth_required is True:
                 status = "auth_required"

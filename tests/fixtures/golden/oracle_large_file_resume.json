@@ -38,6 +38,7 @@
         "local_path": "<OUT_DIR>/oracle_large_file_download.txt",
         "method": "chunked_download",
         "ok": true,
+        "partial": false,
         "resume_offset": 0,
         "resumed": false
       }

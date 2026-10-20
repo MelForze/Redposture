@@ -1210,7 +1210,9 @@ def _kafka_lifecycle_detection_record(
             state.is_kafka = True
             state.auth_required = True
             state.sasl_first = True
-            return _record(detected=True, status="auth_required", auth_required=True, error=None)
+            record = _record(detected=True, status="auth_required", auth_required=True, error=None)
+            record["auth_flow"] = "sasl_fallback"
+            return record
         except (TimeoutError, ConnectionError, OSError, ValueError):
             return None
         finally:
@@ -1361,7 +1363,7 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
         error = None
         metadata = None
         transport_mode = state.transport_mode or "plaintext"
-        ok: bool | None = False
+        ok: bool | None = None
         for attempt in range(attempts):
             candidate: KafkaSession | None = None
             try:
@@ -1440,6 +1442,22 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
 
     topic_map = dict(metadata.get("topic_map") or {}) if isinstance(metadata, dict) else None
     topic_names = sorted(topic_map) if isinstance(topic_map, dict) else None
+    debug_emit = getattr(ctx, "debug_emit", None)
+    if bool(getattr(ctx.args, "debug", False)) and callable(debug_emit):
+        reason = str(error or "-")
+        if password:
+            for secret in {
+                password,
+                json.dumps(password, ensure_ascii=True)[1:-1],
+                json.dumps(password, ensure_ascii=False)[1:-1],
+            }:
+                reason = reason.replace(secret, "<redacted>")
+        verdict = "valid" if ok is True else "invalid" if ok is False else "inconclusive"
+        debug_emit(
+            f"{ctx.host}:{ctx.port} kafka auth mechanism=PLAIN transport={transport_mode or state.transport_mode} "
+            f"username={json.dumps(username[:128], ensure_ascii=True)} verdict={verdict} "
+            f"error={json.dumps(reason[:512], ensure_ascii=True)}"
+        )
     payload.update(
         {
             "timestamp": utc_now_iso(),
@@ -1449,7 +1467,10 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
             "provided_credentials": credential.source != "default",
             "provided_username": credential.username,
             "provided_password": credential.password if credential.source != "default" else None,
-            "provided_credentials_ok": ok if credential.source != "default" else None,
+            # The verifier result belongs to this pair, including defaults.
+            # Keeping None here erases explicit SASL rejections when the shared
+            # runtime builds attempted_credentials for the sweep renderer.
+            "provided_credentials_ok": ok,
             "defcreds_enabled": credential.source == "default",
             "credential_attempts": [
                 {

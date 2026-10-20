@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import unquote
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -797,7 +797,7 @@ def test_portainer_system_keeps_info_and_disk_usage(monkeypatch: pytest.MonkeyPa
     assert all("/docker/" in path for path in paths[1:])
 
 
-def test_dashboards_proxy_uses_only_upstream_gets(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dashboards_fixed_inventory_uses_upstream_gets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web_panels, "HttpSessionPool", lambda **_kw: SimpleNamespace(close=lambda: None))
     requests: list[tuple[str, bytes]] = []
 
@@ -810,14 +810,11 @@ def test_dashboards_proxy_uses_only_upstream_gets(monkeypatch: pytest.MonkeyPatc
         return _response(200, {"status": "green"})
 
     monkeypatch.setattr(web_panels, "_post", post)
-    ctx = SimpleNamespace(
-        args=SimpleNamespace(cluster=True, discover=True, timeout=1, secure=False, _proxy_config=None)
-    )
+    ctx = SimpleNamespace(args=SimpleNamespace(cluster=True, timeout=1, secure=False, _proxy_config=None))
     inventory = web_panels.enumerate_panel(ctx, {"ui_product": "kibana", "ui": {"endpoint": "http://qa"}})["ui"][
         "inventory"
     ]
     assert inventory["cluster"]["records"]["status"] == "green"
-    assert inventory["discover"]["records"][0]["hit"]["_source"]["name"] == "qa"
     assert all("method=GET" in path and body == b"" for path, body in requests)
 
 
@@ -843,8 +840,8 @@ def test_dashboards_does_not_count_proxy_errors_or_prioritize_internal_indices(
         "inventory"
     ]
     assert inventory["user"]["status"] == "unavailable"
-    assert inventory["discover"]["records"][0]["index"] == "qa"
-    assert any("qa%2F_search" in path for path in requested)
+    assert inventory["discover"]["count"] == 0
+    assert inventory["discover"]["partial"] is True
 
 
 def test_pgadmin_view_rows_uses_read_only_cursor_and_closes_session(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1061,46 +1058,38 @@ def test_portainer_walks_paginated_environments(monkeypatch: pytest.MonkeyPatch)
     assert inventory["containers"]["partial"] is True
 
 
-def test_dashboard_discover_reads_following_page_and_short_page_is_partial(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(web_panels, "HttpSessionPool", lambda **_kw: SimpleNamespace(close=lambda: None))
-    paths: list[str] = []
+def test_dashboard_discovery_forwards_search_bodies_cleanup_and_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core.modules.elastic import discover
 
-    def post(_pool: object, _base: str, path: str, _body: bytes, _headers: object, **_kw: object) -> HttpResponse:
-        paths.append(path)
-        decoded = unquote(path)
-        if "_cat/indices" in decoded:
-            return _response(200, [{"index": "qa"}])
-        if "from=0" in decoded:
-            return _response(
-                200,
-                {
-                    "hits": {
-                        "total": {"value": 150, "relation": "eq"},
-                        "hits": [{"_id": str(number)} for number in range(100)],
-                    }
-                },
-            )
-        return _response(
-            200,
-            {
-                "hits": {
-                    "total": {"value": 150, "relation": "eq"},
-                    "hits": [{"_id": str(number)} for number in range(100, 120)],
-                }
-            },
-        )
+    monkeypatch.setattr(web_panels, "HttpSessionPool", lambda **_kw: SimpleNamespace(close=lambda: None))
+    requests = []
+
+    def post(_pool, _base, path, body, headers, **kwargs):
+        requests.append((parse_qs(urlsplit(path).query), body, headers))
+        return HttpResponse(200, b"{}", {}, truncated=True)
 
     monkeypatch.setattr(web_panels, "_post", post)
-    ctx = SimpleNamespace(args=SimpleNamespace(discover=True, timeout=1, secure=False, _proxy_config=None))
+
+    def run(request, **kwargs):
+        options = kwargs["options"]
+        assert options.max_source_bytes == 17 and options.max_seconds == 0.001
+        result = request(
+            discover.DiscoverRequest("POST", "/qa/_search", {"Content-Type": "application/json"}, b'{"size":1}')
+        )
+        assert result.truncated
+        request(discover.DiscoverRequest("DELETE", "/_pit", body=b'{"id":"context"}'))
+        coverage = discover.DiscoverCoverage(truncated=True)
+        return discover.DiscoverReport([], coverage, [])
+
+    monkeypatch.setattr(discover, "run_discovery", run)
+    ctx = SimpleNamespace(args=SimpleNamespace(discover=True, discover_max_bytes=17, discover_time=0.001))
     inventory = web_panels.enumerate_panel(ctx, {"ui_product": "kibana", "ui": {"endpoint": "http://qa"}})["ui"][
         "inventory"
     ]
-    assert inventory["discover"]["count"] == 120
-    assert inventory["discover"]["partial"] is True
-    assert any("from=100" in unquote(path) for path in paths)
-    assert all("method=GET" in path for path in paths)
+    assert inventory["discover"]["partial"]
+    assert requests[0][0] == {"path": ["/qa/_search"], "method": ["POST"]}
+    assert requests[0][1] == b'{"size":1}' and requests[0][2]["kbn-xsrf"] == "redposture"
+    assert requests[1][0]["method"] == ["DELETE"]
 
 
 def test_redis_insight_typed_hash_pages_and_repeated_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1176,8 +1165,8 @@ def test_minio_console_download_without_bucket_reads_all_accessible(
     ]
     assert inventory["download"]["count"] == 2
     assert inventory["download"]["partial"] is False
-    assert (tmp_path / "one" / "a.txt").exists()
-    assert (tmp_path / "two" / "a.txt").exists()
+    assert all(Path(row["path"]).exists() for row in inventory["download"]["records"])
+    assert len(set(inventory["download"]["items"])) == 2
 
 
 def test_ui_rendering_uses_airflow_palette_and_has_no_ansi() -> None:
@@ -1196,7 +1185,7 @@ def test_ui_rendering_uses_airflow_palette_and_has_no_ansi() -> None:
     console = PaintConsole()
     detection = "MINIO\t127.0.0.1\t9001\t [*] MinIO Console (auth required:True) (version:2026.1)"
     assert web_panels.colorize_panel_line(console, detection, "MINIO") is True
-    assert any("version:2026.1" in value and color == "orange" for value, color in console.calls)
+    assert any("version:2026.1" in value and color == "white" for value, color in console.calls)
     assert any("auth required:True" in value and color == "bright_green" for value, color in console.calls)
     for count, color in ((0, "bright_green"), (3, "red")):
         console.calls.clear()
@@ -1209,7 +1198,7 @@ def test_ui_rendering_uses_airflow_palette_and_has_no_ansi() -> None:
         assert any(f"count:{count}" in value and painted == color for value, painted in console.calls)
     console.calls.clear()
     assert web_panels.colorize_panel_line(console, "MINIO\t127.0.0.1\t9001\t [+] user:secret (UI)", "MINIO")
-    assert any("user:secret" in value and color == "red" for value, color in console.calls)
+    assert any("user:secret (UI)" in value and color == "white" for value, color in console.calls)
     console.calls.clear()
     assert web_panels.colorize_panel_line(console, "MINIO\t127.0.0.1\t9001\t [-] user:wrong (UI)", "MINIO")
     assert not any("user:wrong" in value and color == "red" for value, color in console.calls)

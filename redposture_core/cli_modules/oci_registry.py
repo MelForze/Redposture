@@ -58,7 +58,12 @@ def add_oci_content_flags(group: argparse._ArgumentGroup, *, product: str) -> No
             "--asset", metavar="path-or-url", help="Show one Nexus asset by its exact path or download URL."
         )
     group.add_argument("--download", action="store_true", help="Download blobs for --image.")
-    group.add_argument("--download-dir", default="./registry_downloads", metavar="dir", help="Blob output directory.")
+    group.add_argument(
+        "--download-dir",
+        default="./registry_downloads",
+        metavar="dir",
+        help="Blob output root; endpoint/image identity directories preserve existing downloads.",
+    )
 
 
 def configure_oci_registry_parser(

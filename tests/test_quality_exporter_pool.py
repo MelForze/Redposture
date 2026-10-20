@@ -9,6 +9,7 @@ class _Connection:
     def __init__(self) -> None:
         self.closed = 0
         self.timeout = 0.0
+        self.sock = None
 
     def close(self) -> None:
         self.closed += 1

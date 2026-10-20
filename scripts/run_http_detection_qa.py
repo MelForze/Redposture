@@ -17,25 +17,12 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULES = (
-    "airflow",
-    "consul",
-    "docker",
-    "elastic",
-    "etcd",
-    "gitlab",
-    "grafana",
-    "kubeapi",
-    "minio",
-    "proxmox",
-    "qdrant",
-    "rabbitmq",
-    "docker-registry",
-    "harbor",
-    "nexus",
-    "clickhouse",
-    "grpc",
-)
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from redposture_core.module_registry import AUDIT_MODULE_NAMES  # noqa: E402
+
+MODULES = AUDIT_MODULE_NAMES
 TESTS = (
     "tests/test_network_fingerprint_matrix.py",
     "tests/test_detection_precision.py",
@@ -68,9 +55,11 @@ def _junit_summary(path: Path) -> tuple[dict[str, int], dict[str, dict[str, int]
             else "passed"
         )
         totals[key] += 1
-        for module in MODULES:
-            if f"[{module}]" in name or f"[{module}-" in name or f"-{module}]" in name:
-                modules[module][key] += 1
+        from scripts.run_output_quality_audit import _module_from_nodeid
+
+        module = _module_from_nodeid(f"{owner}::{name}")
+        if module in modules:
+            modules[module][key] += 1
         if failure is not None or error is not None:
             detail = failure if failure is not None else error
             assert detail is not None
@@ -89,19 +78,34 @@ def _run(
 ) -> dict[str, Any]:
     log = output / f"{name}.log"
     xml = output / f"{name}.xml"
+    xml.unlink(missing_ok=True)
     actual = command + ([f"--junitxml={xml}"] if junit else [])
     started = time.monotonic()
     with log.open("w", encoding="utf-8") as stream:
         completed = subprocess.run(
             actual, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT, env={**os.environ, **(env or {})}, check=False
         )
-    totals, modules, failures = _junit_summary(xml)
+    reason = None
+    status = "passed" if completed.returncode == 0 else "failed"
+    try:
+        if junit and not xml.is_file():
+            raise ValueError("missing current JUnit report")
+        totals, modules, failures = _junit_summary(xml)
+        if junit and not sum(totals.values()):
+            raise ValueError("empty current JUnit report")
+    except (OSError, ValueError, ET.ParseError) as exc:
+        totals = {key: 0 for key in ("passed", "failed", "skipped", "errors")}
+        modules = {name: dict(totals) for name in MODULES}
+        failures = []
+        status = "failed"
+        reason = f"JUnit artifact error: {exc}"
     return {
         "name": name,
         "command": shlex.join(actual),
         "duration_seconds": round(time.monotonic() - started, 3),
         "returncode": completed.returncode,
-        "status": "passed" if completed.returncode == 0 else "failed",
+        "status": status,
+        "reason": reason,
         "log": str(log),
         "junit": str(xml) if junit else None,
         "counts": totals,
@@ -222,7 +226,7 @@ def main() -> int:
             defects.append(
                 {
                     "test": str(run["name"]),
-                    "message": f"QA stage failed with exit {run['returncode']}",
+                    "message": str(run.get("reason") or f"QA stage failed with exit {run['returncode']}"),
                     "trace": "\n".join(log_tail),
                     "run": str(run["name"]),
                 }

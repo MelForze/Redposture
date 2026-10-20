@@ -29,7 +29,7 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...shell_capture import DEFAULT_CAPTURE_BYTES, hex_preview, is_binary
 from ...utils import (
     is_signature_compat_typeerror,
@@ -81,6 +81,9 @@ class KubeApiLifecycleState:
     http_session: KubeApiHttpSession | None = None
     http_pool: HttpSessionPool | None = None
     origin_resolved: bool = False
+    anonymous_self_review: tuple[bool | None, str | None, str | None] | None = None
+    anonymous_pod_probe: tuple[bool | None, int, str | None] | None = None
+    access_pod_probe: tuple[bool | None, int, str | None] | None = None
 
     def configure_transport(self, host: str, port: int, timeout: float) -> None:
         self.host = str(host)
@@ -297,7 +300,7 @@ def _http_request(
         "body": body,
         "timeout": timeout,
     }
-    if isinstance(request_client, KubeApiHttpSession):
+    if isinstance(request_client, (KubeApiHttpSession, HttpSessionPool)):
         request_kwargs["response_size_cap"] = int(response_size_cap)
     response = request_client.request(method, url, **request_kwargs)
     response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
@@ -1294,11 +1297,9 @@ def _list_pods(
             items, _status, error = list_result
             if items is None:
                 error_text = f"{namespace}: {error}" if error else f"{namespace}: request failed"
-                if access_confirmed:
-                    partial_errors.append(f"partial: {error_text}")
-                    complete = False
-                    break
-                return KubeResourceResult(None, error_text, False, False)
+                partial_errors.append(error_text)
+                complete = False
+                continue
             access_confirmed = True
             complete = complete and list_result.complete
             if error:
@@ -1325,7 +1326,10 @@ def _list_pods(
                     }
                 )
     results.sort(key=lambda item: (str(item.get("namespace") or ""), str(item.get("name") or "")))
-    return KubeResourceResult(results, "; ".join(partial_errors) or None, access_confirmed, complete)
+    final_error = "; ".join(partial_errors) or None
+    if access_confirmed and final_error and not final_error.startswith("partial:"):
+        final_error = f"partial: {final_error}"
+    return KubeResourceResult(results if access_confirmed else None, final_error, access_confirmed, complete)
 
 
 def _list_secrets(
@@ -1395,11 +1399,9 @@ def _list_secrets(
             items, _status, error = list_result
             if items is None:
                 error_text = f"{namespace}: {error}" if error else f"{namespace}: request failed"
-                if access_confirmed:
-                    partial_errors.append(f"partial: {error_text}")
-                    complete = False
-                    break
-                return KubeResourceResult(None, error_text, False, False)
+                partial_errors.append(error_text)
+                complete = False
+                continue
             access_confirmed = True
             complete = complete and list_result.complete
             if error:
@@ -1426,7 +1428,10 @@ def _list_secrets(
             }
         )
     results.sort(key=lambda item: (str(item.get("namespace") or ""), str(item.get("name") or "")))
-    return KubeResourceResult(results, "; ".join(partial_errors) or None, access_confirmed, complete)
+    final_error = "; ".join(partial_errors) or None
+    if access_confirmed and final_error and not final_error.startswith("partial:"):
+        final_error = f"partial: {final_error}"
+    return KubeResourceResult(results if access_confirmed else None, final_error, access_confirmed, complete)
 
 
 def _auth_label(token: str | None, username: str | None, password: str | None) -> str:
@@ -2412,9 +2417,11 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
 
     version_text = str(record.get("version") or "-")
     auth_required_text = _bool_text(record.get("auth_required"))
-    if str(record.get("anonymous_access") or "") == "limited":
-        return f"{prefix} [*] Kubernetes API (anonymous access:limited) (version:{version_text})"
-    return f"{prefix} [*] Kubernetes API (auth required:{auth_required_text}) (version:{version_text})"
+    return (
+        f"{prefix} [*] Kubernetes API (auth required:{auth_required_text}) "
+        f"(namespaces access:{_bool_text(record.get('can_list_namespaces'))}) "
+        f"(pods access:{_bool_text(record.get('can_list_pods'))}) (version:{version_text})"
+    )
 
 
 def _status_summary_line(record: dict[str, Any]) -> str | None:
@@ -2557,6 +2564,14 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
         else:
             lines.append(f"{prefix} <no secrets>")
 
+    for resource in ("namespaces", "pods", "secrets"):
+        if not record.get(f"show_{resource}") or not record.get(resource):
+            continue
+        coverage_error = record.get(f"{resource}_error")
+        if record.get(f"{resource}_partial") or coverage_error:
+            reason = str(coverage_error or "incomplete inventory")
+            lines.append(f"{prefix} [-] {resource} coverage:partial err={_clip(reason, 120)}")
+
     exec_result = record.get("exec_result") if not access_blocked else None
     if isinstance(exec_result, dict):
         exec_ns = str(exec_result.get("namespace") or "").strip()
@@ -2616,12 +2631,19 @@ def _render_colored_kubeapi_line(console: Console, line: str) -> bool:
         console,
         line,
         tag=_KUBE_TAG,
+        booleans=(
+            BooleanColorRule(
+                "namespaces access", true_color="true_red", false_color="bright_green", unknown_color="orange"
+            ),
+            BooleanColorRule("pods access", true_color="true_red", false_color="bright_green", unknown_color="orange"),
+        ),
         counts=(
             CountColorRule("secrets", "red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("pods", "red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("namespaces", "red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("keys", "red", unknown_color="orange", zero_color="bright_green"),
         ),
+        regexes=((r"coverage:partial.*", "orange"),),
     ):
         return True
     if line.startswith(_KUBE_TAG) and "\t" in line:
@@ -2769,6 +2791,61 @@ def _elapsed_ms(state: KubeApiLifecycleState) -> int:
     return max(0, int((time.monotonic() - started) * 1000))
 
 
+def _probe_pod_access(
+    ctx: Any,
+    state: KubeApiLifecycleState,
+    options: dict[str, Any],
+    *,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+) -> tuple[bool | None, int, str | None]:
+    """Check one PodList page per requested scope; never follow continuation."""
+    namespaces = list(options.get("namespace_filters") or [])
+    paths = (
+        [f"/api/v1/namespaces/{urllib.parse.quote(ns, safe='')}/pods" for ns in namespaces]
+        if namespaces
+        else ["/api/v1/pods"]
+    )
+    allowed = False
+    unknown = False
+    last_status = 0
+    errors: list[str] = []
+    for path in paths:
+        status, payload, _headers, error = _lifecycle_get_json_with_retries(
+            ctx,
+            state,
+            path + "?limit=1",
+            response_size_cap=_KUBE_AUTH_RESPONSE_CAP,
+            token=token,
+            username=username,
+            password=password,
+        )
+        last_status = status
+        if (
+            not error
+            and status == 200
+            and isinstance(payload, dict)
+            and payload.get("kind") == "PodList"
+            and isinstance(payload.get("items"), list)
+        ):
+            allowed = True  # Empty PodList proves the permission too.
+        elif error or status not in {401, 403}:
+            unknown = True
+            errors.append(error or f"invalid pods access response status={status}")
+        else:
+            errors.append(_kube_status_message(status, payload) or f"pods access denied status={status}")
+    return (True, 200, None) if allowed else (None if unknown else False, last_status, "; ".join(errors) or None)
+
+
+def _resource_auth_required(namespaces: bool | None, pods: bool | None) -> bool | None:
+    if namespaces is True or pods is True:
+        return False
+    if namespaces is False and pods is False:
+        return True
+    return None
+
+
 def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     state = ctx.lifecycle_state
     if not isinstance(state, KubeApiLifecycleState):
@@ -2837,25 +2914,19 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     namespace_access: bool | None
     ns_status: int
     ns_error: str | None
-    if auth_status_confirmed:
-        # Two canonical Status objects are a strong Kubernetes signature. A
-        # 403 proves that anonymous requests reach RBAC, not that auth is
-        # required; only 401 disables anonymous access.
-        ns_status = 403 if 403 in {version_status, api_status} else 401
-        namespace_access = False
-        source_payload = api_payload if api_status == ns_status else version_payload
-        ns_error = _kube_status_message(ns_status, source_payload)
-    else:
-        namespace_access, ns_status, ns_error = _probe_namespace_access(
-            str(state.host or ctx.host),
-            int(state.port or ctx.port),
-            float(getattr(ctx.args, "timeout", 5.0)),
-            use_https=state.use_https,
-            insecure=state.insecure,
-            ca_file=state.ca_file,
-            client=_state_http_client_or_none(state, response_size_cap=_KUBE_AUTH_RESPONSE_CAP),
-            retries=int(getattr(ctx.args, "retries", 0) or 0),
-        )
+    # Permissions on /version and /api do not establish resource-list rights.
+    namespace_access, ns_status, ns_error = _probe_namespace_access(
+        str(state.host or ctx.host),
+        int(state.port or ctx.port),
+        float(getattr(ctx.args, "timeout", 5.0)),
+        use_https=state.use_https,
+        insecure=state.insecure,
+        ca_file=state.ca_file,
+        client=_state_http_client_or_none(state, response_size_cap=_KUBE_AUTH_RESPONSE_CAP),
+        retries=int(getattr(ctx.args, "retries", 0) or 0),
+    )
+    pod_probe = _probe_pod_access(ctx, state, options)
+    state.anonymous_pod_probe = state.access_pod_probe = pod_probe
     namespaces: list[str] | None = [] if namespace_access is True else None
     state.anonymous_namespaces = namespaces
     state.anonymous_namespaces_error = ns_error
@@ -2880,6 +2951,9 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
         auth_required = None
         record_status = "detected"
     state.anonymous_access = anonymous_access
+    auth_required = _resource_auth_required(namespace_access, pod_probe[0])
+    if pod_probe[0] is True:
+        record_status = "open_no_auth"
     result = {
         "timestamp": utc_now_iso(),
         "host": str(ctx.host),
@@ -2911,7 +2985,8 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
         "pods_error": None,
         "secrets_error": None,
         "can_list_namespaces": namespace_access,
-        "can_list_pods": None,
+        "can_list_pods": pod_probe[0],
+        "pods_access_error": pod_probe[2],
         "can_list_secrets": None,
         "can_exec_pod": None,
         "namespaces_partial": False,
@@ -3015,7 +3090,7 @@ def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any])
     if status == 401:
         auth_valid = False
         auth_error = error or "authentication rejected"
-    elif namespace_access is True and credential.token is not None:
+    elif namespace_access is True and credential.token is not None and state.anonymous_namespace_status in {401, 403}:
         auth_valid = True
         auth_error = None
     elif status in {200, 403} and (credential.token is not None or credential.username is not None):
@@ -3027,6 +3102,17 @@ def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any])
             username=credential.username,
             password=credential.password,
         )
+        if auth_valid is True and anonymous_usable:
+            if state.anonymous_self_review is None:
+                state.anonymous_self_review = _verify_self_subject_review(ctx, state, None)
+            baseline_valid, baseline_identity, baseline_error = state.anonymous_self_review
+            new_identity = baseline_valid is False or (baseline_valid is True and baseline_identity != identity)
+            protected_review = baseline_valid is None and any(
+                marker in str(baseline_error or "").lower() for marker in ("forbidden", "status=403")
+            )
+            if not new_identity and not protected_review:
+                auth_valid = None
+                auth_error = "observed identity does not establish credential-specific access"
     else:
         auth_valid = None
         auth_error = error or (
@@ -3040,11 +3126,15 @@ def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any])
         state.access_namespaces_error = error
         state.access_namespace_status = status
         state.token, state.username, state.password = credential.token, credential.username, credential.password
+        state.access_pod_probe = _probe_pod_access(
+            ctx, state, _options, token=credential.token, username=credential.username, password=credential.password
+        )
     else:
         state.token = state.username = state.password = None
         state.access_namespaces = state.anonymous_namespaces
         state.access_namespaces_error = state.anonymous_namespaces_error
         state.access_namespace_status = state.anonymous_namespace_status
+        state.access_pod_probe = state.anonymous_pod_probe
     if auth_valid is True:
         record_status = "auth_valid"
     elif auth_valid is False:
@@ -3060,9 +3150,16 @@ def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any])
             "auth_valid": auth_valid,
             "auth_error": auth_error,
             "auth_verification_method": method,
-            "auth_verified_identity": identity,
+            "auth_verified_identity": identity if auth_valid is True else None,
+            "auth_observed_identity": identity,
             "namespaces_error": state.access_namespaces_error,
-            "can_list_namespaces": True if namespace_access is True else False if status in {401, 403} else None,
+            "can_list_namespaces": True
+            if state.access_namespaces is not None
+            else False
+            if state.access_namespace_status in {401, 403}
+            else None,
+            "can_list_pods": state.access_pod_probe[0] if state.access_pod_probe is not None else None,
+            "pods_access_error": state.access_pod_probe[2] if state.access_pod_probe is not None else None,
             "elapsed_ms": _elapsed_ms(state),
         }
     )
@@ -3125,22 +3222,31 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
     pods_result = KubeResourceResult(None, None, False, False)
     secrets_result = KubeResourceResult(None, None, False, False)
     if options["show_pods"] or (options["exec_pod"] and not options["namespace_filters"]):
-        pods_result = _coerce_resource_result(
-            _list_pods(
-                request_host,
-                request_port,
-                float(getattr(ctx.args, "timeout", 5.0)),
-                use_https=state.use_https,
-                insecure=state.insecure,
-                ca_file=state.ca_file,
-                namespaces=list(options["namespace_filters"]),
-                token=token,
-                username=username,
-                password=password,
-                client=data_client,
-                retries=int(getattr(ctx.args, "retries", 0) or 0),
-            )
+        known_denial = (
+            state.access_pod_probe is not None
+            and state.access_pod_probe[0] is False
+            and state.access_pod_probe[1] in {401, 403}
         )
+        if known_denial:
+            assert state.access_pod_probe is not None
+            pods_result = KubeResourceResult(None, state.access_pod_probe[2], False, False)
+        else:
+            pods_result = _coerce_resource_result(
+                _list_pods(
+                    request_host,
+                    request_port,
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    use_https=state.use_https,
+                    insecure=state.insecure,
+                    ca_file=state.ca_file,
+                    namespaces=list(options["namespace_filters"]),
+                    token=token,
+                    username=username,
+                    password=password,
+                    client=data_client,
+                    retries=int(getattr(ctx.args, "retries", 0) or 0),
+                )
+            )
         pods, pods_error = pods_result
         if pods is None and not pods_error:
             pods_error = "pods request failed"
@@ -3238,7 +3344,7 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
             "can_list_namespaces": namespace_access_confirmed
             if options["show_namespaces"]
             else record.get("can_list_namespaces"),
-            "can_list_pods": None if not options["show_pods"] else pods_result.access_confirmed,
+            "can_list_pods": record.get("can_list_pods") if not options["show_pods"] else pods_result.access_confirmed,
             "can_list_secrets": None if not options["show_secrets"] else secrets_result.access_confirmed,
             "can_exec_pod": None if exec_result is None else bool(exec_result.get("ok")),
             "namespaces_partial": namespaces_partial,

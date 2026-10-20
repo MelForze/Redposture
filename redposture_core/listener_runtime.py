@@ -243,6 +243,9 @@ def stop_started_listeners(running: list[RunningServer], temp_cert_dir: str | No
     for item in running:
         try:
             item.server.shutdown()
+        except Exception:
+            pass
+        try:
             item.server.server_close()
         except Exception:
             pass

@@ -67,6 +67,7 @@
         "namespace": "redposture-lab"
       }
     ],
+    "pods_access_error": null,
     "pods_error": null,
     "pods_partial": false,
     "port": 26443,

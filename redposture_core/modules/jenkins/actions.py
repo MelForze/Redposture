@@ -213,9 +213,23 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     client = _client(ctx)
     identity = _get(client, base, "/whoAmI/api/json", _basic(username, secret))
     data = _json_object(identity)
-    verified = (
+    identity_observed = (
         _whoami(data) and data is not None and data.get("authenticated") is True and data.get("name") != "anonymous"
     )
+    verified = False
+    if identity_observed and data is not None:
+        state = getattr(ctx, "lifecycle_state", None)
+        anonymous = getattr(state, "jenkins_anonymous_whoami", None)
+        if anonymous is None:
+            anonymous = _get(client, base, "/whoAmI/api/json")
+            if state is not None:
+                state.jenkins_anonymous_whoami = anonymous
+        anonymous_data = _json_object(anonymous)
+        verified = anonymous.status in {401, 403} or (
+            _whoami(anonymous_data)
+            and anonymous_data is not None
+            and (anonymous_data.get("authenticated") is False or anonymous_data.get("name") != data.get("name"))
+        )
     result["credential_state"] = "valid" if verified else "invalid" if identity.status == 401 else "unknown"
     result["provided_credentials_ok"] = True if verified else False if identity.status == 401 else None
     result["status"] = (
@@ -230,13 +244,15 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     result["auth_http_status"] = identity.status
     result["credential_results"] = [{"username": username}]
     result["credential_password"] = "API token" if getattr(credential, "source", "") == "api_token" else secret
-    if verified and data is not None:
+    if identity_observed and data is not None:
         result["authenticated_identity"] = data["name"]
     result["credential_verification_reason"] = (
         "Jenkins whoAmI authenticated identity"
         if verified
         else "Jenkins rejected Basic credentials"
         if identity.status == 401
+        else "observed identity does not establish credential-specific access"
+        if identity_observed
         else "identity unavailable or Basic authentication not supported"
     )
     if verified:

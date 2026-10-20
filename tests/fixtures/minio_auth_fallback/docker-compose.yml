@@ -1,0 +1,26 @@
+services:
+  minio:
+    image: redposture-minio-qa:RELEASE.2025-04-22T22-12-26Z
+    command: [server, /data, --address, ':9000', --console-address, ':9001']
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MC_HOST_local: http://minioadmin:minioadmin@127.0.0.1:9000
+    ports: ['127.0.0.1::9000']
+    healthcheck:
+      test: [CMD, mc, ready, local]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  seed:
+    image: redposture-minio-qa:RELEASE.2025-04-22T22-12-26Z
+    depends_on:
+      minio: {condition: service_healthy}
+    entrypoint: [/bin/sh, /seed.sh]
+    volumes: ['./seed.sh:/seed.sh:ro']
+  proxy:
+    image: nginx:stable-alpine
+    depends_on:
+      minio: {condition: service_healthy}
+    ports: ['127.0.0.1::8080', '127.0.0.1::8081', '127.0.0.1::8082', '127.0.0.1::8083']
+    volumes: ['./nginx.conf:/etc/nginx/conf.d/default.conf:ro']

@@ -220,10 +220,10 @@ class AttemptLogger:
             self._text_fh = open(path, "w", encoding="utf-8")
             self._text_path = path
 
-    def set_mysql_hash_output(self, output_path: str) -> Path:
-        """Enable a sidecar for captured mysql_native_password responses."""
+    def set_mysql_hash_output(self, output_path: str, *, exact_path: bool = False) -> Path:
+        """Enable an explicit file or a sidecar for native-password responses."""
         path = Path(output_path)
-        sidecar = path.with_name(path.stem + ".mysql.hashes.hashcat")
+        sidecar = path if exact_path else path.with_name(path.stem + ".mysql.hashes.hashcat")
         with self._lock:
             sidecar.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(sidecar, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

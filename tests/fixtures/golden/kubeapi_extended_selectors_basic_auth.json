@@ -3,6 +3,7 @@
     "anonymous_access": "open",
     "auth_error": "selfsubjectreviews.authentication.k8s.io is forbidden: User \"system:anonymous\" cannot create resource \"selfsubjectreviews\" in API group \"authentication.k8s.io\" at the cluster scope",
     "auth_mode": "basic",
+    "auth_observed_identity": null,
     "auth_required": false,
     "auth_valid": null,
     "auth_verification_method": "self_subject_review",
@@ -49,6 +50,7 @@
         "namespace": "default"
       }
     ],
+    "pods_access_error": null,
     "pods_error": null,
     "pods_partial": false,
     "port": 26443,

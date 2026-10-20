@@ -1630,7 +1630,7 @@ def test_fuzz_txt_and_json_keep_four_fields_and_no_terminal_escape(username: str
 def test_credential_type_matrix_and_ambiguous_evidence(module: str) -> None:
     detected = AuditRecord.from_mapping({"host": "localhost", "port": 1, "status": "detected"})
     assert _supported(module, Candidate("pair", "u", "p"), detected) == (
-        module not in {"docker", "keycloak", "qdrant", "kubeapi"}
+        module not in {"docker", "keycloak", "qdrant", "kubeapi", "vault", "nomad", "jupyter"}
     )
     assert _supported(module, Candidate("token", token="jwt"), detected) == (
         module
@@ -1647,6 +1647,9 @@ def test_credential_type_matrix_and_ambiguous_evidence(module: str) -> None:
             "kubeapi",
             "proxmox",
             "qdrant",
+            "vault",
+            "nomad",
+            "jupyter",
         }
     )
 

@@ -151,6 +151,7 @@ def test_kubeapi_http_tls_required_upgrades_and_reuses_self_signed_https(
                 target,
                 "--namespaces",
                 "--pods",
+                "--no-color",
                 "--retries",
                 "0",
                 "--timeout",
@@ -163,7 +164,10 @@ def test_kubeapi_http_tls_required_upgrades_and_reuses_self_signed_https(
         )
 
         assert result.returncode == 0, result.stdout + result.stderr
-        assert "Kubernetes API (anonymous access:limited) (version:v1.27.5)" in result.stdout
+        assert (
+            "Kubernetes API (auth required:True) (namespaces access:False) (pods access:False) (version:v1.27.5)"
+            in result.stdout
+        )
         assert "namespaces unavailable: anonymous access denied" in result.stdout
         assert "pods unavailable: anonymous access denied" in result.stdout
         assert "auth required:False" not in result.stdout

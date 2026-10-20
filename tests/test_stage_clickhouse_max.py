@@ -268,9 +268,9 @@ def test_quote_ident_escapes_backticks() -> None:
 
 
 def test_normalize_column_names_filters_duplicates() -> None:
-    columns, error = clickhouse_stage._normalize_column_names([" id,Name ", "name", "AGE"])
+    columns, error = clickhouse_stage._normalize_column_names([" id,Name ", "name", "AGE", "Name", "id"])
     assert error is None
-    assert columns == ["id", "Name", "AGE"]
+    assert columns == ["id", "Name", "name", "AGE"]
 
 
 def test_normalize_column_names_returns_error_on_invalid() -> None:
@@ -279,8 +279,10 @@ def test_normalize_column_names_returns_error_on_invalid() -> None:
     assert error == "invalid column name: bad-name"
 
 
-def test_normalize_table_targets_dedupes_case_insensitive() -> None:
-    assert clickhouse_stage._normalize_table_targets(["db.events,db.users", "DB.events"]) == ["db.events", "db.users"]
+def test_normalize_table_targets_dedupes_exact_names_preserving_case() -> None:
+    assert clickhouse_stage._normalize_table_targets(
+        ["db.events,db.users", "DB.events", "db.events", "db.users", "DB.events"]
+    ) == ["db.events", "db.users", "DB.events"]
 
 
 def test_split_table_name_variants() -> None:

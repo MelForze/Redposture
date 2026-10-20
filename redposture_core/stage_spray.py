@@ -14,11 +14,13 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from bisect import bisect_right
+from collections.abc import Generator, Iterable, Iterator, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from itertools import groupby, zip_longest
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 from urllib.parse import urlsplit
 
 from . import web_panels
@@ -41,7 +43,9 @@ from .stage_runtime import (
 )
 from .targeting import TargetParsePolicy, stream_scan_target_specs
 
-_PAIR_MODULES = frozenset(AUDIT_MODULE_NAMES) - {"keycloak", "qdrant"}
+_COOPERATIVE_SPRAY: ContextVar[bool] = ContextVar("cooperative_spray", default=False)
+
+_PAIR_MODULES = frozenset(AUDIT_MODULE_NAMES) - {"keycloak", "qdrant", "vault", "nomad", "jupyter"}
 _TOKEN_MODULES = frozenset(
     {
         "consul",
@@ -56,6 +60,9 @@ _TOKEN_MODULES = frozenset(
         "kubeapi",
         "proxmox",
         "qdrant",
+        "vault",
+        "nomad",
+        "jupyter",
     }
 )
 # These keys are auth/transport settings only.  Never copy arbitrary JSON keys
@@ -63,6 +70,7 @@ _TOKEN_MODULES = frozenset(
 _COMMON_CONFIG = frozenset({"tls", "secure", "ca_file", "tls_ca", "tls_cert", "tls_key", "cert_file", "key_file"})
 _MODULE_CONFIG: dict[str, frozenset[str]] = {
     "keycloak": frozenset({"realm"}),
+    "nomad": frozenset({"namespace"}),
     "oracle": frozenset({"sid", "service", "protocol", "wallet", "ssl_server_dn"}),
     "kafka": frozenset({"plaintext", "tls_server_name", "sasl_mechanism", "security_protocol"}),
     "mongodb": frozenset({"auth_db"}),
@@ -94,6 +102,9 @@ _DISPLAY_NAMES = {
     "qdrant": "Qdrant",
     "rabbitmq": "RabbitMQ",
     "zookeeper": "ZooKeeper",
+    "vault": "HashiCorp Vault",
+    "nomad": "HashiCorp Nomad",
+    "jupyter": "Jupyter Server",
 }
 
 
@@ -111,6 +122,68 @@ class Candidate:
     @property
     def account(self) -> str:
         return self.username or hashlib.sha256((self.token or "").encode()).hexdigest()
+
+
+class CandidateCatalog(Sequence[Candidate]):
+    """Stable indexed credentials without materializing a user/password product."""
+
+    def __init__(
+        self, pairs: tuple[Candidate, ...], users: tuple[str, ...], passwords: tuple[str, ...], tokens: tuple[str, ...]
+    ) -> None:
+        self.pairs, self.users, self.passwords, self.tokens = pairs, users, passwords, tokens
+        user_positions = {value: index for index, value in enumerate(users)}
+        pass_positions = {value: index for index, value in enumerate(passwords)}
+        self.excluded = tuple(
+            sorted(
+                {
+                    pass_positions[pair.password] * len(users) + user_positions[pair.username]
+                    for pair in pairs
+                    if pair.username in user_positions and pair.password in pass_positions
+                }
+            )
+        )
+        self.product_size = len(users) * len(passwords) - len(self.excluded)
+
+    def __len__(self) -> int:
+        return len(self.pairs) + self.product_size + len(self.tokens)
+
+    @overload
+    def __getitem__(self, index: int) -> Candidate: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[Candidate, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> Candidate | tuple[Candidate, ...]:
+        if isinstance(index, slice):
+            return tuple(self[i] for i in range(*index.indices(len(self))))
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        if index < len(self.pairs):
+            return self.pairs[index]
+        index -= len(self.pairs)
+        if index >= self.product_size:
+            return Candidate("token", token=self.tokens[index - self.product_size])
+        low, high = index, index + len(self.excluded)
+        while low < high:
+            middle = (low + high) // 2
+            if middle - bisect_right(self.excluded, middle) < index:
+                low = middle + 1
+            else:
+                high = middle
+        password, user = divmod(low, len(self.users))
+        return Candidate("pair", self.users[user], self.passwords[password])
+
+    def __iter__(self) -> Iterator[Candidate]:
+        yield from self.pairs
+        excluded = set(self.excluded)
+        for p_index, password in enumerate(self.passwords):
+            for u_index, user in enumerate(self.users):
+                if p_index * len(self.users) + u_index not in excluded:
+                    yield Candidate("pair", user, password)
+        for value in self.tokens:
+            yield Candidate("token", token=value)
 
 
 def _read_lines(path: str) -> list[str]:
@@ -143,7 +216,7 @@ def _source_values(value: str, *, passwords: bool = False) -> list[str]:
         return [line.rstrip("\r\n") for line in stream if not line.startswith("#")]
 
 
-def load_candidates(args: Any) -> tuple[Candidate, ...]:
+def load_candidates(args: Any) -> Sequence[Candidate]:
     if bool(args.users) != bool(args.passwords):
         raise ValueError("--users and --passwords must be supplied together")
     if not any((args.pairs, args.users, args.tokens)):
@@ -157,15 +230,10 @@ def load_candidates(args: Any) -> tuple[Candidate, ...]:
             if not user:
                 raise ValueError("--pairs contains an empty username")
             values.append(Candidate("pair", user, password))
-    if args.users:
-        users = _source_values(args.users)
-        passwords = _source_values(args.passwords, passwords=True)
-        for password in passwords:
-            for user in users:
-                values.append(Candidate("pair", user, password))
-    if args.tokens:
-        values.extend(Candidate("token", token=value) for value in _read_lines(args.tokens))
-    return tuple(dict.fromkeys(values))
+    users = tuple(dict.fromkeys(_source_values(args.users))) if args.users else ()
+    passwords = tuple(dict.fromkeys(_source_values(args.passwords, passwords=True))) if args.users else ()
+    tokens = tuple(dict.fromkeys(_read_lines(args.tokens))) if args.tokens else ()
+    return CandidateCatalog(tuple(dict.fromkeys(values)), users, passwords, tokens)
 
 
 def _modules(raw: str) -> tuple[str, ...]:
@@ -336,6 +404,8 @@ class RateGate:
         self.next_origin: dict[str, float] = {}
         self.next_account: dict[tuple[str, str], float] = {}
         self.stopped: dict[str, str] = {}
+        self.sent_origin: dict[str, float] = {}
+        self.sent_account: dict[tuple[str, str], float] = {}
         self.lock = threading.Lock()
         self.cancelled = threading.Event()
 
@@ -350,6 +420,17 @@ class RateGate:
             self.next_origin[origin] = start + self.origin_interval
             self.next_account[(origin, account)] = start + self.account_interval
             return True, max(0.0, start - now)
+
+    def claim(self, origin: str, account: str) -> float:
+        """Recheck actual dispatch, so late resumptions cannot bunch attempts."""
+        with self.lock:
+            now = time.monotonic()
+            ready = max(now, self.sent_origin.get(origin, now), self.sent_account.get((origin, account), now))
+            if ready > now:
+                return ready - now
+            self.sent_origin[origin] = now + self.origin_interval
+            self.sent_account[(origin, account)] = now + self.account_interval
+            return 0.0
 
     def stop(self, origin: str, reason: str) -> None:
         with self.lock:
@@ -662,13 +743,43 @@ def _run_target(
     host: str,
     port: int,
     target: Any,
-    candidates: tuple[Candidate, ...],
+    candidates: Sequence[Candidate],
     journal: AttemptJournal,
     gate: RateGate,
     logger: Any,
     *,
     _surface_id: str | None = None,
-) -> bool:
+) -> Any:
+    steps = _run_target_steps(
+        module, base_ns, host, port, target, candidates, journal, gate, logger, _surface_id=_surface_id
+    )
+    if _COOPERATIVE_SPRAY.get():
+        return steps
+    try:
+        while True:
+            try:
+                delay = next(steps)
+            except StopIteration as done:
+                return bool(done.value)
+            if not gate.paused(delay):
+                return False
+    finally:
+        steps.close()
+
+
+def _run_target_steps(
+    module: str,
+    base_ns: Any,
+    host: str,
+    port: int,
+    target: Any,
+    candidates: Sequence[Candidate],
+    journal: AttemptJournal,
+    gate: RateGate,
+    logger: Any,
+    *,
+    _surface_id: str | None = None,
+) -> Generator[float, None, bool]:
     ns = copy.copy(base_ns)
     if module == "oracle" and not _oracle_spray_preflight(host, port, ns):
         return True
@@ -728,8 +839,10 @@ def _run_target(
                     reason += f"; surface:{_surface_id}"
                 journal.put(key, module, host, port, index, "rate_limited", reason)
                 continue
-            if delay_or_reason and not gate.paused(float(delay_or_reason)):
-                return False
+            if delay_or_reason:
+                yield float(delay_or_reason)
+            while not gate.cancelled.is_set() and (dispatch_delay := gate.claim(origin, candidate.account)):
+                yield dispatch_delay
             if gate.cancelled.is_set():
                 return False
             with gate.lock:
@@ -795,24 +908,26 @@ def _run_target(
         and not gate.cancelled.is_set()
     ):
         other_surface = "backend" if detection.extra.get("surface") == "ui" else "ui"
-        return _run_target(
-            module,
-            base_ns,
-            host,
-            port,
-            replace(target, surface_hint=other_surface),
-            candidates,
-            journal,
-            gate,
-            logger,
-            _surface_id=other_surface,
+        return (
+            yield from _run_target_steps(
+                module,
+                base_ns,
+                host,
+                port,
+                replace(target, surface_hint=other_surface),
+                candidates,
+                journal,
+                gate,
+                logger,
+                _surface_id=other_surface,
+            )
         )
     return True
 
 
 def _render_rows(
     rows: Iterable[tuple[str, str, int, int | None, str, str] | tuple[str, str, int, int | None, str, str, str]],
-    candidates: tuple[Candidate, ...],
+    candidates: Sequence[Candidate],
     fmt: str,
     *,
     debug: bool = False,
@@ -883,7 +998,7 @@ class SpraySink:
         self,
         output: str | None,
         fmt: str,
-        candidates: tuple[Candidate, ...],
+        candidates: Sequence[Candidate],
         console: Console,
         *,
         debug: bool = False,
@@ -896,7 +1011,7 @@ class SpraySink:
         self.debug = debug
         self.group_targets = group_targets
         self.lock = threading.Lock()
-        self._target_buffer = threading.local()
+        self._target_buffer: ContextVar[Any] = ContextVar("spray_target_buffer", default=None)
         self._deferred_rows: dict[tuple[str, str, int], list[tuple[str, str, int, int | None, str, str, str]]] = {}
         self.closed = False
         self.handle: Any = None
@@ -915,21 +1030,19 @@ class SpraySink:
         if self.fmt == "txt" and self.group_targets:
             # Large password lists spill to a private temporary file instead
             # of retaining every pending row for every concurrent target.
-            self._target_buffer.stream = tempfile.SpooledTemporaryFile(
-                max_size=256 * 1024, mode="w+t", encoding="utf-8"
-            )
+            self._target_buffer.set(tempfile.SpooledTemporaryFile(max_size=256 * 1024, mode="w+t", encoding="utf-8"))
             for row in self._deferred_rows.pop((module, host, port), ()):
-                self._buffer_row(self._target_buffer.stream, row)
+                self._buffer_row(self._target_buffer.get(), row)
 
     @staticmethod
     def _buffer_row(stream: Any, row: tuple[str, str, int, int | None, str, str, str]) -> None:
         stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def end_target(self) -> None:
-        stream = getattr(self._target_buffer, "stream", None)
+        stream = self._target_buffer.get()
         if stream is None:
             return
-        del self._target_buffer.stream
+        self._target_buffer.set(None)
         try:
             stream.seek(0)
             with self.lock:
@@ -945,7 +1058,7 @@ class SpraySink:
             return
         if index is None and status != "confirmed" and self.fmt == "txt":
             return
-        stream = getattr(self._target_buffer, "stream", None)
+        stream = self._target_buffer.get()
         if stream is not None:
             self._buffer_row(stream, (module, host, port, index, status, evidence, detail))
             return
@@ -1113,7 +1226,7 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                     for key, grouped in groupby(replay_rows, key=lambda row: (row[0], row[1], row[2])):
                         group_rows = list(grouped)
                         finished = {row[3] for row in group_rows if row[3] is not None}
-                        if finished == set(range(len(candidates))):
+                        if len(finished) == len(candidates) and all(0 <= index < len(candidates) for index in finished):
                             for row in group_rows:
                                 sink.emit(*row)
                         else:
@@ -1121,7 +1234,7 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                 else:
                     for row in replay_rows:
                         sink.emit(*row)
-                progress_local = threading.local()
+                progress_done: ContextVar[int] = ContextVar("spray_progress_done", default=0)
 
                 def emit_result(
                     module: str,
@@ -1135,7 +1248,7 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                     sink.emit(module, host, port, index, status, evidence, detail)
                     if status != "started":
                         progress.advance()
-                        progress_local.done = getattr(progress_local, "done", 0) + 1
+                        progress_done.set(progress_done.get() + 1)
 
                 journal.on_result = emit_result
                 # The shared scheduler bounds the queue and uses daemon workers,
@@ -1144,9 +1257,9 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                     max_workers=args.workers, max_inflight=args.workers * 2
                 )
 
-                def work(job: tuple[str, Any, str, int, Any]) -> None:
+                def work(job: tuple[str, Any, str, int, Any]) -> Generator[float, None, None]:
                     module, ns, host, port, target = job
-                    progress_local.done = 0
+                    progress_done.set(0)
                     job_key = _attempt_id(module, target, port, -1)
                     surfaces = 2 if module in web_panels.MODULE_PRODUCTS else 1
                     budget = surfaces * (len(candidates) + 1)
@@ -1154,15 +1267,19 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                         progress.advance(budget)
                         return
                     sink.begin_target(module, host, port)
+                    token = _COOPERATIVE_SPRAY.set(True)
                     try:
-                        if _run_target(module, ns, host, port, target, candidates, journal, gate, logger):
+                        operation = _run_target(module, ns, host, port, target, candidates, journal, gate, logger)
+                        complete = (yield from operation) if isinstance(operation, Generator) else operation
+                        if complete:
                             journal.finish_job(job_key)
                     finally:
+                        _COOPERATIVE_SPRAY.reset(token)
                         sink.end_target()
                         if not gate.cancelled.is_set():
-                            progress.advance(max(0, budget - progress_local.done))
+                            progress.advance(max(0, budget - progress_done.get()))
 
-                outcomes = scheduler.iter_completed(_spray_jobs(modules, module_args), work)
+                outcomes = scheduler.iter_paused(_spray_jobs(modules, module_args), work, cancelled=gate.cancelled)
                 try:
                     for _job, _result in outcomes:
                         pass

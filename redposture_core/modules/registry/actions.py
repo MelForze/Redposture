@@ -80,6 +80,7 @@ class RegistryLifecycleState:
     port: int | None = None
     base_path: str = ""
     origin_resolved: bool = False
+    download_client: HttpApiClient | None = None
 
     def close(self) -> None:
         if self.http is not None:
@@ -422,6 +423,29 @@ def _http_request_url(
     return int(response.status), response.body, {str(k).lower(): str(v) for k, v in response.headers.items()}, None
 
 
+def _registry_transfer_url(host: str, port: int, path: str, timeout: float, *, resolve: bool = True) -> str:
+    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    endpoint = urllib.parse.urlsplit(_normalize_path(path))
+    if isinstance(state, RegistryLifecycleState):
+        request_port = state.port or port
+        scheme = state.scheme or ("https" if request_port in {443, 5001} else "http")
+        return urllib.parse.urlunsplit(
+            (
+                scheme,
+                format_http_authority(state.host or host, request_port),
+                state.base_path + (endpoint.path or "/"),
+                endpoint.query,
+                "",
+            )
+        )
+    scheme = (
+        resolve_http_scheme(host, port, timeout, probe_path="/v2/")
+        if resolve
+        else ("https" if port in {443, 5001} else "http")
+    )
+    return build_http_target_url(host, port, _normalize_path(path), default_scheme=scheme)
+
+
 def _http_download(
     host: str,
     port: int,
@@ -431,12 +455,27 @@ def _http_download(
     *,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, int, str | None]:
-    scheme = resolve_http_scheme(host, port, timeout, probe_path="/v2/")
-    url = build_http_target_url(host, port, _normalize_path(path), default_scheme=scheme)
+    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    url = _registry_transfer_url(host, port, path, timeout)
+    scheme = urllib.parse.urlsplit(url).scheme
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
-    client = HttpApiClient(HttpClientConfig(timeout=timeout, insecure=scheme == "https"))
+    if isinstance(state, RegistryLifecycleState):
+        if state.download_client is None:
+            state.download_client = HttpApiClient(
+                HttpClientConfig(
+                    timeout=timeout,
+                    insecure=bool(getattr(state.http, "insecure", scheme == "https")),
+                    proxy=getattr(state.http, "proxy", None),
+                    ca_file=getattr(state.http, "ca_file", None),
+                    client_cert=getattr(state.http, "client_cert", None),
+                    client_key=getattr(state.http, "client_key", None),
+                )
+            )
+        client = state.download_client
+    else:
+        client = HttpApiClient(HttpClientConfig(timeout=timeout, insecure=scheme == "https"))
     try:
         descriptor, temporary_path = tempfile.mkstemp(
             prefix=".redposture-download-", dir=os.path.dirname(out_path) or "."
@@ -957,12 +996,12 @@ def _download_image(
     if not _should_download_large(total_size, image_name, console):
         return {"status": "skipped", "size": total_size, "error": "download not confirmed"}
 
-    target_dir = os.path.join(
-        download_dir,
-        _safe_slug(host),
-        _safe_slug(image_name),
+    from ...download_paths import identity_component, unique_directory
+
+    endpoint = _registry_transfer_url(host, port, "/", timeout, resolve=False)
+    target_dir = unique_directory(
+        os.path.join(download_dir, identity_component(endpoint), identity_component(image_name))
     )
-    os.makedirs(target_dir, exist_ok=True)
 
     manifest_raw = str(inspect_data.get("manifest_raw") or "")
     if manifest_raw:

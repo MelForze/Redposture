@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse
 
@@ -922,6 +923,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     listen_seconds = getattr(args, "listen_seconds", None)
     output_format = str(getattr(args, "output_format", "txt") or "txt").strip().lower()
     output_path = getattr(args, "output", None)
+    hash_output = getattr(args, "export_hashcat", None)
     stream_to_stdout = not bool(output_path)
     console.set_structured_output(output_format == "json")
 
@@ -937,6 +939,16 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if getattr(args, "check_credentials", False) and not getattr(args, "with_listen", False):
         console.error("-check requires listeners; omit --no-with-listen")
         return 2
+    if hash_output is not None:
+        if not str(hash_output).strip():
+            console.error("--export-hashcat file must not be empty")
+            return 2
+        if not getattr(args, "with_listen", False):
+            console.error("--export-hashcat requires listeners; omit --no-with-listen")
+            return 2
+        if output_path and Path(hash_output).resolve() == Path(output_path).resolve():
+            console.error("--export-hashcat and --output must use different files")
+            return 2
     if output_format == "json" and getattr(args, "with_listen", False) and stream_to_stdout:
         console.error("--format json with listeners enabled requires --output")
         return 2
@@ -1015,9 +1027,32 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.error("trigger requires --callback-ip and/or --callback-dns")
         return 2
 
+    trigger_exporters = _filter_trigger_exporters(profiles["trigger_exporters"], selected_trigger_exporters)
+    if selected_trigger_exporters and not trigger_exporters:
+        console.error("no trigger exporters matched filter")
+        return 2
+    enabled_names = {str(item.get("name") or "").strip().lower() for item in trigger_exporters}
+    if hash_output is not None and "mysqld_exporter" not in enabled_names:
+        console.error("--export-hashcat requires MySQL exporter to be enabled (-e mysql)")
+        return 2
+    for exporter_name, profile_names in explicit_profiles.items():
+        _destination, parameter, flag = _EXPLICIT_PROFILE_OPTIONS[exporter_name]
+        if exporter_name not in enabled_names:
+            console.error(f"{flag} requires {exporter_name} to be enabled in trigger exporters")
+            return 2
+        console.debug(f"{exporter_name} {parameter} probes=" + ",".join(profile_names))
+
+    if hash_output is not None or (
+        output_path and ("mysqld_exporter" in selected_trigger_exporters or not selected_trigger_exporters)
+    ):
+        try:
+            logger.set_mysql_hash_output(
+                str(hash_output if hash_output is not None else output_path), exact_path=hash_output is not None
+            )
+        except OSError as exc:
+            console.error(f"failed to open MySQL hashcat output: {exc}")
+            return 2
     if output_path:
-        if "mysql" in selected_trigger_exporters or not selected_trigger_exporters:
-            logger.set_mysql_hash_output(output_path)
         if output_format == "txt":
             try:
                 logger.set_text_output(output_path)
@@ -1026,17 +1061,6 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 return 2
         console.info(f"trigger output file: {output_path}")
 
-    trigger_exporters = _filter_trigger_exporters(profiles["trigger_exporters"], selected_trigger_exporters)
-    if selected_trigger_exporters and not trigger_exporters:
-        console.error("no trigger exporters matched filter")
-        return 2
-    enabled_names = {str(item.get("name") or "").strip().lower() for item in trigger_exporters}
-    for exporter_name, profile_names in explicit_profiles.items():
-        _destination, parameter, flag = _EXPLICIT_PROFILE_OPTIONS[exporter_name]
-        if exporter_name not in enabled_names:
-            console.error(f"{flag} requires {exporter_name} to be enabled in trigger exporters")
-            return 2
-        console.debug(f"{exporter_name} {parameter} probes=" + ",".join(profile_names))
     trigger_exporters = _expand_trigger_exporter_profiles(trigger_exporters, explicit_profiles)
     if getattr(args, "with_listen", False):
         enabled_exporters = {str(item.get("name") or "") for item in trigger_exporters}

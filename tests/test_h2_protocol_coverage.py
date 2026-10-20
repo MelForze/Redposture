@@ -453,7 +453,7 @@ def test_kafka_lifecycle_detects_sasl_listener_that_closes_apiversions(
 @pytest.mark.parametrize(
     ("auth_required", "ok", "source", "expected_status", "expected_ok"),
     [
-        (True, True, "default", "weak_default_creds", None),
+        (True, True, "default", "weak_default_creds", True),
         (False, False, "provided", "invalid_credentials_anonymous", False),
         (True, False, "provided", "auth_required", False),
     ],

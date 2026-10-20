@@ -6,7 +6,7 @@ import json
 import os
 import ssl
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from ..constants import COLLECT_DEBUG_ENDPOINTS, COLLECT_EXPORTERS
@@ -337,8 +337,6 @@ def collect_exporter_debug_data(
             max_targets=preflight_max_targets,
         )
 
-        target_plans: dict[tuple[str, str, int], tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]] = {}
-
         def _process_record(
             record: dict[str, Any],
             ok: bool,
@@ -444,18 +442,17 @@ def collect_exporter_debug_data(
 
         pool = build_exporter_http_pool(max_workers, pool_cls, tls_context=tls_context)
         with activate_exporter_tls_context(tls_context), activate_pool_fn(pool):
-            if preflight_enabled:
-                planner = BoundedScheduler[
-                    tuple[str, str, int], tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]
-                ](
-                    max_workers=max_workers,
-                    max_inflight=max_inflight,
-                )
+            scheduled_jobs = 0
+            estimated_jobs = len(collect_targets) * len(endpoints)
+            collect_progress = start_audit_progress(
+                "COLLECT", len(collect_targets) * len(endpoints), enabled=True, owner=progress_owner
+            )
 
-                def _plan_target(
-                    target: tuple[str, str, int],
-                ) -> tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]:
-                    host, exporter_name, port = target
+            def _run_job(job: tuple[Any, ...]) -> Any:
+                kind, host, exporter_name, port, endpoint = job
+                if kind == "plan":
+                    if not preflight_enabled:
+                        return endpoints, {}
                     args = (
                         host,
                         exporter_name,
@@ -469,61 +466,50 @@ def collect_exporter_debug_data(
                     if plan_collect_fn is None:
                         return plan_collect_endpoints_for_target(*args, scheme=scheme)
                     return plan_collect(*args)
+                if collect_task_fn is collect_task:
+                    return collect_task(host, exporter_name, port, endpoint, timeout, retries, scheme=scheme)
+                return collect_task_fn(host, exporter_name, port, endpoint, timeout, retries)
 
-                for target, plan in planner.iter_completed(collect_targets, _plan_target):
-                    target_plans[target] = plan
-            else:
-                for host, exporter_name, port in collect_targets:
-                    target_plans[(host, exporter_name, port)] = (endpoints, {})
-
-            jobs: list[tuple[str, str, int, str, tuple[dict[str, Any], bool] | None]] = []
-            for host, exporter_name, port in collect_targets:
-                planned_endpoints, prefetched = target_plans.get((host, exporter_name, port), (endpoints, {}))
+            def _child_jobs(job: tuple[Any, ...], result: Any) -> Iterator[tuple[Any, ...]]:
+                nonlocal scheduled_jobs, skipped_jobs, estimated_jobs
+                kind, host, exporter_name, port, _endpoint = job
+                if kind != "plan":
+                    return
+                planned_endpoints, prefetched = result
+                estimated_jobs += len(planned_endpoints) - len(endpoints)
+                collect_progress.set_total(estimated_jobs)
                 for endpoint in planned_endpoints:
-                    job_key = (host, exporter_name, int(port), endpoint)
-                    if job_key in completed_jobs:
+                    if (host, exporter_name, int(port), endpoint) in completed_jobs:
                         skipped_jobs += 1
+                        estimated_jobs -= 1
+                        collect_progress.set_total(estimated_jobs)
                         continue
-                    jobs.append((host, exporter_name, port, endpoint, prefetched.get(endpoint)))
-
-            if stats_sink is not None:
-                stats_sink["targets"] = len(collect_targets)
-                stats_sink["scheduled_jobs"] = len(jobs)
-                stats_sink["skipped_jobs"] = skipped_jobs
-
-            collect_progress = start_audit_progress("COLLECT", len(jobs), enabled=True, owner=progress_owner)
-            try:
-                fetch_jobs: list[tuple[str, str, int, str]] = []
-                for host, exporter_name, port, endpoint, prefetched_result in jobs:
+                    scheduled_jobs += 1
+                    prefetched_result = prefetched.get(endpoint)
                     if prefetched_result is not None:
                         record, ok = prefetched_result
                         _process_record(record, ok, pause_before_emit=collect_progress.pause_for_output)
                         collect_progress.advance()
-                        continue
-                    fetch_jobs.append((host, exporter_name, port, endpoint))
+                    else:
+                        yield "fetch", host, exporter_name, port, endpoint
 
-                scheduler = BoundedScheduler[tuple[str, str, int, str], tuple[dict[str, Any], bool]](
-                    max_workers=max_workers,
-                    max_inflight=max_inflight,
-                )
-
-                def _collect_job(job: tuple[str, str, int, str]) -> tuple[dict[str, Any], bool]:
-                    host, exporter_name, port, endpoint = job
-                    if collect_task_fn is collect_task:
-                        return collect_task(
-                            host,
-                            exporter_name,
-                            port,
-                            endpoint,
-                            timeout,
-                            retries,
-                            scheme=scheme,
-                        )
-                    return collect_task_fn(host, exporter_name, port, endpoint, timeout, retries)
-
-                for _job, (record, ok) in scheduler.iter_completed(fetch_jobs, _collect_job):
-                    _process_record(record, ok, pause_before_emit=collect_progress.pause_for_output)
-                    collect_progress.advance()
+            roots: Iterable[tuple[Any, ...]] = (
+                ("plan", host, exporter_name, port, None) for host, exporter_name, port in collect_targets
+            )
+            scheduler: BoundedScheduler[tuple[Any, ...], Any] = BoundedScheduler(
+                max_workers=max_workers,
+                max_inflight=max_inflight,
+            )
+            try:
+                for job, result in scheduler.iter_expanding(roots, _run_job, _child_jobs):
+                    if job[0] == "fetch":
+                        record, ok = result
+                        _process_record(record, ok, pause_before_emit=collect_progress.pause_for_output)
+                        collect_progress.advance()
+                if stats_sink is not None:
+                    stats_sink["targets"] = len(collect_targets)
+                    stats_sink["scheduled_jobs"] = scheduled_jobs
+                    stats_sink["skipped_jobs"] = skipped_jobs
             finally:
                 collect_progress.close()
 

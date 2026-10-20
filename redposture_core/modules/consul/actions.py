@@ -427,20 +427,22 @@ def _unauthorized_status(status: int) -> bool:
 
 
 def _count_kv_keys(payload: Any) -> int | None:
-    if isinstance(payload, list):
-        return sum(1 for item in payload if isinstance(item, str))
+    if isinstance(payload, list) and all(isinstance(item, str) for item in payload):
+        return len(payload)
     return None
 
 
 def _count_services(payload: Any) -> int | None:
-    if isinstance(payload, dict):
+    if isinstance(payload, dict) and all(
+        isinstance(tags, list) and all(isinstance(tag, str) for tag in tags) for tags in payload.values()
+    ):
         return sum(1 for _ in payload)
     return None
 
 
 def _count_agents(payload: Any) -> int | None:
-    if isinstance(payload, list):
-        return sum(1 for item in payload if isinstance(item, dict))
+    if isinstance(payload, list) and all(isinstance(item, dict) for item in payload):
+        return len(payload)
     return None
 
 
@@ -482,8 +484,10 @@ def _scope_probe(
         result["error"] = error
         return result
     if status == 200:
-        result["ok"] = True
         result["count"] = count_fn(payload)
+        result["ok"] = result["count"] is not None
+        if not result["ok"]:
+            result["error"] = "invalid resource response"
         return result
     if _unauthorized_status(status):
         result["error"] = "Unauthorized" if status == 401 else "Forbidden"
@@ -534,6 +538,15 @@ def _extract_script_check_flags(agent_self_payload: Any) -> tuple[bool | None, b
     return local, remote
 
 
+def _prepare_auth_cache(state: ConsulLifecycleState, headers: dict[str, str]) -> None:
+    if state.auth_headers != headers:
+        state.auth_scopes = None
+        state.auth_self = None
+        state.auth_identity = None
+        state.deep_record = None
+        state.auth_headers = dict(headers)
+
+
 def _agent_self_probe(
     host: str,
     port: int,
@@ -545,6 +558,8 @@ def _agent_self_probe(
 ) -> dict[str, Any]:
     replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
     if isinstance(replay, ConsulLifecycleState):
+        if headers:
+            _prepare_auth_cache(replay, headers)
         cached = replay.auth_self if headers else replay.anonymous_self
         if cached is not None:
             return dict(cached)
@@ -568,6 +583,8 @@ def _agent_self_probe(
         "tls_auto_insecure": tls_auto,
         "insecure_effective": effective_insecure,
     }
+    if isinstance(replay, ConsulLifecycleState) and headers:
+        replay.auth_self = result
     if error:
         result["error"] = error
         return result
@@ -597,6 +614,8 @@ def _acl_token_self_probe(
     """Validate the supplied token against Consul's identity endpoint."""
 
     replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
+    if isinstance(replay, ConsulLifecycleState):
+        _prepare_auth_cache(replay, headers)
     if isinstance(replay, ConsulLifecycleState) and replay.auth_identity is not None and replay.auth_headers == headers:
         return dict(replay.auth_identity)
     status, payload, error, effective_insecure, tls_auto = _consul_get_json_any(
@@ -659,6 +678,8 @@ def _consul_access_matrix(
 ) -> dict[str, Any]:
     replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
     if isinstance(replay, ConsulLifecycleState):
+        if headers:
+            _prepare_auth_cache(replay, headers)
         cached = replay.auth_scopes if headers else replay.anonymous_scopes
         if cached is not None:
             return dict(cached)
@@ -694,6 +715,8 @@ def _consul_access_matrix(
             count_fn=_count_agents,
         ),
     }
+    if isinstance(replay, ConsulLifecycleState) and headers:
+        replay.auth_scopes = probes
     return probes
 
 
@@ -3286,6 +3309,7 @@ def _audit_consul_host(
                 revshell_payload=revshell_payload,
                 revshell_check_id=revshell_check_id,
                 preferred_scheme=preferred_scheme,
+                dump_limit=dump_limit,
             )
             if not bool(deep_record.get("is_consul")):
                 deep_error = str(deep_record.get("error") or "deep check failed").strip()
@@ -3534,7 +3558,9 @@ def _auth_summary_line(record: dict[str, Any]) -> str | None:
             label = "basic auth"
     if auth_valid is True:
         return f"[+] {label} {_scope_counts_suffix(auth_scopes)}"
-    line = f"[-] {label} failed"
+    line = f"[-] {label} {'failed' if auth_valid is False else 'unverified'}"
+    if auth_valid is None and not auth_error:
+        auth_error = "credential proof unavailable"
     if auth_error:
         if auth_mode == "token" and auth_error == "Consul ACL token not found":
             line += " (Token not found)"
@@ -4024,6 +4050,11 @@ def _render_colored_consul_line(console: Console, line: str) -> bool:
             CountColorRule("agents", "red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("count", "red", unknown_color="orange", zero_color="bright_green"),
         ),
+        extra_spans=lambda marker, payload: (
+            [(payload.index(" unverified") + 1, len(payload), "orange")]
+            if marker == "[-]" and " unverified" in payload
+            else []
+        ),
     ):
         return True
     if line.startswith(_CONSUL_TAG) and "\t" in line:
@@ -4151,7 +4182,7 @@ def authenticate_consul(ctx: Any, _detect_record: Any, options: dict[str, Any]) 
     if credential.token is None and credential.username is None and credential.password is None:
         return _consul_lifecycle_call(ctx, options, run_deep_checks=False)
     headers = _consul_headers(credential.token, credential.username, credential.password)
-    state.auth_headers = headers
+    _prepare_auth_cache(state, headers)
     state.auth_identity = None
     with _ConsulLifecycleReplay(state):
         state.auth_scopes = _consul_access_matrix(

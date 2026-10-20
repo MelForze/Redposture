@@ -24,6 +24,9 @@ DISCOVERY_MODULES = frozenset(
         "oracle",
         "kubeapi",
         "jenkins",
+        "vault",
+        "nomad",
+        "jupyter",
     }
 )
 _FIELDS: dict[str, tuple[str, ...]] = {
@@ -39,6 +42,9 @@ _FIELDS: dict[str, tuple[str, ...]] = {
     "oracle": ("rows", "query_rows"),
     "kubeapi": ("secrets", "configmaps"),
     "jenkins": ("build_logs", "job_configs", "build_envs"),
+    "vault": ("kv_dump_items",),
+    "nomad": ("job_specs",),
+    "jupyter": ("notebook_contents",),
 }
 _MAX_BYTES = 50 * 1024 * 1024
 _MAX_SECONDS = 300.0
@@ -110,6 +116,10 @@ def project_discovery_output(args: Any, record: Mapping[str, Any]) -> dict[str, 
     module = str(getattr(args, "command", "") or "")
     if module not in DISCOVERY_MODULES or not bool(getattr(args, "discover", False)):
         return payload
+    for field in {"vault": ("kv_dump_items",), "nomad": ("job_specs",), "jupyter": ("notebook_contents",)}.get(
+        module, ()
+    ):
+        payload.pop(field, None)
 
     if bool(getattr(args, "_discover_implicit_dump", False)):
         if (
@@ -272,6 +282,9 @@ def inspect_record(
                 "znodes_truncated",
                 "secrets_partial",
                 "configmaps_partial",
+                "kv_discovery_partial",
+                "job_discovery_partial",
+                "content_discovery_partial",
             )
         )
         else "complete"

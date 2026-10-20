@@ -15,13 +15,13 @@ from typing import Any
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
     """Read exactly ``size`` bytes, raising on premature EOF."""
-    data = b""
+    data = bytearray()
     while len(data) < size:
         chunk = sock.recv(size - len(data))
         if not chunk:
             raise ConnectionError("unexpected EOF")
-        data += chunk
-    return data
+        data.extend(chunk)
+    return bytes(data)
 
 
 def is_connection_refused(value: Any) -> bool:

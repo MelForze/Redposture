@@ -46,11 +46,19 @@ def iter_buckets(
         if on_error is not None:
             on_error(f"ListBuckets: {resp.transport_error or f'HTTP {resp.http_status}'}")
         return
+    if getattr(resp, "truncated", False):
+        if on_error is not None:
+            on_error("ListBuckets: truncated XML response")
+        return
     try:
         root = ElementTree.fromstring(resp.body or b"")
     except ElementTree.ParseError:
         if on_error is not None:
             on_error("ListBuckets: invalid XML response")
+        return
+    if _tag(root) != "ListAllMyBucketsResult":
+        if on_error is not None:
+            on_error("ListBuckets: unexpected XML response")
         return
     count = 0
     for bucket in root.iter():
@@ -73,8 +81,10 @@ def iter_buckets(
 def _parse_page(bucket: str, body: bytes) -> tuple[list[ObjectInfo], str | None]:
     try:
         root = ElementTree.fromstring(body or b"")
-    except ElementTree.ParseError:
-        return [], None
+    except ElementTree.ParseError as exc:
+        raise ValueError("invalid XML response") from exc
+    if _tag(root) != "ListBucketResult":
+        raise ValueError("unexpected XML response")
     objects: list[ObjectInfo] = []
     next_token: str | None = None
     for elem in root:
@@ -86,7 +96,7 @@ def _parse_page(bucket: str, body: bytes) -> tuple[list[ObjectInfo], str | None]
             for child in elem:
                 ctag = _tag(child)
                 if ctag == "Key":
-                    key = (child.text or "").strip()
+                    key = child.text or ""
                 elif ctag == "Size":
                     size = child.text
                 elif ctag == "LastModified":
@@ -103,6 +113,11 @@ def _parse_page(bucket: str, body: bytes) -> tuple[list[ObjectInfo], str | None]
                         etag=etag,
                     )
                 )
+    truncated = next(
+        (str(elem.text or "").strip().lower() == "true" for elem in root if _tag(elem) == "IsTruncated"), False
+    )
+    if truncated and not next_token:
+        raise ValueError("truncated listing without continuation token")
     return objects, next_token
 
 
@@ -124,6 +139,7 @@ def iter_objects(
         return
     yielded = 0
     token: str | None = None
+    seen_tokens: set[str] = set()
     while True:
         request_page_size = max(1, int(page_size))
         if limit is not None:
@@ -138,7 +154,19 @@ def iter_objects(
             if on_error is not None:
                 on_error(f"ListObjects {bucket}: {resp.transport_error or f'HTTP {resp.http_status}'}")
             return
-        objects, token = _parse_page(bucket, resp.body or b"")
+        try:
+            if getattr(resp, "truncated", False):
+                raise ValueError("truncated XML response")
+            objects, next_token = _parse_page(bucket, resp.body or b"")
+            if next_token and next_token in seen_tokens:
+                raise ValueError("repeated continuation token")
+        except ValueError as exc:
+            if on_error is not None:
+                on_error(f"ListObjects {bucket}: {exc}")
+            return
+        token = next_token
+        if token:
+            seen_tokens.add(token)
         for obj in objects:
             yield obj
             yielded += 1

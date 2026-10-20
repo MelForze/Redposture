@@ -1081,8 +1081,10 @@ def _audit_gitlab_host(
                     clone_scope = "public"
                     clone_candidates = public_projects
 
-                if project_filters and not clone_candidates:
+                if project_filters:
                     for ref in project_filters:
+                        if any(_project_matches_filters(project, [ref]) for project in clone_candidates):
+                            continue
                         fetched, fetch_error = _fetch_project_by_ref(
                             host,
                             port,
@@ -1802,8 +1804,10 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
     if options["clone"]:
         clone_scope = "token" if state.token_valid else "public"
         clone_candidates = list(token_projects if state.token_valid else public_projects)
-        if project_filters and not clone_candidates:
+        if project_filters:
             for ref in project_filters:
+                if any(_project_matches_filters(project, [ref]) for project in clone_candidates):
+                    continue
                 fetched, fetch_error = _fetch_project_by_ref(
                     host,
                     port,

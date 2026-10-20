@@ -82,6 +82,7 @@ def build_airflow_spec(args: Any) -> ModuleAuditSpec:
             "attempted_credentials",
             "credential_password",
             "_credential_capabilities_pending",
+            "_inventory_streamed",
         ),
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         # `--defcreds` is exhaustive (house convention): try every default pair and

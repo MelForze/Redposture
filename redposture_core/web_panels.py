@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import html
 import json
-import os
 import re
 import secrets
 import time
@@ -571,28 +570,17 @@ def _mongo_page_size_and_count(source: str) -> tuple[int, int] | None:
     return (page_size, int(count.group(1))) if 0 < page_size <= 1000 else None
 
 
-def _write_ui_object(bucket: str, key: str, body: bytes) -> str | None:
-    """Create a new local file for a Console download without overwriting files."""
-    if "/" in bucket or "\\" in bucket:
-        return None
-    parts = (bucket, *key.split("/"))
-    if any(part in {"", ".", ".."} or "\\" in part or "\x00" in part for part in parts):
-        return None
-    destination = Path.cwd().joinpath(*parts)
+def _write_ui_object(bucket: str, key: str, body: bytes, *, endpoint: str = "unknown") -> str | None:
+    """Preserve endpoint/object identity and existing downloads."""
+    from .download_paths import identity_component, write_unique_file
+
+    destination = (
+        Path("minio-downloads") / identity_component(endpoint) / identity_component(bucket) / identity_component(key)
+    )
     try:
-        current = Path.cwd()
-        for part in parts[:-1]:
-            current = current / part
-            if current.is_symlink():
-                return None
-            current.mkdir(mode=0o700, exist_ok=True)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(destination, flags, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(body)
+        return write_unique_file(str(destination), body)
     except OSError:
         return None
-    return str(destination.relative_to(Path.cwd()))
 
 
 def _redis_insight_value(
@@ -882,7 +870,34 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
     if getattr(ctx.args, "_ui_standard_export", False):
         export_categories = standard_export_selection(ctx.args, product)
         if export_categories:
-            return export_panel(ctx, record, export_categories)
+            from copy import copy
+
+            exported = export_panel(ctx, record, export_categories)
+            remaining_ctx = copy(ctx)
+            remaining_args = copy(ctx.args)
+            object.__setattr__(remaining_ctx, "args", remaining_args)
+            remaining_args._ui_standard_export = False
+            category_flags = {
+                "buckets": "show_buckets",
+                "objects": "show_objects",
+                "content": "dump",
+                "databases": "show_databases",
+                "collections": "show_collections",
+                "documents": "dump",
+                "keys": "show_keys",
+                "values": "dump",
+                "tables": "show_tables",
+                "columns": "show_columns",
+                "rows": "dump",
+            }
+            for category in export_categories:
+                setattr(remaining_args, category_flags.get(category, category), False)
+            remaining = enumerate_panel(remaining_ctx, exported)
+            export_inventory = (exported.get("ui") or {}).get("inventory") or {}
+            remaining_ui = dict(remaining.get("ui") or {})
+            if export_inventory or "inventory" in remaining_ui:
+                remaining_ui["inventory"] = {**export_inventory, **(remaining_ui.get("inventory") or {})}
+            return {**remaining, "ui": remaining_ui}
     ui = dict(record.get("ui") or {})
     base = str(ui.get("endpoint") or "")
     flags = {
@@ -986,7 +1001,7 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                     item["Id"] for item in endpoints if isinstance(item, dict) and type(item.get("Id")) is int
                 ]
                 paths = {
-                    "containers": "containers/json",
+                    "containers": "containers/json?all=1",
                     "images": "images/json",
                     "networks": "networks",
                     "volumes": "volumes",
@@ -1222,8 +1237,8 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                         for flag in flags & {"dump", "query"}:
                             results[flag] = value
         elif product in {"kibana", "opensearch_dashboards"}:
-            # The Dev Tools proxy executes only a fixed list of upstream GETs.
-            # The UI's own backend principal is independent of supplied credentials.
+            # Fixed inventory GETs and the read-only discovery engine share the
+            # Console backend principal and session.
             def proxy_get(path: str, *, response_size_cap: int = 128 * 1024) -> HttpResponse:
                 headers = {**auth_headers, "Content-Type": "application/json"}
                 headers["kbn-xsrf" if product == "kibana" else "osd-xsrf"] = "redposture"
@@ -1266,82 +1281,46 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                 else:
                     results[flag] = _response_status(response)
             if "discover" in flags:
-                response = proxy_get(
-                    "/_cat/indices?format=json&h=index,health,docs.count", response_size_cap=8 * 1024 * 1024
+                from .modules.elastic.discover import DiscoverOptions, DiscoverResponse, run_discovery
+
+                def discover_request(request):
+                    headers = {**auth_headers, **request.headers}
+                    headers["kbn-xsrf" if product == "kibana" else "osd-xsrf"] = "redposture"
+                    response = _post(
+                        pool,
+                        base,
+                        "/api/console/proxy?" + urlencode({"path": request.path, "method": request.method}),
+                        request.body or b"",
+                        headers,
+                        response_size_cap=10 * 1024 * 1024,
+                    )
+                    return DiscoverResponse(
+                        response.status, response.body, response.headers, response.error, response.truncated
+                    )
+
+                report = run_discovery(
+                    discover_request,
+                    vendor="elasticsearch" if product == "kibana" else "opensearch",
+                    options=DiscoverOptions(
+                        max_seconds=float(
+                            300.0 if getattr(ctx.args, "discover_time", None) is None else ctx.args.discover_time
+                        ),
+                        max_source_bytes=int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024)),
+                    ),
+                    nested_scheduler=getattr(ctx, "nested_scheduler", None),
+                    scheduler_key=("ui-elastic-discover", base),
                 )
-                value = _json(response)
-                if isinstance(value, list):
-                    indices = [
-                        row["index"]
-                        for row in value
-                        if isinstance(row, dict)
-                        and isinstance(row.get("index"), str)
-                        and not row["index"].startswith(".")
-                    ]
-                    hits: list[dict[str, Any]] = []
-                    failed = len(indices) > _DUMP_COLLECTIONS
-                    bytes_used = len(response.body or b"")
-                    deadline = time.monotonic() + _DUMP_SECONDS
-                    for index in indices[:_DUMP_COLLECTIONS]:
-                        offset = 0
-                        seen_pages: set[str] = set()
-                        while True:
-                            if len(hits) >= _DUMP_ITEMS or bytes_used >= _DUMP_BYTES or time.monotonic() >= deadline:
-                                failed = True
-                                break
-                            page_size = min(100, _DUMP_ITEMS - len(hits))
-                            search = proxy_get(
-                                f"/{quote(index, safe='')}/_search?"
-                                + urlencode(
-                                    {"size": page_size, "from": offset, "track_total_hits": "true", "sort": "_doc"}
-                                ),
-                                response_size_cap=min(8 * 1024 * 1024, _DUMP_BYTES - bytes_used),
-                            )
-                            bytes_used += len(search.body or b"")
-                            page = _json(search)
-                            hit_data = page.get("hits") if isinstance(page, dict) else None
-                            rows = hit_data.get("hits") if isinstance(hit_data, dict) else None
-                            if (
-                                not isinstance(hit_data, dict)
-                                or not isinstance(rows, list)
-                                or any(not isinstance(row, dict) for row in rows)
-                            ):
-                                failed = True
-                                break
-                            signature = json.dumps([rows[0], rows[-1]], sort_keys=True) if rows else ""
-                            if signature and signature in seen_pages:
-                                failed = True
-                                break
-                            if signature:
-                                seen_pages.add(signature)
-                            hits.extend({"index": index, "hit": row} for row in rows)
-                            offset += len(rows)
-                            total_data = hit_data.get("total")
-                            total_hits = total_data.get("value") if isinstance(total_data, dict) else total_data
-                            total_exact = not isinstance(total_data, dict) or total_data.get("relation", "eq") == "eq"
-                            if type(total_hits) is int and offset >= total_hits and total_exact:
-                                break
-                            if len(rows) < page_size:
-                                if type(total_hits) is int and offset < total_hits:
-                                    failed = True
-                                if not total_exact:
-                                    failed = True
-                                break
-                            if offset >= _DUMP_ITEMS or offset >= 10_000:
-                                failed = True
-                                break
-                        if failed and (
-                            len(hits) >= _DUMP_ITEMS or bytes_used >= _DUMP_BYTES or time.monotonic() >= deadline
-                        ):
-                            break
-                    results["discover"] = {
-                        "count": len(hits),
-                        "items": [f"{row['index']} {json.dumps(row['hit'], ensure_ascii=False)[:512]}" for row in hits],
-                        "records": hits,
-                        "partial": failed,
-                    }
-                else:
-                    results["discover"] = _response_status(response)
+                payload = report.to_dict()
+                findings = payload["discover_findings"]
+                coverage = payload["discover_coverage"]
+                results["discover"] = {
+                    "count": len(findings),
+                    "records": findings,
+                    "items": [str(row.get("value") or row.get("type") or "") for row in findings],
+                    "coverage": coverage,
+                    "partial": not coverage.get("complete", False),
+                    **payload,
+                }
         elif product == "redis_insight":
             if flags & {"show_keys", "dump"}:
                 response = get("/api/databases", response_size_cap=8 * 1024 * 1024)
@@ -1820,6 +1799,15 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                         results[flag] = _response_status(response)
         elif product == "minio_console":
             if flags & {"show_buckets", "show_objects", "dump", "download", "discover"}:
+                from .clients.minio_api import MinioResponse
+                from .modules.minio.discover import Budget, discover_secrets
+                from .modules.minio.enumerate import ObjectInfo
+
+                discover_started = time.monotonic()
+                discover_budget = Budget(
+                    time_budget=getattr(ctx.args, "discover_time", None),
+                    max_total_bytes=getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024),
+                )
                 object_ref = getattr(ctx.args, "object", None)
                 response = get(
                     "/api/v1/buckets", response_size_cap=8 * 1024 * 1024 if flags & {"dump", "download"} else 128 * 1024
@@ -1857,6 +1845,10 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                             selected = [{"name": selected_bucket}]
                         walk_limit = _DUMP_COLLECTIONS
                         deadline = time.monotonic() + _DUMP_SECONDS
+                        if "discover" in flags and not flags & {"dump", "download", "show_objects"}:
+                            seconds = getattr(ctx.args, "discover_time", None)
+                            if seconds is not None:
+                                deadline = min(deadline, discover_started + float(seconds))
                         for bucket in selected[:walk_limit]:
                             if time.monotonic() >= deadline or len(objects) >= _DUMP_ITEMS:
                                 failed = True
@@ -1966,7 +1958,7 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                             elif explicit_object:
                                 object_targets = [explicit_object]
                             elif selected_bucket or flags & {"discover", "dump", "download"}:
-                                object_targets = objects if flags & {"dump", "download"} else objects[:100]
+                                object_targets = objects
                             else:
                                 object_targets = []
                             if (
@@ -1982,54 +1974,25 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                                     results[flag] = {"status": "object_or_bucket_required"}
                             object_dumps: list[dict[str, Any]] = []
                             downloads: list[dict[str, Any]] = []
-                            findings: list[dict[str, Any]] = []
-                            from .modules.minio.discover import is_candidate_key
-                            from .secret_detection import mask_secret, scan_value
-
                             bytes_used = 0
-                            budget = (
-                                _DUMP_BYTES
-                                if flags & {"dump", "download"}
-                                else min(
-                                    50 * 1024 * 1024,
-                                    int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024) or 0),
-                                )
-                            )
-                            partial = failed or ("discover" in flags and len(object_targets) >= 100)
-                            for target in object_targets:
-                                if time.monotonic() >= deadline or bytes_used >= budget:
+                            partial = failed or len(selected) > walk_limit
+                            for target in object_targets if flags & {"dump", "download"} else []:
+                                if time.monotonic() >= deadline or bytes_used >= _DUMP_BYTES:
                                     partial = True
                                     break
                                 bucket_name, key = target.split("/", 1)
-                                if (
-                                    "discover" in flags
-                                    and not flags & {"dump", "download"}
-                                    and not is_candidate_key(key)
-                                ):
-                                    continue
-                                if "discover" in flags and bytes_used >= budget:
-                                    partial = True
-                                    break
                                 path = f"/api/v1/buckets/{quote(bucket_name, safe='')}/objects/download?" + urlencode(
                                     {"prefix": key}
                                 )
-                                object_response = get(
-                                    path,
-                                    response_size_cap=(
-                                        min(_DUMP_BYTES, budget - bytes_used)
-                                        if flags & {"dump", "download"}
-                                        else 128 * 1024
-                                    ),
-                                )
+                                object_response = get(path, response_size_cap=_DUMP_BYTES - bytes_used)
+                                bytes_used += len(object_response.body or b"")
                                 if object_response.status != 200 or object_response.error or object_response.truncated:
-                                    bytes_used += len(object_response.body or b"")
                                     partial = True
                                     continue
                                 object_body = object_response.body or b""
-                                if bytes_used + len(object_body) > budget:
+                                if bytes_used > _DUMP_BYTES:
                                     partial = True
                                     break
-                                bytes_used += len(object_body)
                                 if "dump" in flags:
                                     try:
                                         content = object_body.decode("utf-8")
@@ -2042,33 +2005,21 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                                     else:
                                         object_dumps.append({"object": target, "content": content})
                                 if "download" in flags:
-                                    destination = _write_ui_object(bucket_name, key, object_body)
+                                    destination = _write_ui_object(bucket_name, key, object_body, endpoint=base)
                                     if destination:
                                         downloads.append(
                                             {"object": target, "path": destination, "size": len(object_body)}
                                         )
                                     else:
                                         partial = True
-                                if "discover" in flags:
-                                    for match in scan_value(
-                                        object_body.decode("utf-8", errors="replace"), object_path="$", enabled=None
-                                    ):
-                                        findings.append(
-                                            {
-                                                "object": target,
-                                                "type": match.detector,
-                                                "masked_value": mask_secret(match.value),
-                                                "object_path": match.object_path,
-                                            }
-                                        )
                             if "dump" in flags and "dump" not in results:
                                 results["dump"] = {
                                     "count": len(object_dumps),
+                                    "records": object_dumps,
                                     "items": [
                                         f"{entry['object']} {str(entry.get('content') or entry.get('base64'))[:512]}"
                                         for entry in object_dumps
                                     ],
-                                    "records": object_dumps,
                                     "partial": partial,
                                 }
                             if "download" in flags and "download" not in results:
@@ -2079,15 +2030,49 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                                     "partial": partial,
                                 }
                             if "discover" in flags:
+
+                                class ConsoleObjectReader:
+                                    def get_object_range(self, bucket, key, *, start, length, signed=True):
+                                        response = _get(
+                                            pool,
+                                            base,
+                                            f"/api/v1/buckets/{quote(bucket, safe='')}/objects/download?"
+                                            + urlencode({"prefix": key}),
+                                            headers={**auth_headers, "Range": f"bytes={start}-{start + length - 1}"},
+                                            response_size_cap=length,
+                                        )
+                                        error = response.error
+                                        if start and response.status == 200:
+                                            error = error or "Console ignored object range"
+                                        return MinioResponse(
+                                            response.status,
+                                            response.headers,
+                                            response.body,
+                                            transport_error=error,
+                                            truncated=response.truncated,
+                                        )
+
+                                scan = discover_secrets(
+                                    ConsoleObjectReader(),
+                                    (
+                                        ObjectInfo(bucket=target.split("/", 1)[0], key=target.split("/", 1)[1], size=0)
+                                        for target in object_targets
+                                    ),
+                                    budget=discover_budget,
+                                )
+                                if failed or len(selected) > walk_limit:
+                                    scan._partial("listing_incomplete")
                                 results["discover"] = {
-                                    "count": len(findings),
+                                    "count": len(scan.findings),
+                                    "records": scan.findings,
                                     "items": [
-                                        f"{entry['object']} {entry['type']} {entry['masked_value']}"
-                                        for entry in findings
+                                        f"{entry['bucket']}/{entry['key']} {entry['type']} {entry['masked_value']}"
+                                        for entry in scan.findings
                                     ],
-                                    "records": findings,
-                                    "bytes_read": bytes_used,
-                                    "partial": partial or bytes_used > budget,
+                                    "bytes_read": scan.bytes_read,
+                                    "objects_scanned": scan.objects_scanned,
+                                    "partial": not scan.coverage_complete,
+                                    "partial_reasons": scan.partial_reasons,
                                 }
                 else:
                     for flag in flags & {"show_buckets", "show_objects", "dump", "download", "discover"}:
@@ -2234,7 +2219,7 @@ def render_panel(record: dict[str, Any], label: str) -> list[str]:
     auth_text = "True" if auth is True else "False" if auth is False else "unknown"
     version = ui.get("version") or "unknown"
     prefix = f"{label}\t{record.get('host') or '?'}\t{int(record.get('port') or 0)}\t"
-    lines = [f"{prefix} [*] {name} (auth required:{auth_text}) (version:{version})"]
+    lines = [f"{prefix} [*] {name} (auth required:{auth_text}) (version:{version}) (UI)"]
     if product == "postgrest" and ui.get("anonymous_read") is True:
         lines.append(f"{prefix} [+] Anonymous READ available through PostgREST")
     attempts = record.get("attempted_credentials")
@@ -2328,6 +2313,14 @@ def render_panel(record: dict[str, Any], label: str) -> list[str]:
 def colorize_panel_line(console: Any, line: str, label: str) -> bool:
     """Airflow-style emphasis for UI lines; backend renderers keep their rules."""
     payload = line.split("\t", 3)[-1]
+    # The shared runner tries this colorizer before the backend's own one.
+    # A successful pair/token without the explicit UI suffix belongs to that
+    # backend: painting the whole payload here discards its capability colors.
+    # Keep generic UI dump rows on their existing path below.
+    if payload.startswith(" [+] ") and not payload.rstrip().endswith(" (UI)"):
+        credential = payload[len(" [+] ") :]
+        if re.match(r"\S+:", credential) or credential.startswith(("apikey auth", "token auth")):
+            return False
     if payload.startswith(" ") and not payload.lstrip().startswith("["):
         return render_tagged_detail_line(console, line, tag=label, default_color="orange")
     if not (
@@ -2341,11 +2334,10 @@ def colorize_panel_line(console: Any, line: str, label: str) -> bool:
         return False
 
     def credential_spans(marker: str, right: str) -> list[tuple[int, int, str]]:
-        match = re.match(r"\S+:\S+", right)
+        if right.endswith(" (UI)") and marker in {"[+]", "[-]"}:
+            return []
         if marker != "[+]":
             return []
-        if right.endswith(" (UI)") and match:
-            return [(match.start(), match.end(), "red")]
         if right.startswith("Anonymous READ"):
             return [(0, len(right), "red")]
         return [(0, len(right), "true_red")]
@@ -2355,7 +2347,7 @@ def colorize_panel_line(console: Any, line: str, label: str) -> bool:
         line,
         tag=label,
         regexes=(
-            RegexColorRule(r"\(version:[^)]+\)", "orange"),
+            RegexColorRule(r"\(version:unknown\)", "orange"),
             RegexColorRule(r"coverage:partial", "orange"),
             RegexColorRule(r"\(reason:[^)]+\)", "orange"),
         ),

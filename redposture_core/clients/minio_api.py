@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urlencode, urlsplit
@@ -55,14 +56,24 @@ def _parse_s3_error(status: int, body: bytes) -> S3Error | None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         parsed = None
     if isinstance(parsed, dict):
-        code = str(parsed.get("Code") or parsed.get("code") or "").strip()
-        message = str(parsed.get("Message") or parsed.get("message") or "").strip()
+        # Kubernetes Status and generic HTTP APIs also have `code`/`message`.
+        # Their numeric status is not an S3 error identifier.
+        raw_code = parsed.get("Code", parsed.get("code"))
+        if "kind" in parsed or "apiVersion" in parsed or not isinstance(raw_code, str):
+            return None
+        code = raw_code.strip()
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9:._-]*", code):
+            return None
+        raw_message = parsed.get("Message", parsed.get("message", ""))
+        if not isinstance(raw_message, str):
+            return None
+        message = raw_message.strip()
         return S3Error(http_status=status, code=code, message=message)
     try:
         root = ElementTree.fromstring(body)
-    except ElementTree.ParseError:
+    except (ElementTree.ParseError, ValueError, LookupError):
         return S3Error(http_status=status, code="", message="")
-    if root.tag.split("}")[-1] != "Error":
+    if root.tag not in {"Error", "{http://s3.amazonaws.com/doc/2006-03-01/}Error"}:
         return None
     code = ""
     message = ""
@@ -72,6 +83,8 @@ def _parse_s3_error(status: int, body: bytes) -> S3Error | None:
             code = (child.text or "").strip()
         elif tag == "Message":
             message = (child.text or "").strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9:._-]*", code):
+        return None
     return S3Error(http_status=status, code=code, message=message)
 
 
@@ -203,6 +216,29 @@ class MinioClient:
 
     def head_bucket(self, bucket: str, *, signed: bool) -> MinioResponse:
         return self._request("HEAD", f"/{quote(bucket)}", "", signed=signed)
+
+    def bucket_location(self, bucket: str, *, signed: bool = True) -> MinioResponse:
+        # GET location returns a typed XML envelope; a HEAD 200/403 alone cannot
+        # distinguish a verified S3 signature from a generic gateway response.
+        return self._request("GET", f"/{quote(bucket, safe='')}", "location=", signed=signed)
+
+    def invalid_signature_client(self) -> MinioClient:
+        """Share the transport, but sign a read-only control with a wrong secret.
+
+        Keep the access key and STS token unchanged: the control distinguishes
+        signature verification from a public/cached response for this identity.
+        The caller owns the shared pool; this clone must not close it.
+        """
+        return MinioClient(
+            self._pool,
+            scheme=self.scheme,
+            host=self.host,
+            port=self.port,
+            access_key=self.access_key,
+            secret_key=f"{self.secret_key}-redposture-invalid-signature",
+            session_token=self.session_token,
+            base_path=self.base_path,
+        )
 
     def list_objects_v2(
         self,

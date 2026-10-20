@@ -70,6 +70,7 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
         ("/api/datasources", None),
         ("/api/user", grafana._auth_header("bad", "bad")),
         ("/api/user", grafana._auth_header("good", "good")),
+        ("/api/user", None),
         ("/api/datasources", grafana._auth_header("good", "good")),
     ]
     assert result.records[0]["status"] == "valid_credentials"
@@ -118,7 +119,7 @@ def test_grafana_rejected_api_token_falls_back_to_defaults() -> None:
 def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_winner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    auth_headers: list[str] = []
+    auth_headers: list[str | None] = []
     datasource_headers: list[str] = []
     first_header = grafana._auth_header("admin", "admin")
     winning_header = grafana._auth_header("admin", "password")
@@ -163,9 +164,16 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
         emit_line=emitted.append,
     ).run_plan(plan)
 
-    assert auth_headers == [
+    expected_headers: list[str | None] = [
         grafana._auth_header(run.username or "admin", run.password or "") for run in plan.credential_runs
     ]
+    # A valid-looking identity needs a same-endpoint anonymous control: the
+    # earlier datasource denial cannot exclude a fixed /api/user front end.
+    expected_headers.insert(expected_headers.index(winning_header) + 1, None)
+    assert auth_headers == expected_headers
+    # Later accepted pairs reuse this baseline in the live lifecycle state.
+    assert auth_headers.count(None) == 1
+    assert auth_headers.index(None) < auth_headers.index(later_header)
     assert datasource_headers == [None, winning_header]
     record = result.records[0]
     assert record["status"] == "weak_default_creds"
@@ -202,6 +210,10 @@ def test_kubeapi_credential_file_reuses_anonymous_classification_and_selected_na
         classification.append(path)
         if path == "/version":
             return 200, {"major": "1", "minor": "30", "gitVersion": "v1.30.0"}, {}, None
+        if path == "/api/v1/pods?limit=1":
+            if _kwargs.get("username") == "good":
+                return 200, {"kind": "PodList", "items": []}, {}, None
+            return 403, {"kind": "Status", "reason": "Forbidden"}, {}, None
         return 200, {"kind": "APIVersions", "apiVersion": "v1", "versions": ["v1"]}, {}, None
 
     def fake_namespaces(
@@ -244,7 +256,7 @@ def test_kubeapi_credential_file_reuses_anonymous_classification_and_selected_na
     )
     result = _run(kubeapi, "kubeapi", args)
 
-    assert classification == ["/version"]
+    assert classification == ["/version", "/api/v1/pods?limit=1", "/api/v1/pods?limit=1"]
     assert namespace_auth == [
         (None, None, None),
         (None, "bad", "bad"),
@@ -253,6 +265,7 @@ def test_kubeapi_credential_file_reuses_anonymous_classification_and_selected_na
     ]
     assert result.records[0]["status"] == "auth_valid"
     assert result.records[0]["namespaces"] == ["default"]
+    assert result.records[0]["can_list_pods"] is True
 
 
 def test_gitlab_invalid_token_runs_public_data_once_without_reclassification(

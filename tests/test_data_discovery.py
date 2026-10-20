@@ -53,7 +53,7 @@ def test_discover_help_is_in_module_inventory_group(module: str) -> None:
         "Discovery / Dump"
         if module in {"mongodb", "oracle", "postgres"}
         else "Inventory"
-        if module == "jenkins"
+        if module in {"jenkins", "vault", "nomad", "jupyter"}
         else "Actions"
     )
     owner = next(
@@ -405,3 +405,41 @@ def test_new_discovery_lines_follow_airflow_palette_and_remain_plain_in_storage(
     assert any("status:complete" in value and color == "bright_green" for value, color in console.calls)
     assert any("Pass Value=" in value and color == "orange" for value, color in console.calls)
     assert all("\x1b[" not in line and "QaSecret2026" not in line for line in lines)
+
+
+@pytest.mark.parametrize("module", ["vault", "nomad", "jupyter", "redis"])
+def test_runtime_honors_explicit_secret_inspection_byte_budget(module: str, tmp_path) -> None:
+    from redposture_core.data_discovery import discovery_fields
+
+    args = SimpleNamespace(command=module, discover=True, discover_max_bytes=1, debug=False)
+    field = discovery_fields(module)[0]
+    record = AuditRecord.from_mapping(
+        {
+            "host": "host",
+            "port": 1234,
+            "status": "open_no_auth",
+            f"is_{module}": True,
+            field: [{"key": "password", "value": _SECRET}],
+        },
+        module=module,
+    )
+    runner = AuditCommandRunner(
+        args=args,
+        spec=ModuleAuditSpec(
+            module=module,
+            label=module.upper(),
+            default_port=1234,
+            detect=lambda _: record,
+            data=lambda _ctx, prior: prior,
+            is_detected=lambda _: True,
+            render=lambda _: [],
+        ),
+        emit_line=lambda _: None,
+    )
+    output = tmp_path / "result.json"
+    runner.run_plan(
+        AuditCommandPlan(targets_by_port={1234: ("host",)}, output_path=str(output), output_format="json", workers=1)
+    )
+    saved = json.loads(output.read_text())
+    assert saved["content_discovery"]["status"] == "partial"
+    assert saved["content_discovery"]["bytes_inspected"] == 0

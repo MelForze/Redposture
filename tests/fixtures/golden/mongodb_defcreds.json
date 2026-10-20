@@ -46,105 +46,105 @@
     ],
     "credential_attempts": [
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "12345678",
         "token": null,
         "username": "admin"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "admin",
         "token": null,
         "username": "admin"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "changeme",
         "token": null,
         "username": "admin"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "mongo",
         "token": null,
         "username": "admin"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "mongodb",
         "token": null,
         "username": "admin"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "password",
         "token": null,
         "username": "admin"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "dev",
         "token": null,
         "username": "dev"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "mongo",
         "token": null,
         "username": "mongo"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "password",
         "token": null,
         "username": "mongo"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "mongodb",
         "token": null,
         "username": "mongodb"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "password",
         "token": null,
         "username": "mongodb"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "admin",
         "token": null,
         "username": "root"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "mongo",
         "token": null,
         "username": "root"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "mongodb",
         "token": null,
         "username": "root"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "password",
         "token": null,
@@ -158,21 +158,21 @@
         "username": "root"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "test",
         "token": null,
         "username": "test"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "password",
         "token": null,
         "username": "user"
       },
       {
-        "error": "connection timeout",
+        "error": "authentication failed",
         "ok": false,
         "password": "user",
         "token": null,

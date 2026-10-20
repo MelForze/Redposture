@@ -834,10 +834,9 @@ def _normalize_column_names(raw_values: list[str]) -> tuple[list[str], str | Non
         name = _parse_identifier_part(part)
         if name is None:
             return [], f"invalid column name: {part}"
-        lowered = name.lower()
-        if lowered in seen:
+        if name in seen:
             continue
-        seen.add(lowered)
+        seen.add(name)
         normalized.append(name)
     return normalized, None
 
@@ -846,7 +845,7 @@ def _normalize_table_targets(raw_values: list[str]) -> list[str]:
     tables: list[str] = []
     seen: set[str] = set()
     for target in _split_csv_values(raw_values):
-        key = target.lower()
+        key = target
         if key in seen:
             continue
         seen.add(key)
@@ -924,7 +923,8 @@ def _query_visible_tables(
     for row in rows or []:
         if len(row) < 2:
             continue
-        tables.append(f"{row[0]}.{row[1]}")
+        parts = [str(row[0]), str(row[1])]
+        tables.append(".".join(part if _CH_IDENT_RE.fullmatch(part) else _quote_ident(part) for part in parts))
     return tables, None
 
 
@@ -1020,13 +1020,13 @@ def _query_table_columns(
     if error:
         return None, error
 
-    allowed = {item.lower() for item in only_columns or []}
+    allowed = set(only_columns or [])
     columns: list[str] = []
     for row in rows or []:
         if not row:
             continue
         name = str(row[0])
-        if allowed and name.lower() not in allowed:
+        if allowed and name not in allowed:
             continue
         columns.append(name)
     return columns, None

@@ -66,6 +66,7 @@ class GrafanaLifecycleState:
     host: str | None = None
     port: int | None = None
     origin_resolved: bool = False
+    anonymous_responses: dict[str, tuple[int, str, dict[str, str]]] = field(default_factory=dict)
 
     def close(self) -> None:
         if self.http is not None:
@@ -311,6 +312,28 @@ def _auth_header(username: str, password: str) -> str:
     return f"Basic {token}"
 
 
+def _new_grafana_access(
+    host: str, port: int, timeout: float, path: str, *, identity_body: str | None = None
+) -> tuple[bool | None, str | None]:
+    """Attribute a successful response only after comparing anonymous access."""
+    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    cache = state.anonymous_responses if isinstance(state, GrafanaLifecycleState) and state.http is not None else {}
+    try:
+        if path not in cache:
+            cache[path] = _http_request(host, port, path, timeout)
+        status, body, _headers = cache[path]
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return None, "anonymous baseline unavailable; credential unverified"
+    if status in {401, 403}:
+        return True, None
+    if identity_body is not None and status == 200 and _looks_like_grafana_user(body):
+        observed = _load_json_dict(identity_body) or {}
+        anonymous = _load_json_dict(body) or {}
+        if (observed.get("id"), observed.get("login")) != (anonymous.get("id"), anonymous.get("login")):
+            return True, None
+    return None, "response already available without this credential; credential unverified"
+
+
 def _verify_credentials(
     host: str, port: int, timeout: float, username: str, password: str
 ) -> tuple[bool | None, str | None]:
@@ -322,7 +345,7 @@ def _verify_credentials(
         headers={"Authorization": _auth_header(username, password)},
     )
     if status == 200 and _looks_like_grafana_user(body):
-        return True, None
+        return _new_grafana_access(host, port, timeout, "/api/user", identity_body=body)
     if status == 200:
         return None, "/api/user returned an invalid identity payload"
     if status == 401:
@@ -349,7 +372,7 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
         headers=headers,
     )
     if status == 200 and _looks_like_grafana_user(body):
-        return True, None
+        return _new_grafana_access(host, port, timeout, "/api/user", identity_body=body)
     if status == 200:
         capability_status, capability_body, _capability_headers = _http_request(
             host,
@@ -359,7 +382,7 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
             headers=headers,
         )
         if capability_status == 200 and _load_json_list(capability_body) is not None:
-            return True, None
+            return _new_grafana_access(host, port, timeout, "/api/datasources")
         if capability_status == 403:
             return None, "datasource access denied without token evidence"
         return None, "/api/user returned an invalid identity payload"
@@ -374,7 +397,7 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
             headers=headers,
         )
         if capability_status == 200 and _load_json_list(capability_body) is not None:
-            return True, None
+            return _new_grafana_access(host, port, timeout, "/api/datasources")
         if capability_status == 200:
             return None, "/api/datasources returned an invalid capability payload"
         if capability_status == 403:
@@ -1228,7 +1251,7 @@ def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: s
             password = "" if raw_password is None else str(raw_password)
             password_text = "<empty>" if password == "" else password
             credential_text = f"{username}:{password_text}"
-        ok = bool(attempt.get("ok"))
+        ok = attempt.get("ok")
         if ok:
             if token_attempt:
                 selected = effective_username is None and bool(credentials_source) and source == credentials_source
@@ -1242,7 +1265,11 @@ def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: s
             line = f"{prefix} [+] {credential_text}"
             lines.append(_with_optional_datasources(record, line) if selected else line)
             continue
-        lines.append(f"{prefix} [-] {credential_text}")
+        if ok is None:
+            reason = _safe_excerpt(str(attempt.get("error") or "credential proof unavailable"), 120)
+            lines.append(f"{prefix} [-] {credential_text} (unverified: {reason})")
+        else:
+            lines.append(f"{prefix} [-] {credential_text}")
     return lines
 
 
@@ -1373,6 +1400,11 @@ def _render_colored_grafana_line(console: Console, line: str) -> bool:
         tag="GRAFANA",
         literals=(("auth required:sso", "bright_green"), ("provider:keycloak", "cyan")),
         counts=(CountColorRule("datasources", "red", unknown_color="orange", zero_color="bright_green"),),
+        extra_spans=lambda marker, payload: (
+            [(payload.index("(unverified:"), len(payload), "orange")]
+            if marker == "[-]" and "(unverified:" in payload
+            else []
+        ),
     ):
         return True
     if line.startswith("GRAFANA") and "\t" in line:

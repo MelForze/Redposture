@@ -11,12 +11,19 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
-from ...clients.minio_api import MinioClient
+from ...clients.minio_api import MinioResponse
 from ...scheduler import NestedSchedulerCancelled
 from ...secret_detection import mask_secret, scan_value
 from .enumerate import ObjectInfo
+
+
+class ObjectReader(Protocol):
+    """Ranged object transport shared by S3 and Console discovery."""
+
+    def get_object_range(self, bucket: str, key: str, *, start: int, length: int, signed: bool) -> MinioResponse: ...
+
 
 # Stage 1: interesting-by-name substrings / suffixes. A match makes the key a
 # *candidate*, not a finding.
@@ -159,7 +166,7 @@ class DiscoverResult:
 
 
 def _read_and_scan(
-    client: MinioClient,
+    client: ObjectReader,
     obj: ObjectInfo,
     budget: Budget,
     result: DiscoverResult,
@@ -252,7 +259,7 @@ def _read_and_scan(
 
 
 def discover_secrets(
-    client: MinioClient,
+    client: ObjectReader,
     objects: Iterable[ObjectInfo],
     *,
     budget: Budget | None = None,

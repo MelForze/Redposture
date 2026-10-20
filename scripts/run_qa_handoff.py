@@ -274,8 +274,10 @@ def _run_stage(name: str, destination: Path, prefix: str, python: str) -> dict[s
 
 def _python_matrix(destination: Path) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
-    for minor in range(10, 14):
-        tag = f"py3{minor}"
+    # CI's checked-in lockfiles are the supported test environments.
+    for lock in sorted((ROOT / "requirements").glob("ci-py3*.txt")):
+        tag = lock.stem.removeprefix("ci-")
+        minor = int(tag.removeprefix("py3"))
         case_dir = destination / tag
         interpreter = shutil.which(f"python3.{minor}")
         if interpreter is None:

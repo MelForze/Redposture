@@ -1926,6 +1926,8 @@ _HTTP_DETECTION_MODULES = frozenset(
         "keycloak",
         "jenkins",
         "vault",
+        "nomad",
+        "jupyter",
         "kubeapi",
         "minio",
         "proxmox",
@@ -2098,7 +2100,21 @@ class AuditCommandRunner:
     def _cve_explicit_credentials_requested(self) -> bool:
         return any(
             getattr(self.args, field, None) is not None
-            for field in ("username", "password", "token", "api_token", "apitoken", "api_key", "pve_api_token")
+            for field in (
+                "username",
+                "password",
+                "token",
+                "token_file",
+                "api_token",
+                "apitoken",
+                "api_key",
+                "pve_api_token",
+                "private_token",
+                "_jupyter_token",
+                "_vault_token",
+                "_nomad_token",
+                "_keycloak_token",
+            )
         )
 
     def _record_reports_verified_credentials(self, payload: dict[str, Any]) -> bool:
@@ -2804,7 +2820,12 @@ class AuditCommandRunner:
         )
         if bool(getattr(self.args, "discover", False)) and self.spec.module in data_discovery.DISCOVERY_MODULES:
             payload = final_record.to_dict()
-            payload["content_discovery"] = data_discovery.inspect_record(self.spec.module, payload)
+            payload["content_discovery"] = data_discovery.inspect_record(
+                self.spec.module,
+                payload,
+                max_bytes=int(getattr(self.args, "discover_max_bytes", None) or 50 * 1024 * 1024),
+                max_seconds=float(getattr(self.args, "discover_time", None) or 300.0),
+            )
             payload = data_discovery.project_discovery_output(self.args, payload)
             final_record = AuditRecord.from_mapping(
                 payload, module=self.spec.module, service=final_record.service or self.spec.module
