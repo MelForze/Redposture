@@ -155,6 +155,9 @@ class HttpSessionPool:
         self.default_retries = max(0, int(retries))
         self._idle: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = defaultdict(list)
         self._connections: set[http.client.HTTPConnection] = set()
+        # A Connection: close response can detach the socket from HTTPConnection
+        # before its body has been read. Keep it reachable for pool.close().
+        self._active_sockets: set[Any] = set()
         self._lock = threading.Lock()
         self._closed = False
         self._stats = {"connections": 0, "reused": 0, "requests": 0, "retries": 0}
@@ -241,12 +244,21 @@ class HttpSessionPool:
         connection, reused = self._acquire(key, timeout)
         response: http.client.HTTPResponse | None = None
         reusable = False
+        active_sock: Any | None = None
         try:
             request_headers = {str(name): str(value) for name, value in headers.items()}
             lowered = {name.lower() for name in request_headers}
             if "connection" not in lowered:
                 request_headers["Connection"] = "keep-alive"
             connection.request(method, _request_path(url), body=body, headers=request_headers)
+            active_sock = getattr(connection, "sock", None)
+            if active_sock is not None:
+                with self._lock:
+                    closed = self._closed
+                    if not closed:
+                        self._active_sockets.add(active_sock)
+                if closed:
+                    active_sock.shutdown(socket.SHUT_RDWR)
             response = connection.getresponse()
             cap = max(0, int(response_size_cap))
             payload = response.read(cap + 1)
@@ -281,6 +293,9 @@ class HttpSessionPool:
         except BaseException as exc:  # noqa: BLE001 - normalized for callers
             return HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc)), exc, reused
         finally:
+            if active_sock is not None:
+                with self._lock:
+                    self._active_sockets.discard(active_sock)
             if response is not None:
                 try:
                     response.close()
@@ -322,7 +337,9 @@ class HttpSessionPool:
                     timeout=attempt_timeout,
                     response_size_cap=response_size_cap,
                 )
-                if request_error is None or not safe or attempt >= attempts - 1:
+                # Closing the pool is a cancellation, not a transient network
+                # failure. Retrying would delay shutdown or race _acquire().
+                if self._closed or request_error is None or not safe or attempt >= attempts - 1:
                     return response
                 reason = transport.classify_failure_reason(response.error)
                 stale_protocol = isinstance(
@@ -382,8 +399,15 @@ class HttpSessionPool:
                 return
             self._closed = True
             connections = list(self._connections)
+            active_sockets = list(self._active_sockets)
             self._connections.clear()
+            self._active_sockets.clear()
             self._idle.clear()
+        for sock in active_sockets:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         for connection in connections:
             try:
                 sock = getattr(connection, "sock", None)

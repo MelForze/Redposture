@@ -24,7 +24,7 @@ For the current repository code, use `python -m venv .venv`, `source .venv/bin/a
 
 ## Usage
 
-Run `redposture MODULE -t TARGET`; `TARGET` can be a host, `host:port`, URL, CIDR/range, comma-separated list, or file. Use `redposture MODULE -h` for flags. `-o FILE` saves output; `-f json` selects JSON instead of TXT. `--debug` shows diagnostics. TXT contains confirmed services; unconfirmed detections remain in debug/JSON. Saved files contain no ANSI colors.
+Run `redposture MODULE -t TARGET`; `TARGET` can be a host, `host:port`, URL, CIDR/range, comma-separated list, or file. Use `redposture MODULE -h` for flags. `-o FILE` saves output; `-f json` selects JSON instead of TXT. `--debug` shows diagnostics. TXT contains confirmed services; unconfirmed detections remain in debug/JSON. Saved files contain no ANSI colors. `-ot, --out-target` removes matching hosts before ports are expanded; for example, `--out-target exclusions.txt`.
 
 ## Default credential checks
 

@@ -20,10 +20,8 @@ from redposture_core.modules.zookeeper.stage import _DEFAULT_CREDENTIALS as _ZOO
 
 def test_readme_default_credentials_table_matches_runtime_catalogs() -> None:
     readme = (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
-    table_heading = "## Default credentials checked by `--defcreds`"
-    examples_heading = "## Module Examples"
-    assert readme.index(table_heading) < readme.index(examples_heading)
-    table = readme.split(table_heading, 1)[1].split(examples_heading, 1)[0]
+    table_header = "| Module | Credential pairs checked |"
+    table = readme.split(table_header, 1)[1].split("For confirmed UI surfaces", 1)[0]
 
     catalogs = {
         "Grafana": [(username, password) for username, password, _source in grafana_credentials(None, None, True)],
