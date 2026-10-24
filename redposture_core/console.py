@@ -10,14 +10,10 @@ from .progress import suspend_active_progress_for_output
 
 _COLORS = {
     "blue": "1;94",
-    "green": "1;92",
     "bright_green": "1;92",
     "orange": "1;38;5;208",
     "yellow": "1;93",
-    "red": "1;91",
-    # 256-color pure red (#ff0000): unlike ANSI bright-red (91), it is taken from
-    # the 256-palette and is not remapped by a terminal theme, so it stays clearly
-    # red next to the 256-color orange above (some themes render 91 orange-ish).
+    # 256-color pure red (#ff0000) remains distinct from the orange above.
     "true_red": "1;38;5;196",
     "magenta": "1;95",
     "cyan": "1;96",
@@ -181,13 +177,13 @@ class Console:
         self._line("[*]", message, "blue", self._diagnostic_stream())
 
     def success(self, message: str) -> None:
-        self._line("[+]", message, "green", self._diagnostic_stream())
+        self._line("[+]", message, "bright_green", self._diagnostic_stream())
 
     def warn(self, message: str) -> None:
         self._line("[-]", message, "yellow", self._diagnostic_stream())
 
     def error(self, message: str) -> None:
-        self._line("[!]", message, "red", sys.stderr)
+        self._line("[!]", message, "true_red", sys.stderr)
 
     def debug(self, message: str) -> None:
         if not self.debug_enabled:

@@ -15,7 +15,7 @@ from typing import Any, Protocol, TextIO
 _PROGRESS_BAR_WIDTH = 38
 _NO_PROGRESS_ENV = "REDPOSTURE_NO_PROGRESS"
 _ANSI_RESET = "\033[0m"
-_ANSI_GREEN = "\033[32m"
+_ANSI_BRIGHT_GREEN = "\033[1;92m"
 _ANSI_CYAN = "\033[36m"
 _ANSI_DIM = "\033[2m"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -259,7 +259,7 @@ class ProgressBar:
                 f"{_ANSI_CYAN}{complete_segment}{marker_segment}{_ANSI_RESET}"
                 f"{_ANSI_DIM}{remaining_segment}{_ANSI_RESET}"
             )
-            colored_description = lambda s: f"{_ANSI_GREEN}{s}{_ANSI_RESET}"  # noqa: E731
+            colored_description = lambda s: f"{_ANSI_BRIGHT_GREEN}{s}{_ANSI_RESET}"  # noqa: E731
 
         elapsed = max(0.0, time.monotonic() - self._started)
         rate = (self._done / elapsed) if elapsed > 0 else 0.0

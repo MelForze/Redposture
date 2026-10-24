@@ -8,12 +8,22 @@ from typing import Any
 
 from ...clients.kafka import KAFKA_MAX_WRITE_VALUE_BYTES
 from ...stage_runtime import validate_basic_module_args
+from ..execution_api import validate as validate_execution
 
 
 def validate_args(args: Any, console: Any) -> int | None:
     common_rc = validate_basic_module_args(args, console, module="kafka", pure_http=False)
     if common_rc is not None:
         return common_rc
+    if (execution_rc := validate_execution(args, console)) is not None:
+        return execution_rc
+    if getattr(args, "execute", None) is not None and (
+        bool(getattr(args, "probe_write", False))
+        or getattr(args, "write_message", None) is not None
+        or getattr(args, "write_file", None) is not None
+    ):
+        console.error("--execute cannot be combined with --probe-write/--write-message/--write-file")
+        return 2
     max_messages = getattr(args, "max_messages", None)
     if max_messages is not None and int(max_messages) <= 0:
         console.error("--max-messages must be > 0")

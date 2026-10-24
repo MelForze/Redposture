@@ -135,6 +135,17 @@
         "state": "readable"
       }
     ],
+    "znode_dump_items": [
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "2"
+      },
+      {
+        "value": "<base64:wA==>"
+      }
+    ],
     "znode_truncated_reason": null,
     "znode_values": [
       "/keeper:<empty>",

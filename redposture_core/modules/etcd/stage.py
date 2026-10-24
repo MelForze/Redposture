@@ -42,7 +42,7 @@ def build_etcd_plan(args: Any) -> AuditCommandPlan:
 
 
 def build_etcd_spec(args: Any) -> ModuleAuditSpec:
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="etcd",
         label="ETCD",
         default_port=_DEFAULT_PORT,
@@ -56,6 +56,10 @@ def build_etcd_spec(args: Any) -> ModuleAuditSpec:
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
     )
+
+    from .async_detect import bind
+
+    return bind(spec)
 
 
 def run_etcd_stage(args: Any, logger: Any) -> int:

@@ -663,7 +663,7 @@ def test_nexus_storage_inventory_colors_follow_airflow_convention() -> None:
     assert any(color == "white" and "Nexus Assets Enumeration" in value for value, color in console.paints)
     console.paints.clear()
     assert product_render._render_colored_registry_line(console, "NEXUS\thost\t8081\t [-] asset not found: /missing")
-    assert ("[-]", "red") in console.paints
+    assert ("[-]", "true_red") in console.paints
 
 
 def test_nexus_asset_selector_filters_exact_path_and_reports_missing(monkeypatch: pytest.MonkeyPatch) -> None:

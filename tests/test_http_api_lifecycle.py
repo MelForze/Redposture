@@ -71,6 +71,7 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
         ("/api/user", grafana._auth_header("bad", "bad")),
         ("/api/user", grafana._auth_header("good", "good")),
         ("/api/user", None),
+        ("/api/health", grafana._auth_header("good", "good")),
         ("/api/datasources", grafana._auth_header("good", "good")),
     ]
     assert result.records[0]["status"] == "valid_credentials"

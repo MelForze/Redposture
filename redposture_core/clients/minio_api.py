@@ -13,10 +13,11 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode, urlsplit
 from xml.etree import ElementTree
 
+from ..detection_io import DetectCall, HttpRead, run_sync
 from . import s3_sigv4
 
 if TYPE_CHECKING:
@@ -132,6 +133,30 @@ class MinioClient:
         response_cap: int | None = None,
         body: bytes | None = None,
     ) -> MinioResponse:
+        return run_sync(
+            MinioClient._detect_request_steps(
+                self,
+                method,
+                path,
+                query,
+                signed=signed,
+                extra_headers=extra_headers,
+                response_cap=response_cap,
+                body=body,
+            )
+        )
+
+    def _detect_request_steps(
+        self,
+        method: str,
+        path: str,
+        query: str,
+        *,
+        signed: bool,
+        extra_headers: dict[str, str] | None = None,
+        response_cap: int | None = None,
+        body: bytes | None = None,
+    ) -> Any:
         endpoint = path if path.startswith("/") else "/" + path
         url = f"{self.base_url}{endpoint}"
         if query:
@@ -178,13 +203,16 @@ class MinioClient:
             headers = prepare(method, url, headers, body)
         cap = _RESPONSE_CAP if response_cap is None else max(1, int(response_cap))
         try:
-            resp = self._pool.request(
+            resp = yield HttpRead(
+                self._pool,
                 method,
                 url,
-                headers=headers,
-                body=body,
-                response_size_cap=cap,
-                prepare_request=prepare if signing else None,
+                {
+                    "headers": headers,
+                    "body": body,
+                    "response_size_cap": cap,
+                    "prepare_request": prepare if signing else None,
+                },
             )
         except Exception as exc:  # noqa: BLE001 - transport errors normalized for callers
             return MinioResponse(http_status=0, headers={}, body=b"", transport_error=str(exc))
@@ -212,7 +240,10 @@ class MinioClient:
         )
 
     def get_service_root(self, *, signed: bool) -> MinioResponse:
-        return self._request("GET", "/", "", signed=signed)
+        return run_sync(MinioClient._detect_get_service_root_steps(self, signed=signed))
+
+    def _detect_get_service_root_steps(self, *, signed: bool) -> Any:
+        return (yield DetectCall(self._request, ("GET", "/", ""), {"signed": signed}))
 
     def head_bucket(self, bucket: str, *, signed: bool) -> MinioResponse:
         return self._request("HEAD", f"/{quote(bucket)}", "", signed=signed)
@@ -241,20 +272,27 @@ class MinioClient:
         )
 
     def list_objects_v2(
-        self,
-        bucket: str,
-        *,
-        max_keys: int = 1,
-        prefix: str = "",
-        continuation_token: str | None = None,
-        signed: bool,
+        self, bucket: str, *, max_keys: int = 1, prefix: str = "", continuation_token: str | None = None, signed: bool
     ) -> MinioResponse:
+        return run_sync(
+            MinioClient._detect_list_objects_v2_steps(
+                self, bucket, max_keys=max_keys, prefix=prefix, continuation_token=continuation_token, signed=signed
+            )
+        )
+
+    def _detect_list_objects_v2_steps(
+        self, bucket: str, *, max_keys: int = 1, prefix: str = "", continuation_token: str | None = None, signed: bool
+    ) -> Any:
         params = {"list-type": "2", "max-keys": str(max(1, int(max_keys)))}
         if prefix:
             params["prefix"] = prefix
         if continuation_token:
             params["continuation-token"] = continuation_token
-        return self._request("GET", f"/{quote(bucket)}", urlencode(params, quote_via=quote), signed=signed)
+        return (
+            yield DetectCall(
+                self._request, ("GET", f"/{quote(bucket)}", urlencode(params, quote_via=quote)), {"signed": signed}
+            )
+        )
 
     def head_object(self, bucket: str, key: str, *, signed: bool) -> MinioResponse:
         path = f"/{quote(bucket)}/{quote(key, safe='/')}"
@@ -285,10 +323,16 @@ class MinioClient:
         return self._request("GET", path, "", signed=signed, response_cap=max(1, int(max_bytes)))
 
     def health(self, kind: str) -> MinioResponse:
-        return self._request("GET", f"/minio/health/{kind}", "", signed=False)
+        return run_sync(MinioClient._detect_health_steps(self, kind))
+
+    def _detect_health_steps(self, kind: str) -> Any:
+        return (yield DetectCall(self._request, ("GET", f"/minio/health/{kind}", ""), {"signed": False}))
 
     def admin_info(self, *, signed: bool = True) -> MinioResponse:
-        return self._request("GET", "/minio/admin/v3/info", "", signed=signed)
+        return run_sync(MinioClient._detect_admin_info_steps(self, signed=signed))
+
+    def _detect_admin_info_steps(self, *, signed: bool = True) -> Any:
+        return (yield DetectCall(self._request, ("GET", "/minio/admin/v3/info", ""), {"signed": signed}))
 
     def account_info(self, *, signed: bool = True) -> MinioResponse:
         return self._request("GET", "/minio/admin/v3/accountinfo", "", signed=signed)

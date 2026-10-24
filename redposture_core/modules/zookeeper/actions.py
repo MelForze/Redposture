@@ -42,6 +42,8 @@ from ...clients.zookeeper import (
     _znode_detail_entry,
 )
 from ...console import Console
+from ...detection_io import DetectCall as _DetectCall
+from ...detection_io import run_sync as _run_detect_sync
 from ...rendering import (
     BooleanColorRule,
     CountColorRule,
@@ -227,24 +229,26 @@ def _normalize_auth_probe_result(err_code: int) -> tuple[str, str]:
 
 
 def _run_anonymous_auth_probe(
-    host: str,
-    port: int,
-    timeout: float,
-    path: str,
-    transport_config: ZkTransportConfig | None = None,
+    host: str, port: int, timeout: float, path: str, transport_config: ZkTransportConfig | None = None
 ) -> tuple[int | None, str | None]:
+    return _run_detect_sync(_run_anonymous_auth_probe_detect_steps(host, port, timeout, path, transport_config))
+
+
+def _run_anonymous_auth_probe_detect_steps(
+    host: str, port: int, timeout: float, path: str, transport_config: ZkTransportConfig | None = None
+):
     if transport_config is None:
         probe_client = _ZkClient(host, port, timeout)
     else:
         probe_client = _ZkClient(host, port, timeout, transport_config=transport_config)
     try:
-        probe_client.connect()
-        _children, probe_err, _stat = probe_client.get_children2(path)
-        return int(probe_err), None
+        yield _DetectCall(probe_client.connect, (), {})
+        _children, probe_err, _stat = yield _DetectCall(probe_client.get_children2, (path,), {})
+        return (int(probe_err), None)
     except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
-        return None, _friendly_error_from_exception(exc)
+        return (None, _friendly_error_from_exception(exc))
     finally:
-        probe_client.close()
+        yield _DetectCall(probe_client.close, (), {})
 
 
 def _infer_auth_required_from_anonymous_probes(
@@ -255,32 +259,37 @@ def _infer_auth_required_from_anonymous_probes(
     query_znode: str | None,
     transport_config: ZkTransportConfig | None = None,
 ) -> tuple[bool | None, str, list[str]]:
+    return _run_detect_sync(
+        _infer_auth_required_from_anonymous_probes_detect_steps(
+            host, port, timeout, root_err, query_znode, transport_config
+        )
+    )
+
+
+def _infer_auth_required_from_anonymous_probes_detect_steps(
+    host: str,
+    port: int,
+    timeout: float,
+    root_err: int,
+    query_znode: str | None,
+    transport_config: ZkTransportConfig | None = None,
+):
     root_state, root_code = _normalize_auth_probe_result(root_err)
     trace = [f"/:{root_code}"]
     if root_state == "noauth":
-        return True, "root_noauth", trace
+        return (True, "root_noauth", trace)
     if root_state == "auth_required":
-        return True, "session_closed_requires_auth", trace
-    if root_state == "ok" and not query_znode:
-        return False, "root_ok", trace
-
-    # A caller-selected znode is authoritative even when / is public.  Only
-    # fall back to the generic system probes when the root result itself was
-    # inconclusive; querying them on every public endpoint adds noise and
-    # cannot improve the explicit-path decision.
+        return (True, "session_closed_requires_auth", trace)
+    if root_state == "ok" and (not query_znode):
+        return (False, "root_ok", trace)
     probe_paths: list[str] = [] if root_state == "ok" else ["/zookeeper", "/zookeeper/config"]
     normalized_query = _normalize_znode_path(query_znode)
     if normalized_query and normalized_query not in probe_paths:
         probe_paths.append(normalized_query)
-
     saw_ok = False
     for probe_path in probe_paths:
-        probe_err, probe_exc = _run_anonymous_auth_probe(
-            host,
-            port,
-            timeout,
-            probe_path,
-            transport_config=transport_config,
+        probe_err, probe_exc = yield _DetectCall(
+            _run_anonymous_auth_probe, (host, port, timeout, probe_path), {"transport_config": transport_config}
         )
         if probe_exc:
             trace.append(f"{probe_path}:error:{probe_exc}")
@@ -291,17 +300,16 @@ def _infer_auth_required_from_anonymous_probes(
         probe_state, probe_code = _normalize_auth_probe_result(probe_err)
         trace.append(f"{probe_path}:{probe_code}")
         if probe_state == "noauth":
-            return True, "probe_noauth", trace
+            return (True, "probe_noauth", trace)
         if probe_state == "auth_required":
-            return True, "probe_session_closed_requires_auth", trace
+            return (True, "probe_session_closed_requires_auth", trace)
         if probe_state == "ok":
             saw_ok = True
-
     if root_state == "ok":
-        return False, "root_ok", trace
+        return (False, "root_ok", trace)
     if saw_ok:
-        return False, "probe_ok", trace
-    return None, "inconclusive", trace
+        return (False, "probe_ok", trace)
+    return (None, "inconclusive", trace)
 
 
 def _credential_verification_paths(
@@ -363,8 +371,21 @@ def _collect_session_auth_probes(
     known_root_err: int | None = None,
     discovered_children: dict[str, list[str]] | None = None,
 ) -> tuple[dict[str, int | None], dict[str, str]]:
-    """Probe a fixed path set on one session without mutating server state."""
+    return _run_detect_sync(
+        _collect_session_auth_probes_detect_steps(
+            client, paths, known_root_err=known_root_err, discovered_children=discovered_children
+        )
+    )
 
+
+def _collect_session_auth_probes_detect_steps(
+    client: _ZkClient,
+    paths: tuple[str, ...],
+    *,
+    known_root_err: int | None = None,
+    discovered_children: dict[str, list[str]] | None = None,
+):
+    """Probe a fixed path set on one session without mutating server state."""
     results: dict[str, int | None] = {}
     errors: dict[str, str] = {}
     for path in paths:
@@ -372,7 +393,7 @@ def _collect_session_auth_probes(
             results[path] = int(known_root_err)
             continue
         try:
-            children, err, _stat = client.get_children2(path)
+            children, err, _stat = yield _DetectCall(client.get_children2, (path,), {})
             results[path] = int(err)
             if discovered_children is not None and int(err) == _ZK_ERR_OK:
                 discovered_children[path] = list(children or [])
@@ -381,11 +402,9 @@ def _collect_session_auth_probes(
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             results[path] = None
             errors[path] = _friendly_error_from_exception(exc)
-            # SESSIONCLOSEDREQUIRESASLAUTH closes the anonymous session. Once a
-            # server has done that, later reads on the same session are noise.
             if results.get("/") == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH:
                 break
-    return results, errors
+    return (results, errors)
 
 
 def _collect_anonymous_verifier_probes(
@@ -396,19 +415,29 @@ def _collect_anonymous_verifier_probes(
     *,
     root_err: int,
 ) -> tuple[dict[str, int | None], dict[str, str]]:
-    """Find protected descendants with bounded, read-only anonymous probes."""
+    return _run_detect_sync(
+        _collect_anonymous_verifier_probes_detect_steps(
+            client, root_children, query_znode, auth_probe_trace, root_err=root_err
+        )
+    )
 
+
+def _collect_anonymous_verifier_probes_detect_steps(
+    client: _ZkClient,
+    root_children: list[str] | None,
+    query_znode: str | None,
+    auth_probe_trace: tuple[str, ...] | list[str],
+    *,
+    root_err: int,
+):
+    """Find protected descendants with bounded, read-only anonymous probes."""
     initial_paths = _credential_verifier_candidates(root_children, query_znode, auth_probe_trace)
     children_by_path: dict[str, list[str]] = {}
-    results, errors = _collect_session_auth_probes(
-        client,
-        initial_paths,
-        known_root_err=root_err,
-        discovered_children=children_by_path,
+    results, errors = yield _DetectCall(
+        _collect_session_auth_probes,
+        (client, initial_paths),
+        {"known_root_err": root_err, "discovered_children": children_by_path},
     )
-    # Protected nodes are often nested under several public ClickHouse or
-    # application paths. Walk public children breadth-first, with a strict
-    # 32-request budget and a four-component depth limit per target.
     pending = [path for path in initial_paths if path != "/" and results.get(path) == _ZK_ERR_OK]
     extra_budget = 32
     while pending and extra_budget > 0:
@@ -427,13 +456,13 @@ def _collect_anonymous_verifier_probes(
         if not candidates:
             continue
         extra_budget -= len(candidates)
-        extra_results, extra_errors = _collect_session_auth_probes(
-            client, tuple(candidates), discovered_children=children_by_path
+        extra_results, extra_errors = yield _DetectCall(
+            _collect_session_auth_probes, (client, tuple(candidates)), {"discovered_children": children_by_path}
         )
         results.update(extra_results)
         errors.update(extra_errors)
         pending.extend(path for path in candidates if results.get(path) == _ZK_ERR_OK)
-    return results, errors
+    return (results, errors)
 
 
 def _serialized_auth_probe_results(
@@ -758,6 +787,7 @@ def _audit_zookeeper_host(
         stage_duration_totals_ms: dict[str, int] | None = None,
         stage_attempt_totals: dict[str, int] | None = None,
         credential_verdict: str | None = None,
+        znode_dump_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         resolved_stage_durations = dict(stage_duration_totals_ms or stage_durations_ms)
         resolved_stage_attempts = dict(stage_attempt_totals or stage_attempts)
@@ -793,6 +823,7 @@ def _audit_zookeeper_host(
             "znodes": znodes,
             "znode_details": znode_details,
             "znode_values": znode_values,
+            "znode_dump_items": znode_dump_items,
             "znodes_truncated": znodes_truncated,
             "query_znode_value": query_znode_value,
             "query_znode_dump": query_znode_dump,
@@ -1461,13 +1492,17 @@ def _audit_zookeeper_host(
             dump_error_codes: set[str] = set()
 
             znode_values: list[str] | None = None
+            znode_dump_items: list[dict[str, Any]] | None = None
             if dump and not query_znode:
                 znode_values = []
+                znode_dump_items = []
                 dump_paths = sorted_znodes[:dump_limit] if dump_limit is not None else sorted_znodes
                 for path in dump_paths:
                     value_bytes, value_err, _value_stat = client.get_data(path)
                     if value_err == _ZK_ERR_OK:
-                        znode_values.append(f"{path}:{_format_znode_data(value_bytes)}")
+                        formatted = _format_znode_data(value_bytes)
+                        znode_values.append(f"{path}:{formatted}")
+                        znode_dump_items.append({"path": path, "value": formatted})
                     elif value_err == _ZK_ERR_NOAUTH:
                         znode_values.append(f"{path}:<{noauth_detail_text}>")
                         dump_error_codes.add("NOAUTH")
@@ -1593,6 +1628,7 @@ def _audit_zookeeper_host(
                 znodes=sorted_znodes,
                 znode_details=znode_details,
                 znode_values=znode_values,
+                znode_dump_items=znode_dump_items,
                 znodes_truncated=truncated if collect_znode_paths else False,
                 query_znode_value=query_znode_value,
                 query_znode_dump=query_znode_dump,
@@ -1863,8 +1899,11 @@ def _zookeeper_update_lifecycle_payload(
 
 
 def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
-    """Open one anonymous session and classify ZooKeeper from the root query."""
+    return _run_detect_sync(_detect_zookeeper_detect_steps(ctx, options))
 
+
+def _detect_zookeeper_detect_steps(ctx: Any, options: Mapping[str, Any]):
+    """Open one anonymous session and classify ZooKeeper from the root query."""
     state = ctx.lifecycle_state
     if not isinstance(state, ZooKeeperLifecycleState):
         raise TypeError("zookeeper lifecycle state is unavailable")
@@ -1875,18 +1914,15 @@ def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
     for attempt in range(attempts):
         attempt_started = time.monotonic()
         client = _zookeeper_lifecycle_client(
-            ctx,
-            requested_transport if isinstance(requested_transport, ZkTransportConfig) else None,
+            ctx, requested_transport if isinstance(requested_transport, ZkTransportConfig) else None
         )
         try:
             connect_and_get_root = getattr(client, "connect_and_get_root", None)
             if callable(connect_and_get_root):
-                root_children, root_err, _root_stat = connect_and_get_root()
+                root_children, root_err, _root_stat = yield _DetectCall(connect_and_get_root, (), {})
             else:
-                # Compatibility boundary for tests and third-party client
-                # doubles that implement the historical connect/get pair.
-                client.connect()
-                root_children, root_err, _root_stat = client.get_children2("/")
+                yield _DetectCall(client.connect, (), {})
+                root_children, root_err, _root_stat = yield _DetectCall(client.get_children2, ("/",), {})
             selected_transport = getattr(client, "selected_transport", None)
             if isinstance(requested_transport, ZkTransportConfig):
                 selected_mode = (
@@ -1899,27 +1935,34 @@ def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
             if (
                 root_err != _ZK_ERR_OK
                 and _is_retryable_stage_error(_zk_error_name(root_err))
-                and attempt < attempts - 1
+                and (attempt < attempts - 1)
             ):
-                client.close()
-                time.sleep(_retry_delay(attempt))
+                yield _DetectCall(client.close, (), {})
+                yield _DetectCall(time.sleep, (_retry_delay(attempt),), {})
                 continue
             if selected_config is not None:
-                auth_required, source, trace = _infer_auth_required_from_anonymous_probes(
-                    str(ctx.host),
-                    int(ctx.port),
-                    float(getattr(ctx.args, "timeout", 5.0)),
-                    root_err,
-                    options.get("query_znode"),
-                    transport_config=selected_config,
+                auth_required, source, trace = yield _DetectCall(
+                    _infer_auth_required_from_anonymous_probes,
+                    (
+                        str(ctx.host),
+                        int(ctx.port),
+                        float(getattr(ctx.args, "timeout", 5.0)),
+                        root_err,
+                        options.get("query_znode"),
+                    ),
+                    {"transport_config": selected_config},
                 )
             else:
-                auth_required, source, trace = _infer_auth_required_from_anonymous_probes(
-                    str(ctx.host),
-                    int(ctx.port),
-                    float(getattr(ctx.args, "timeout", 5.0)),
-                    root_err,
-                    options.get("query_znode"),
+                auth_required, source, trace = yield _DetectCall(
+                    _infer_auth_required_from_anonymous_probes,
+                    (
+                        str(ctx.host),
+                        int(ctx.port),
+                        float(getattr(ctx.args, "timeout", 5.0)),
+                        root_err,
+                        options.get("query_znode"),
+                    ),
+                    {},
                 )
             state.anonymous_client = client
             state.selected_transport_config = selected_config
@@ -1935,12 +1978,10 @@ def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
                 or getattr(ctx.args, "password", None) is not None
             )
             if auth_requested:
-                probe_results, probe_errors = _collect_anonymous_verifier_probes(
-                    client,
-                    list(root_children or []),
-                    options.get("query_znode"),
-                    trace,
-                    root_err=int(root_err),
+                probe_results, probe_errors = yield _DetectCall(
+                    _collect_anonymous_verifier_probes,
+                    (client, list(root_children or []), options.get("query_znode"), trace),
+                    {"root_err": int(root_err)},
                 )
                 state.anonymous_auth_probe_results = probe_results
                 state.anonymous_auth_probe_errors = probe_errors
@@ -1966,38 +2007,17 @@ def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
             else:
                 status = "fail"
                 error = f"root query failed: {_zk_error_name(root_err)}"
-            payload = _zookeeper_lifecycle_payload(
-                ctx,
-                options,
-                state,
-                status=status,
-                is_zookeeper=True,
-                error=error,
-            )
+            payload = _zookeeper_lifecycle_payload(ctx, options, state, status=status, is_zookeeper=True, error=error)
             payload["attempts"] = attempt + 1
-            # Successful detection intentionally leaves telemetry empty. The
-            # shared runner then owns the complete detect/auth/capabilities/data
-            # contract instead of mixing runner- and module-owned traces.
             return payload
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             last_error = _friendly_error_from_exception(exc)
-            failed_attempts.append(
-                (
-                    attempt + 1,
-                    int((time.monotonic() - attempt_started) * 1000),
-                    last_error,
-                )
-            )
-            client.close()
+            failed_attempts.append((attempt + 1, int((time.monotonic() - attempt_started) * 1000), last_error))
+            yield _DetectCall(client.close, (), {})
             if attempt < attempts - 1:
-                time.sleep(_retry_delay(attempt))
+                yield _DetectCall(time.sleep, (_retry_delay(attempt),), {})
     payload = _zookeeper_lifecycle_payload(
-        ctx,
-        options,
-        state,
-        status="fail",
-        is_zookeeper=False,
-        error=last_error or "connection failed",
+        ctx, options, state, status="fail", is_zookeeper=False, error=last_error or "connection failed"
     )
     payload["connect_error"] = last_error or "connection failed"
     for failed_attempt, duration_ms, attempt_error in failed_attempts:
@@ -2626,6 +2646,7 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
     dump_started = time.monotonic() if (dump or query_znode) else None
     dump_errors: set[str] = set()
     znode_values: list[str] | None = None
+    znode_dump_items: list[dict[str, Any]] | None = None
     if dump and collect_paths and reopen_error is None:
         refreshed_client, dump_reopen_error = _refresh_zookeeper_lifecycle_client(
             ctx,
@@ -2642,6 +2663,7 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
         dump_errors.add(refresh_action_error)
     if dump and not query_znode and reopen_error is None:
         znode_values = []
+        znode_dump_items = []
         dump_limit = options.get("dump_limit")
         dump_paths = sorted_znodes[: int(dump_limit)] if isinstance(dump_limit, int) else sorted_znodes
         for path in dump_paths:
@@ -2661,7 +2683,9 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
                 continue
             value, value_err, _stat = read_result
             if value_err == _ZK_ERR_OK:
-                znode_values.append(f"{path}:{_format_znode_data(value)}")
+                formatted = _format_znode_data(value)
+                znode_values.append(f"{path}:{formatted}")
+                znode_dump_items.append({"path": path, "value": formatted})
             elif value_err == _ZK_ERR_NOAUTH:
                 znode_values.append(f"{path}:<{noauth_text}>")
                 dump_errors.add("NOAUTH")
@@ -2775,6 +2799,7 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
             "znodes": sorted_znodes,
             "znode_details": znode_details,
             "znode_values": znode_values,
+            "znode_dump_items": znode_dump_items,
             "znodes_truncated": bool(truncated or noauth_partial or refresh_blocked_enumeration),
             "query_znode_value": query_value,
             "query_znode_dump": query_dump,
@@ -2890,6 +2915,7 @@ def _merge_stage2_record(
         "znodes",
         "znode_details",
         "znode_values",
+        "znode_dump_items",
         "znodes_truncated",
         "query_znode_value",
         "query_znode_dump",
@@ -2949,6 +2975,7 @@ def _merge_stage2_record(
     merged["znodes"] = detect_record.get("znodes")
     merged["znode_details"] = detect_record.get("znode_details")
     merged["znode_values"] = detect_record.get("znode_values")
+    merged["znode_dump_items"] = detect_record.get("znode_dump_items")
     merged["znodes_truncated"] = bool(detect_record.get("znodes_truncated"))
     merged["query_znode_value"] = detect_record.get("query_znode_value")
     merged["query_znode_dump"] = detect_record.get("query_znode_dump")
@@ -3481,7 +3508,7 @@ def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
                     line,
                     tag=tag,
                     spans=((reason_start, reason_end, "orange"),),
-                    marker_colors={"[*]": "white", "[+]": "bright_green", "[-]": "red", "[!]": "yellow"},
+                    marker_colors={"[*]": "white", "[+]": "bright_green", "[-]": "true_red", "[!]": "yellow"},
                 )
         if (
             line.startswith(tag)
@@ -3505,7 +3532,7 @@ def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
                 line,
                 tag=tag,
                 spans=((0, len(payload), "orange"),),
-                marker_colors={"[*]": "white", "[+]": "bright_green", "[-]": "red", "[!]": "yellow"},
+                marker_colors={"[*]": "white", "[+]": "bright_green", "[-]": "true_red", "[!]": "yellow"},
             )
         literals: tuple[tuple[str, str], ...] = (
             ("(transport:plaintext)", "yellow"),
@@ -3513,7 +3540,7 @@ def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
         )
         if tag == "KEEPER":
             literals += (
-                ("(ddl access:Write)", "red"),
+                ("(ddl access:Write)", "true_red"),
                 ("(ddl access:Read)", "orange"),
                 ("(ddl access:Denied)", "bright_green"),
                 ("(ddl access:Absent)", "bright_green"),
@@ -3526,8 +3553,8 @@ def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
             literals=literals,
             booleans=(BooleanColorRule("create"), BooleanColorRule("delete")),
             counts=(
-                CountColorRule("znodes", "red", unknown_color="orange", zero_color="bright_green"),
-                CountColorRule("Count", "red", unknown_color="orange", zero_color="bright_green"),
+                CountColorRule("znodes", "true_red", unknown_color="orange", zero_color="bright_green"),
+                CountColorRule("Count", "true_red", unknown_color="orange", zero_color="bright_green"),
             ),
             extra_spans=lambda marker, payload: (
                 [(0, len(payload.split(" (", 1)[0]), "true_red" if marker == "[+]" else "white")]
@@ -3584,3 +3611,13 @@ def _update_debug_stats(debug_stats: dict[str, Any], record: dict[str, Any]) -> 
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_host_with_thread_debug
+
+
+# Exact synchronous wrappers are the compatibility/override identities.
+_ASYNC_RETAINED_STEPS = {
+    _run_anonymous_auth_probe: _run_anonymous_auth_probe_detect_steps,
+    _infer_auth_required_from_anonymous_probes: _infer_auth_required_from_anonymous_probes_detect_steps,
+    _collect_session_auth_probes: _collect_session_auth_probes_detect_steps,
+    _collect_anonymous_verifier_probes: _collect_anonymous_verifier_probes_detect_steps,
+    detect_zookeeper: _detect_zookeeper_detect_steps,
+}

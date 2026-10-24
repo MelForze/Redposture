@@ -22,6 +22,7 @@ from ...clients.http_api import HttpApiClient, HttpClientConfig, format_http_aut
 from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
+from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
     DEFAULT_MAX_NETWORK_HOSTS,
@@ -174,6 +175,25 @@ def _http_request(
     headers: dict[str, str] | None = None,
     body: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
+    return run_sync(
+        _http_request_steps(
+            host, port, method, path, timeout, use_https=use_https, insecure=insecure, headers=headers, body=body
+        )
+    )
+
+
+def _http_request_steps(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    use_https: bool,
+    insecure: bool,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+) -> Any:
     scheme = "https" if use_https else "http"
     replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
     if isinstance(replay, ConsulLifecycleState):
@@ -200,26 +220,33 @@ def _http_request(
     client_key = replay.client_key if use_https and isinstance(replay, ConsulLifecycleState) else None
     response_cap = 256 * 1024 if parsed_path.path in {"/v1/status/leader", "/v1/agent/self"} else 10 * 1024 * 1024
     if isinstance(replay, ConsulLifecycleState) and replay.http is not None:
-        response = replay.http.request(
+        response = yield HttpRead(
+            replay.http,
             method,
             url,
-            headers=request_headers,
-            body=body,
-            timeout=timeout,
-            response_size_cap=response_cap,
-            replay_safe=method.upper() in {"GET", "HEAD"},
+            {
+                "headers": request_headers,
+                "body": body,
+                "timeout": timeout,
+                "response_size_cap": response_cap,
+                "replay_safe": method.upper() in {"GET", "HEAD"},
+            },
         )
     else:
-        response = HttpApiClient(
-            HttpClientConfig(
-                timeout=timeout,
-                insecure=bool(use_https and insecure),
-                ca_file=ca_file,
-                client_cert=client_cert,
-                client_key=client_key,
-                response_size_cap=response_cap,
-            )
-        ).request(method, url, headers=request_headers, body=body, timeout=timeout)
+        response = yield DetectCall(
+            HttpApiClient(
+                HttpClientConfig(
+                    timeout=timeout,
+                    insecure=bool(use_https and insecure),
+                    ca_file=ca_file,
+                    client_cert=client_cert,
+                    client_key=client_key,
+                    response_size_cap=response_cap,
+                )
+            ).request,
+            (method, url),
+            {"headers": request_headers, "body": body, "timeout": timeout},
+        )
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
     if isinstance(replay, ConsulLifecycleState):
@@ -247,8 +274,29 @@ def _request_with_tls_fallback(
     headers: dict[str, str] | None = None,
     body: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None, bool, bool]:
-    status, payload, resp_headers, error = _http_request(
-        host, port, method, path, timeout, use_https=use_https, insecure=insecure, headers=headers, body=body
+    return run_sync(
+        _request_with_tls_fallback_steps(
+            host, port, method, path, timeout, use_https=use_https, insecure=insecure, headers=headers, body=body
+        )
+    )
+
+
+def _request_with_tls_fallback_steps(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    use_https: bool,
+    insecure: bool,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+) -> Any:
+    status, payload, resp_headers, error = yield DetectCall(
+        _http_request,
+        (host, port, method, path, timeout),
+        {"use_https": use_https, "insecure": insecure, "headers": headers, "body": body},
     )
     return status, payload, resp_headers, error, insecure, False
 
@@ -318,15 +366,25 @@ def _consul_get_json_any(
     insecure: bool,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, Any, str | None, bool, bool]:
-    status, payload, _resp_headers, error, effective_insecure, tls_auto = _request_with_tls_fallback(
-        host,
-        port,
-        "GET",
-        path,
-        timeout,
-        use_https=use_https,
-        insecure=insecure,
-        headers=headers,
+    return run_sync(
+        _consul_get_json_any_steps(host, port, path, timeout, use_https=use_https, insecure=insecure, headers=headers)
+    )
+
+
+def _consul_get_json_any_steps(
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    *,
+    use_https: bool,
+    insecure: bool,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    status, payload, _resp_headers, error, effective_insecure, tls_auto = yield DetectCall(
+        _request_with_tls_fallback,
+        (host, port, "GET", path, timeout),
+        {"use_https": use_https, "insecure": insecure, "headers": headers},
     )
     if error:
         return status, None, error, effective_insecure, tls_auto
@@ -339,13 +397,18 @@ def _consul_get_json_any(
 
 
 def _probe_consul_scheme(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    preferred_scheme: str | None = None,
-    allow_scheme_fallback: bool = True,
+    host: str, port: int, timeout: float, *, preferred_scheme: str | None = None, allow_scheme_fallback: bool = True
 ) -> tuple[bool, str | None, bool, bool, str | None, str | None]:
+    return run_sync(
+        _probe_consul_scheme_steps(
+            host, port, timeout, preferred_scheme=preferred_scheme, allow_scheme_fallback=allow_scheme_fallback
+        )
+    )
+
+
+def _probe_consul_scheme_steps(
+    host: str, port: int, timeout: float, *, preferred_scheme: str | None = None, allow_scheme_fallback: bool = True
+) -> Any:
     replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
     if isinstance(replay, ConsulLifecycleState) and replay.scheme is not None:
         return True, replay.scheme, replay.insecure, replay.tls_auto_insecure, replay.leader, None
@@ -369,29 +432,19 @@ def _probe_consul_scheme(
             replay.origin_scheme = scheme
             replay.host = str(host)
             replay.port = int(port)
-        status, payload, response_headers, error, effective_insecure, tls_auto = _request_with_tls_fallback(
-            host,
-            port,
-            "GET",
-            "/v1/status/leader",
-            timeout,
-            use_https=(scheme == "https"),
-            insecure=requested_insecure,
+        status, payload, response_headers, error, effective_insecure, tls_auto = yield DetectCall(
+            _request_with_tls_fallback,
+            (host, port, "GET", "/v1/status/leader", timeout),
+            {"use_https": scheme == "https", "insecure": requested_insecure},
         )
         if error:
             last_error = error
             continue
         if _looks_like_consul_payload(status, payload):
-            peer_status, peer_payload, peer_headers, peer_error, peer_insecure, peer_tls_auto = (
-                _request_with_tls_fallback(
-                    host,
-                    port,
-                    "GET",
-                    "/v1/status/peers",
-                    timeout,
-                    use_https=(scheme == "https"),
-                    insecure=effective_insecure,
-                )
+            peer_status, peer_payload, peer_headers, peer_error, peer_insecure, peer_tls_auto = yield DetectCall(
+                _request_with_tls_fallback,
+                (host, port, "GET", "/v1/status/peers", timeout),
+                {"use_https": scheme == "https", "insecure": effective_insecure},
             )
             if peer_error is None and (
                 _looks_like_consul_peers_payload(peer_status, peer_payload)
@@ -422,7 +475,7 @@ def _probe_consul_scheme(
     return False, None, False, False, None, last_error or "connection failed"
 
 
-def _unauthorized_status(status: int) -> bool:
+def _unauthorized_status(status: int | None) -> bool:
     return status in {401, 403}
 
 
@@ -463,18 +516,32 @@ def _scope_probe(
     headers: dict[str, str] | None = None,
     count_fn: Callable[[Any], int | None],
 ) -> dict[str, Any]:
-    status, payload, error, effective_insecure, tls_auto = _consul_get_json_any(
-        host,
-        port,
-        path,
-        timeout,
-        use_https=(scheme == "https"),
-        insecure=insecure,
-        headers=headers,
+    return run_sync(
+        _scope_probe_steps(
+            host, port, path, timeout, scheme=scheme, insecure=insecure, headers=headers, count_fn=count_fn
+        )
+    )
+
+
+def _scope_probe_steps(
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    *,
+    scheme: str,
+    insecure: bool,
+    headers: dict[str, str] | None = None,
+    count_fn: Callable[[Any], int | None],
+) -> Any:
+    status, payload, error, effective_insecure, tls_auto = yield DetectCall(
+        _consul_get_json_any,
+        (host, port, path, timeout),
+        {"use_https": scheme == "https", "insecure": insecure, "headers": headers},
     )
     result: dict[str, Any] = {
         "status": status,
-        "ok": False,
+        "ok": None,
         "count": None,
         "error": None,
         "tls_auto_insecure": tls_auto,
@@ -485,11 +552,13 @@ def _scope_probe(
         return result
     if status == 200:
         result["count"] = count_fn(payload)
-        result["ok"] = result["count"] is not None
-        if not result["ok"]:
+        if result["count"] is not None:
+            result["ok"] = True
+        else:
             result["error"] = "invalid resource response"
         return result
     if _unauthorized_status(status):
+        result["ok"] = False
         result["error"] = "Unauthorized" if status == 401 else "Forbidden"
         return result
     body_text = _clip(str(payload or ""), 120)
@@ -548,14 +617,14 @@ def _prepare_auth_cache(state: ConsulLifecycleState, headers: dict[str, str]) ->
 
 
 def _agent_self_probe(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    scheme: str,
-    insecure: bool,
-    headers: dict[str, str] | None = None,
+    host: str, port: int, timeout: float, *, scheme: str, insecure: bool, headers: dict[str, str] | None = None
 ) -> dict[str, Any]:
+    return run_sync(_agent_self_probe_steps(host, port, timeout, scheme=scheme, insecure=insecure, headers=headers))
+
+
+def _agent_self_probe_steps(
+    host: str, port: int, timeout: float, *, scheme: str, insecure: bool, headers: dict[str, str] | None = None
+) -> Any:
     replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
     if isinstance(replay, ConsulLifecycleState):
         if headers:
@@ -563,18 +632,14 @@ def _agent_self_probe(
         cached = replay.auth_self if headers else replay.anonymous_self
         if cached is not None:
             return dict(cached)
-    status, payload, error, effective_insecure, tls_auto = _consul_get_json_any(
-        host,
-        port,
-        "/v1/agent/self",
-        timeout,
-        use_https=(scheme == "https"),
-        insecure=insecure,
-        headers=headers,
+    status, payload, error, effective_insecure, tls_auto = yield DetectCall(
+        _consul_get_json_any,
+        (host, port, "/v1/agent/self", timeout),
+        {"use_https": scheme == "https", "insecure": insecure, "headers": headers},
     )
     result: dict[str, Any] = {
         "status": status,
-        "ok": False,
+        "ok": None,
         "error": None,
         "version": None,
         "local_script_checks": None,
@@ -590,6 +655,7 @@ def _agent_self_probe(
         return result
     if status != 200 or not isinstance(payload, dict):
         if _unauthorized_status(status):
+            result["ok"] = False
             result["error"] = "Unauthorized" if status == 401 else "Forbidden"
         else:
             result["error"] = f"unexpected status={status}"
@@ -668,14 +734,14 @@ def _acl_token_self_probe(
 
 
 def _consul_access_matrix(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    scheme: str,
-    insecure: bool,
-    headers: dict[str, str] | None = None,
+    host: str, port: int, timeout: float, *, scheme: str, insecure: bool, headers: dict[str, str] | None = None
 ) -> dict[str, Any]:
+    return run_sync(_consul_access_matrix_steps(host, port, timeout, scheme=scheme, insecure=insecure, headers=headers))
+
+
+def _consul_access_matrix_steps(
+    host: str, port: int, timeout: float, *, scheme: str, insecure: bool, headers: dict[str, str] | None = None
+) -> Any:
     replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
     if isinstance(replay, ConsulLifecycleState):
         if headers:
@@ -684,35 +750,26 @@ def _consul_access_matrix(
         if cached is not None:
             return dict(cached)
     probes = {
-        "kv": _scope_probe(
-            host,
-            port,
-            "/v1/kv/?keys&recurse",
-            timeout,
-            scheme=scheme,
-            insecure=insecure,
-            headers=headers,
-            count_fn=_count_kv_keys,
+        "kv": (
+            yield DetectCall(
+                _scope_probe,
+                (host, port, "/v1/kv/?keys&recurse", timeout),
+                {"scheme": scheme, "insecure": insecure, "headers": headers, "count_fn": _count_kv_keys},
+            )
         ),
-        "services": _scope_probe(
-            host,
-            port,
-            "/v1/catalog/services",
-            timeout,
-            scheme=scheme,
-            insecure=insecure,
-            headers=headers,
-            count_fn=_count_services,
+        "services": (
+            yield DetectCall(
+                _scope_probe,
+                (host, port, "/v1/catalog/services", timeout),
+                {"scheme": scheme, "insecure": insecure, "headers": headers, "count_fn": _count_services},
+            )
         ),
-        "agents": _scope_probe(
-            host,
-            port,
-            "/v1/agent/members",
-            timeout,
-            scheme=scheme,
-            insecure=insecure,
-            headers=headers,
-            count_fn=_count_agents,
+        "agents": (
+            yield DetectCall(
+                _scope_probe,
+                (host, port, "/v1/agent/members", timeout),
+                {"scheme": scheme, "insecure": insecure, "headers": headers, "count_fn": _count_agents},
+            )
         ),
     }
     if isinstance(replay, ConsulLifecycleState) and headers:
@@ -739,9 +796,17 @@ def _basic_credential_verdict(
     for name in _CONSUL_SCOPE_NAMES:
         anonymous = anonymous_scopes.get(name) or {}
         authenticated = authenticated_scopes.get(name) or {}
-        if anonymous.get("ok") is False and authenticated.get("ok") is True:
+        if (
+            anonymous.get("ok") is False
+            and _unauthorized_status(anonymous.get("status"))
+            and authenticated.get("ok") is True
+        ):
             return True
-    if anonymous_self.get("ok") is False and authenticated_self.get("ok") is True:
+    if (
+        anonymous_self.get("ok") is False
+        and _unauthorized_status(anonymous_self.get("status"))
+        and authenticated_self.get("ok") is True
+    ):
         return True
     return None
 
@@ -4037,18 +4102,18 @@ def _render_colored_consul_line(console: Console, line: str) -> bool:
         tag=_CONSUL_TAG,
         literals=(
             ("(Token not found)", "bright_green"),
-            ("(EnableLocalScriptChecks:True)", "red"),
-            ("(EnableRemoteScriptChecks:True)", "red"),
-            ("(local_script_checks:True)", "red"),
-            ("(remote_script_checks:True)", "red"),
+            ("(EnableLocalScriptChecks:True)", "true_red"),
+            ("(EnableRemoteScriptChecks:True)", "true_red"),
+            ("(local_script_checks:True)", "true_red"),
+            ("(remote_script_checks:True)", "true_red"),
             ("Pwned!", "orange"),
         ),
         counts=(
-            CountColorRule("kv", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("services", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("agent", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("agents", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("count", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("kv", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("services", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("agent", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("agents", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("count", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
         extra_spans=lambda marker, payload: (
             [(payload.index(" unverified") + 1, len(payload), "orange")]
@@ -4111,6 +4176,10 @@ def _consul_lifecycle_call(ctx: Any, options: dict[str, Any], *, run_deep_checks
 
 
 def detect_consul(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    return run_sync(_detect_consul_steps(ctx, options))
+
+
+def _detect_consul_steps(ctx: Any, options: dict[str, Any]) -> Any:
     state = ctx.lifecycle_state
     if not isinstance(state, ConsulLifecycleState):
         raise TypeError("consul lifecycle state is unavailable")
@@ -4119,12 +4188,10 @@ def detect_consul(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     preferred = state.preferred_scheme or target_preferred
     for attempt in range(attempts):
         with _ConsulLifecycleReplay(state):
-            detected, scheme, insecure, tls_auto, leader, error = _probe_consul_scheme(
-                str(ctx.host),
-                int(ctx.port),
-                float(getattr(ctx.args, "timeout", 5.0)),
-                preferred_scheme=preferred,
-                allow_scheme_fallback=not state.strict_scheme,
+            detected, scheme, insecure, tls_auto, leader, error = yield DetectCall(
+                _probe_consul_scheme,
+                (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+                {"preferred_scheme": preferred, "allow_scheme_fallback": not state.strict_scheme},
             )
         if detected and scheme is not None:
             state.scheme = scheme
@@ -4132,21 +4199,15 @@ def detect_consul(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             state.tls_auto_insecure = tls_auto
             state.leader = leader
             with _ConsulLifecycleReplay(state):
-                state.anonymous_scopes = _consul_access_matrix(
-                    str(ctx.host),
-                    int(ctx.port),
-                    float(getattr(ctx.args, "timeout", 5.0)),
-                    scheme=scheme,
-                    insecure=insecure,
-                    headers=None,
+                state.anonymous_scopes = yield DetectCall(
+                    _consul_access_matrix,
+                    (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+                    {"scheme": scheme, "insecure": insecure, "headers": None},
                 )
-                state.anonymous_self = _agent_self_probe(
-                    str(ctx.host),
-                    int(ctx.port),
-                    float(getattr(ctx.args, "timeout", 5.0)),
-                    scheme=scheme,
-                    insecure=insecure,
-                    headers=None,
+                state.anonymous_self = yield DetectCall(
+                    _agent_self_probe,
+                    (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+                    {"scheme": scheme, "insecure": insecure, "headers": None},
                 )
             anonymous_ctx = type("_AnonymousConsulContext", (), {})()
             anonymous_ctx.args = ctx.args
@@ -4160,7 +4221,7 @@ def detect_consul(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                 (),
                 {"username": None, "password": None, "token": None, "source": "anonymous"},
             )()
-            return _consul_lifecycle_call(anonymous_ctx, options, run_deep_checks=False)
+            return (yield DetectCall(_consul_lifecycle_call, (anonymous_ctx, options), {"run_deep_checks": False}))
         if error is None or attempt >= attempts - 1:
             return {
                 "timestamp": utc_now_iso(),
@@ -4170,7 +4231,7 @@ def detect_consul(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                 "status": "fail" if error else "not_consul",
                 "error": error or "not a Consul API",
             }
-        time.sleep(_retry_delay(attempt))
+        (yield DetectDelay(_retry_delay(attempt)))
     raise AssertionError("unreachable")
 
 
@@ -4224,3 +4285,15 @@ def collect_consul_data(ctx: Any, _record: Any, options: dict[str, Any]) -> dict
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_consul_host_with_thread_debug
+
+
+_ASYNC_DETECT_STEPS: dict[Any, Any] = {
+    _agent_self_probe: _agent_self_probe_steps,
+    _consul_access_matrix: _consul_access_matrix_steps,
+    _consul_get_json_any: _consul_get_json_any_steps,
+    _http_request: _http_request_steps,
+    _probe_consul_scheme: _probe_consul_scheme_steps,
+    _request_with_tls_fallback: _request_with_tls_fallback_steps,
+    _scope_probe: _scope_probe_steps,
+    detect_consul: _detect_consul_steps,
+}

@@ -164,7 +164,7 @@ def test_verified_token_line_is_distinct_from_rejected_token_and_red_when_confir
     assert line.endswith("[+] token accepted")
     console = Console()
     assert grpc._render_colored_grpc_line(console, line)
-    assert ("token accepted", "red") in console.paint_calls
+    assert ("token accepted", "true_red") in console.paint_calls
     assert "\x1b" not in line
     attempts = {
         "host": "h",

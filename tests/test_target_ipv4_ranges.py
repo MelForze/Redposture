@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -101,6 +104,60 @@ def test_entire_ipv4_range_is_lazy_and_exclusions_are_subtracted():
     assert plan.hosts_sample(3) == ["0.0.0.2", "0.0.0.3", "0.0.0.4"]
     assert plan.contains_host("255.255.255.254")
     assert not plan.contains_host("255.255.255.255")
+
+
+def test_large_literal_ipv4_file_is_compact_and_keeps_source_and_port_counts(tmp_path):
+    targets = tmp_path / "targets.txt"
+    lines = [f"10.{i // 65536}.{i // 256 % 256}.{i % 256}" for i in range(12_000)]
+    targets.write_text("\n".join([*lines, lines[0], lines[-1]]) + "\n", encoding="utf-8")
+    plan = stream_scan_target_specs(str(targets))
+    assert plan.target_count == 12_000
+    assert len(plan._entries) < 10
+    assert plan.count_for_ports((80, 443)) == 24_000
+    assert plan.unique_host_count() == 12_000
+    first = plan.first_spec()
+    assert first is not None and first.host == lines[0]
+    assert first.source == f"{targets.resolve()}:1"
+    assert [spec.host for spec in plan.iter_specs_for_port(443, (80, 443))][:2] == lines[:2]
+
+
+def test_compact_ipv4_file_and_later_range_do_not_repeat_hosts(tmp_path):
+    targets = tmp_path / "targets.txt"
+    targets.write_text("10.0.0.1\n10.0.0.3\n10.0.0.0-10.0.0.4\n", encoding="utf-8")
+    plan = stream_scan_target_specs(str(targets))
+    assert [spec.host for spec in plan.iter_specs()] == ["10.0.0.1", "10.0.0.3", "10.0.0.0", "10.0.0.2", "10.0.0.4"]
+    assert plan.count_for_ports((80,)) == 5
+
+
+def test_compact_ipv4_file_deduplicates_additive_explicit_port(tmp_path):
+    targets = tmp_path / "targets.txt"
+    targets.write_text("10.0.0.1\n10.0.0.2:8080\n10.0.0.2\n", encoding="utf-8")
+    plan = stream_scan_target_specs(str(targets)).with_additional_ports_for_bare_explicit_targets()
+    assert plan.count_for_ports((8080, 8443)) == 4
+    assert plan.unique_host_count() == 2
+    assert [spec.host for spec in plan.iter_specs_for_port(8080, (8080, 8443))] == ["10.0.0.1", "10.0.0.2"]
+    assert [spec.host for spec in plan.iter_specs_for_port(8443, (8080, 8443))] == ["10.0.0.1", "10.0.0.2"]
+
+
+@given(st.lists(st.integers(0, 15), min_size=1, max_size=30))
+def test_compact_file_matches_eager_parser_for_mixed_ipv4_inputs(values):
+    lines = [f"10.0.0.{value}" for value in values]
+    lines.extend(["10.0.0.4-10.0.0.9", "10.0.0.2:8080", "10.0.0.7:8080"])
+    with TemporaryDirectory() as directory:
+        targets = Path(directory) / "targets.txt"
+        targets.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        eager = parse_scan_target_specs(str(targets))
+        plan = stream_scan_target_specs(str(targets))
+        expected = [(spec.host, spec.explicit_port, spec.scheme) for spec in eager]
+        actual = [(spec.host, spec.explicit_port, spec.scheme) for spec in plan.iter_specs()]
+        assert actual == expected
+        assert plan.target_count == len(expected)
+        for port in (8080, 8443):
+            expanded = list(plan.iter_specs_for_port(port, (8080, 8443)))
+            assert len(expanded) == len({spec.normalized_key for spec in expanded})
+        assert plan.count_for_ports((8080, 8443)) == sum(
+            len(list(plan.iter_specs_for_port(port, (8080, 8443)))) for port in (8080, 8443)
+        )
 
 
 def test_eager_range_expansion_respects_existing_host_limit():

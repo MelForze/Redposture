@@ -52,8 +52,13 @@ HTTP_PRODUCTS = (
     "docker-registry",
     "harbor",
     "nexus",
+    "spark",
+    "yarn",
+    "portainer",
 )
-CROSS_ORIGIN_HTTP_PRODUCTS = tuple(product for product in HTTP_PRODUCTS if product not in TOKEN_API_PRODUCTS)
+CROSS_ORIGIN_HTTP_PRODUCTS = tuple(
+    product for product in HTTP_PRODUCTS if product not in (*TOKEN_API_PRODUCTS, "spark", "yarn", "portainer")
+)
 HTTP_API_SUFFIXES = {
     "airflow": "/api/v1/version",
     "consul": "/v1/status/leader",
@@ -75,6 +80,9 @@ HTTP_API_SUFFIXES = {
     "docker-registry": "/v2/_catalog",
     "harbor": "/api/v2.0/systeminfo",
     "nexus": "/service/rest/v1/status",
+    "spark": "/json/",
+    "yarn": "/ws/v1/cluster/info",
+    "portainer": "/api/system/status",
 }
 NATIVE_PRODUCTS = ("clickhouse", "grpc", "kafka", "keeper", "mongodb", "oracle", "postgres", "redis", "zookeeper")
 PRODUCTS = HTTP_PRODUCTS + NATIVE_PRODUCTS
@@ -187,6 +195,29 @@ def _http_response(product: str, path: str, *, proxy_headers: bool = False, orig
                 "progress": 0,
                 "version": "1.21.0",
             }
+    elif product == "spark":
+        payload = {"url": "spark://qa:7077", "workers": [], "activeapps": [], "cores": 0}
+        if path == "/":
+            payload = '<title>Spark Master at spark://qa:7077</title><span class="version">3.5.6</span>'
+            headers["Content-Type"] = "text/html"
+    elif product == "yarn":
+        payload = {
+            "clusterInfo": {
+                "state": "STARTED",
+                "haState": "ACTIVE",
+                "resourceManagerVersion": "3.3.6",
+                "hadoopVersion": "3.3.6",
+            }
+        }
+        if path == "/ws/v1/cluster/apps":
+            payload = {"apps": {}}
+    elif product == "portainer":
+        payload = {"Version": "2.39.7", "InstanceID": "qa"}
+        if path == "/":
+            payload = "<title>Portainer</title>"
+            headers["Content-Type"] = "text/html"
+        elif path == "/api/endpoints":
+            status, payload = 401, {"message": "Unauthorized"}
     elif product == "nomad":
         payload = {
             "config": {"Version": {"Version": "1.10.1"}, "ACL": {"Enabled": True}},
@@ -594,7 +625,7 @@ def _detect(
             extra += ["--token", "qa-token"]
         elif module == "qdrant":
             extra += ["--api-key", "qa-token"]
-        elif module != "docker":
+        elif module not in {"docker", "spark", "yarn"}:
             extra += ["-u", "qa-user", "-p", "qa-password"]
     args = parse_args(
         [
@@ -634,7 +665,7 @@ def _detect(
 
 
 def test_wire_corpus_covers_exactly_all_audit_modules() -> None:
-    assert len(PRODUCTS) == len(set(PRODUCTS)) == 29
+    assert len(PRODUCTS) == len(set(PRODUCTS)) == len(AUDIT_MODULE_NAMES)
     assert set(PRODUCTS) == set(AUDIT_MODULE_NAMES)
 
 

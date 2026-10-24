@@ -103,9 +103,26 @@ MUTATIONS = (
     Mutation(
         name="Consul Basic pair inherits public scope access",
         source="redposture_core/modules/consul/actions.py",
-        original='if anonymous.get("ok") is False and authenticated.get("ok") is True:',
+        original=(
+            'if (\n            anonymous.get("ok") is False\n'
+            '            and _unauthorized_status(anonymous.get("status"))\n'
+            '            and authenticated.get("ok") is True\n        ):'
+        ),
         replacement='if authenticated.get("ok") is True:',
         tests=("tests/test_stage_consul.py::test_consul_basic_pair_requires_new_protected_access",),
+    ),
+    Mutation(
+        name="Consul unknown baseline is treated as a protected endpoint",
+        source="redposture_core/modules/consul/actions.py",
+        original=(
+            'if (\n            anonymous.get("ok") is False\n'
+            '            and _unauthorized_status(anonymous.get("status"))\n'
+            '            and authenticated.get("ok") is True\n        ):'
+        ),
+        replacement='if anonymous.get("ok") is not True and authenticated.get("ok") is True:',
+        tests=(
+            "tests/test_campaign22_fault_contracts.py::test_consul_unknown_anonymous_probe_cannot_prove_basic_credentials",
+        ),
     ),
     Mutation(
         name="Consul token 403 is treated as rejected",
@@ -248,8 +265,8 @@ MUTATIONS = (
     Mutation(
         name="GitLab tries private version retrieval only after token rejection",
         source="redposture_core/modules/gitlab/actions.py",
-        original='if state.token_valid is True and bool(getattr(ctx.args, "enum_cve", False)) and not record.get("version"):',
-        replacement='if state.token_valid is False and bool(getattr(ctx.args, "enum_cve", False)) and not record.get("version"):',
+        original='if state.token_valid is True and not record.get("version"):',
+        replacement='if state.token_valid is False and not record.get("version"):',
         tests=("tests/test_gitlab_version_cve.py",),
     ),
     Mutation(

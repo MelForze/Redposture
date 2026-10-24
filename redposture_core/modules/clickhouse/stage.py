@@ -20,7 +20,7 @@ from ...stage_runtime import (
     merge_audit_credential_runs,
     sort_default_audit_credential_runs,
 )
-from . import actions, policy, render
+from . import actions, async_detect, policy, render
 
 _DEFAULT_PORT = 9000
 _DEFAULT_PORTS: tuple[int, ...] = (9000, 19000, 29000)
@@ -152,6 +152,9 @@ def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
             service="clickhouse",
         )
 
+    async def _detect_async(ctx: Any, http: Any) -> AuditRecord:
+        return await async_detect.detect(ctx, http, options)
+
     def _auth(ctx: Any, record: Any) -> AuditRecord:
         return AuditRecord.from_mapping(
             actions.authenticate_clickhouse(ctx, record, options),
@@ -178,6 +181,8 @@ def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         host_stage_options=host_stage_options,
         detect=_detect if use_lifecycle_hooks else None,
+        detect_async=_detect_async if use_lifecycle_hooks else None,
+        async_detect_sync_hook=_detect if use_lifecycle_hooks else None,
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,

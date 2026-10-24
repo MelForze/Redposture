@@ -16,6 +16,7 @@ from redposture_core.modules.postgres.actions import _POSTGRES_DEFAULT_CREDENTIA
 from redposture_core.modules.proxmox.actions import _PROXMOX_DEFAULT_CREDENTIALS
 from redposture_core.modules.redis.actions import _REDIS_DEFAULT_CREDENTIALS
 from redposture_core.modules.zookeeper.stage import _DEFAULT_CREDENTIALS as _ZOOKEEPER_DEFAULT_CREDENTIALS
+from redposture_core.web_panels import default_pairs
 
 
 def test_readme_default_credentials_table_matches_runtime_catalogs() -> None:
@@ -40,6 +41,7 @@ def test_readme_default_credentials_table_matches_runtime_catalogs() -> None:
         "ZooKeeper": list(_ZOOKEEPER_DEFAULT_CREDENTIALS),
         "Keeper": list(_KEEPER_DEFAULT_CREDENTIALS),
         "Airflow": list(_AIRFLOW_DEFAULT_CREDENTIALS),
+        "Portainer": list(default_pairs("portainer")),
     }
 
     for module, pairs in catalogs.items():

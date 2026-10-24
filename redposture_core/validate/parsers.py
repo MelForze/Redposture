@@ -1082,7 +1082,7 @@ def _extract_vulnerable_login_pairs_from_text(text: str) -> list[tuple[str, str]
     # Unstructured values are paired only when both occur in the same line.
     # Global zip/first-user fallbacks fabricated credentials when unrelated
     # settings happened to share one response body.
-    for raw_line in sample.splitlines() or [sample]:
+    for raw_line in (sample.splitlines() or [sample]) if structured is None else ():
         usernames_here: list[str] = []
         passwords_here: list[str] = []
         for pattern in (_TEXT_GENERIC_KV_RE, _CMD_FLAG_GENERIC_RE):

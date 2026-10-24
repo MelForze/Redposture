@@ -9,6 +9,7 @@ from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...clients.http_api import http_target_context
 from ...console import Console
+from ...detection_io import with_async_io_detection
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
@@ -230,7 +231,7 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
             result = actions.inspect_elastic_capabilities(ctx, record, options)
         return AuditRecord.from_mapping(result, module="elastic", service="elastic")
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="elastic",
         label="ELASTIC",
         default_port=_DEFAULT_PORT,
@@ -263,6 +264,18 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
         record_retention_limit=_ELASTIC_RECORD_RETENTION_LIMIT,
         progress_refresh_interval_s=_ELASTIC_PROGRESS_REFRESH_INTERVAL_S,
         defer_detect_output_until_auth=True,
+        # Capabilities complete the credential summary. Publish that summary
+        # together with detection before live discovery can emit any findings.
+        defer_phase_output_until_final=True,
+        emit_capabilities_before_data=True,
+    )
+    return with_async_io_detection(
+        spec,
+        actions,
+        root_name="detect_elastic",
+        options=options,
+        api_prefixes=("/_security", "/_plugins", "/_cluster", "/_cat", "/_nodes"),
+        activate_name="_activate_elastic_detection",
     )
 
 

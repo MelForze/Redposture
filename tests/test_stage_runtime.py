@@ -3551,7 +3551,7 @@ def test_pipeline_cancellation_closes_states_and_suppresses_late_worker_output(t
             if host == "blocked":
                 blocked_worker_finished.set()
 
-    runner._run_target_pipeline = tracked_pipeline  # type: ignore[method-assign]
+    runner._run_target_pipeline = tracked_pipeline  # type: ignore[method-assign,assignment]
 
     with pytest.raises(TypeError, match="contract violation"):
         runner.run_plan(

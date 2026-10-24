@@ -9,6 +9,7 @@ import ssl
 import threading
 import time
 import urllib.parse
+import zlib
 from collections import defaultdict
 from collections.abc import Mapping
 from typing import Any
@@ -241,13 +242,17 @@ class HttpSessionPool:
         body: bytes | None,
         timeout: float,
         response_size_cap: int,
+        preserve_partial_body: bool = False,
     ) -> tuple[HttpResponse, BaseException | None, bool]:
         key = _origin(url)
-        connection, reused = self._acquire(key, timeout)
+        connection: http.client.HTTPConnection | None = None
+        reused = False
         response: http.client.HTTPResponse | None = None
         reusable = False
         active_sock: Any | None = None
+        received = bytearray()
         try:
+            connection, reused = self._acquire(key, timeout)
             request_headers = {str(name): str(value) for name, value in headers.items()}
             lowered = {name.lower() for name in request_headers}
             if "connection" not in lowered:
@@ -263,7 +268,15 @@ class HttpSessionPool:
                     active_sock.shutdown(socket.SHUT_RDWR)
             response = connection.getresponse()
             cap = max(0, int(response_size_cap))
-            payload = response.read(cap + 1)
+            if preserve_partial_body:
+                while len(received) <= cap:
+                    chunk = response.read1(min(64 * 1024, cap + 1 - len(received)))
+                    if not chunk:
+                        break
+                    received.extend(chunk)
+                payload = bytes(received)
+            else:
+                payload = response.read(cap + 1)
             truncated = len(payload) > cap
             remaining_length = getattr(response, "length", None)
             if not truncated and remaining_length is not None and remaining_length > 0:
@@ -293,6 +306,28 @@ class HttpSessionPool:
                 reused,
             )
         except BaseException as exc:  # noqa: BLE001 - normalized for callers
+            if preserve_partial_body and response is not None and received:
+                prefix = bytes(received[: max(0, int(response_size_cap))])
+                if str(response.getheader("Content-Encoding", "")).strip().lower() == "gzip":
+                    try:
+                        prefix = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(
+                            prefix, max(1, int(response_size_cap))
+                        )[: max(0, int(response_size_cap))]
+                    except zlib.error:
+                        prefix = b""
+                return (
+                    HttpResponse(
+                        status=int(response.status),
+                        body=prefix,
+                        headers={str(name): str(value) for name, value in response.getheaders()},
+                        error=normalize_http_error(exc),
+                        truncated=True,
+                        request_url=url,
+                        final_url=url,
+                    ),
+                    exc,
+                    reused,
+                )
             return HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc)), exc, reused
         finally:
             if active_sock is not None:
@@ -303,7 +338,8 @@ class HttpSessionPool:
                     response.close()
                 except OSError:
                     reusable = False
-            self._release(key, connection, reusable)
+            if connection is not None:
+                self._release(key, connection, reusable)
 
     def request(
         self,
@@ -319,6 +355,7 @@ class HttpSessionPool:
         allow_cross_origin_redirects: bool = True,
         preserve_authorization_on_cross_origin: bool = True,
         prepare_request: RequestPreparer | None = None,
+        preserve_partial_body: bool = False,
     ) -> HttpResponse:
         if self._closed:
             raise RuntimeError("HTTP session pool is closed")
@@ -338,10 +375,17 @@ class HttpSessionPool:
                     body=body_value,
                     timeout=attempt_timeout,
                     response_size_cap=response_size_cap,
+                    **({"preserve_partial_body": True} if preserve_partial_body else {}),
                 )
                 # Closing the pool is a cancellation, not a transient network
                 # failure. Retrying would delay shutdown or race _acquire().
-                if self._closed or request_error is None or not safe or attempt >= attempts - 1:
+                if (
+                    self._closed
+                    or request_error is None
+                    or not safe
+                    or attempt >= attempts - 1
+                    or (preserve_partial_body and response.body)
+                ):
                     return response
                 reason = transport.classify_failure_reason(response.error)
                 stale_protocol = isinstance(

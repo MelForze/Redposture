@@ -11,6 +11,7 @@ from ...clients.http_api import http_target_context
 from ...clients.http_session import HttpSessionPool
 from ...clients.scoped_http import HttpLifecycleState
 from ...console import Console
+from ...detection_steps import with_async_http_detection
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCredentialRun,
@@ -20,7 +21,7 @@ from ...stage_runtime import (
     run_basic_host_audit,
     sort_default_audit_credential_runs,
 )
-from . import actions, policy, render
+from . import actions, execution, policy, render
 
 _DEFAULT_PORTS = (8080, 8443, 18080)
 _DEFAULT_CREDENTIALS = (
@@ -87,7 +88,27 @@ def build_jenkins_spec(args: Any) -> ModuleAuditSpec:
             value = action(ctx) if record is None else action(ctx, record.to_dict())
         return AuditRecord.from_mapping(value, module="jenkins", service="jenkins")
 
-    return ModuleAuditSpec(
+    def _data(ctx: Any, record: AuditRecord) -> AuditRecord:
+        payload = execution.collect(ctx, record.to_dict(), ctx.lifecycle_state)
+        if getattr(ctx.args, "execute", None) is not None and (
+            not payload.get("execute_verified")
+            or not any(
+                getattr(ctx.args, key, False)
+                for key in (
+                    "show_jobs",
+                    "show_builds",
+                    "show_plugins",
+                    "show_nodes",
+                    "show_queue",
+                    "show_artifacts",
+                    "discover",
+                )
+            )
+        ):
+            return AuditRecord.from_mapping(payload, module="jenkins", service="jenkins")
+        return _phase(ctx, actions.data_record, AuditRecord.from_mapping(payload, module="jenkins", service="jenkins"))
+
+    spec = ModuleAuditSpec(
         module="jenkins",
         label="JENKINS",
         default_port=8080,
@@ -95,7 +116,7 @@ def build_jenkins_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_close=lambda state: state.close(),
         detect=lambda ctx: _phase(ctx, actions.detect_record),
         auth=lambda ctx, record: _phase(ctx, actions.auth_record, record),
-        data=lambda ctx, record: _phase(ctx, actions.data_record, record),
+        data=_data,
         render_module=render,
         colorize=render._render_colored_jenkins_line,
         is_detected=lambda record: record.extra.get("is_jenkins") is True,
@@ -110,6 +131,10 @@ def build_jenkins_spec(args: Any) -> ModuleAuditSpec:
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
         defer_detect_output_until_auth=True,
         live_phase_output=True,
+    )
+
+    return with_async_http_detection(
+        spec, actions, api_prefixes=("/api", "/login", "/whoAmI", "/job", "/pluginManager", "/computer", "/queue")
     )
 
 

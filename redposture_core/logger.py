@@ -17,9 +17,9 @@ from .utils import utc_now_iso
 
 _COLORS = {
     "blue": "1;94",
-    "green": "1;92",
+    "bright_green": "1;92",
     "orange": "1;38;5;208",
-    "red": "1;91",
+    "true_red": "1;38;5;196",
     "white": "1;97",
     "yellow": "1;93",
     "cyan": "1;96",
@@ -378,12 +378,12 @@ class AttemptLogger:
         listen_port = str(event.get("listen_port") or "-")
 
         has_creds = self._is_trigger_cred_event(event)
-        marker_color = "green"
+        marker_color = "bright_green"
         suffix = ""
         if has_creds:
             suffix = " " + _paint("(CRED!)", "orange", console_stream)
         else:
-            marker_color = "green"
+            marker_color = "bright_green"
             suffix = " " + _paint("(SSRF!)", "orange", console_stream)
 
         target_segment = "\t" + _clip(display_target, 64) + "\t" + _clip(listen_port, 16) + "\t"

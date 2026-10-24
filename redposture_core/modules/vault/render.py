@@ -19,11 +19,15 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     if output_format != "txt" or record.get("is_vault") is not True:
         return ""
     auth = auth_required_text(record.get("auth_required"), None)
-    return (
-        f"{_prefix(record)} [*] HashiCorp Vault (auth required:{auth}) "
-        f"(initialized:{record.get('initialized')}) (sealed:{record.get('sealed')}) "
-        f"(standby:{record.get('standby')}) (version:{record.get('version') or 'unknown'})"
+    line = f"{_prefix(record)} [*] HashiCorp Vault"
+    if auth != "unknown":
+        line += f" (auth required:{auth})"
+    line += (
+        f" (initialized:{record.get('initialized')}) (sealed:{record.get('sealed')}) (standby:{record.get('standby')})"
     )
+    if record.get("version"):
+        line += f" (version:{record['version']})"
+    return line
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
@@ -53,10 +57,10 @@ def _format_inventory_records(record: dict[str, Any], output_format: str) -> lis
         lines.append(f"{prefix} [!] Common development token accepted (dev mode unverified)")
     if "mounts" in (record.get("inventory_requested") or []):
         mounts = record.get("mounts")
+        count = len(mounts) if isinstance(mounts, list) else record.get("mounts_count")
+        count = count if type(count) is int and count >= 0 else "unknown"
         access = record.get("mounts_access") or "unknown"
-        lines.append(
-            f"{prefix} [*] Secret Engines (access:{access}) (mounts:{len(mounts) if isinstance(mounts, list) else 'unknown'})"
-        )
+        lines.append(f"{prefix} [*] Secret Engines (access:{access}) (mounts:{count})")
         if isinstance(mounts, list):
             lines.extend(
                 f"{prefix} [+] Mount Path={item['path']} (type:{item.get('type') or 'unknown'})" for item in mounts

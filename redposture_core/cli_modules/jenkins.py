@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..modules.execution_api import add_flags as add_execution_flags
 from ..show_limits import optional_show_count_kwargs
 
 
@@ -51,6 +52,8 @@ def configure_jenkins_parser(
     inventory.add_argument(
         "--show-jobs", **optional_show_count_kwargs("List jobs visible to the selected identity or anonymously.")
     )
+    execution = parser.add_argument_group("Execution")
+    add_execution_flags(execution)
     inventory.add_argument(
         "--show-builds", **optional_show_count_kwargs("List recent builds of visible jobs; implies --show-jobs.")
     )

@@ -186,7 +186,7 @@ def build_spec(args: Any, module: str, port: int, actions: Any, render: Any) -> 
             value = action(ctx) if record is None else action(ctx, record.to_dict())
         return AuditRecord.from_mapping(value, module=module, service=module)
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module=module,
         label=module.upper(),
         default_port=port,
@@ -202,4 +202,10 @@ def build_spec(args: Any, module: str, port: int, actions: Any, render: Any) -> 
         structured_output_redact_fields=("attempted_credentials", "credential_results"),
         defer_detect_output_until_auth=True,
         live_phase_output=True,
+    )
+
+    from ..detection_steps import with_async_http_detection
+
+    return with_async_http_detection(
+        spec, actions, api_prefixes=("/v1",) if module != "jupyter" else ("/api", "/login", "/lab", "/tree")
     )

@@ -15,6 +15,7 @@ from xml.etree import ElementTree
 from ...clients.http_api import http_response_requires_https
 from ...clients.http_session import HttpSessionPool
 from ...clients.minio_api import MinioClient, MinioResponse
+from ...detection_io import DetectCall, run_sync
 from .types import AdminCapability, AnonymousResult, CredentialResult, MinioDetection
 
 # `Server: MinIO/RELEASE.2021-06-17T00-10-46Z` on older deployments; modern ones
@@ -163,15 +164,19 @@ def _admin_plane(resp: MinioResponse) -> bool:
 
 
 def detect_minio(client: MinioClient) -> MinioDetection:
-    root = client.get_service_root(signed=False)
+    return run_sync(_detect_detect_minio_steps(client))
+
+
+def _detect_detect_minio_steps(client: MinioClient) -> Any:
+    root = yield DetectCall(client.get_service_root, (), {"signed": False})
     if root.transport_error:
         return MinioDetection(
             status="transport_failure",
             api_endpoint=client.base_url,
             evidence={"transport_error": root.transport_error},
         )
-    health = client.health("live")
-    admin = client.admin_info(signed=False)
+    health = yield DetectCall(client.health, ("live",), {})
+    admin = yield DetectCall(client.admin_info, (), {"signed": False})
 
     root_console = _is_minio_console(root)
     # An unsigned GET / on the S3 listener may redirect to the Console. The
@@ -235,7 +240,11 @@ def _parse_bucket_names(body: bytes) -> tuple[str, ...]:
 
 
 def classify_anonymous(client: MinioClient, *, known_bucket: str | None = None) -> AnonymousResult:
-    root = client.get_service_root(signed=False)
+    return run_sync(_detect_classify_anonymous_steps(client, known_bucket=known_bucket))
+
+
+def _detect_classify_anonymous_steps(client: MinioClient, *, known_bucket: str | None = None) -> Any:
+    root = yield DetectCall(client.get_service_root, (), {"signed": False})
     if root.transport_error:
         return AnonymousResult(api_reachable=False, classification="verification_unavailable")
 
@@ -254,7 +263,7 @@ def classify_anonymous(client: MinioClient, *, known_bucket: str | None = None) 
 
     read_probe: str | None = None
     if known_bucket:
-        listing = client.list_objects_v2(known_bucket, max_keys=1, signed=False)
+        listing = yield DetectCall(client.list_objects_v2, (known_bucket,), {"max_keys": 1, "signed": False})
         if listing.transport_error:
             read_probe = None
         elif listing.http_status == 200:
@@ -619,6 +628,9 @@ class MinioLifecycleState:
         )
 
     def _probe(self, scheme: str) -> MinioResponse:
+        return run_sync(MinioLifecycleState._detect_probe_steps(self, scheme))
+
+    def _detect_probe_steps(self, scheme: str) -> Any:
         client = MinioClient(
             self.pool,
             scheme=scheme,
@@ -626,7 +638,7 @@ class MinioLifecycleState:
             port=self.resolved_port,
             base_path=self.base_path,
         )
-        return client.get_service_root(signed=False)
+        return (yield DetectCall(client.get_service_root, (), {"signed": False}))
 
     def _remember_origin(self, url: str | None) -> str | None:
         origin = _http_origin(url)
@@ -641,6 +653,9 @@ class MinioLifecycleState:
         return self._remember_origin(resp.final_url)
 
     def resolve_scheme(self) -> str:
+        return run_sync(MinioLifecycleState._detect_resolve_scheme_steps(self))
+
+    def _detect_resolve_scheme_steps(self) -> Any:
         """Return the transport scheme for this target, probing once and caching.
 
         An explicit ``http`` is a starting preference rather than a lock. If its
@@ -652,7 +667,7 @@ class MinioLifecycleState:
         if self.resolved_scheme is not None:
             return self.resolved_scheme
         guess = self.explicit_scheme or ("https" if self.port in _TLS_PORTS else "http")
-        resp = self._probe(guess)
+        resp = yield DetectCall(self._probe, (guess,), {})
         if _is_minio_console(resp) and resp.redirect_history:
             # The final URL is a web UI, not an S3 origin. Retain the listener
             # that issued the final redirect. A same-host, same-port HTTPS
@@ -678,12 +693,15 @@ class MinioLifecycleState:
             guess = final_scheme
         elif mismatch or tls_required:
             guess = "http" if guess == "https" else "https"
-        elif guess == "http" and _is_minio_console(resp) and self.try_https_upgrade():
+        elif guess == "http" and _is_minio_console(resp) and (yield DetectCall(self.try_https_upgrade, (), {})):
             return "https"
         self.resolved_scheme = guess
         return guess
 
     def find_api_for_console(self, console_endpoint: str | None) -> MinioDetection | None:
+        return run_sync(MinioLifecycleState._detect_find_api_for_console_steps(self, console_endpoint))
+
+    def _detect_find_api_for_console_steps(self, console_endpoint: str | None) -> Any:
         """Try the conventional S3 port on the same host using unsigned requests."""
         for port in _CONSOLE_API_CANDIDATE_PORTS:
             if port == self.resolved_port and self.host == self.resolved_host:
@@ -691,7 +709,7 @@ class MinioLifecycleState:
             first_scheme = self.resolved_scheme or self.explicit_scheme or "http"
             for scheme in (first_scheme, "https" if first_scheme == "http" else "http"):
                 client = MinioClient(self.pool, scheme=scheme, host=self.host, port=port)
-                detection = detect_minio(client)
+                detection = yield DetectCall(detect_minio, (client,), {})
                 if detection.status != "confirmed":
                     continue
                 self.resolved_scheme = scheme
@@ -704,6 +722,9 @@ class MinioLifecycleState:
         return None
 
     def try_https_upgrade(self) -> bool:
+        return run_sync(MinioLifecycleState._detect_try_https_upgrade_steps(self))
+
+    def _detect_try_https_upgrade_steps(self) -> Any:
         """Switch an HTTP lifecycle to HTTPS when HTTPS exposes an S3 endpoint.
 
         This is also used after an ambiguous signed response. The alternate probe
@@ -713,7 +734,7 @@ class MinioLifecycleState:
         if self.resolved_scheme not in {None, "http"} or self._https_probe_attempted:
             return self.resolved_scheme == "https"
         self._https_probe_attempted = True
-        alternate = self._probe("https")
+        alternate = yield DetectCall(self._probe, ("https",), {})
         if _has_s3_shape(alternate):
             self._remember_final_origin(alternate)
             self.resolved_scheme = "https"
@@ -737,9 +758,13 @@ def minio_lifecycle_state_factory(ctx: Any) -> MinioLifecycleState:
 
 
 def _client_for(ctx: Any, credential: Any) -> MinioClient:
+    return run_sync(_detect_client_for_steps(ctx, credential))
+
+
+def _detect_client_for_steps(ctx: Any, credential: Any) -> Any:
     state = getattr(ctx, "lifecycle_state", None)
     if isinstance(state, MinioLifecycleState):
-        scheme = state.resolve_scheme()
+        scheme = yield DetectCall(state.resolve_scheme, (), {})
         pool = state.pool
         host = state.resolved_host
         port = state.resolved_port
@@ -763,8 +788,12 @@ def _client_for(ctx: Any, credential: Any) -> MinioClient:
 
 
 def detect_record(ctx: Any) -> dict[str, Any]:
-    client = _client_for(ctx, ctx.credential)
-    detection = detect_minio(client)
+    return run_sync(_detect_detect_record_steps(ctx))
+
+
+def _detect_detect_record_steps(ctx: Any) -> Any:
+    client = yield DetectCall(_client_for, (ctx, ctx.credential), {})
+    detection = yield DetectCall(detect_minio, (client,), {})
     state = getattr(ctx, "lifecycle_state", None)
     args = getattr(ctx, "args", None)
     credential = getattr(ctx, "credential", None)
@@ -774,11 +803,11 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         or (getattr(credential, "username", None) and getattr(credential, "password", None))
     )
     if detection.status == "console" and wants_credentials and isinstance(state, MinioLifecycleState):
-        recovered = state.find_api_for_console(detection.console_endpoint)
+        recovered = yield DetectCall(state.find_api_for_console, (detection.console_endpoint,), {})
         if recovered is not None:
             detection = recovered
-            client = _client_for(ctx, ctx.credential)
-    anon = classify_anonymous(client) if detection.status == "confirmed" else None
+            client = yield DetectCall(_client_for, (ctx, ctx.credential), {})
+    anon = (yield DetectCall(classify_anonymous, (client,), {})) if detection.status == "confirmed" else None
     verification_status = "available" if detection.status == "confirmed" else "unavailable"
     status_word = {
         "confirmed": "detected",
@@ -1288,3 +1317,20 @@ def _build_credential_candidates(
             seen.add(pair)
             candidates.append((access_key, secret_key, "default"))
     return candidates
+
+
+_ASYNC_DETECT_STEPS = {
+    MinioClient._request: MinioClient._detect_request_steps,
+    MinioClient.get_service_root: MinioClient._detect_get_service_root_steps,
+    MinioClient.health: MinioClient._detect_health_steps,
+    MinioClient.admin_info: MinioClient._detect_admin_info_steps,
+    MinioClient.list_objects_v2: MinioClient._detect_list_objects_v2_steps,
+    detect_record: _detect_detect_record_steps,
+    _client_for: _detect_client_for_steps,
+    detect_minio: _detect_detect_minio_steps,
+    classify_anonymous: _detect_classify_anonymous_steps,
+    MinioLifecycleState.resolve_scheme: MinioLifecycleState._detect_resolve_scheme_steps,
+    MinioLifecycleState._probe: MinioLifecycleState._detect_probe_steps,
+    MinioLifecycleState.try_https_upgrade: MinioLifecycleState._detect_try_https_upgrade_steps,
+    MinioLifecycleState.find_api_for_console: MinioLifecycleState._detect_find_api_for_console_steps,
+}

@@ -6,10 +6,12 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import ssl
 import sys
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
+from contextlib import closing
 from dataclasses import replace
 from typing import Any, TextIO, cast
 
@@ -20,6 +22,7 @@ from .exporters.discover import scan_exporter_presence
 from .exporters.http_client import build_exporter_tls_context
 from .exporters.output import emit_line as emit_output_line
 from .exporters.output import format_collect_record
+from .exporters.workflows import exporter_worker_count
 from .logger import AttemptLogger
 from .profiles import default_exporter_ports, load_profiles
 from .stage_runtime import progress_total_from_groups, should_use_global_progress, start_command_progress
@@ -43,27 +46,27 @@ COLLECT_VALIDATE_FAIL_ON_CREDS = False
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def _chunk_collect_specs_by_scheme(
-    specs: Iterable[Any],
-    *,
-    size: int = 4096,
-) -> Iterator[tuple[str, list[str]]]:
-    buckets: dict[str, list[str]] = {}
-    seen: dict[str, set[str]] = {}
-    for spec in specs:
-        scheme = str(getattr(spec, "scheme", None) or "http").lower()
-        host = str(spec.host)
-        if host in seen.setdefault(scheme, set()):
-            continue
-        seen[scheme].add(host)
-        bucket = buckets.setdefault(scheme, [])
-        bucket.append(host)
-        if len(bucket) >= size:
-            yield scheme, bucket
-            buckets[scheme] = []
-    for scheme, bucket in buckets.items():
-        if bucket:
-            yield scheme, bucket
+def _iter_collect_scan_items(target_plan: Any, ports: tuple[int, ...]) -> Iterator[tuple[str, int, str]]:
+    """Stream unique endpoints without accumulating a command-sized host set."""
+    if not target_plan.has_explicit_port_targets and not target_plan.schemes:
+        for host in target_plan.iter_hosts():
+            for port in ports:
+                yield host, int(port), "http"
+        return
+    # Paths on one origin all resolve to the same exporter metrics endpoint.
+    # A temporary disk database bounds RAM even for millions of URL inputs.
+    with closing(sqlite3.connect("")) as seen:
+        seen.execute("CREATE TABLE endpoints (host TEXT, scheme TEXT, PRIMARY KEY (host, scheme))")
+        for port in target_plan.execution_ports(ports):
+            seen.execute("DELETE FROM endpoints")
+            for spec in target_plan.iter_specs_for_port(int(port), ports):
+                scheme = str(spec.scheme or "http").lower()
+                inserted = seen.execute(
+                    "INSERT OR IGNORE INTO endpoints VALUES (?, ?)",
+                    (str(spec.host).rstrip(".").lower(), scheme),
+                ).rowcount
+                if inserted:
+                    yield str(spec.host), int(port), scheme
 
 
 def _collect_transport_kwargs(scheme: str, tls_context: ssl.SSLContext | None) -> dict[str, Any]:
@@ -354,6 +357,11 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             return 2
         console.error("collect requires -t/--targets")
         return 2
+    args.workers = exporter_worker_count(
+        args.workers,
+        target_plan.target_count,
+        explicit=getattr(args, "_workers_option_provided", None),
+    )
     hosts = list(dict.fromkeys(spec.host for spec in target_specs))
 
     stream_to_stdout = not bool(args.output)
@@ -443,7 +451,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             colored = (
                 f"{console._paint(tag_text, 'blue', sys.stdout)}"
                 f"{console._paint(rest_text, 'white', sys.stdout)} "
-                f"{console._paint('[+]', 'green', sys.stdout)} "
+                f"{console._paint('[+]', 'bright_green', sys.stdout)} "
                 f"{console._paint(right, 'white', sys.stdout)}"
             )
             console.plain(colored)
@@ -451,7 +459,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if not args.debug:
             return
         if " [!] " in line:
-            console.plain(line, color="red")
+            console.plain(line, color="true_red")
             return
         if " [-] " in line:
             console.plain(line, color="yellow")
@@ -579,51 +587,20 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if args.debug:
             console.debug(f"pass=1 detect start total={target_plan.target_count}")
         default_ports = default_exporter_ports(discovery_exporters)
-        scan_checks = 0
-        scan_found = 0
-        scan_errors = 0
-        requests = 0
-        success = 0
-        collect_errors = 0
-        collect_stats: dict[str, int] = {}
-        skipped_jobs_total = 0
-        collect_chunk_index = 0
-        data_started_at = time.monotonic()
-
-        def _process_host_chunk(
-            host_chunk: list[str],
-            ports_for_scan: list[int] | None,
-            scheme: str,
-        ) -> int:
-            nonlocal scan_checks, scan_found, scan_errors, requests, success, collect_errors
-            nonlocal collect_chunk_index, skipped_jobs_total
-            part_scan_stats: dict[str, int] = {}
-            part_checks, part_found, part_found_by_host = scan_exporter_presence(
-                hosts=host_chunk,
-                timeout=args.timeout,
-                output_path=None,
-                output_format="txt",
-                logger=logger if args.debug else None,
-                emit_line=emit_line if args.output_format == "txt" else None,
-                workers=args.workers,
-                retries=args.retries,
-                discovery_exporters=discovery_exporters,
-                custom_ports=ports_for_scan,
-                emit_summary=False,
-                show_progress=False,
-                progress_leave=False,
-                progress_owner=getattr(args, "_progress_owner", None),
-                stats_sink=part_scan_stats,
-                **_collect_transport_kwargs(scheme, tls_context),
+        matrix_ports = tuple(
+            custom_ports
+            or (
+                default_ports
+                if target_plan.has_explicit_port_targets
+                else dict.fromkeys(int(item["port"]) for item in discovery_exporters if item.get("port") is not None)
             )
-            scan_checks += part_checks
-            scan_found += part_found
-            scan_errors += int(part_scan_stats.get("errors", 0))
-            if part_found <= 0:
-                return 0
-            part_requests, part_success = collect_exporter_debug_data(
+        )
+        data_started_at = time.monotonic()
+        collect_stats: dict[str, int] = {}
+        try:
+            requests, success = collect_exporter_debug_data(
                 logger=logger if args.debug else None,
-                hosts=host_chunk,
+                hosts=[],
                 timeout=args.timeout,
                 output_path=args.output,
                 output_format=args.output_format,
@@ -632,59 +609,31 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 retries=args.retries,
                 collect_exporters=collect_exporters,
                 collect_debug_endpoints=collect_endpoints,
-                found_by_host=part_found_by_host,
                 save_responses_dir=save_responses_dir,
                 record_callback=validator.feed,
-                output_mode="a" if (resume_enabled or collect_chunk_index > 0) else "w",
-                index_mode="a" if (resume_enabled or collect_chunk_index > 0) else "w",
+                output_mode="a" if resume_enabled else "w",
+                index_mode="a" if resume_enabled else "w",
                 emit_summary=False,
                 adaptive_collect=adaptive_collect,
                 max_inflight_requests=max_inflight,
                 resume_completed_jobs=completed_jobs if resume_enabled else None,
                 checkpoint_path=checkpoint_path,
-                checkpoint_mode="a" if (resume_enabled or collect_chunk_index > 0) else "w",
+                checkpoint_mode="a" if resume_enabled else "w",
                 stats_sink=collect_stats,
-                # The chunked path owns a single command-level bar across all chunks
-                # (see `chunk_progress`); the owner allows only one active bar, so the
-                # per-chunk collect must not start its own (it would close ours).
-                progress_owner=None,
-                **_collect_transport_kwargs(scheme, tls_context),
+                progress_owner=getattr(args, "_progress_owner", None),
+                tls_context=tls_context,
+                scan_work_items=_iter_collect_scan_items(target_plan, matrix_ports),
+                scan_work_items_count=target_plan.count_for_ports(matrix_ports),
+                discovery_exporters=discovery_exporters,
             )
-            collect_chunk_index += 1
-            requests += part_requests
-            success += part_success
-            collect_errors += int(collect_stats.get("errors", 0))
-            skipped_jobs_total += int(collect_stats.get("skipped_jobs", 0))
-            return part_found
-
-        # A huge target list is chunked; per-chunk scan progress is off, so a single
-        # command-level bar owns the run (counted by hosts). advance() clamps at the
-        # total, so re-visited hosts in the explicit-port matrix never overshoot.
-        chunk_progress = None
-        if should_use_global_progress(args.output_format, target_plan.target_count):
-            chunk_progress = start_command_progress(args, "COLLECT", target_plan.target_count, enabled=True, leave=True)
-        try:
-            if not target_plan.has_explicit_port_targets:
-                for scheme, host_chunk in _chunk_collect_specs_by_scheme(target_plan.iter_specs()):
-                    _process_host_chunk(host_chunk, custom_ports or None, scheme)
-                    if chunk_progress is not None:
-                        chunk_progress.advance(len(host_chunk))
-            else:
-                matrix_ports = tuple(custom_ports or default_ports)
-                for port in target_plan.execution_ports(matrix_ports):
-                    for scheme, host_chunk in _chunk_collect_specs_by_scheme(
-                        target_plan.iter_specs_for_port(int(port), matrix_ports)
-                    ):
-                        _process_host_chunk(host_chunk, [int(port)], scheme)
-                        if chunk_progress is not None:
-                            chunk_progress.advance(len(host_chunk))
         except OSError as exc:
             console.error(f"failed to process collect output: {exc}")
             return 2
-        finally:
-            if chunk_progress is not None:
-                chunk_progress.close()
-
+        scan_checks = collect_stats.get("discovery_checks", 0)
+        scan_found = collect_stats.get("discovery_found", 0)
+        scan_errors = collect_stats.get("discovery_errors", 0)
+        collect_errors = collect_stats.get("errors", 0)
+        skipped_jobs_total = collect_stats.get("skipped_jobs", 0)
         data_ms = int((time.monotonic() - data_started_at) * 1000)
         if args.debug:
             console.debug(f"pass=1 detect complete checks={scan_checks} detected={scan_found}")
@@ -708,7 +657,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 f"{save_suffix}{resume_suffix}"
             )
         validate_rc = _finish_validation()
-        summary_mode = "a" if (resume_enabled or collect_chunk_index > 0) else "w"
+        summary_mode = "a"
         _emit_collect_summary(
             target_plan.target_count,
             resumed_success + requests,
@@ -757,6 +706,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 progress_leave=False,
                 progress_owner=getattr(args, "_progress_owner", None),
                 stats_sink=scan_stats,
+                suppress_negative_lines=not args.debug,
                 **_collect_transport_kwargs("http", tls_context),
             )
             scan_errors = int(scan_stats.get("errors", 0))
@@ -804,6 +754,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     progress_leave=False,
                     progress_owner=getattr(args, "_progress_owner", None),
                     stats_sink=part_scan_stats,
+                    suppress_negative_lines=not args.debug,
                     **_collect_transport_kwargs(group.scheme_hint or "http", tls_context),
                 )
                 scan_checks += part_checks

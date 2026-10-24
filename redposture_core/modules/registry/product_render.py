@@ -11,12 +11,14 @@ from typing import Any
 
 from ...auth_detection import auth_required_text
 from ...console import Console
+from ...discovery_rendering import discovery_color_spans
 from ...rendering import (
     BooleanColorRule,
     CountColorRule,
     render_colored_marker_line,
     render_tagged_detail_line,
 )
+from ..execution_api import render as render_execution
 from . import actions
 
 _NAMES = {
@@ -126,7 +128,13 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return ""
     user = str(username or "user")
     password = record.get("provided_password")
-    pair = f"{user}:{'<empty>' if password == '' else str(password or '')}"
+    if password == "":
+        password_text = "<empty>"
+    elif password is None and record.get("provided_credentials") is True:
+        password_text = "<redacted>"
+    else:
+        password_text = str(password or "")
+    pair = f"{user}:{password_text}"
     return f"{_prefix(record)} {'[+]' if status == 'valid_credentials' else '[-]'} {pair}"
 
 
@@ -296,6 +304,12 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     return _order_inventory_sections(lines, inspection_error=str(record.get("inspection_error") or "").strip())
 
 
+def _format_execution_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if _product(record) != "nexus" or output_format != "txt":
+        return []
+    return render_execution("nexus", record)
+
+
 def _render_colored_registry_line(console: Console, line: str) -> bool:
     tag = line.split(None, 1)[0].strip() if line.strip() else ""
     if tag not in {"DOCKER-REGISTRY", "HARBOR", "NEXUS", "GITLAB"}:
@@ -312,6 +326,7 @@ def _render_colored_registry_line(console: Console, line: str) -> bool:
         ),
         extra_spans=lambda marker, payload: (
             ([(0, len(payload), "orange")] if marker == "[!]" and not payload.startswith("CVE's Enumeration") else [])
+            + discovery_color_spans(marker, payload)
             + _registry_marker_value_spans(marker, payload)
         ),
     ):
@@ -336,4 +351,10 @@ def _render_colored_registry_line(console: Console, line: str) -> bool:
     return False
 
 
-__all__ = ["_format_detect_record", "_format_record", "_format_detail_records", "_render_colored_registry_line"]
+__all__ = [
+    "_format_detect_record",
+    "_format_record",
+    "_format_detail_records",
+    "_format_execution_records",
+    "_render_colored_registry_line",
+]

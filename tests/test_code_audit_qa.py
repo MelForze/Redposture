@@ -93,6 +93,18 @@ def test_q2_planned_token_mapping_is_complete_but_requires_executed_evidence(tmp
         )
         + '<testcase name="test_execute_http_contract[False-nomad-job]"/>'
         + '<testcase name="test_execute_http_contract[False-jupyter-kernel]"/>'
+        + "".join(
+            f'<testcase name="{name}"/>'
+            for name in (
+                "test_real_http_spark_runner_prefix_tls_and_clean_saved_output[False-ui]",
+                "test_explicit_probe_real_http_keeps_create_payload_non_executable[400-True-unverified]",
+                "test_runner_prefix_tls_discovery_inventory_and_plain_outputs[http]",
+                "test_cli_probe_sends_only_application_id_allocation[False-allowed]",
+                "test_real_portainer_auth_inventory_prefix_tls_and_clean_files[False-pair]",
+                "test_full_command_defcreds_stops_after_first_429",
+                "test_real_spray_preserves_portainer_verifier_for_pairs_and_tokens[pair]",
+            )
+        )
         + "</testsuite></testsuites>"
     )
     executed = matrix.build_coverage_report(script, status_file=status)

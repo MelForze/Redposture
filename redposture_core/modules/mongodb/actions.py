@@ -12,6 +12,7 @@ from ...clients.mongodb import (
     MongoAuditClient,
     MongoDependencyError,
     MongoNotMongoError,
+    MongoPartialReadError,
     close_quietly,
     is_auth_error,
     is_legacy_wire_error,
@@ -509,6 +510,13 @@ def _collect_mongodb_data(
                     for doc in docs:
                         target.append({"database": db_name, "collection": collection_name, "document": doc})
                 except Exception as exc:
+                    if isinstance(exc, MongoPartialReadError):
+                        target = query_rows if query_requested else document_rows
+                        for doc in exc.documents:
+                            target.append({"database": db_name, "collection": collection_name, "document": doc})
+                        # A returned document proves read access even if count
+                        # and the eventual getMore both failed.
+                        capability_outcomes["can_read_documents"].append(True)
                     note(
                         "can_read_documents",
                         False,
@@ -1416,9 +1424,9 @@ def _render_colored_mongodb_line(console: Console, line: str) -> bool:
         line,
         tag=_MONGODB_TAG,
         counts=(
-            CountColorRule("DBs", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("collections", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("documents", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("DBs", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("collections", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("documents", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
         regexes=(
             RegexColorRule(r"\d+ credential check\(s\) inconclusive", "orange"),

@@ -10,6 +10,9 @@ from redposture_core.module_registry import AUDIT_MODULE_NAMES
 from redposture_core.stage_runtime import AuditCommandResult
 
 RUN_CASES = {
+    "spark": ["spark", "-t", "127.0.0.1", "--show-workers", "--show-apps"],
+    "yarn": ["yarn", "-t", "127.0.0.1", "--show-apps", "--show-nodes"],
+    "portainer": ["portainer", "-t", "127.0.0.1", "--defcreds", "--show-endpoints"],
     "redis": ["redis", "-t", "127.0.0.1"],
     "postgres": ["postgres", "-t", "127.0.0.1"],
     "kafka": ["kafka", "-t", "127.0.0.1"],

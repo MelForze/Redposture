@@ -94,7 +94,8 @@ def _provider_from_urls(urls: Iterable[str]) -> tuple[str, str] | None:
             and ("authorize" in value or "/auth" in value)
         ):
             return "oidc", "oidc"
-        if ("samlrequest" in query or "samlresponse" in query) and "relaystate" in query:
+        saml_keys = {key.casefold() for key in query}
+        if ("samlrequest" in saml_keys or "samlresponse" in saml_keys) and "relaystate" in saml_keys:
             return "saml", "saml"
     return None
 

@@ -23,6 +23,14 @@ class MongoClientError(RuntimeError):
     """Normalized MongoDB client error."""
 
 
+class MongoPartialReadError(MongoClientError):
+    """A cursor failed after returning useful documents."""
+
+    def __init__(self, documents: list[dict[str, Any]], cause: Exception) -> None:
+        super().__init__(normalize_mongodb_error(cause))
+        self.documents = documents
+
+
 class MongoAuthError(MongoClientError):
     """Normalized MongoDB auth/permission error."""
 
@@ -195,8 +203,10 @@ def normalize_mongodb_error(exc: BaseException) -> str:
         return "connection refused (service is not listening on target port)"
     if "timed out" in lower or "timeout" in lower or "serverselectiontimeouterror" in lower:
         return "connection timeout"
-    if "authentication failed" in lower or "not authorized" in lower or "unauthorized" in lower:
+    if "authentication failed" in lower or getattr(exc, "code", None) == 18:
         return "authentication failed"
+    if getattr(exc, "code", None) == 13 or "not authorized" in lower or "unauthorized" in lower:
+        return "authorization denied"
     if "name or service not known" in lower or "temporary failure in name resolution" in lower:
         return "dns lookup failed"
     match = re.search(r"\[errno\s+(-?\d+)\]\s*(.*)", text, flags=re.IGNORECASE)
@@ -222,6 +232,7 @@ def is_auth_error(exc: BaseException | str | None) -> bool:
             for needle in (
                 "authentication failed",
                 "not authorized",
+                "authorization denied",
                 "unauthorized",
                 "requires authentication",
                 "command requires authentication",
@@ -403,9 +414,19 @@ class MongoAuditClient:
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         cursor = self.client[database][collection].find(query or {}, projection)
-        if limit is not None:
-            cursor = cursor.limit(int(limit))
-        return [json_safe(item) for item in cursor]
+        documents: list[dict[str, Any]] = []
+        try:
+            if limit is not None:
+                cursor = cursor.limit(int(limit))
+            for item in cursor:
+                documents.append(json_safe(item))
+            return documents
+        except Exception as exc:
+            if documents:
+                raise MongoPartialReadError(documents, exc) from exc
+            raise
+        finally:
+            close_quietly(cursor)
 
 
 def close_quietly(client: Any) -> None:
@@ -436,6 +457,7 @@ __all__ = [
     "MongoClientError",
     "MongoDependencyError",
     "MongoNotMongoError",
+    "MongoPartialReadError",
     "is_mongodb_hello_response",
     "build_mongodb_uri",
     "close_quietly",

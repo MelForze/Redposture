@@ -494,14 +494,22 @@ def _decode_chunked_body(body: bytes, *, allow_partial: bool = False) -> bytes:
             if allow_partial:
                 break
             raise ValueError("malformed chunked body: incomplete chunk header")
-        try:
-            size = int(line.split(b";", 1)[0].strip() or b"0", 16)
-        except ValueError as exc:
+        size_token, extension_sep, _extension = line.partition(b";")
+        if extension_sep:
+            # Chunk extensions permit SP/HTAB before their semicolon, but
+            # the size itself is one or more hexadecimal digits.
+            size_token = size_token.rstrip(b" \t")
+        if not size_token or any(char not in b"0123456789abcdefABCDEF" for char in size_token):
             if allow_partial:
                 return bytes(output)
-            raise ValueError("malformed chunked body: invalid chunk size") from exc
+            raise ValueError("malformed chunked body: invalid chunk size")
+        size = int(size_token, 16)
         if size == 0:
-            completed = True
+            # The last chunk still requires an empty trailer line, including
+            # when a nonempty trailer section follows it.
+            completed = rest.startswith(b"\r\n") or b"\r\n\r\n" in rest
+            if not completed and not allow_partial:
+                raise ValueError("malformed chunked body: incomplete trailers")
             break
         if len(rest) < size:
             if allow_partial:
@@ -509,7 +517,11 @@ def _decode_chunked_body(body: bytes, *, allow_partial: bool = False) -> bytes:
                 break
             raise ValueError("malformed chunked body: truncated chunk")
         output.extend(rest[:size])
-        remaining = rest[size + 2 :] if rest[size : size + 2] == b"\r\n" else rest[size:]
+        if rest[size : size + 2] != b"\r\n":
+            if allow_partial:
+                break
+            raise ValueError("malformed chunked body: invalid chunk delimiter")
+        remaining = rest[size + 2 :]
     if not completed and not allow_partial:
         raise ValueError("malformed chunked body: missing terminator")
     return bytes(output)
@@ -518,14 +530,20 @@ def _decode_chunked_body(body: bytes, *, allow_partial: bool = False) -> bytes:
 def _parse_http_response_bytes_detailed(
     raw: bytes, *, response_cap: int, truncated: bool = False, method: str = "GET"
 ) -> tuple[int, dict[str, str], bytes, bool]:
-    header_bytes, separator, body = raw.partition(b"\r\n\r\n")
-    if not separator:
-        raise OSError("invalid HTTP response from target")
-    lines = header_bytes.decode("iso-8859-1", errors="replace").split("\r\n")
-    status_line = lines[0] if lines else ""
-    parts = status_line.split(None, 2)
-    if len(parts) < 2 or not parts[1].isdigit():
-        raise OSError("invalid HTTP status from target")
+    # Informational responses have no body and precede the final response.
+    # 101 is terminal: it switches the connection away from HTTP semantics.
+    while True:
+        header_bytes, separator, body = raw.partition(b"\r\n\r\n")
+        if not separator:
+            raise OSError("invalid or incomplete HTTP response from target")
+        lines = header_bytes.decode("iso-8859-1", errors="replace").split("\r\n")
+        status_line = lines[0] if lines else ""
+        parts = status_line.split(None, 2)
+        if len(parts) < 2 or not parts[1].isdigit():
+            raise OSError("invalid HTTP status from target")
+        if not 100 <= int(parts[1]) < 200 or int(parts[1]) == 101:
+            break
+        raw = body
     headers: dict[str, str] = {}
     for line in lines[1:]:
         if ":" not in line:

@@ -29,6 +29,7 @@ from ...clients.http_api import (
 from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
+from ...detection_io import DetectCall, DetectDelay, Steps, run_sync
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
 from ...network_proxy import ProxySocketPatch
 from ...rendering import BooleanColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
@@ -36,6 +37,7 @@ from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
 )
+from . import native_detect
 from .async_detect import AsyncProbe, probe_direct_paths
 from .discover import DiscoverOptions, DiscoverReport, DiscoverRequest, DiscoverResponse, Finding, run_discovery
 from .http_session import ElasticHttpSession
@@ -442,6 +444,19 @@ def _http_url_host(host: str) -> str:
     return normalized
 
 
+def _elastic_session_response(session: ElasticHttpSession, scheme: str, method: str, path: str, **options: Any) -> Any:
+    return session.request(scheme, method, path, **options)
+
+
+def _elastic_generic_response(config: HttpClientConfig, method: str, url: str, **options: Any) -> Any:
+    return HttpApiClient(config).request(method, url, **options)
+
+
+def _activate_elastic_detection(state: ElasticLifecycleState) -> None:
+    _THREAD_LOCAL_ELASTIC_SESSION.state = state
+    _THREAD_LOCAL_ELASTIC_SESSION.session = state.session
+
+
 def _elastic_request(
     host: str,
     port: int,
@@ -455,6 +470,35 @@ def _elastic_request(
     headers: dict[str, str] | None = None,
     data: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
+    return run_sync(
+        _elastic_request_steps(
+            host,
+            port,
+            path,
+            timeout,
+            use_https=use_https,
+            insecure=insecure,
+            ca_file=ca_file,
+            method=method,
+            headers=headers,
+            data=data,
+        )
+    )
+
+
+def _elastic_request_steps(
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    *,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    data: bytes | None = None,
+) -> Steps[tuple[int, bytes, dict[str, str], str | None]]:
     scheme = "https" if use_https else "http"
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
@@ -468,12 +512,8 @@ def _elastic_request(
             use_https = scheme == "https"
     active_session = _active_elastic_session(host, port)
     if active_session is not None:
-        response = active_session.request(
-            scheme,
-            method,
-            path,
-            headers=req_headers,
-            data=data,
+        response = yield DetectCall(
+            _elastic_session_response, (active_session, scheme, method, path), {"headers": req_headers, "data": data}
         )
     else:
         url = build_http_target_url(
@@ -483,14 +523,20 @@ def _elastic_request(
             default_scheme=scheme,
             override_bound_scheme=isinstance(lifecycle, ElasticLifecycleState),
         )
-        response = HttpApiClient(
-            HttpClientConfig(
-                timeout=timeout,
-                insecure=bool(use_https and insecure),
-                ca_file=ca_file if use_https and ca_file else None,
-                response_size_cap=10 * 1024 * 1024,
-            )
-        ).request(method, url, headers=req_headers, body=data, timeout=timeout)
+        response = yield DetectCall(
+            _elastic_generic_response,
+            (
+                HttpClientConfig(
+                    timeout=timeout,
+                    insecure=bool(use_https and insecure),
+                    ca_file=ca_file if use_https and ca_file else None,
+                    response_size_cap=10 * 1024 * 1024,
+                ),
+                method,
+                url,
+            ),
+            {"headers": req_headers, "body": data, "timeout": timeout},
+        )
     if response.error:
         return 0, b"", {}, str(response.error)
     if isinstance(lifecycle, ElasticLifecycleState):
@@ -519,6 +565,35 @@ def _request_with_tls_fallback(
     data: bytes | None = None,
     allow_fallback: bool = True,
 ) -> tuple[int, bytes, dict[str, str], str | None, str, bool, bool]:
+    return run_sync(
+        _request_with_tls_fallback_steps(
+            host,
+            port,
+            path,
+            timeout,
+            ca_file=ca_file,
+            preferred_scheme=preferred_scheme,
+            method=method,
+            headers=headers,
+            data=data,
+            allow_fallback=allow_fallback,
+        )
+    )
+
+
+def _request_with_tls_fallback_steps(
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    *,
+    ca_file: str | None,
+    preferred_scheme: str = "https",
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    data: bytes | None = None,
+    allow_fallback: bool = True,
+) -> Steps[tuple[int, bytes, dict[str, str], str | None, str, bool, bool]]:
     normalized_scheme = str(preferred_scheme or "").strip().lower()
     if normalized_scheme not in {"http", "https"}:
         normalized_scheme = "https"
@@ -529,17 +604,17 @@ def _request_with_tls_fallback(
     first_insecure = bool(first_use_https and not ca_file)
     second_insecure = bool(second_use_https and not ca_file)
 
-    status, payload, response_headers, error = _elastic_request(
-        host,
-        port,
-        path,
-        timeout,
-        use_https=first_use_https,
-        insecure=first_insecure,
-        ca_file=ca_file if first_use_https else None,
-        method=method,
-        headers=headers,
-        data=data,
+    status, payload, response_headers, error = yield DetectCall(
+        _elastic_request,
+        (host, port, path, timeout),
+        {
+            "use_https": first_use_https,
+            "insecure": first_insecure,
+            "ca_file": ca_file if first_use_https else None,
+            "method": method,
+            "headers": headers,
+            "data": data,
+        },
     )
     if status > 0:
         lifecycle = getattr(_THREAD_LOCAL_ELASTIC_SESSION, "state", None)
@@ -562,17 +637,17 @@ def _request_with_tls_fallback(
             False,
         )
 
-    fallback_status, fallback_payload, fallback_headers, fallback_error = _elastic_request(
-        host,
-        port,
-        path,
-        timeout,
-        use_https=second_use_https,
-        insecure=second_insecure,
-        ca_file=ca_file if second_use_https else None,
-        method=method,
-        headers=headers,
-        data=data,
+    fallback_status, fallback_payload, fallback_headers, fallback_error = yield DetectCall(
+        _elastic_request,
+        (host, port, path, timeout),
+        {
+            "use_https": second_use_https,
+            "insecure": second_insecure,
+            "ca_file": ca_file if second_use_https else None,
+            "method": method,
+            "headers": headers,
+            "data": data,
+        },
     )
     if fallback_status > 0:
         diagnostic_headers = dict(fallback_headers)
@@ -1174,16 +1249,29 @@ def _request_detect_probe(
     ca_file: str | None,
     allow_fallback: bool = True,
 ) -> tuple[int, bytes, dict[str, str], str | None, str]:
+    return run_sync(
+        _request_detect_probe_steps(
+            host, port, path, timeout, preferred_scheme=preferred_scheme, ca_file=ca_file, allow_fallback=allow_fallback
+        )
+    )
+
+
+def _request_detect_probe_steps(
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    *,
+    preferred_scheme: str,
+    ca_file: str | None,
+    allow_fallback: bool = True,
+) -> Steps[tuple[int, bytes, dict[str, str], str | None, str]]:
     use_https = preferred_scheme == "https"
     insecure = bool(use_https and not ca_file)
-    status, payload, headers, error = _elastic_request(
-        host,
-        port,
-        path,
-        timeout,
-        use_https=use_https,
-        insecure=insecure,
-        ca_file=ca_file if use_https else None,
+    status, payload, headers, error = yield DetectCall(
+        _elastic_request,
+        (host, port, path, timeout),
+        {"use_https": use_https, "insecure": insecure, "ca_file": ca_file if use_https else None},
     )
     if status > 0:
         return status, payload, headers, error, preferred_scheme
@@ -1195,14 +1283,10 @@ def _request_detect_probe(
     fallback_scheme = "http" if preferred_scheme == "https" else "https"
     fallback_https = fallback_scheme == "https"
     fallback_insecure = bool(fallback_https and not ca_file)
-    fallback_status, fallback_payload, fallback_headers, fallback_error = _elastic_request(
-        host,
-        port,
-        path,
-        timeout,
-        use_https=fallback_https,
-        insecure=fallback_insecure,
-        ca_file=ca_file if fallback_https else None,
+    fallback_status, fallback_payload, fallback_headers, fallback_error = yield DetectCall(
+        _elastic_request,
+        (host, port, path, timeout),
+        {"use_https": fallback_https, "insecure": fallback_insecure, "ca_file": ca_file if fallback_https else None},
     )
     if fallback_status > 0:
         diagnostic_headers = dict(fallback_headers)
@@ -3118,6 +3202,48 @@ def _audit_elastic_host(
     run_deep_checks: bool = True,
     scheme_locked: bool = False,
 ) -> dict[str, Any]:
+    return run_sync(
+        _audit_elastic_host_steps(
+            host,
+            port,
+            timeout,
+            retries,
+            username,
+            password,
+            api_token,
+            ca_file,
+            show_endpoints,
+            show_plugins,
+            show_cluster,
+            show_users,
+            discover,
+            preferred_scheme,
+            debug,
+            run_deep_checks,
+            scheme_locked,
+        )
+    )
+
+
+def _audit_elastic_host_steps(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    username: str | None,
+    password: str | None,
+    api_token: str | None,
+    ca_file: str | None,
+    show_endpoints: bool,
+    show_plugins: bool,
+    show_cluster: bool,
+    show_users: bool,
+    discover: bool,
+    preferred_scheme: str | None = None,
+    debug: bool = False,
+    run_deep_checks: bool = True,
+    scheme_locked: bool = False,
+) -> Steps[dict[str, Any]]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
     normalized_preferred_scheme = str(preferred_scheme or "").strip().lower()
@@ -3237,14 +3363,10 @@ def _audit_elastic_host(
         started = time.monotonic()
         _debug(f"attempt={attempt + 1}/{attempts} start timeout={timeout}s")
         stage1_started = time.monotonic()
-        status, payload, root_headers, error, scheme, effective_insecure, tls_auto_plain = _request_with_tls_fallback(
-            host,
-            port,
-            "/",
-            timeout,
-            ca_file=ca_file,
-            preferred_scheme=preferred_scheme,
-            allow_fallback=True,
+        status, payload, root_headers, error, scheme, effective_insecure, tls_auto_plain = yield DetectCall(
+            _request_with_tls_fallback,
+            (host, port, "/", timeout),
+            {"ca_file": ca_file, "preferred_scheme": preferred_scheme, "allow_fallback": True},
         )
         root_transport_error = root_headers.pop(_TRANSPORT_DIAGNOSTIC_HEADER, None)
         if error and status <= 0:
@@ -3267,7 +3389,7 @@ def _audit_elastic_host(
                     delay_s=delay,
                     reason=last_error,
                 )
-                time.sleep(delay)
+                (yield DetectDelay(delay))
                 continue
             _stage_trace(
                 _STAGE_DETECT_PROTOCOL,
@@ -3305,7 +3427,7 @@ def _audit_elastic_host(
 
         def _run_confirmation_probe(
             probe_path: str, pass_name: str, prefetched: AsyncProbe | None = None
-        ) -> dict[str, Any]:
+        ) -> Steps[dict[str, Any]]:
             nonlocal preferred_scheme
             requested_scheme = preferred_scheme
             if prefetched is not None and not prefetched.fallback:
@@ -3319,12 +3441,8 @@ def _audit_elastic_host(
                     "preferred_scheme": requested_scheme,
                     "ca_file": ca_file,
                 }
-                probe_status, probe_payload, probe_headers, probe_error, probe_scheme = _request_detect_probe(
-                    host,
-                    port,
-                    probe_path,
-                    timeout,
-                    **probe_kwargs,
+                probe_status, probe_payload, probe_headers, probe_error, probe_scheme = yield DetectCall(
+                    _request_detect_probe, (host, port, probe_path, timeout), {**(probe_kwargs)}
                 )
             probe_transport_error = probe_headers.pop(_TRANSPORT_DIAGNOSTIC_HEADER, None)
             probe_detection = _classify_detect_probe(
@@ -3363,17 +3481,21 @@ def _audit_elastic_host(
             async_attempted = False
             async_probes: dict[int, AsyncProbe] = {}
             for probe_index, probe_path in enumerate(_DETECT_CONFIRM_PATHS):
-                if slow_probe and not async_attempted and _can_probe_direct_async(host, port):
+                if slow_probe and not async_attempted and (yield DetectCall(_can_probe_direct_async, (host, port), {})):
                     async_attempted = True
                     remaining = _DETECT_CONFIRM_PATHS[probe_index:]
                     try:
-                        fetched = probe_direct_paths(
-                            host,
-                            port,
-                            tuple(join_http_target_path(path) for path in remaining),
-                            preferred_scheme,
-                            timeout,
-                            ca_file,
+                        fetched = yield DetectCall(
+                            probe_direct_paths,
+                            (
+                                host,
+                                port,
+                                tuple(join_http_target_path(path) for path in remaining),
+                                preferred_scheme,
+                                timeout,
+                                ca_file,
+                            ),
+                            {},
                         )
                     except (OSError, RuntimeError, ValueError) as exc:
                         fetched = None
@@ -3381,7 +3503,7 @@ def _audit_elastic_host(
                     if fetched is not None:
                         async_probes = {probe_index + offset: item for offset, item in enumerate(fetched)}
                 probe_started = time.monotonic()
-                probe = _run_confirmation_probe(probe_path, "base", async_probes.get(probe_index))
+                probe = yield from _run_confirmation_probe(probe_path, "base", async_probes.get(probe_index))
                 detect_probes.append(probe)
                 probe_error = str(probe.get("error") or "")
                 if (
@@ -3401,7 +3523,7 @@ def _audit_elastic_host(
                 break
             next_retry_paths: list[str] = []
             for probe_path in retry_paths:
-                probe = _run_confirmation_probe(probe_path, f"retry:{retry_round + 1}")
+                probe = yield from _run_confirmation_probe(probe_path, f"retry:{retry_round + 1}")
                 detect_probes.append(probe)
                 probe_error = str(probe.get("error") or "")
                 if (
@@ -4103,6 +4225,10 @@ def _credential_verification_payload(
 
 
 def detect_elastic(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    return run_sync(detect_elastic_steps(ctx, options))
+
+
+def detect_elastic_steps(ctx: Any, options: Mapping[str, Any]) -> Steps[dict[str, Any]]:
     """Perform the complete anonymous identity/version classification once."""
 
     state = ctx.lifecycle_state
@@ -4115,24 +4241,29 @@ def detect_elastic(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
     state.session = session
     try:
         with _elastic_session_scope(session, state):
-            record = _audit_elastic_host(
-                str(ctx.host),
-                int(ctx.port),
-                float(getattr(ctx.args, "timeout", 5.0)),
-                int(getattr(ctx.args, "retries", 0) or 0),
-                None,
-                None,
-                None,
-                str(getattr(ctx.args, "ca_file", "") or "").strip() or None,
-                False,
-                False,
-                False,
-                False,
-                False,
-                preferred_scheme=preferred_scheme,
-                debug=bool(getattr(ctx.args, "debug", False)),
-                run_deep_checks=False,
-                scheme_locked=False,
+            record = yield DetectCall(
+                _audit_elastic_host,
+                (
+                    str(ctx.host),
+                    int(ctx.port),
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    int(getattr(ctx.args, "retries", 0) or 0),
+                    None,
+                    None,
+                    None,
+                    str(getattr(ctx.args, "ca_file", "") or "").strip() or None,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                ),
+                {
+                    "preferred_scheme": preferred_scheme,
+                    "debug": bool(getattr(ctx.args, "debug", False)),
+                    "run_deep_checks": False,
+                    "scheme_locked": False,
+                },
             )
     finally:
         if session is not None:
@@ -5441,3 +5572,17 @@ def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_elastic_host_with_thread_debug
+
+
+# Native detection executes only registered continuations, never sync sockets.
+_ASYNC_DETECT_STEPS: dict[Callable[..., Any], Callable[..., Steps[Any]]] = {
+    _audit_elastic_host: _audit_elastic_host_steps,
+    _elastic_request: _elastic_request_steps,
+    _request_detect_probe: _request_detect_probe_steps,
+    _request_with_tls_fallback: _request_with_tls_fallback_steps,
+    detect_elastic: native_detect.detect_steps,
+    _elastic_session_response: native_detect.session_response_steps,
+    _elastic_generic_response: native_detect.generic_response_steps,
+    _can_probe_direct_async: native_detect.no_direct_prefetch_steps,
+    probe_direct_paths: native_detect.no_direct_prefetch_steps,
+}

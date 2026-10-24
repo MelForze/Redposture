@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from ...stage_runtime import validate_basic_module_args
+from ..execution_api import validate as validate_execution
 from .actions import _normalize_ssrf_urls
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -15,6 +16,14 @@ def validate_args(args: Any, console: Any) -> int | None:
     common_rc = validate_basic_module_args(args, console, module="consul", pure_http=False)
     if common_rc is not None:
         return common_rc
+    execution_rc = validate_execution(args, console)
+    if execution_rc is not None:
+        return execution_rc
+    if getattr(args, "execute", None) is not None and (
+        bool(getattr(args, "revshell", False)) or bool(getattr(args, "delete_revshell", False))
+    ):
+        console.error("--execute cannot be combined with --revshell or --delete")
+        return 2
 
     if bool(getattr(args, "tls_cert", None)) != bool(getattr(args, "tls_key", None)):
         console.error("--tls-cert and --tls-key must be provided together")

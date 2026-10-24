@@ -29,6 +29,7 @@ from ...clients.http_api import (
 from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
+from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
 from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...scheduler import NestedSchedulerCancelled
@@ -227,6 +228,37 @@ def _proxmox_request_once(
     form: dict[str, Any] | None = None,
     auth_headers: dict[str, str] | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
+    return run_sync(
+        _detect_proxmox_request_once_steps(
+            host,
+            port,
+            path,
+            timeout,
+            pve_api_token=pve_api_token,
+            use_https=use_https,
+            insecure=insecure,
+            proxy=proxy,
+            method=method,
+            form=form,
+            auth_headers=auth_headers,
+        )
+    )
+
+
+def _detect_proxmox_request_once_steps(
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    *,
+    pve_api_token: str,
+    use_https: bool,
+    insecure: bool,
+    proxy: Any | None,
+    method: str = "GET",
+    form: dict[str, Any] | None = None,
+    auth_headers: dict[str, str] | None = None,
+) -> Any:
     request_method = str(method or "GET").upper()
     request_body = urllib.parse.urlencode(form or {}, doseq=True).encode("utf-8") if form else None
     requested_scheme = "https" if use_https else "http"
@@ -257,14 +289,17 @@ def _proxmox_request_once(
                 default_scheme=scheme,
                 override_bound_scheme=True,
             )
-            response = pool.request(
+            response = yield HttpRead(
+                pool,
                 request_method,
                 url,
-                headers=request_headers,
-                body=request_body,
-                timeout=timeout,
-                response_size_cap=_MAX_HTTP_BODY_BYTES,
-                replay_safe=request_method in {"GET", "HEAD"},
+                {
+                    "headers": request_headers,
+                    "body": request_body,
+                    "timeout": timeout,
+                    "response_size_cap": _MAX_HTTP_BODY_BYTES,
+                    "replay_safe": request_method in {"GET", "HEAD"},
+                },
             )
             if response.error is None and not (
                 scheme == "http"
@@ -324,14 +359,13 @@ def _proxmox_request(
     form: dict[str, Any] | None = None,
     auth_headers: dict[str, str] | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
-    attempts = max(1, retries + 1)
-    last_error: str | None = None
-    for attempt in range(attempts):
-        status, payload, response_headers, error = _proxmox_request_once(
+    return run_sync(
+        _detect_proxmox_request_steps(
             host,
             port,
             path,
             timeout,
+            retries,
             pve_api_token=pve_api_token,
             use_https=use_https,
             insecure=insecure,
@@ -339,6 +373,40 @@ def _proxmox_request(
             method=method,
             form=form,
             auth_headers=auth_headers,
+        )
+    )
+
+
+def _detect_proxmox_request_steps(
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    retries: int,
+    *,
+    pve_api_token: str,
+    use_https: bool,
+    insecure: bool,
+    proxy: Any | None,
+    method: str = "GET",
+    form: dict[str, Any] | None = None,
+    auth_headers: dict[str, str] | None = None,
+) -> Any:
+    attempts = max(1, retries + 1)
+    last_error: str | None = None
+    for attempt in range(attempts):
+        status, payload, response_headers, error = yield DetectCall(
+            _proxmox_request_once,
+            (host, port, path, timeout),
+            {
+                "pve_api_token": pve_api_token,
+                "use_https": use_https,
+                "insecure": insecure,
+                "proxy": proxy,
+                "method": method,
+                "form": form,
+                "auth_headers": auth_headers,
+            },
         )
         if error is None:
             return status, payload, response_headers, None
@@ -352,7 +420,7 @@ def _proxmox_request(
         last_error = error
         if attempt >= attempts - 1:
             break
-        time.sleep(_retry_delay(attempt))
+        (yield DetectDelay(_retry_delay(attempt)))
     return 0, b"", {}, last_error or "connection failed"
 
 
@@ -2381,3 +2449,9 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_proxmox_host_with_stage_debug
+
+
+_ASYNC_DETECT_STEPS: dict[Any, Any] = {
+    _proxmox_request: _detect_proxmox_request_steps,
+    _proxmox_request_once: _detect_proxmox_request_once_steps,
+}

@@ -13,8 +13,8 @@ from .console import Console
 _DEFAULT_MARKER_COLORS = {
     "[*]": "cyan",
     "[+]": "bright_green",
-    "[-]": "red",
-    "[!]": "red",
+    "[-]": "true_red",
+    "[!]": "true_red",
 }
 
 
@@ -34,7 +34,7 @@ class RegexColorRule:
 @dataclass(frozen=True)
 class BooleanColorRule:
     field: str
-    true_color: str = "red"
+    true_color: str = "true_red"
     false_color: str = "bright_green"
     unknown_color: str = "yellow"
 
@@ -84,6 +84,22 @@ def sanitize_report_line(line: str) -> str:
     return "\t".join(parts)
 
 
+def order_detection_fields(line: str) -> str:
+    """Keep the version last in detection headers, preserving data/detail rows."""
+    if "(version:" not in line:
+        return line
+    parts = line.split("\t", 3)
+    if len(parts) != 4 or not parts[3].lstrip().startswith("[*] ") or "(auth required:" not in parts[3]:
+        return line
+    payload = parts[3]
+    matches = list(re.finditer(r"\(version:[^()]*\)", payload))
+    if len(matches) != 1 or matches[0].end() == len(payload):
+        return line
+    match = matches[0]
+    parts[3] = payload[: match.start()].rstrip() + " " + payload[match.end() :].strip() + " " + match[0]
+    return "\t".join(parts)
+
+
 def normalize_report_line_for_storage(line: str) -> str:
     """Return a machine-friendly TXT/TSV record without display padding.
 
@@ -94,6 +110,7 @@ def normalize_report_line_for_storage(line: str) -> str:
     remain unchanged.
     """
 
+    line = order_detection_fields(line)
     parts = line.split("\t", 3)
     if len(parts) < 4:
         return line
@@ -109,6 +126,7 @@ def format_report_line_for_console(line: str) -> str:
     and run-level messages remain unchanged.
     """
 
+    line = order_detection_fields(line)
     parts = line.split("\t", 3)
     if len(parts) < 4:
         return line
@@ -260,7 +278,7 @@ def collect_stage_payload_spans(
                     BooleanColorRule(
                         "auth required",
                         true_color="bright_green",
-                        false_color="red",
+                        false_color="true_red",
                         unknown_color="yellow",
                     ),
                 ),
@@ -374,7 +392,10 @@ def render_tagged_detail_line(
     resolved_spans = list(spans) if spans else _detect_count_pattern_spans(right, count_pattern_color)
     count_spans = collect_count_spans(
         right,
-        (CountColorRule(field, "red", unknown_color="orange", zero_color="bright_green") for field in resource_counts),
+        (
+            CountColorRule(field, "true_red", unknown_color="orange", zero_color="bright_green")
+            for field in resource_counts
+        ),
     )
     if count_spans:
         resolved_spans = [
@@ -406,6 +427,51 @@ def render_tagged_detail_line(
     return True
 
 
+_CREDENTIAL_PAIR_PREFIX = re.compile(r"^(?![\[{\"])[^\s:]*:")
+_URI_PREFIX = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def _credential_pair_end(payload: str) -> int | None:
+    """Locate the leading user:password, excluding report metadata suffixes.
+
+    Marker rows use a leading pair for authentication, while inventory rows
+    have resource labels. Do not mistake a URL or a JSON object for a pair.
+    Passwords may contain spaces, colons, Unicode and ordinary parentheses.
+    """
+    if not _CREDENTIAL_PAIR_PREFIX.match(payload) or _URI_PREFIX.match(payload):
+        return None
+    end = len(payload.rstrip())
+    while end and payload[end - 1] == ")":
+        start = payload.rfind(" (", 0, end)
+        if start < 0:
+            break
+        field = payload[start + 2 : end - 1]
+        if "(" in field or ")" in field:
+            break
+        if field in {"UI", "backend", "no access to protected znodes; credentials unverified"} or ":" in field:
+            end = start
+        else:
+            break
+    return end
+
+
+def _override_color_span(
+    spans: Iterable[tuple[int, int, str]], start: int, end: int, color: str
+) -> list[tuple[int, int, str]]:
+    """Replace an overlapping local palette without losing its outside spans."""
+    result: list[tuple[int, int, str]] = []
+    for left, right, original in spans:
+        if right <= start or left >= end:
+            result.append((left, right, original))
+        else:
+            if left < start:
+                result.append((left, start, original))
+            if right > end:
+                result.append((end, right, original))
+    result.append((start, end, color))
+    return result
+
+
 def render_module_marker_line(
     console: Console,
     line: str,
@@ -430,7 +496,38 @@ def render_module_marker_line(
             continue
         left, right = line.split(token, 1)
         rest = left[len(tag) :] if left.startswith(tag) else left
-        right_colored = colorize_spans(console, right, spans)
+        payload_spans = spans
+        if marker in {"[+]", "[-]"}:
+            pair_end = _credential_pair_end(right)
+            if pair_end is not None:
+                payload_spans = _override_color_span(
+                    payload_spans, 0, pair_end, "true_red" if marker == "[+]" else "white"
+                )
+                for suffix in (" (UI)", " (backend)"):
+                    if right.endswith(suffix):
+                        payload_spans = _override_color_span(
+                            payload_spans, len(right) - len(suffix) + 1, len(right), "white"
+                        )
+        if marker == "[+]":
+            for accepted in (
+                "Vault token accepted",
+                "Bearer token accepted",
+                "Token accepted",
+                "token auth",
+                "apikey auth",
+            ):
+                if right == accepted or right.startswith(accepted + " "):
+                    payload_spans = _override_color_span(payload_spans, 0, len(accepted), "true_red")
+                    if right.endswith(" (UI)"):
+                        payload_spans = _override_color_span(payload_spans, len(right) - 4, len(right), "white")
+                    break
+        if marker == "[-]" and right.removesuffix(" (UI)") in {
+            "Vault token rejected",
+            "Token rejected",
+            "Bearer token rejected",
+        }:
+            payload_spans = _override_color_span(payload_spans, 0, len(right), "white")
+        right_colored = colorize_spans(console, right, payload_spans)
         colored = (
             f"{console._paint(tag, 'blue', sys.stdout)}"
             f"{console._paint(rest, 'white', sys.stdout)} "

@@ -77,7 +77,11 @@ def test_repeated_kafka_ui_cursor_does_not_duplicate_message(monkeypatch: pytest
         {"dump": True, "query_topic": "topic"},
     )
     assert calls == 2
-    assert result["ui_dump_records"][0]["messages"] == [{"partition": 0, "offset": 1, "value": "value-1"}]
+    assert result["ui_dump_records"][0]["messages"] == [
+        {"partition": 0, "offset": 1, "value": "value-1"},
+        {"partition": 0, "offset": 2, "value": "value-2"},
+    ]
+    assert result["ui_dump_records"][0]["error"] == "Kafka UI repeated a message cursor"
     assert result["ui_dump_records"][0]["complete"] is False
     assert result["ui_dump_partial"] is True
 
@@ -481,7 +485,7 @@ def test_ui_full_export_uses_airflow_count_and_value_palette() -> None:
     console = PaintConsole()
     line = "KAFKA\t127.0.0.1\t18099\t [*] UI Export (messages:1205) (file:/tmp/qa.jsonl)"
     assert kafka_render._render_colored_kafka_line(console, line)
-    assert any("messages:1205" in value and color == "red" for value, color in console.calls)
+    assert any("messages:1205" in value and color == "true_red" for value, color in console.calls)
     assert any("file:/tmp/qa.jsonl" in value and color == "orange" for value, color in console.calls)
     console.calls.clear()
     assert kafka_render._render_colored_kafka_line(
@@ -558,7 +562,11 @@ def test_ui_dump_walks_all_topic_pages_beyond_old_ten_topic_cap(monkeypatch: pyt
         return _response(404, {})
 
     monkeypatch.setattr(ui, "_get", get)
-    monkeypatch.setattr(ui, "_read_ui_messages", lambda *_args, **_kw: ([{"value": "qa"}], True, None, None, True))
+    monkeypatch.setattr(
+        ui,
+        "_read_ui_messages",
+        lambda *_args, **_kw: ([{"partition": 0, "offset": 0, "value": "qa"}], True, None, None, True),
+    )
     result = ui.collect_ui(SimpleNamespace(), {}, state, {"dump": True, "max_messages": 10})
     assert len(result["ui_dump_records"]) == 205
     assert result["ui_dump_skipped_topics"] == 0
@@ -675,7 +683,7 @@ def test_ui_color_contract() -> None:
     assert kafka_render._render_colored_kafka_line(
         console, "KAFKA\t127.0.0.1\t8080\t [*] Dump Topic local/orders (messages:2) (max:3)"
     )
-    assert "<red>messages:2</red>" in console.line
+    assert "<true_red>messages:2</true_red>" in console.line
     assert kafka_render._render_colored_kafka_line(
         console, "KAFKA\t127.0.0.1\t8080\t [*] Dump completeness unverified: legacy Kafka UI has no cursor"
     )

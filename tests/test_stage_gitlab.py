@@ -751,7 +751,7 @@ def test_clone_project_handles_missing_git_existing_dir_and_fallback(
     assert result["status"] == "failed"
     assert result["error"] == "git binary not found in PATH"
 
-    dest_path = clone_root / "127.0.0.1_8080" / "group" / "app"
+    dest_path = pathlib.Path(result["dest"])
     dest_path.mkdir(parents=True)
     monkeypatch.setattr(gitlab.shutil, "which", lambda _name: "/usr/bin/git")
     result = gitlab._clone_project(project, "127.0.0.1", 8080, use_https=False, token=None, clone_dir=str(clone_root))
@@ -759,6 +759,11 @@ def test_clone_project_handles_missing_git_existing_dir_and_fallback(
     assert result["error"] == "destination exists but is not a complete git repository"
 
     (dest_path / ".git").mkdir()
+    monkeypatch.setattr(
+        gitlab.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, project["http_url_to_repo"] + "\n", ""),
+    )
     result = gitlab._clone_project(project, "127.0.0.1", 8080, use_https=False, token=None, clone_dir=str(clone_root))
     assert result["status"] == "exists"
     assert result["dest"] == str(dest_path)

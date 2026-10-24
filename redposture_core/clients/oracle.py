@@ -191,12 +191,34 @@ def tns_service_fingerprint(
     protocol: str = "tcp",
     insecure: bool = False,
 ) -> bool:
+    """Bounded descriptor fingerprint, using the shared native/sync decisions."""
+    from ..detection_io import run_sync
+
+    return run_sync(
+        _tns_service_fingerprint_steps(
+            host, port, service=service, sid=sid, timeout=timeout, protocol=protocol, insecure=insecure
+        )
+    )
+
+
+def _tns_service_fingerprint_steps(
+    host: str,
+    port: int,
+    *,
+    service: str | None = None,
+    sid: str | None = None,
+    timeout: float = 1.0,
+    protocol: str = "tcp",
+    insecure: bool = False,
+) -> Any:
     """Bounded, unauthenticated TNS CONNECT probe before a full Oracle client.
 
     A foreign listener may hold a python-oracledb connection far beyond its
     configured timeout. Only a framed TNS accept/refuse/redirect proves that a
     full connection attempt is worth making.
     """
+    from ..detection_io import DetectCall
+
     target = str(service or sid or "").strip()
     if (
         not target
@@ -215,29 +237,32 @@ def tns_service_fingerprint(
     raw_sock: socket.socket | None = None
     wrapped_sock: socket.socket | ssl.SSLSocket | None = None
 
-    def read_exact(sock: socket.socket | ssl.SSLSocket, size: int) -> bytes | None:
+    def read_exact(sock: socket.socket | ssl.SSLSocket, size: int) -> Any:
         result = bytearray()
         while len(result) < size:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
-            sock.settimeout(remaining)
-            chunk = sock.recv(size - len(result))
+            yield DetectCall(sock.settimeout, (remaining,), {})
+            chunk = yield DetectCall(sock.recv, (size - len(result),), {})
             if not chunk:
                 return None
             result.extend(chunk)
         return bytes(result)
 
     try:
-        raw_sock = socket.create_connection((host, int(port)), timeout=max(0.1, float(timeout)))
+        raw_sock = yield DetectCall(
+            socket.create_connection, ((host, int(port)),), {"timeout": max(0.1, float(timeout))}
+        )
         if protocol.lower() == "tcps":
             context = shared_client_ssl_context(insecure=insecure)
-            wrapped_sock = context.wrap_socket(raw_sock, server_hostname=host)
+            wrapped_sock = yield DetectCall(context.wrap_socket, (raw_sock,), {"server_hostname": host})
         else:
             wrapped_sock = raw_sock
-        wrapped_sock.settimeout(max(0.1, deadline - time.monotonic()))
-        wrapped_sock.sendall(packet)
-        header = read_exact(wrapped_sock, 8)
+        assert wrapped_sock is not None
+        yield DetectCall(wrapped_sock.settimeout, (max(0.1, deadline - time.monotonic()),), {})
+        yield DetectCall(wrapped_sock.sendall, (packet,), {})
+        header = yield from read_exact(wrapped_sock, 8)
         if header is None:
             return False
         length, _checksum, packet_type, reserved, _header_checksum = struct.unpack(">HHBBH", header)
@@ -253,7 +278,7 @@ def tns_service_fingerprint(
             }
         ):
             return False
-        body = read_exact(wrapped_sock, length - 8)
+        body = yield from read_exact(wrapped_sock, length - 8)
         return body is not None
     except (OSError, ValueError, TimeoutError, ssl.SSLError):
         return False

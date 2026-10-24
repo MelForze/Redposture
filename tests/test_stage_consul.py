@@ -2081,7 +2081,7 @@ def test_scope_probe_and_agent_self_error_paths(monkeypatch: pytest.MonkeyPatch)
         headers=None,
         count_fn=lambda _payload: 1,
     )
-    assert probe_error["ok"] is False
+    assert probe_error["ok"] is None
     assert probe_error["error"] == "broken pipe"
 
     monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (403, {"x": 1}, None, False, False))
@@ -2117,7 +2117,7 @@ def test_scope_probe_and_agent_self_error_paths(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (200, "bad", None, False, False))
     self_invalid = consul._agent_self_probe("127.0.0.1", 8500, 1.0, scheme="http", insecure=False, headers=None)
-    assert self_invalid["ok"] is False
+    assert self_invalid["ok"] is None
     assert self_invalid["error"] == "unexpected status=200"
 
 
@@ -2933,7 +2933,7 @@ def test_consul_basic_pair_requires_new_protected_access() -> None:
     unlocked = _scope_fixture(True, True, False)
     assert consul._basic_credential_verdict(public, unchanged, {"ok": False}, {"ok": False}) is None
     assert consul._basic_credential_verdict(public, unlocked, {"ok": False}, {"ok": False}) is True
-    assert consul._basic_credential_verdict(public, unchanged, {"ok": False}, {"ok": True}) is True
+    assert consul._basic_credential_verdict(public, unchanged, {"ok": False, "status": 403}, {"ok": True}) is True
 
 
 @pytest.mark.parametrize("status", (200, 401, 403, 500))

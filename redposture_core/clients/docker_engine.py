@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
+from ..detection_io import DetectCall, run_sync
 from ..shell_capture import is_binary
 from .http_api import HttpResponse, decode_http_content
 from .http_redirects import follow_redirects, http_origin
@@ -270,15 +271,26 @@ class DockerEngineClient:
         return DockerHTTPResponse(result.status, last_reason, result.headers, result.body)
 
     def ping(self) -> bool:
-        response = self.request("GET", "/_ping", allow_statuses={200, 204}, response_size_cap=256 * 1024)
+        return run_sync(DockerEngineClient._detect_ping_steps(self))
+
+    def _detect_ping_steps(self) -> Any:
+        response = yield DetectCall(
+            self.request, ("GET", "/_ping"), {"allow_statuses": {200, 204}, "response_size_cap": 256 * 1024}
+        )
         return response.text().strip().upper() in {"OK", ""}
 
     def version(self) -> dict[str, Any]:
-        result = self.request("GET", "/version", response_size_cap=256 * 1024).json()
+        return run_sync(DockerEngineClient._detect_version_steps(self))
+
+    def _detect_version_steps(self) -> Any:
+        result = (yield DetectCall(self.request, ("GET", "/version"), {"response_size_cap": 256 * 1024})).json()
         return result if isinstance(result, dict) else {}
 
     def info(self) -> dict[str, Any]:
-        result = self.request("GET", "/info", response_size_cap=256 * 1024).json()
+        return run_sync(DockerEngineClient._detect_info_steps(self))
+
+    def _detect_info_steps(self) -> Any:
+        result = (yield DetectCall(self.request, ("GET", "/info"), {"response_size_cap": 256 * 1024})).json()
         return result if isinstance(result, dict) else {}
 
     def containers(self) -> list[dict[str, Any]]:

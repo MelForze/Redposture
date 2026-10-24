@@ -31,6 +31,7 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
+from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
     is_signature_compat_typeerror,
@@ -204,11 +205,12 @@ def _auth_headers(username: str | None, password: str | None, token: str | None)
 
 
 def _fetch_registry_bearer_token(
-    challenge: str,
-    timeout: float,
-    *,
-    request_headers: Mapping[str, str],
+    challenge: str, timeout: float, *, request_headers: Mapping[str, str]
 ) -> tuple[str | None, str | None]:
+    return run_sync(_fetch_registry_bearer_token_steps(challenge, timeout, request_headers=request_headers))
+
+
+def _fetch_registry_bearer_token_steps(challenge: str, timeout: float, *, request_headers: Mapping[str, str]) -> Any:
     scheme, params = _parse_www_authenticate(challenge)
     if scheme != "bearer":
         return None, "unsupported registry authentication challenge"
@@ -248,17 +250,22 @@ def _fetch_registry_bearer_token(
         token_headers["Authorization"] = basic_authorization
     state = getattr(_THREAD_LOCAL_HTTP, "state", None)
     if isinstance(state, RegistryLifecycleState) and state.http is not None:
-        response = state.http.request(
+        response = yield HttpRead(
+            state.http,
             "GET",
             token_url,
-            headers=token_headers,
-            timeout=timeout,
-            response_size_cap=_DETECT_RESPONSE_CAP,
+            {"headers": token_headers, "timeout": timeout, "response_size_cap": _DETECT_RESPONSE_CAP},
         )
     else:
-        response = HttpApiClient(
-            HttpClientConfig(timeout=timeout, response_size_cap=_DETECT_RESPONSE_CAP, insecure=parsed.scheme == "https")
-        ).get(token_url, headers=token_headers, timeout=timeout)
+        response = yield DetectCall(
+            HttpApiClient(
+                HttpClientConfig(
+                    timeout=timeout, response_size_cap=_DETECT_RESPONSE_CAP, insecure=parsed.scheme == "https"
+                )
+            ).get,
+            (token_url,),
+            {"headers": token_headers, "timeout": timeout},
+        )
     if response.error:
         return None, _friendly_error_text(response.error)
     if response.status != 200:
@@ -284,12 +291,33 @@ def _http_request(
     *,
     headers: dict[str, str] | None = None,
     body: bytes | None = None,
+    response_size_cap: int | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
+    return run_sync(
+        _http_request_steps(
+            host, port, method, path, timeout, headers=headers, body=body, response_size_cap=response_size_cap
+        )
+    )
+
+
+def _http_request_steps(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+    response_size_cap: int | None = None,
+) -> Any:
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
     state = getattr(_THREAD_LOCAL_HTTP, "state", None)
     cap = _DETECT_RESPONSE_CAP if _normalize_path(path).partition("?")[0] == "/v2/" else 10 * 1024 * 1024
+    if response_size_cap is not None:
+        cap = max(1, int(response_size_cap))
     if isinstance(state, RegistryLifecycleState) and state.http is not None:
         request_host = state.host or str(host)
         request_port = state.port or int(port)
@@ -312,13 +340,11 @@ def _http_request(
                     "",
                 )
             )
-            response = state.http.request(
+            response = yield HttpRead(
+                state.http,
                 method,
                 url,
-                headers=req_headers,
-                body=body,
-                timeout=timeout,
-                response_size_cap=cap,
+                {"headers": req_headers, "body": body, "timeout": timeout, "response_size_cap": cap},
             )
             if response.error is None and not (
                 scheme == "http"
@@ -339,14 +365,12 @@ def _http_request(
                 break
         assert response is not None
     else:
-        scheme = resolve_http_scheme(host, port, timeout, probe_path="/v2/")
+        scheme = yield DetectCall(resolve_http_scheme, (host, port, timeout), {"probe_path": "/v2/"})
         url = build_http_target_url(host, port, _normalize_path(path), default_scheme=scheme)
-        response = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True)).request(
-            method,
-            url,
-            headers=req_headers,
-            body=body,
-            timeout=timeout,
+        response = yield DetectCall(
+            HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True)).request,
+            (method, url),
+            {"headers": req_headers, "body": body, "timeout": timeout},
         )
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
@@ -355,36 +379,44 @@ def _http_request(
         challenge = response_headers.get("www-authenticate", "")
         challenge_scheme, _challenge_params = _parse_www_authenticate(challenge)
         if challenge_scheme == "bearer":
-            bearer_token, bearer_error = _fetch_registry_bearer_token(
-                challenge,
-                timeout,
-                request_headers=req_headers,
+            bearer_token, bearer_error = yield DetectCall(
+                _fetch_registry_bearer_token, (challenge, timeout), {"request_headers": req_headers}
             )
             if bearer_token:
                 retry_headers = dict(req_headers)
                 retry_headers["Authorization"] = f"Bearer {bearer_token}"
                 retry_response = (
-                    state.http.request(
-                        method,
-                        url,
-                        headers=retry_headers,
-                        body=body,
-                        timeout=timeout,
-                        response_size_cap=cap,
+                    (
+                        yield HttpRead(
+                            state.http,
+                            method,
+                            url,
+                            {"headers": retry_headers, "body": body, "timeout": timeout, "response_size_cap": cap},
+                        )
                     )
                     if isinstance(state, RegistryLifecycleState) and state.http is not None
-                    else HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True)).request(
-                        method, url, headers=retry_headers, body=body, timeout=timeout
+                    else (
+                        yield DetectCall(
+                            HttpApiClient(
+                                HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True)
+                            ).request,
+                            (method, url),
+                            {"headers": retry_headers, "body": body, "timeout": timeout},
+                        )
                     )
                 )
                 if retry_response.error:
                     return 0, b"", {}, _friendly_error_text(retry_response.error)
                 retry_response_headers = {str(key).lower(): str(value) for key, value in retry_response.headers.items()}
+                if getattr(retry_response, "truncated", False):
+                    retry_response_headers["x-redposture-truncated"] = "true"
                 retry_response_headers["x-redposture-bearer-exchanged"] = "true"
                 retry_response_headers.setdefault("www-authenticate", challenge)
                 return int(retry_response.status), retry_response.body, retry_response_headers, None
             if bearer_error:
                 response_headers["x-redposture-bearer-error"] = bearer_error
+    if getattr(response, "truncated", False):
+        response_headers["x-redposture-truncated"] = "true"
     return int(response.status), response.body, response_headers, None
 
 
@@ -532,12 +564,12 @@ def _parse_link_next(link_header: str | None) -> str | None:
 
 
 def _fetch_registry_catalog(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    headers: dict[str, str],
+    host: str, port: int, timeout: float, *, headers: dict[str, str]
 ) -> tuple[list[str] | None, str | None]:
+    return run_sync(_fetch_registry_catalog_steps(host, port, timeout, headers=headers))
+
+
+def _fetch_registry_catalog_steps(host: str, port: int, timeout: float, *, headers: dict[str, str]) -> Any:
     repositories: list[str] = []
     seen: set[str] = set()
     next_path = "/v2/_catalog?n=1000"
@@ -553,7 +585,9 @@ def _fetch_registry_catalog(
         if pages > 30:
             repositories.sort()
             return repositories, "partial: registry catalog pagination limit exceeded"
-        status, body, resp_headers, error = _http_request(host, port, "GET", next_path, timeout, headers=headers)
+        status, body, resp_headers, error = yield DetectCall(
+            _http_request, (host, port, "GET", next_path, timeout), {"headers": headers}
+        )
         if error:
             return (repositories if repositories else None), f"partial: {error}" if repositories else error
         if status in (401, 403):
@@ -569,6 +603,9 @@ def _fetch_registry_catalog(
             error_text = f"{next_path} returned invalid JSON"
             return (repositories if repositories else None), f"partial: {error_text}" if repositories else error_text
         items = payload.get("repositories") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or any(not isinstance(item, str) or not item.strip() for item in items):
+            message = f"{next_path} returned invalid repositories list"
+            return (repositories if repositories else None), f"partial: {message}" if repositories else message
         if isinstance(items, list):
             for item in items:
                 repo = str(item or "").strip()
@@ -615,6 +652,19 @@ def _fetch_repository_tags(
             return (sorted(tags) if tags else None), f"partial: {error_text}" if tags else error_text
 
         tags_raw = payload.get("tags") if isinstance(payload, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or "tags" not in payload
+            or (
+                tags_raw is not None
+                and (
+                    not isinstance(tags_raw, list)
+                    or any(not isinstance(item, str) or not item.strip() for item in tags_raw)
+                )
+            )
+        ):
+            message = f"{next_path} returned invalid tags list"
+            return (sorted(tags) if tags else None), f"partial: {message}" if tags else message
         if isinstance(tags_raw, list):
             tags.update(str(item or "").strip() for item in tags_raw if str(item or "").strip())
         parsed_next = _parse_link_next(response_headers.get("link"))
@@ -1072,19 +1122,19 @@ def _download_image(
 
 
 def _fetch_harbor_info(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    headers: dict[str, str],
+    host: str, port: int, timeout: float, *, headers: dict[str, str]
 ) -> tuple[dict[str, Any] | None, str | None]:
-    status, body, _resp_headers, error = _http_request(
-        host, port, "GET", "/api/v2.0/systeminfo", timeout, headers=headers
+    return run_sync(_fetch_harbor_info_steps(host, port, timeout, headers=headers))
+
+
+def _fetch_harbor_info_steps(host: str, port: int, timeout: float, *, headers: dict[str, str]) -> Any:
+    status, body, _resp_headers, error = yield DetectCall(
+        _http_request, (host, port, "GET", "/api/v2.0/systeminfo", timeout), {"headers": headers}
     )
     legacy = status == 404 and not error
     if legacy:
-        status, body, _resp_headers, error = _http_request(
-            host, port, "GET", "/api/systeminfo", timeout, headers=headers
+        status, body, _resp_headers, error = yield DetectCall(
+            _http_request, (host, port, "GET", "/api/systeminfo", timeout), {"headers": headers}
         )
     if error:
         return None, error
@@ -1115,27 +1165,22 @@ def _fetch_harbor_info(
 
 
 def _fetch_harbor_pages(
-    host: str,
-    port: int,
-    base_path: str,
-    timeout: float,
-    *,
-    headers: dict[str, str],
-    page_size: int,
+    host: str, port: int, base_path: str, timeout: float, *, headers: dict[str, str], page_size: int
 ) -> tuple[list[Any] | None, str | None]:
+    return run_sync(_fetch_harbor_pages_steps(host, port, base_path, timeout, headers=headers, page_size=page_size))
+
+
+def _fetch_harbor_pages_steps(
+    host: str, port: int, base_path: str, timeout: float, *, headers: dict[str, str], page_size: int
+) -> Any:
     items: list[Any] = []
     parsed_base = urllib.parse.urlsplit(base_path)
     existing_query = urllib.parse.parse_qsl(parsed_base.query, keep_blank_values=True)
     for page in range(1, 31):
         query = urllib.parse.urlencode([("page", str(page)), ("page_size", str(page_size)), *existing_query])
         path = urllib.parse.urlunsplit(("", "", parsed_base.path, query, ""))
-        status, body, response_headers, error = _http_request(
-            host,
-            port,
-            "GET",
-            path,
-            timeout,
-            headers=headers,
+        status, body, response_headers, error = yield DetectCall(
+            _http_request, (host, port, "GET", path, timeout), {"headers": headers}
         )
         if error:
             return (items if items else None), f"partial: {error}" if items else error
@@ -1162,20 +1207,18 @@ def _fetch_harbor_pages(
 
 
 def _fetch_harbor_projects(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    headers: dict[str, str],
-    legacy: bool = False,
+    host: str, port: int, timeout: float, *, headers: dict[str, str], legacy: bool = False
 ) -> tuple[list[str] | None, str | None]:
-    payload, page_error = _fetch_harbor_pages(
-        host,
-        port,
-        "/api/projects" if legacy else "/api/v2.0/projects",
-        timeout,
-        headers=headers,
-        page_size=100,
+    return run_sync(_fetch_harbor_projects_steps(host, port, timeout, headers=headers, legacy=legacy))
+
+
+def _fetch_harbor_projects_steps(
+    host: str, port: int, timeout: float, *, headers: dict[str, str], legacy: bool = False
+) -> Any:
+    payload, page_error = yield DetectCall(
+        _fetch_harbor_pages,
+        (host, port, "/api/projects" if legacy else "/api/v2.0/projects", timeout),
+        {"headers": headers, "page_size": 100},
     )
     if payload is None:
         if page_error and "payload is invalid" in page_error:
@@ -1479,14 +1522,14 @@ def _nexus_status_info(response_headers: Mapping[str, str], payload: Mapping[str
 
 
 def _fetch_nexus_info(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    headers: dict[str, str],
+    host: str, port: int, timeout: float, *, headers: dict[str, str]
 ) -> tuple[dict[str, Any] | None, str | None]:
-    status, body, resp_headers, error = _http_request(
-        host, port, "GET", "/service/rest/v1/status", timeout, headers=headers
+    return run_sync(_fetch_nexus_info_steps(host, port, timeout, headers=headers))
+
+
+def _fetch_nexus_info_steps(host: str, port: int, timeout: float, *, headers: dict[str, str]) -> Any:
+    status, body, resp_headers, error = yield DetectCall(
+        _http_request, (host, port, "GET", "/service/rest/v1/status", timeout), {"headers": headers}
     )
     if error:
         return None, error
@@ -1495,8 +1538,8 @@ def _fetch_nexus_info(
         # its fingerprint separate from the Nexus 3 REST response: a lone
         # version field (or generic 200) must not confirm another service.
         for legacy_path in ("/service/local/status", "/nexus/service/local/status"):
-            legacy_status, legacy_body, _legacy_headers, legacy_error = _http_request(
-                host, port, "GET", legacy_path, timeout, headers=headers
+            legacy_status, legacy_body, _legacy_headers, legacy_error = yield DetectCall(
+                _http_request, (host, port, "GET", legacy_path, timeout), {"headers": headers}
             )
             if legacy_error or legacy_status != 200:
                 continue
@@ -1609,19 +1652,14 @@ def _fetch_nexus_repositories(
 
 
 def _fetch_nexus_repository_records(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    headers: dict[str, str],
+    host: str, port: int, timeout: float, *, headers: dict[str, str]
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
-    status, body, _resp_headers, error = _http_request(
-        host,
-        port,
-        "GET",
-        "/service/rest/v1/repositories",
-        timeout,
-        headers=headers,
+    return run_sync(_fetch_nexus_repository_records_steps(host, port, timeout, headers=headers))
+
+
+def _fetch_nexus_repository_records_steps(host: str, port: int, timeout: float, *, headers: dict[str, str]) -> Any:
+    status, body, _resp_headers, error = yield DetectCall(
+        _http_request, (host, port, "GET", "/service/rest/v1/repositories", timeout), {"headers": headers}
     )
     if error:
         return None, error
@@ -1700,6 +1738,9 @@ def _fetch_nexus_components(
             return (components if components else None), f"partial: {message}" if components else message
 
         items = payload.get("items")
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            message = f"{path} returned invalid items list"
+            return (components if components else None), f"partial: {message}" if components else message
         if isinstance(items, list):
             for item in items:
                 if isinstance(item, dict):
@@ -1999,6 +2040,10 @@ def _registry_probe_is_retryable(probe: _RegistryProbe) -> bool:
 
 
 def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    return run_sync(_detect_registry_steps(ctx, options))
+
+
+def _detect_registry_steps(ctx: Any, options: Mapping[str, Any]) -> Any:
     state = ctx.lifecycle_state
     if not isinstance(state, RegistryLifecycleState):
         raise TypeError("registry lifecycle state is unavailable")
@@ -2010,17 +2055,14 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
     probe: _RegistryProbe = (0, b"", {}, "connection failed")
     for attempt in range(attempts):
         attempts_used += 1
-        probe = _http_request(
-            str(ctx.host),
-            int(ctx.port),
-            "GET",
-            "/v2/",
-            float(getattr(ctx.args, "timeout", 5.0)),
-            headers=None,
+        probe = yield DetectCall(
+            _http_request,
+            (str(ctx.host), int(ctx.port), "GET", "/v2/", float(getattr(ctx.args, "timeout", 5.0))),
+            {"headers": None},
         )
         if probe[3] is None or attempt >= attempts - 1:
             break
-        time.sleep(_retry_delay(attempt))
+        (yield DetectDelay(_retry_delay(attempt)))
     state.anonymous_probe = probe
     is_registry, status, auth_required = _registry_probe_state(probe)
     is_nexus: bool | None = None
@@ -2035,11 +2077,8 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
     if (bool(options["nexus"]) or product == "docker-registry") and (
         not is_registry or "nexus" in selected_vendors or product == "docker-registry"
     ):
-        nexus_info, nexus_error = _fetch_nexus_info(
-            str(ctx.host),
-            int(ctx.port),
-            float(getattr(ctx.args, "timeout", 5.0)),
-            headers={},
+        nexus_info, nexus_error = yield DetectCall(
+            _fetch_nexus_info, (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))), {"headers": {}}
         )
         state.anonymous_nexus = (nexus_info, nexus_error)
         if nexus_error == "authentication required":
@@ -2070,8 +2109,10 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
             payload["is_gitlab"] = True
             payload["gitlab_info"] = gitlab_info
         if _has_harbor_registry_challenge(probe[2]) or product in {"harbor", "docker-registry"}:
-            harbor_info, harbor_error = _fetch_harbor_info(
-                str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), headers={}
+            harbor_info, harbor_error = yield DetectCall(
+                _fetch_harbor_info,
+                (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+                {"headers": {}},
             )
             version = str((harbor_info or {}).get("harbor_version") or "").strip()
             if re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", version):
@@ -2095,24 +2136,29 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
         payload["error"] = f"requested {'/'.join(sorted(selected_vendors))} fingerprint not confirmed"
     payload["nexus_info"] = nexus_info
     if payload.get("is_harbor") is True and payload.get("auth_required") is False:
-        harbor_projects, _projects_error = _fetch_harbor_projects(
-            str(ctx.host),
-            int(ctx.port),
-            float(getattr(ctx.args, "timeout", 5.0)),
-            headers={},
-            legacy=bool(re.match(r"v?1\.", str((payload.get("harbor_info") or {}).get("harbor_version") or ""))),
+        harbor_projects, _projects_error = yield DetectCall(
+            _fetch_harbor_projects,
+            (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+            {
+                "headers": {},
+                "legacy": bool(re.match(r"v?1\.", str((payload.get("harbor_info") or {}).get("harbor_version") or ""))),
+            },
         )
         if harbor_projects is not None:
             payload["harbor_project_count"] = len(harbor_projects)
     if payload.get("is_gitlab") is True and payload.get("auth_required") is False:
-        registry_repositories, _catalog_error = _fetch_registry_catalog(
-            str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), headers={}
+        registry_repositories, _catalog_error = yield DetectCall(
+            _fetch_registry_catalog,
+            (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+            {"headers": {}},
         )
         if registry_repositories is not None:
             payload["gitlab_repository_count"] = len(registry_repositories)
     if payload.get("is_nexus") is True and payload.get("auth_required") is False:
-        repository_records, _repository_error = _fetch_nexus_repository_records(
-            str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), headers={}
+        repository_records, _repository_error = yield DetectCall(
+            _fetch_nexus_repository_records,
+            (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+            {"headers": {}},
         )
         if repository_records is not None:
             state.anonymous_nexus_repositories = repository_records
@@ -2200,6 +2246,29 @@ def _verify_registry_credential(
             return None, error
         if status == 401:
             return False, "authentication rejected"
+        if status == 403 and username is not None and password is not None and token is None:
+            # The user listing requires an administrative privilege. A valid
+            # browse-only account also receives 403, so compare a public API
+            # with an explicitly invalid Basic identity. Nexus rejects bad
+            # Basic credentials even when the API itself is public.
+            probe_status, _probe_body, _probe_headers, probe_error = _http_request(
+                host, port, "GET", "/service/rest/v1/status", timeout, headers=headers
+            )
+            if probe_error:
+                return None, probe_error
+            if probe_status == 401:
+                return False, "authentication rejected"
+            if probe_status != 200:
+                return None, f"Nexus restricted identity verification unavailable status={probe_status}"
+            invalid_headers = _auth_headers(username, "rp-verification-" + os.urandom(16).hex(), None)
+            control_status, _control_body, _control_headers, control_error = _http_request(
+                host, port, "GET", "/service/rest/v1/status", timeout, headers=invalid_headers
+            )
+            if control_error:
+                return None, control_error
+            if control_status == 401:
+                return True, None
+            return None, f"Nexus restricted identity control inconclusive status={control_status}"
         if status != 200:
             return None, f"identity verification unavailable status={status}"
         try:
@@ -4388,10 +4457,10 @@ def _render_colored_registry_line(console: Console, line: str) -> bool:
         line,
         tag=tag,
         counts=(
-            CountColorRule("images", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("layers", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("components", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("tags", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("images", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("layers", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("components", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("tags", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
     ):
         return True
@@ -4451,3 +4520,16 @@ def _looks_like_registry_data_row(line: str) -> bool:
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_registry_host_with_thread_debug
+
+
+_ASYNC_DETECT_STEPS = {
+    _fetch_harbor_info: _fetch_harbor_info_steps,
+    _fetch_harbor_pages: _fetch_harbor_pages_steps,
+    _fetch_harbor_projects: _fetch_harbor_projects_steps,
+    _fetch_nexus_info: _fetch_nexus_info_steps,
+    _fetch_nexus_repository_records: _fetch_nexus_repository_records_steps,
+    _fetch_registry_bearer_token: _fetch_registry_bearer_token_steps,
+    _fetch_registry_catalog: _fetch_registry_catalog_steps,
+    _http_request: _http_request_steps,
+    detect_registry: _detect_registry_steps,
+}

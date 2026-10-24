@@ -381,8 +381,26 @@ def test_n10_etcd_v2_auth_status():
     )
 
 
-def test_n01_long_unknown_frontier_does_not_recurse(monkeypatch):
+def test_n01_long_unknown_frontier_does_not_recurse(monkeypatch, tmp_path):
     table = TableInventory("app", "events", columns=[ColumnInventory("app", "events", "payload", "String", 1)])
+    checkpoint = tmp_path / "long-frontier.json"
+    reads = []
+
+    def read(_session, query):
+        reads.append(int(re.search(r"OFFSET (\d+)", query)[1]))
+        return ReadResult([], 0)
+
+    monkeypatch.setattr(engine, "collect_inventory", lambda _: ([table], []))
+    monkeypatch.setattr(engine, "read_chunk", read)
+    # Produce the current compatibility metadata through the real scan/store,
+    # then seed a long completed frontier without changing its scan scope.
+    engine.run_discovery(
+        None,
+        host="audit",
+        port=9000,
+        config=engine.DiscoverConfig(checkpoint=checkpoint, chunk_rows=1),
+        query_rows=None,
+    )
     chunks = {f"app.events|<all>|{offset}|1": {"status": "complete", "rows_scanned": 1} for offset in range(1100)}
     coverage = {
         "app.events.payload": {
@@ -395,26 +413,17 @@ def test_n01_long_unknown_frontier_does_not_recurse(monkeypatch):
         }
     }
 
-    class Store:
-        def __init__(self, *args, **kwargs):
-            self.state = {"chunks": chunks, "coverage": coverage}
-
-        def target_state(self):
-            return self.state
-
-        def update(self, **kwargs):
-            pass
-
-        def is_complete(self, key):
-            return chunks.get(key, {}).get("status") == "complete"
-
-    monkeypatch.setattr(engine, "InMemoryCheckpointStore", Store)
-    monkeypatch.setattr(engine, "collect_inventory", lambda _: ([table], []))
-    monkeypatch.setattr(engine, "read_chunk", lambda *_: ReadResult([], 0))
+    engine.CheckpointStore(checkpoint, "audit:9000", resume=True).update(chunks=chunks, coverage=coverage)
+    reads.clear()
     result = engine.run_discovery(
-        None, host="audit", port=9000, config=engine.DiscoverConfig(resume=True, chunk_rows=1), query_rows=None
+        None,
+        host="audit",
+        port=9000,
+        config=engine.DiscoverConfig(checkpoint=checkpoint, resume=True, chunk_rows=1),
+        query_rows=None,
     )
     assert result["status"] == "complete" and result["coverage_percent"] == 100
+    assert reads == [1100]
 
 
 @pytest.mark.parametrize("failure", ["budget", "read_error"])

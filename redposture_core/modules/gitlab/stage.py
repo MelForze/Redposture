@@ -19,6 +19,7 @@ from ...stage_runtime import (
     merge_audit_credential_runs,
     run_basic_host_audit,
 )
+from ...storage_discovery import DiscoveryCollector, discover_gitlab_sources, merge_discovery_results
 from ..registry import actions as oci_actions
 from ..registry import stage as oci_stage
 from . import actions, policy, render
@@ -155,27 +156,7 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
         if registry_spec.detect is None:
             raise RuntimeError("GitLab registry detector is unavailable")
         registry = registry_spec.detect(_surface_ctx(ctx, state.registry)).to_dict()
-        web_ok = web.get("is_gitlab") is True
-        registry_ok = registry.get("is_registry") is True and registry.get("is_gitlab") is True
-        if web_ok:
-            result = dict(web)
-            result["gitlab_surface"] = "web_and_registry" if registry_ok else "web"
-        elif registry_ok:
-            result = dict(registry)
-            result.update(
-                {
-                    "is_gitlab": True,
-                    "status": "detected",
-                    "login_page": False,
-                    "version": (registry.get("gitlab_info") or {}).get("version"),
-                    "gitlab_surface": "container_registry",
-                }
-            )
-        else:
-            result = dict(web)
-            result["gitlab_surface"] = "none"
-        result["container_registry"] = registry if registry_ok else None
-        return AuditRecord.from_mapping(result, module="gitlab", service="gitlab")
+        return _merge_detected_surfaces(ctx, web, registry)
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
         state = ctx.lifecycle_state
@@ -255,9 +236,30 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
             with http_target_context(
                 ctx.target, route_state=state.web, api_prefixes=("/api/v4", "/users/sign_in", "/-")
             ):
-                result = actions.collect_gitlab_data(
-                    _surface_ctx(ctx, state.web, anonymous=source == "registry_token"), record, web_options
+                discover_only = bool(getattr(ctx.args, "discover", False)) and not (
+                    web_options["show_repositories"] or options["clone"]
                 )
+                if discover_only:
+                    # The ordinary project inventory is outside the discovery
+                    # collector's network budget. Let discovery enumerate (or
+                    # resolve --project) through its capped transport instead.
+                    result["public_projects"] = None
+                    result["token_projects"] = None
+                    result["project_filters"] = list(options["project_filters"])
+                else:
+                    result = actions.collect_gitlab_data(
+                        _surface_ctx(ctx, state.web, anonymous=source == "registry_token"), record, web_options
+                    )
+                if bool(getattr(ctx.args, "discover", False)):
+                    web_ctx = _surface_ctx(ctx, state.web, anonymous=source == "registry_token")
+                    discovery_record = dict(result)
+                    if web_ctx.credential.token is None and web_ctx.credential.username is None:
+                        discovery_record["anonymous_access"] = True
+                    collector = DiscoveryCollector("gitlab", ctx, discovery_record)
+                    discover_gitlab_sources(web_ctx, result, collector)
+                    if result.get("provided_credentials_ok") is True and not web_ctx.credential.token:
+                        collector.partial("projects", "authenticated API content requires a token")
+                    result["content_discovery"] = collector.result()
             if not (web_options["show_repositories"] or options["project_filters"] or options["clone"]):
                 public_projects = result.get("public_projects")
                 token_projects = result.get("token_projects")
@@ -275,10 +277,16 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
                 ).to_dict()
                 updated_registry.pop("provided_password", None)
                 result["container_registry"] = updated_registry
+                if bool(getattr(ctx.args, "discover", False)):
+                    merged = merge_discovery_results(
+                        result.get("content_discovery"), updated_registry.get("content_discovery")
+                    )
+                    if merged is not None:
+                        result["content_discovery"] = merged
         result["gitlab_surface"] = prior.get("gitlab_surface")
         return AuditRecord.from_mapping(result, module="gitlab", service="gitlab")
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="gitlab",
         label="GITLAB",
         default_port=_DEFAULT_PORT,
@@ -312,6 +320,57 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
     )
+
+    from ...clients.async_http_detect import AsyncHttpFallback
+    from ...detection_io import detection_thread_locals, run_async
+
+    original = actions.detect_gitlab
+    if not use_lifecycle_hooks or original not in actions._ASYNC_DETECT_STEPS or registry_spec.detect_async is None:
+        return spec
+
+    async def detect_async(ctx: Any, http: Any) -> AuditRecord:
+        if actions.detect_gitlab is not original:
+            raise AsyncHttpFallback("GitLab detector override")
+        state = ctx.lifecycle_state
+        if not isinstance(state, GitLabCombinedState):
+            raise TypeError("GitLab combined lifecycle state is unavailable")
+        with http_target_context(ctx.target, route_state=state.web, api_prefixes=("/api/v4", "/users/sign_in", "/-")):
+            web = await run_async(
+                actions._ASYNC_DETECT_STEPS[original](_surface_ctx(ctx, state.web), options),
+                http,
+                actions._ASYNC_DETECT_STEPS,
+                activate=lambda: actions._activate_gitlab_transport(state.web),
+                thread_locals=detection_thread_locals(actions),
+            )
+        assert registry_spec.detect_async is not None
+        registry = (await registry_spec.detect_async(_surface_ctx(ctx, state.registry), http)).to_dict()
+        return _merge_detected_surfaces(ctx, web, registry)
+
+    return replace(spec, detect_async=detect_async, async_detect_sync_hook=spec.detect)
+
+
+def _merge_detected_surfaces(ctx: Any, web: dict[str, Any], registry: dict[str, Any]) -> AuditRecord:
+    web_ok = web.get("is_gitlab") is True
+    registry_ok = registry.get("is_registry") is True and registry.get("is_gitlab") is True
+    if web_ok:
+        result = dict(web)
+        result["gitlab_surface"] = "web_and_registry" if registry_ok else "web"
+    elif registry_ok:
+        result = dict(registry)
+        result.update(
+            {
+                "is_gitlab": True,
+                "status": "detected",
+                "login_page": False,
+                "version": (registry.get("gitlab_info") or {}).get("version"),
+                "gitlab_surface": "container_registry",
+            }
+        )
+    else:
+        result = dict(web)
+        result["gitlab_surface"] = "none"
+    result["container_registry"] = registry if registry_ok else None
+    return AuditRecord.from_mapping(result, module="gitlab", service="gitlab")
 
 
 def run_gitlab_stage(args: Any, logger: Any) -> int:

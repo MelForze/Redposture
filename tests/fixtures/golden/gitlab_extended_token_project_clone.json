@@ -6,7 +6,7 @@
     "clone_requested": true,
     "clone_results": [
       {
-        "dest": "<OUT_DIR>/gitlab_clones/127.0.0.1_18080/redposture-lab/public-api",
+        "dest": "<OUT_DIR>/gitlab_clones/127.0.0.1_18080/b35e55e531d7c1ee/redposture-lab/public-api",
         "error": null,
         "project": "redposture-lab/public-api",
         "project_id": 1,

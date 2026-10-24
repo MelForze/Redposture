@@ -84,8 +84,8 @@ def test_stage_colored_renderers_map_marker_colors(renderer: _Renderer, tag: str
     expected_marker_colors = {
         "[*]": "cyan",
         "[+]": "bright_green",
-        "[-]": "red",
-        "[!]": "red",
+        "[-]": "true_red",
+        "[!]": "true_red",
     }
     for marker, expected_color in expected_marker_colors.items():
         console = _RecordingConsole()
@@ -127,8 +127,8 @@ def test_render_colored_redis_colors_auth_false_and_keys() -> None:
     console = _RecordingConsole()
     line = "REDIS\t127.0.0.1\t6379\t [*] Redis Database (auth required:False) (keys:2)"
     assert _render_colored_redis_line(console, line) is True
-    assert _contains_paint(console.paint_calls, "(auth required:False)", "red")
-    assert _contains_paint(console.paint_calls, "(keys:2)", "red")
+    assert _contains_paint(console.paint_calls, "(auth required:False)", "true_red")
+    assert _contains_paint(console.paint_calls, "(keys:2)", "true_red")
     _assert_parentheses_are_not_colored(console.paint_calls)
 
 
@@ -169,7 +169,7 @@ def test_render_colored_kafka_colors_topics_red() -> None:
     console = _RecordingConsole()
     line = "KAFKA\t127.0.0.1\t9092\t [+] anonymous access (topics:3)"
     assert _render_colored_kafka_line(console, line) is True
-    assert _contains_paint(console.paint_calls, "(topics:3)", "red")
+    assert _contains_paint(console.paint_calls, "(topics:3)", "true_red")
 
 
 @pytest.mark.parametrize(
@@ -196,7 +196,7 @@ def test_render_colored_zookeeper_colors_znodes_red() -> None:
     console = _RecordingConsole()
     line = "ZOOKEEPER\t127.0.0.1\t2181\t [+] anonymous access (znodes:4)"
     assert _render_colored_zookeeper_line(console, line) is True
-    assert _contains_paint(console.paint_calls, "(znodes:4)", "red")
+    assert _contains_paint(console.paint_calls, "(znodes:4)", "true_red")
 
 
 @pytest.mark.parametrize(
@@ -228,8 +228,8 @@ def test_render_colored_postgres_colors_caps_and_dbs() -> None:
     assert _render_colored_postgres_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(superuser:False)", "bright_green")
     assert _contains_paint(console.paint_calls, "(execute:unknown)", "orange")
-    assert _contains_paint(console.paint_calls, "(read:True)", "red")
-    assert _contains_paint(console.paint_calls, "(DBs:2)", "red")
+    assert _contains_paint(console.paint_calls, "(read:True)", "true_red")
+    assert _contains_paint(console.paint_calls, "(DBs:2)", "true_red")
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
 
 
@@ -242,8 +242,8 @@ def test_render_colored_clickhouse_colors_caps_and_dbs() -> None:
     assert _render_colored_clickhouse_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(read:false)", "bright_green")
     assert _contains_paint(console.paint_calls, "(execute:unknown)", "orange")
-    assert _contains_paint(console.paint_calls, "(admin:true)", "red")
-    assert _contains_paint(console.paint_calls, "(DBs:2)", "red")
+    assert _contains_paint(console.paint_calls, "(admin:true)", "true_red")
+    assert _contains_paint(console.paint_calls, "(DBs:2)", "true_red")
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
 
 
@@ -252,8 +252,8 @@ def test_render_colored_qdrant_colors_rce_and_idor() -> None:
     line = "QDRANT\t127.0.0.1\t6333\t [!] RCE:potential (idor:true) (collections:1)"
     assert _render_colored_qdrant_line(console, line) is True
     assert _contains_paint(console.paint_calls, "RCE:potential", "orange")
-    assert _contains_paint(console.paint_calls, "(idor:true)", "red")
-    assert _contains_paint(console.paint_calls, "(collections:1)", "red")
+    assert _contains_paint(console.paint_calls, "(idor:true)", "true_red")
+    assert _contains_paint(console.paint_calls, "(collections:1)", "true_red")
 
 
 def test_render_colored_consul_colors_pwned_and_counts() -> None:
@@ -261,9 +261,9 @@ def test_render_colored_consul_colors_pwned_and_counts() -> None:
     line = "CONSUL\t127.0.0.1\t8500\t [!] check result Pwned! (kv:2) (services:1) (agents:1) (auth required:unknown)"
     assert _render_colored_consul_line(console, line) is True
     assert _contains_paint(console.paint_calls, "Pwned!", "orange")
-    assert _contains_paint(console.paint_calls, "(kv:2)", "red")
-    assert _contains_paint(console.paint_calls, "(services:1)", "red")
-    assert _contains_paint(console.paint_calls, "(agents:1)", "red")
+    assert _contains_paint(console.paint_calls, "(kv:2)", "true_red")
+    assert _contains_paint(console.paint_calls, "(services:1)", "true_red")
+    assert _contains_paint(console.paint_calls, "(agents:1)", "true_red")
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
 
 
@@ -274,7 +274,7 @@ def test_render_colored_consul_colors_detect_agent_count() -> None:
         "(kv:2) (services:1) (agent:1) (version:1.22.0)"
     )
     assert _render_colored_consul_line(console, line) is True
-    assert _contains_paint(console.paint_calls, "(agent:1)", "red")
+    assert _contains_paint(console.paint_calls, "(agent:1)", "true_red")
 
 
 def test_consul_token_denial_and_postgres_version_colors() -> None:
@@ -296,7 +296,7 @@ def test_render_colored_elastic_colors_access_and_capabilities() -> None:
         "(auth required:unknown)"
     )
     assert _render_colored_elastic_line(console, line) is True
-    assert _contains_paint(console.paint_calls, "(read:True)", "red")
+    assert _contains_paint(console.paint_calls, "(read:True)", "true_red")
     assert _contains_paint(console.paint_calls, "(write:False)", "bright_green")
     assert _contains_paint(console.paint_calls, "(manage:unknown)", "yellow")
     assert _contains_paint(console.paint_calls, "(manage_security:False)", "bright_green")
@@ -358,16 +358,16 @@ def test_render_colored_kubeapi_colors_resources() -> None:
     console = _RecordingConsole()
     line = "KUBEAPI\t127.0.0.1\t6443\t [+] token access (pods:2) (namespaces:1) (secrets:5)"
     assert _render_colored_kubeapi_line(console, line) is True
-    assert _contains_paint(console.paint_calls, "(pods:2)", "red")
-    assert _contains_paint(console.paint_calls, "(namespaces:1)", "red")
-    assert _contains_paint(console.paint_calls, "(secrets:5)", "red")
+    assert _contains_paint(console.paint_calls, "(pods:2)", "true_red")
+    assert _contains_paint(console.paint_calls, "(namespaces:1)", "true_red")
+    assert _contains_paint(console.paint_calls, "(secrets:5)", "true_red")
 
 
 def test_render_colored_grafana_colors_datasources_and_auth() -> None:
     console = _RecordingConsole()
     line = "GRAFANA\t127.0.0.1\t3000\t [+] admin:admin (datasources:4) (auth required:True)"
     assert _render_colored_grafana_line(console, line) is True
-    assert _contains_paint(console.paint_calls, "(datasources:4)", "red")
+    assert _contains_paint(console.paint_calls, "(datasources:4)", "true_red")
     assert _contains_paint(console.paint_calls, "(auth required:True)", "bright_green")
 
     heading = _RecordingConsole()
@@ -375,7 +375,7 @@ def test_render_colored_grafana_colors_datasources_and_auth() -> None:
         heading, "GRAFANA\t127.0.0.1\t3000\t [*] Datasources Enumeration (datasources:4)"
     )
     assert _contains_paint(heading.paint_calls, "Datasources Enumeration", "white")
-    assert _contains_paint(heading.paint_calls, "datasources:4", "red")
+    assert _contains_paint(heading.paint_calls, "datasources:4", "true_red")
 
 
 def test_render_colored_gitlab_colors_login_page_and_repo_capabilities() -> None:
@@ -383,9 +383,9 @@ def test_render_colored_gitlab_colors_login_page_and_repo_capabilities() -> None
     line = "GITLAB\t127.0.0.1\t8080\t [+] token valid (login page:False) (repo:True) (issues:True) (members:True)"
     assert _render_colored_gitlab_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(login page:False)", "yellow")
-    assert _contains_paint(console.paint_calls, "(repo:True)", "red")
-    assert _contains_paint(console.paint_calls, "(issues:True)", "red")
-    assert _contains_paint(console.paint_calls, "(members:True)", "red")
+    assert _contains_paint(console.paint_calls, "(repo:True)", "true_red")
+    assert _contains_paint(console.paint_calls, "(issues:True)", "true_red")
+    assert _contains_paint(console.paint_calls, "(members:True)", "true_red")
 
 
 def test_render_colored_registry_colors_auth_unknown_and_images() -> None:
@@ -393,7 +393,7 @@ def test_render_colored_registry_colors_auth_unknown_and_images() -> None:
     line = "REGISTRY\t127.0.0.1\t5000\t [+] anonymous access (auth required:unknown) (images:7)"
     assert _render_colored_registry_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
-    assert _contains_paint(console.paint_calls, "(images:7)", "red")
+    assert _contains_paint(console.paint_calls, "(images:7)", "true_red")
 
 
 def test_render_colored_proxmox_colors_capabilities_and_finding_payload() -> None:
@@ -403,9 +403,9 @@ def test_render_colored_proxmox_colors_capabilities_and_finding_payload() -> Non
     )
     assert _render_colored_proxmox_line(console_caps, caps_line) is True
     assert _contains_paint(console_caps.paint_calls, "(adduser:false)", "bright_green")
-    assert _contains_paint(console_caps.paint_calls, "(modify:true)", "red")
+    assert _contains_paint(console_caps.paint_calls, "(modify:true)", "true_red")
     assert _contains_paint(console_caps.paint_calls, "(backup:unknown)", "orange")
-    assert _contains_paint(console_caps.paint_calls, "(read:true)", "red")
+    assert _contains_paint(console_caps.paint_calls, "(read:true)", "true_red")
 
     console_finding = _RecordingConsole()
     finding_line = 'PROXMOX\t127.0.0.1\t8006\t [!] Token Value="abc" Place="/access$.token"'
@@ -456,8 +456,8 @@ def test_render_colored_grpc_colors_status_and_protocol() -> None:
     assert _render_colored_grpc_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(transport:plaintext)", "yellow")
     assert _contains_paint(console.paint_calls, "(protocol:grpc-web)", "orange")
-    assert _contains_paint(console.paint_calls, "(reflection:enabled)", "red")
-    assert _contains_paint(console.paint_calls, "(health_access:anonymous)", "red")
+    assert _contains_paint(console.paint_calls, "(reflection:enabled)", "true_red")
+    assert _contains_paint(console.paint_calls, "(health_access:anonymous)", "true_red")
     assert _contains_paint(console.paint_calls, "(reflection_access:auth_required)", "bright_green")
     assert _contains_paint(console.paint_calls, "(invoke_access:not_tested)", "yellow")
 

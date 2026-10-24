@@ -12,11 +12,13 @@ import struct
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from queue import Empty, Queue
 from typing import Any, Literal
 
+from ..detection_io import DetectCall as _DetectCall
+from ..detection_io import run_sync as _run_detect_sync
 from .tls_cache import shared_client_ssl_context
 from .zookeeper_sasl import DigestMd5Client
 
@@ -180,11 +182,15 @@ def _zk_error_name(code: int) -> str:
 
 
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    return _run_detect_sync(_recv_exact_detect_steps(sock, size))
+
+
+def _recv_exact_detect_steps(sock: socket.socket, size: int):
     if size < 0:
         raise ValueError("invalid receive size")
     data = bytearray()
     while len(data) < size:
-        chunk = sock.recv(size - len(data))
+        chunk = yield _DetectCall(sock.recv, (size - len(data),), {})
         if not chunk:
             raise ConnectionError("unexpected EOF")
         data.extend(chunk)
@@ -192,15 +198,23 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
 
 
 def _recv_frame(sock: socket.socket) -> bytes:
-    raw_size = _recv_exact(sock, 4)
+    return _run_detect_sync(_recv_frame_detect_steps(sock))
+
+
+def _recv_frame_detect_steps(sock: socket.socket):
+    raw_size = yield _DetectCall(_recv_exact, (sock, 4), {})
     (frame_size,) = struct.unpack(">i", raw_size)
     if frame_size <= 0 or frame_size > _ZK_MAX_FRAME:
         raise ValueError(f"invalid ZooKeeper frame size {frame_size}")
-    return _recv_exact(sock, frame_size)
+    return (yield _DetectCall(_recv_exact, (sock, frame_size), {}))
 
 
 def _send_frame(sock: socket.socket, payload: bytes) -> None:
-    sock.sendall(struct.pack(">i", len(payload)) + payload)
+    return _run_detect_sync(_send_frame_detect_steps(sock, payload))
+
+
+def _send_frame_detect_steps(sock: socket.socket, payload: bytes):
+    yield _DetectCall(sock.sendall, (struct.pack(">i", len(payload)) + payload,), {})
 
 
 def _encode_zk_string(value: str) -> bytes:
@@ -390,21 +404,22 @@ def _build_tls_context(config: ZkTransportConfig) -> ssl.SSLContext:
 
 
 def _open_zk_socket(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    transport: Literal["plaintext", "tls"],
-    config: ZkTransportConfig,
+    host: str, port: int, timeout: float, *, transport: Literal["plaintext", "tls"], config: ZkTransportConfig
 ) -> socket.socket:
-    raw_sock = socket.create_connection((host, port), timeout=timeout)
-    raw_sock.settimeout(timeout)
+    return _run_detect_sync(_open_zk_socket_detect_steps(host, port, timeout, transport=transport, config=config))
+
+
+def _open_zk_socket_detect_steps(
+    host: str, port: int, timeout: float, *, transport: Literal["plaintext", "tls"], config: ZkTransportConfig
+):
+    raw_sock = yield _DetectCall(socket.create_connection, ((host, port),), {"timeout": timeout})
+    yield _DetectCall(raw_sock.settimeout, (timeout,), {})
     if transport == "plaintext":
         return raw_sock
     try:
         context = _build_tls_context(config)
-        wrapped = context.wrap_socket(raw_sock, server_hostname=host)
-        wrapped.settimeout(timeout)
+        wrapped = yield _DetectCall(context.wrap_socket, (raw_sock,), {"server_hostname": host})
+        yield _DetectCall(wrapped.settimeout, (timeout,), {})
         return wrapped
     except Exception:
         raw_sock.close()
@@ -547,26 +562,36 @@ def query_four_letter_word(
     transport: Literal["plaintext", "tls"],
     config: ZkTransportConfig,
 ) -> ZkFourLetterResult:
+    return _run_detect_sync(
+        _query_four_letter_word_detect_steps(host, port, timeout, command, transport=transport, config=config)
+    )
+
+
+def _query_four_letter_word_detect_steps(
+    host: str,
+    port: int,
+    timeout: float,
+    command: str,
+    *,
+    transport: Literal["plaintext", "tls"],
+    config: ZkTransportConfig,
+):
     normalized = str(command or "").strip().lower()
     if normalized not in _ZK_FOUR_LETTER_COMMANDS:
         return ZkFourLetterResult(command=normalized, error="unsupported four-letter command")
-
     sock: socket.socket | None = None
     try:
-        sock = _open_zk_socket(host, port, timeout, transport=transport, config=config)
-        sock.sendall(normalized.encode("ascii"))
+        sock = yield _DetectCall(_open_zk_socket, (host, port, timeout), {"transport": transport, "config": config})
+        yield _DetectCall(sock.sendall, (normalized.encode("ascii"),), {})
         payload = bytearray()
         while True:
-            chunk = sock.recv(min(65536, _ZK_FOUR_LETTER_MAX_RESPONSE + 1 - len(payload)))
+            chunk = yield _DetectCall(sock.recv, (min(65536, _ZK_FOUR_LETTER_MAX_RESPONSE + 1 - len(payload)),), {})
             if not chunk:
                 break
             payload.extend(chunk)
             if len(payload) > _ZK_FOUR_LETTER_MAX_RESPONSE:
                 raise ValueError("four-letter response exceeds 1 MiB limit")
-        return ZkFourLetterResult(
-            command=normalized,
-            response=bytes(payload).decode("utf-8", errors="replace").strip(),
-        )
+        return ZkFourLetterResult(command=normalized, response=bytes(payload).decode("utf-8", errors="replace").strip())
     except (TimeoutError, ConnectionError, OSError, ValueError, ssl.SSLError) as exc:
         return ZkFourLetterResult(command=normalized, error=_friendly_error_from_exception(exc))
     finally:
@@ -688,38 +713,32 @@ def _raft_metrics(
 
 
 def fingerprint_zookeeper_implementation(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    transport: Literal["plaintext", "tls"],
-    config: ZkTransportConfig,
+    host: str, port: int, timeout: float, *, transport: Literal["plaintext", "tls"], config: ZkTransportConfig
 ) -> ZkImplementationFingerprint:
+    return _run_detect_sync(
+        _fingerprint_zookeeper_implementation_detect_steps(host, port, timeout, transport=transport, config=config)
+    )
+
+
+def _fingerprint_zookeeper_implementation_detect_steps(
+    host: str, port: int, timeout: float, *, transport: Literal["plaintext", "tls"], config: ZkTransportConfig
+):
     responses: dict[str, ZkFourLetterResult] = {}
 
-    def _query(command: str) -> ZkFourLetterResult:
+    def _query(command: str) -> Generator[_DetectCall, Any, ZkFourLetterResult]:
         try:
-            return query_four_letter_word(
-                host,
-                port,
-                timeout,
-                command,
-                transport=transport,
-                config=config,
+            return (
+                yield _DetectCall(
+                    query_four_letter_word, (host, port, timeout, command), {"transport": transport, "config": config}
+                )
             )
-        except Exception as exc:  # pragma: no cover - scheduler isolation boundary
-            return ZkFourLetterResult(
-                command=command,
-                error=_friendly_error_from_exception(exc),
-            )
+        except Exception as exc:
+            return ZkFourLetterResult(command=command, error=_friendly_error_from_exception(exc))
 
     version: str | None = None
     is_keeper: bool | None = None
-    # Identity probes are deliberately sequential and strongest-first. Stop as
-    # soon as a definitive vendor marker is observed; this keeps Apache and
-    # non-compatible endpoints to the smallest possible request budget.
     for command in ("srvr", "stat", "mntr"):
-        response = _query(command)
+        response = yield from _query(command)
         responses[command] = response
         candidate_version, candidate_impl = _version_from_four_letter(response.response)
         if version is None and candidate_version:
@@ -729,25 +748,18 @@ def fingerprint_zookeeper_implementation(
             if candidate_version:
                 version = candidate_version
             break
-
-    # mntr and isro are telemetry, not parallel identity guesses. Query them
-    # only after Keeper has been confirmed; re-use mntr when it was the probe
-    # that supplied the strong marker.
     if is_keeper is True:
         if "mntr" not in responses:
-            responses["mntr"] = _query("mntr")
-        responses["isro"] = _query("isro")
-
+            responses["mntr"] = yield from _query("mntr")
+        responses["isro"] = yield from _query("isro")
     merged_values: dict[str, str] = {}
     for command in ("srvr", "stat", "mntr"):
         result = responses.get(command)
         merged_values.update(_parse_four_letter_key_values(result.response if result else None))
-
     state = str(merged_values.get("zk_server_state") or merged_values.get("mode") or "").strip().lower() or None
     connections_raw = merged_values.get("zk_num_alive_connections") or merged_values.get("connections")
     connections_value = _parse_number(connections_raw)
     connections = int(connections_value) if isinstance(connections_value, (int, float)) else None
-
     latency: dict[str, int | float | None] = {
         "min": _parse_number(merged_values.get("zk_min_latency")),
         "avg": _parse_number(merged_values.get("zk_avg_latency")),
@@ -760,11 +772,9 @@ def fingerprint_zookeeper_implementation(
             for key, raw in zip(("min", "avg", "max"), parts, strict=True):
                 if latency[key] is None:
                     latency[key] = _parse_number(raw)
-
     isro_result = str((responses.get("isro") or ZkFourLetterResult("isro")).response or "").strip().lower()
     read_only = True if isro_result == "ro" else False if isro_result == "rw" else None
     raft, quorum_status = _raft_metrics(merged_values, state, read_only)
-
     if is_keeper is True:
         implementation = "clickhouse-keeper"
         confidence = "confirmed"
@@ -775,7 +785,6 @@ def fingerprint_zookeeper_implementation(
     else:
         implementation = "zookeeper-compatible"
         confidence = "unconfirmed"
-
     return ZkImplementationFingerprint(
         implementation=implementation,
         is_keeper=is_keeper,
@@ -809,28 +818,32 @@ class _ZkClient:
         self._xid = 1
 
     def connect(self) -> None:
+        return _run_detect_sync(self._connect_detect_steps())
+
+    def _connect_detect_steps(self):
         self.selected_transport = None
         failures: list[tuple[str, BaseException]] = []
         for transport in _transport_attempt_order(self.transport_config):
             try:
-                self._connect_once(transport)
+                yield _DetectCall(self._connect_once, (transport,), {})
                 self.selected_transport = transport
                 return
             except (TimeoutError, ConnectionError, OSError, ValueError, ssl.SSLError) as exc:
                 failures.append((transport, exc))
                 self._close_socket_only()
                 if not _transport_error_allows_fallback(
-                    exc,
-                    attempted_transport=transport,
-                    config=self.transport_config,
+                    exc, attempted_transport=transport, config=self.transport_config
                 ):
                     raise
         if len(failures) == 1:
             raise failures[0][1]
-        details = "; ".join(f"{mode}: {_friendly_error_from_exception(exc)}" for mode, exc in failures)
+        details = "; ".join((f"{mode}: {_friendly_error_from_exception(exc)}" for mode, exc in failures))
         raise ConnectionError(f"ZooKeeper transport auto-detection failed ({details})")
 
     def connect_and_get_root(self) -> tuple[list[str] | None, int, dict[str, int] | None]:
+        return _run_detect_sync(self._connect_and_get_root_detect_steps())
+
+    def _connect_and_get_root_detect_steps(self):
         """Select a transport only after a complete root request succeeds.
 
         A valid ConnectResponse alone is not enough to distinguish a real
@@ -841,55 +854,44 @@ class _ZkClient:
         a downgrade; protocol mismatch/reset/EOF/bounded timeout may consume
         one alternate attempt.
         """
-
         self.selected_transport = None
         failures: list[tuple[str, BaseException]] = []
         for transport in _transport_attempt_order(self.transport_config):
             try:
-                self._connect_once(transport)
+                yield _DetectCall(self._connect_once, (transport,), {})
             except (TimeoutError, ConnectionError, OSError, ValueError, ssl.SSLError) as exc:
                 failures.append((transport, exc))
                 self._close_socket_only()
                 if not _transport_error_allows_fallback(
-                    exc,
-                    attempted_transport=transport,
-                    config=self.transport_config,
+                    exc, attempted_transport=transport, config=self.transport_config
                 ):
                     raise
                 continue
-
             try:
-                root = self.get_children2("/")
+                root = yield _DetectCall(self.get_children2, ("/",), {})
             except (TimeoutError, ConnectionError, OSError, ValueError, ssl.SSLError) as exc:
                 failures.append((transport, exc))
                 self._close_socket_only()
-                # A fully decoded root response is required before selection.
-                # Certificate/mTLS failures and permanent endpoint errors do
-                # not downgrade, while reset/EOF/timeout/malformed protocol
-                # evidence may consume the single alternate attempt.
                 if not _transport_error_allows_fallback(
-                    exc,
-                    attempted_transport=transport,
-                    config=self.transport_config,
+                    exc, attempted_transport=transport, config=self.transport_config
                 ):
                     raise
                 continue
-
             self.selected_transport = transport
             return root
-
         if len(failures) == 1:
             raise failures[0][1]
-        details = "; ".join(f"{mode}: {_friendly_error_from_exception(exc)}" for mode, exc in failures)
+        details = "; ".join((f"{mode}: {_friendly_error_from_exception(exc)}" for mode, exc in failures))
         raise ConnectionError(f"ZooKeeper transport auto-detection failed ({details})")
 
     def _connect_once(self, transport: Literal["plaintext", "tls"]) -> None:
-        self.sock = _open_zk_socket(
-            self.host,
-            self.port,
-            self.timeout,
-            transport=transport,
-            config=self.transport_config,
+        return _run_detect_sync(self._connect_once_detect_steps(transport))
+
+    def _connect_once_detect_steps(self, transport: Literal["plaintext", "tls"]):
+        self.sock = yield _DetectCall(
+            _open_zk_socket,
+            (self.host, self.port, self.timeout),
+            {"transport": transport, "config": self.transport_config},
         )
         try:
             session_timeout_ms = max(1000, int(self.timeout * 1000))
@@ -902,15 +904,10 @@ class _ZkClient:
                 + _ZK_PASSWD_DEFAULT
                 + b"\x00"
             )
-            _send_frame(self._require_sock(), connect_payload)
-            response = _recv_frame(self._require_sock())
+            yield _DetectCall(_send_frame, (self._require_sock(), connect_payload), {})
+            response = yield _DetectCall(_recv_frame, (self._require_sock(),), {})
             _parse_connect_response(response)
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
-            # ``_open_zk_socket`` performs the TLS handshake before returning.
-            # Every failure below this point therefore belongs to the
-            # ZooKeeper ConnectRequest/ConnectResponse exchange. Preserve the
-            # boundary so certificate failures remain distinguishable from an
-            # EOF/timeout/malformed protocol response eligible for one fallback.
             raise _ZkProtocolPayloadError(str(exc), transport=transport) from exc
 
     def _close_socket_only(self) -> None:
@@ -924,13 +921,16 @@ class _ZkClient:
         self.sock = None
 
     def close(self) -> None:
+        return _run_detect_sync(self._close_detect_steps())
+
+    def _close_detect_steps(self):
         sock = self.sock
         if sock is None:
             return
         try:
             xid = self._next_xid()
             payload = struct.pack(">ii", xid, _ZK_OP_CLOSE_SESSION)
-            _send_frame(sock, payload)
+            yield _DetectCall(_send_frame, (sock, payload), {})
         except Exception:
             pass
         try:
@@ -950,23 +950,27 @@ class _ZkClient:
         return xid
 
     def _request_with_xid(self, xid: int, opcode: int, payload: bytes = b"") -> tuple[int, bytes]:
+        return _run_detect_sync(self._request_with_xid_detect_steps(xid, opcode, payload))
+
+    def _request_with_xid_detect_steps(self, xid: int, opcode: int, payload: bytes = b""):
         sock = self._require_sock()
         frame = struct.pack(">ii", xid, int(opcode)) + payload
-        _send_frame(sock, frame)
-        response = _recv_frame(sock)
-
+        yield _DetectCall(_send_frame, (sock, frame), {})
+        response = yield _DetectCall(_recv_frame, (sock,), {})
         if len(response) < 16:
             raise ValueError("invalid ZooKeeper response header")
-
         rxid = struct.unpack(">i", response[0:4])[0]
         _zxid = struct.unpack(">q", response[4:12])[0]
         err = struct.unpack(">i", response[12:16])[0]
         if rxid != xid:
             raise ValueError(f"unexpected ZooKeeper xid {rxid} (expected {xid})")
-        return int(err), response[16:]
+        return (int(err), response[16:])
 
     def _request(self, opcode: int, payload: bytes = b"") -> tuple[int, bytes]:
-        return self._request_with_xid(self._next_xid(), opcode, payload)
+        return _run_detect_sync(self._request_detect_steps(opcode, payload))
+
+    def _request_detect_steps(self, opcode: int, payload: bytes = b""):
+        return (yield _DetectCall(self._request_with_xid, (self._next_xid(), opcode, payload), {}))
 
     def auth_digest(self, username: str, password: str) -> tuple[bool, str | None]:
         raw_auth = f"{username}:{password}".encode("utf-8", errors="replace")
@@ -1015,90 +1019,81 @@ class _ZkClient:
         return True, None
 
     def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+        return _run_detect_sync(self._get_children2_detect_steps(path))
+
+    def _get_children2_detect_steps(self, path: str):
         payload = _encode_zk_string(path) + b"\x00"
-        err, response_payload = self._request(_ZK_OP_GET_CHILDREN2, payload)
+        err, response_payload = yield _DetectCall(self._request, (_ZK_OP_GET_CHILDREN2, payload), {})
         if err != _ZK_ERR_OK:
             if response_payload:
                 raise ValueError("unexpected ZooKeeper error payload")
-            return None, err, None
-
+            return (None, err, None)
         children, offset = _parse_children_vector(response_payload, 0)
         if children is None:
             raise ValueError("invalid null ZooKeeper children vector")
         stat, offset = _parse_stat(response_payload, offset)
-        # ClickHouse Keeper exposes virtual nodes below /keeper but reports
-        # numChildren=0 in their Stat record. The children vector is still
-        # fully framed and authoritative, so tolerate this vendor-specific
-        # inconsistency without weakening validation for user znodes.
-        if len(children) != stat["num_children"] and not (
-            path == _KEEPER_SYSTEM_PREFIX or path.startswith(f"{_KEEPER_SYSTEM_PREFIX}/")
+        if len(children) != stat["num_children"] and (
+            not (path == _KEEPER_SYSTEM_PREFIX or path.startswith(f"{_KEEPER_SYSTEM_PREFIX}/"))
         ):
             raise ValueError("ZooKeeper children vector/stat count mismatch")
         if offset != len(response_payload):
             raise ValueError("unexpected trailing ZooKeeper getChildren2 payload")
-        return children, err, stat
+        return (children, err, stat)
 
     def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+        return _run_detect_sync(self._get_data_detect_steps(path))
+
+    def _get_data_detect_steps(self, path: str):
         payload = _encode_zk_string(path) + b"\x00"
-        err, response_payload = self._request(_ZK_OP_GET_DATA, payload)
+        err, response_payload = yield _DetectCall(self._request, (_ZK_OP_GET_DATA, payload), {})
         if err != _ZK_ERR_OK:
             if response_payload:
                 raise ValueError("unexpected ZooKeeper error payload")
-            return None, err, None
-
+            return (None, err, None)
         data, offset = _decode_zk_buffer(response_payload, 0)
         stat, offset = _parse_stat(response_payload, offset)
         if offset != len(response_payload):
             raise ValueError("unexpected trailing ZooKeeper getData payload")
-        return data, err, stat
+        return (data, err, stat)
 
     def probe_keeper_virtual_nodes(self) -> ZkKeeperVirtualProbe:
+        return _run_detect_sync(self._probe_keeper_virtual_nodes_detect_steps())
+
+    def _probe_keeper_virtual_nodes_detect_steps(self):
         """Confirm Keeper when diagnostic four-letter commands are disabled.
 
         The probe is deliberately bounded to one children lookup and one data
         read on ClickHouse Keeper's virtual ``/keeper`` tree.  Merely finding
         a user-created ``/keeper`` znode is not sufficient evidence.
         """
-
-        children, children_err, _stat = self.get_children2(_KEEPER_SYSTEM_PREFIX)
+        children, children_err, _stat = yield _DetectCall(self.get_children2, (_KEEPER_SYSTEM_PREFIX,), {})
         if children_err != _ZK_ERR_OK or children is None:
-            return ZkKeeperVirtualProbe(
-                confirmed=False,
-                reason=f"/keeper children: {_zk_error_name(children_err)}",
-            )
+            return ZkKeeperVirtualProbe(confirmed=False, reason=f"/keeper children: {_zk_error_name(children_err)}")
         normalized_children = tuple(sorted(str(child) for child in children))
         required = {"api_version", "feature_flags"}
         if not required.issubset(normalized_children):
             return ZkKeeperVirtualProbe(
-                confirmed=False,
-                children=normalized_children,
-                reason="/keeper virtual children are incomplete",
+                confirmed=False, children=normalized_children, reason="/keeper virtual children are incomplete"
             )
-
-        api_data, api_err, _api_stat = self.get_data(f"{_KEEPER_SYSTEM_PREFIX}/api_version")
+        api_data, api_err, _api_stat = yield _DetectCall(self.get_data, (f"{_KEEPER_SYSTEM_PREFIX}/api_version",), {})
         if api_err != _ZK_ERR_OK or api_data is None:
             return ZkKeeperVirtualProbe(
-                confirmed=False,
-                children=normalized_children,
-                reason=f"/keeper/api_version: {_zk_error_name(api_err)}",
+                confirmed=False, children=normalized_children, reason=f"/keeper/api_version: {_zk_error_name(api_err)}"
             )
         try:
             api_text = api_data.decode("ascii", errors="strict").strip()
         except UnicodeDecodeError:
             api_text = ""
-        if not re.fullmatch(r"[1-9][0-9]{0,9}", api_text):
+        if not re.fullmatch("[1-9][0-9]{0,9}", api_text):
             return ZkKeeperVirtualProbe(
-                confirmed=False,
-                children=normalized_children,
-                reason="/keeper/api_version is not a positive integer",
+                confirmed=False, children=normalized_children, reason="/keeper/api_version is not a positive integer"
             )
-        return ZkKeeperVirtualProbe(
-            confirmed=True,
-            api_version=int(api_text),
-            children=normalized_children,
-        )
+        return ZkKeeperVirtualProbe(confirmed=True, api_version=int(api_text), children=normalized_children)
 
     def create(self, path: str, data: bytes = b"", flags: int = _ZK_CREATE_EPHEMERAL) -> int:
+        return _run_detect_sync(self._create_detect_steps(path, data, flags))
+
+    def _create_detect_steps(self, path: str, data: bytes = b"", flags: int = _ZK_CREATE_EPHEMERAL):
         payload = (
             _encode_zk_string(path)
             + struct.pack(">i", len(data))
@@ -1106,7 +1101,7 @@ class _ZkClient:
             + _encode_acl_world_anyone_all()
             + struct.pack(">i", int(flags))
         )
-        err, _response_payload = self._request(_ZK_OP_CREATE, payload)
+        err, _response_payload = yield _DetectCall(self._request, (_ZK_OP_CREATE, payload), {})
         return int(err)
 
     def create_sequential(self, path: str, data: bytes) -> tuple[str | None, int]:
@@ -1130,8 +1125,11 @@ class _ZkClient:
         return created_path, _ZK_ERR_OK
 
     def delete(self, path: str, version: int = -1) -> int:
+        return _run_detect_sync(self._delete_detect_steps(path, version))
+
+    def _delete_detect_steps(self, path: str, version: int = -1):
         payload = _encode_zk_string(path) + struct.pack(">i", int(version))
-        err, _response_payload = self._request(_ZK_OP_DELETE, payload)
+        err, _response_payload = yield _DetectCall(self._request, (_ZK_OP_DELETE, payload), {})
         return int(err)
 
 
@@ -1655,3 +1653,25 @@ def _znode_detail_entry(path: str, meta: dict[str, Any] | None) -> dict[str, Any
         "bytes": bytes_value,
         "error": error_value,
     }
+
+
+# Exact synchronous wrappers are the compatibility/override identities.
+_ASYNC_RETAINED_STEPS = {
+    _recv_exact: _recv_exact_detect_steps,
+    _recv_frame: _recv_frame_detect_steps,
+    _send_frame: _send_frame_detect_steps,
+    _open_zk_socket: _open_zk_socket_detect_steps,
+    query_four_letter_word: _query_four_letter_word_detect_steps,
+    fingerprint_zookeeper_implementation: _fingerprint_zookeeper_implementation_detect_steps,
+    _ZkClient.connect: _ZkClient._connect_detect_steps,
+    _ZkClient.connect_and_get_root: _ZkClient._connect_and_get_root_detect_steps,
+    _ZkClient._connect_once: _ZkClient._connect_once_detect_steps,
+    _ZkClient.close: _ZkClient._close_detect_steps,
+    _ZkClient._request_with_xid: _ZkClient._request_with_xid_detect_steps,
+    _ZkClient._request: _ZkClient._request_detect_steps,
+    _ZkClient.get_children2: _ZkClient._get_children2_detect_steps,
+    _ZkClient.get_data: _ZkClient._get_data_detect_steps,
+    _ZkClient.probe_keeper_virtual_nodes: _ZkClient._probe_keeper_virtual_nodes_detect_steps,
+    _ZkClient.create: _ZkClient._create_detect_steps,
+    _ZkClient.delete: _ZkClient._delete_detect_steps,
+}

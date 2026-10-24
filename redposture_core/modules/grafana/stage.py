@@ -9,6 +9,7 @@ from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...clients.http_api import http_target_context
 from ...console import Console
+from ...detection_io import with_async_io_detection
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCredentialRun,
@@ -104,7 +105,7 @@ def build_grafana_spec(args: Any) -> ModuleAuditSpec:
             result = actions.collect_grafana_data(ctx, record, options)
         return AuditRecord.from_mapping(result, module="grafana", service="grafana")
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="grafana",
         label="GRAFANA",
         default_port=_DEFAULT_PORT,
@@ -122,6 +123,15 @@ def build_grafana_spec(args: Any) -> ModuleAuditSpec:
         skip_credentials_without_verifier=True,
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
+    )
+
+    return with_async_io_detection(
+        spec,
+        actions,
+        root_name="detect_grafana",
+        options=options,
+        api_prefixes=("/api", "/login"),
+        activate_name="_activate_grafana_transport",
     )
 
 

@@ -355,16 +355,22 @@ def _pg_query_rows(sock: socket.socket, query: str) -> tuple[list[list[str | Non
     error: str | None = None
 
     _pg_send_query(sock, query)
-    while True:
-        message_type, payload = _pg_read_message(sock)
-        if message_type == b"D":
-            rows.append(_pg_parse_data_row(payload))
-            continue
-        if message_type == b"E":
-            _, error = _pg_parse_error(payload)
-            continue
-        if message_type == b"Z":
-            return rows, error
+    try:
+        while True:
+            message_type, payload = _pg_read_message(sock)
+            if message_type == b"D":
+                rows.append(_pg_parse_data_row(payload))
+                continue
+            if message_type == b"E":
+                _, error = _pg_parse_error(payload)
+                continue
+            if message_type == b"Z":
+                return rows, error
+    except (OSError, ValueError) as exc:
+        if not rows:
+            raise
+        detail = str(exc) or type(exc).__name__
+        return rows, f"{error}; {detail}" if error else detail
 
 
 def _parse_bool(value: str | None) -> bool | None:
@@ -1361,7 +1367,7 @@ def _pg_parse_table_reference(raw_name: str) -> tuple[str | None, str | None, st
         return None, None, f"invalid table format: {candidate}"
 
     if len(parts) == 3:
-        return _pg_display_identifier_path([parts[0]]), _pg_display_identifier_path(parts[1:]), None
+        return parts[0], _pg_display_identifier_path(parts[1:]), None
     return None, _pg_display_identifier_path(parts), None
 
 
@@ -1390,7 +1396,9 @@ def _pg_group_table_targets(
         if local_table_name not in bucket:
             bucket.append(local_table_name)
 
-        normalized_target = f"{database_name}.{local_table_name}" if database_name else local_table_name
+        normalized_target = (
+            f"{_pg_display_identifier_path([database_name])}.{local_table_name}" if database_name else local_table_name
+        )
         if normalized_target not in seen_normalized_targets:
             seen_normalized_targets.add(normalized_target)
             normalized_targets.append(normalized_target)
@@ -1532,7 +1540,7 @@ def _pg_execute_remote_command_bytes(
 
 def _pg_try_query_sql(sock: socket.socket, query: str, *, max_rows: int = 500) -> tuple[list[str] | None, str | None]:
     rows, error = _pg_query_rows(sock, query)
-    if error:
+    if error and not rows:
         return None, error
 
     rendered_rows: list[str] = []
@@ -1544,7 +1552,7 @@ def _pg_try_query_sql(sock: socket.socket, query: str, *, max_rows: int = 500) -
         rendered_rows.append(" | ".join("NULL" if value is None else _pg_text(value) for value in row))
     if len(rows) > limit:
         rendered_rows.append(f"<truncated:{len(rows) - limit}>")
-    return rendered_rows, None
+    return rendered_rows, error
 
 
 def _pg_try_read_server_file(
@@ -1774,7 +1782,7 @@ def _pg_query_table_rows(
         sock,
         f"SELECT row_to_json(t)::text FROM (SELECT {select_list} FROM {sql_ident}{limit_clause}) AS t",
     )
-    if error:
+    if error and not rows:
         return display_name, None, error
 
     values: list[str] = []
@@ -1782,7 +1790,7 @@ def _pg_query_table_rows(
         if not row:
             continue
         values.append(_pg_text(row[0]))
-    return display_name, values, None
+    return display_name, values, error
 
 
 def _pg_query_table_row_count(
@@ -3226,10 +3234,10 @@ def _render_colored_postgres_line(console: Console, line: str) -> bool:
             BooleanColorRule("partial", true_color="orange", false_color="bright_green"),
         ),
         counts=(
-            CountColorRule("DBs", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("records", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("errors", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("truncated", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("DBs", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("records", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("errors", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("truncated", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
         extra_spans=_postgres_extra_color_spans,
     ):

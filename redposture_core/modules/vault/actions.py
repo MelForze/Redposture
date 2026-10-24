@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import re
 from collections import deque
 from typing import Any
 from urllib.parse import quote
@@ -14,6 +15,7 @@ from ...clients.http_api import (
     http_response_requires_https,
 )
 from ...clients.scoped_http import ScopedHttpClient
+from ...detection_steps import DetectionRequests, run_requests
 from ..token_api import ReadBudget, json_value, safe_path
 from .types import DetectionStatus
 
@@ -69,11 +71,15 @@ def _header(response: HttpResponse, name: str) -> str:
 
 def detect_record(ctx: Any) -> dict[str, Any]:
     client = _client(ctx)
+    return run_requests(detect_requests(ctx), lambda base, path: _request(client, base, path))
+
+
+def detect_requests(ctx: Any) -> DetectionRequests:
     transport_ok = False
     probable = False
     for index, scheme in enumerate(_scheme_order(ctx)):
         base = _base(ctx, scheme)
-        response = _request(client, base, "/v1/sys/health")
+        response = yield (base, "/v1/sys/health")
         transport_ok |= response.status > 0
         data = _json(response)
         shape = _vault_health(data)
@@ -93,8 +99,8 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         if cluster_name:
             signals.append("vault.cluster")
         # A generic health JSON is not a sufficient product fingerprint.
-        if shape and not (version or cluster_name or header):
-            seal = _request(client, base, "/v1/sys/seal-status")
+        if shape and not version:
+            seal = yield (base, "/v1/sys/seal-status")
             seal_data = _json(seal)
             if (
                 seal.status == 200
@@ -104,10 +110,14 @@ def detect_record(ctx: Any) -> dict[str, Any]:
                 and isinstance(seal_data.get("type"), str)
             ):
                 signals.append("vault.seal_status")
+                if isinstance(seal_data.get("version"), str) and re.fullmatch(
+                    r"v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?", seal_data["version"]
+                ):
+                    version = seal_data["version"]
         if data is not None and shape and len(signals) >= 2 and response.status in {200, 429, 472, 473, 501, 503}:
             initialized = data["initialized"]
             sealed = data["sealed"]
-            mounts = _request(client, base, "/v1/sys/mounts") if initialized and not sealed else None
+            mounts = (yield (base, "/v1/sys/mounts")) if initialized and not sealed else None
             mounts_data = _json(mounts) if mounts is not None and mounts.status == 200 else None
             anonymous = bool(mounts_data and isinstance(mounts_data.get("data"), dict))
             auth_required = False if anonymous else True if mounts is not None and mounts.status in {401, 403} else None
@@ -329,6 +339,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         access.append(status)
         result["mounts_access"] = status
         if mounts is not None:
+            result["mounts_count"] = len(mounts)
             result["mounts"] = mounts if show_mounts else None
             if discover:
                 items, partial, reasons = _discover_kv(
@@ -365,3 +376,6 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = ["detect_record", "auth_record", "data_record"]
+
+# Native adapters must not bypass an explicitly replaced synchronous detector.
+_SYNC_DETECT_RECORD = detect_record

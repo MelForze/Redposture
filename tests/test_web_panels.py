@@ -36,7 +36,7 @@ def _response(
 
 
 _FIXTURES: dict[str, dict[str, HttpResponse]] = {
-    "docker": {
+    "portainer": {
         "/api/system/status": _response(200, {"Version": "2.45.2", "InstanceID": "qa"}),
         "/": _response(200, "<title>Portainer</title>"),
     },
@@ -73,7 +73,7 @@ _FIXTURES: dict[str, dict[str, HttpResponse]] = {
 @pytest.mark.parametrize(
     ("fixture", "module", "product"),
     [
-        ("docker", "docker", "portainer"),
+        ("portainer", "portainer", "portainer"),
         ("mongodb", "mongodb", "mongo_express"),
         ("elastic_kibana", "elastic", "kibana"),
         ("elastic_osd", "elastic", "opensearch_dashboards"),
@@ -172,10 +172,10 @@ def test_explicit_origin_runs_ui_and_backend_as_separate_records(
         return AuditRecord(
             host=ctx.host,
             port=ctx.port,
-            module="docker",
-            service="docker",
+            module="mongodb",
+            service="mongodb",
             status="open_no_auth",
-            extra={"is_docker": True},
+            extra={"is_mongodb": True},
         )
 
     def detect_ui(_module: str, _ctx: object) -> dict[str, object]:
@@ -183,26 +183,26 @@ def test_explicit_origin_runs_ui_and_backend_as_separate_records(
         return {
             "host": "qa",
             "port": target.explicit_port,
-            "module": "docker",
-            "service": "docker",
+            "module": "mongodb",
+            "service": "mongodb",
             "status": "open_no_auth",
             "auth_required": False,
             "surface": "ui",
             "is_ui": True,
-            "ui_product": "portainer",
+            "ui_product": "mongo_express",
             "ui": {"endpoint": "https://qa:9443", "auth_required": False, "inventory": {}},
             "detection_status": "confirmed",
-            "detection_signals": ["portainer_page", "portainer_system_status"],
+            "detection_signals": ["mongo_express_page", "mongo_express_system_status"],
         }
 
     monkeypatch.setattr(web_panels, "detect_panel", detect_ui)
     spec = ModuleAuditSpec(
-        module="docker",
-        label="DOCKER",
+        module="mongodb",
+        label="MONGODB",
         default_port=2375,
         detect=detect_backend,
-        is_detected=lambda record: record.extra.get("is_docker") is True,
-        render=lambda record: [f"DOCKER {record.status}"],
+        is_detected=lambda record: record.extra.get("is_mongodb") is True,
+        render=lambda record: [f"MONGODB {record.status}"],
     )
     plan = AuditCommandPlan(
         target_specs_by_port={int(target.explicit_port or 0): (target,)}, output_format="json", workers=1
@@ -330,7 +330,7 @@ def test_portainer_422_invalid_credentials_and_identity_proof(monkeypatch: pytes
     monkeypatch.setattr(
         web_panels,
         "_get",
-        lambda *_args, **_kw: _response(200, {"Username": "admin"}),
+        lambda *_args, **_kw: _response(200, {"Id": 1, "Username": "admin", "Role": 1}),
     )
     assert web_panels.authenticate_panel(ctx, record)["credential_state"] == "valid"
     monkeypatch.setattr(web_panels, "_post", lambda *_args, **_kw: _response(429, {"message": "too many requests"}))
@@ -807,14 +807,14 @@ def test_dashboards_fixed_inventory_uses_upstream_gets(monkeypatch: pytest.Monke
             return _response(200, [{"index": "qa"}])
         if "_search" in path:
             return _response(200, {"hits": {"hits": [{"_id": "1", "_source": {"name": "qa"}}]}})
-        return _response(200, {"status": "green"})
+        return _response(200, {"status": "bright_green"})
 
     monkeypatch.setattr(web_panels, "_post", post)
     ctx = SimpleNamespace(args=SimpleNamespace(cluster=True, timeout=1, secure=False, _proxy_config=None))
     inventory = web_panels.enumerate_panel(ctx, {"ui_product": "kibana", "ui": {"endpoint": "http://qa"}})["ui"][
         "inventory"
     ]
-    assert inventory["cluster"]["records"]["status"] == "green"
+    assert inventory["cluster"]["records"]["status"] == "bright_green"
     assert all("method=GET" in path and body == b"" for path, body in requests)
 
 
@@ -1042,9 +1042,9 @@ def test_portainer_walks_paginated_environments(monkeypatch: pytest.MonkeyPatch)
     def get(_pool: object, _base: str, path: str, **_kw: object) -> HttpResponse:
         paths.append(path)
         if path == "/api/endpoints?start=0&limit=100":
-            return _response(200, [{"Id": number, "Name": f"env-{number}"} for number in range(100)])
+            return _response(200, [{"Id": number, "Name": f"env-{number}"} for number in range(1, 101)])
         if path == "/api/endpoints?start=100&limit=100":
-            return _response(200, [{"Id": 100, "Name": "env-100"}])
+            return _response(200, [{"Id": 101, "Name": "env-101"}])
         return _response(404, {})
 
     monkeypatch.setattr(web_panels, "_get", get)
@@ -1187,7 +1187,7 @@ def test_ui_rendering_uses_airflow_palette_and_has_no_ansi() -> None:
     assert web_panels.colorize_panel_line(console, detection, "MINIO") is True
     assert any("version:2026.1" in value and color == "white" for value, color in console.calls)
     assert any("auth required:True" in value and color == "bright_green" for value, color in console.calls)
-    for count, color in ((0, "bright_green"), (3, "red")):
+    for count, color in ((0, "bright_green"), (3, "true_red")):
         console.calls.clear()
         assert (
             web_panels.colorize_panel_line(
@@ -1198,10 +1198,11 @@ def test_ui_rendering_uses_airflow_palette_and_has_no_ansi() -> None:
         assert any(f"count:{count}" in value and painted == color for value, painted in console.calls)
     console.calls.clear()
     assert web_panels.colorize_panel_line(console, "MINIO\t127.0.0.1\t9001\t [+] user:secret (UI)", "MINIO")
-    assert any("user:secret (UI)" in value and color == "white" for value, color in console.calls)
+    assert any("user:secret" in value and color == "true_red" for value, color in console.calls)
+    assert any(value == "UI" and color == "white" for value, color in console.calls)
     console.calls.clear()
     assert web_panels.colorize_panel_line(console, "MINIO\t127.0.0.1\t9001\t [-] user:wrong (UI)", "MINIO")
-    assert not any("user:wrong" in value and color == "red" for value, color in console.calls)
+    assert not any("user:wrong" in value and color == "true_red" for value, color in console.calls)
     console.calls.clear()
     assert web_panels.colorize_panel_line(console, "MINIO\t127.0.0.1\t9001\t [*] dump coverage:partial", "MINIO")
     assert any("coverage:partial" in value and color == "orange" for value, color in console.calls)
@@ -1226,7 +1227,7 @@ def test_ui_rendering_uses_airflow_palette_and_has_no_ansi() -> None:
     assert web_panels.colorize_panel_line(
         console, next(line for line in export_lines if "Export Enumeration" in line), "MINIO"
     )
-    assert any("count:10050" in value and color == "red" for value, color in console.calls)
+    assert any("count:10050" in value and color == "true_red" for value, color in console.calls)
     record["ui"]["inventory"] = {"export": {"status": "unavailable", "partial": True, "reason": "HTTP 403"}}
     unavailable = web_panels.render_panel(record, "MINIO")[-1]
     assert "[-] export unavailable (reason:HTTP 403)" in unavailable

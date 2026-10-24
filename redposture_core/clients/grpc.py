@@ -26,6 +26,8 @@ from h2.events import ConnectionTerminated, DataReceived, ResponseReceived, Stre
 from redposture_core.proto import grpc_health_pb2, grpc_reflection_pb2
 from redposture_core.utils import utc_now_iso
 
+from ..detection_io import DetectCall as _DetectCall
+from ..detection_io import run_sync as _run_detect_sync
 from .tls_cache import shared_client_ssl_context
 
 _GRPC_AUTH_CODES = {7, 16}
@@ -303,27 +305,27 @@ def _grpc_ssl_context(config: GrpcTlsConfig | None, *, alpn_h2: bool) -> ssl.SSL
 
 
 def _open_grpc_socket(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    use_tls: bool,
-    tls_config: GrpcTlsConfig | None = None,
+    host: str, port: int, timeout: float, *, use_tls: bool, tls_config: GrpcTlsConfig | None = None
 ) -> socket.socket:
-    base_sock = socket.create_connection((host, port), timeout=timeout)
-    base_sock.settimeout(timeout)
+    return _run_detect_sync(_open_grpc_socket_detect_steps(host, port, timeout, use_tls=use_tls, tls_config=tls_config))
+
+
+def _open_grpc_socket_detect_steps(
+    host: str, port: int, timeout: float, *, use_tls: bool, tls_config: GrpcTlsConfig | None = None
+):
+    base_sock = yield _DetectCall(socket.create_connection, ((host, port),), {"timeout": timeout})
+    yield _DetectCall(base_sock.settimeout, (timeout,), {})
     if not use_tls:
         return base_sock
-
-    context = _grpc_ssl_context(tls_config, alpn_h2=True)
     try:
+        context = _grpc_ssl_context(tls_config, alpn_h2=True)
         tls = tls_config or GrpcTlsConfig(insecure=True)
-        wrapped = context.wrap_socket(base_sock, server_hostname=tls.server_name or host)
+        wrapped = yield _DetectCall(context.wrap_socket, (base_sock,), {"server_hostname": tls.server_name or host})
     except BaseException:
         base_sock.close()
         raise
     try:
-        wrapped.settimeout(timeout)
+        yield _DetectCall(wrapped.settimeout, (timeout,), {})
         negotiated = wrapped.selected_alpn_protocol()
         if negotiated and negotiated.lower() != "h2":
             raise OSError(f"tls alpn negotiation failed (expected h2, got {negotiated})")
@@ -436,48 +438,49 @@ class _GrpcH2Session:
                 pass
 
     def _ensure_connection(self, timeout: float) -> tuple[socket.socket, H2Connection]:
+        return _run_detect_sync(self._ensure_connection_detect_steps(timeout))
+
+    def _ensure_connection_detect_steps(self, timeout: float):
         if self._closed:
             raise OSError("gRPC HTTP/2 session is closed")
         if self._sock is not None and self._conn is not None:
-            self._sock.settimeout(timeout)
-            return self._sock, self._conn
-
-        sock = _open_grpc_socket(
-            self.host,
-            self.port,
-            timeout,
-            use_tls=self.use_tls,
-            tls_config=self.tls_config,
+            yield _DetectCall(self._sock.settimeout, (timeout,), {})
+            return (self._sock, self._conn)
+        sock = yield _DetectCall(
+            _open_grpc_socket, (self.host, self.port, timeout), {"use_tls": self.use_tls, "tls_config": self.tls_config}
         )
         conn = H2Connection()
         try:
             conn.initiate_connection()
             pending = conn.data_to_send()
             if pending:
-                sock.sendall(pending)
+                yield _DetectCall(sock.sendall, (pending,), {})
         except BaseException:
             sock.close()
             raise
         self._sock = sock
         self._conn = conn
-        return sock, conn
+        return (sock, conn)
 
     def close(self) -> None:
         with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            if self._sock is not None and self._conn is not None:
-                close_connection = getattr(self._conn, "close_connection", None)
-                if callable(close_connection):
-                    try:
-                        close_connection()
-                        pending = self._conn.data_to_send()
-                        if pending:
-                            self._sock.sendall(pending)
-                    except (OSError, ssl.SSLError):
-                        pass
-            self._drop_connection()
+            return _run_detect_sync(self._close_detect_steps())
+
+    def _close_detect_steps(self):
+        if self._closed:
+            return
+        self._closed = True
+        if self._sock is not None and self._conn is not None:
+            close_connection = getattr(self._conn, "close_connection", None)
+            if callable(close_connection):
+                try:
+                    close_connection()
+                    pending = self._conn.data_to_send()
+                    if pending:
+                        yield _DetectCall(self._sock.sendall, (pending,), {})
+                except (OSError, ssl.SSLError):
+                    pass
+        self._drop_connection()
 
     def call(
         self,
@@ -488,6 +491,22 @@ class _GrpcH2Session:
         authorization: str | None,
         metadata: Sequence[tuple[str, str | bytes]] | None = None,
     ) -> _GrpcCallResult:
+        with self._lock:
+            return _run_detect_sync(
+                self._call_detect_steps(
+                    path=path, payload=payload, timeout=timeout, authorization=authorization, metadata=metadata
+                )
+            )
+
+    def _call_detect_steps(
+        self,
+        *,
+        path: str,
+        payload: bytes,
+        timeout: float | None = None,
+        authorization: str | None,
+        metadata: Sequence[tuple[str, str | bytes]] | None = None,
+    ):
         started = time.monotonic()
         result = _new_grpc_call_result(self.host, self.port, path, self.use_tls)
         call_timeout = self.timeout if timeout is None else float(timeout)
@@ -498,108 +517,101 @@ class _GrpcH2Session:
             result["error"] = str(exc)
             result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
             return result
+        response_headers: dict[str, str] = {}
+        response_trailers: dict[str, str] = {}
+        body = bytearray()
+        connection_terminated = False
+        try:
+            sock, conn = yield _DetectCall(self._ensure_connection, (call_timeout,), {})
+            result["transport_ok"] = True
+            stream_id = conn.get_next_available_stream_id()
+            headers: list[tuple[str, str]] = [
+                (":method", "POST"),
+                (":scheme", "https" if self.use_tls else "http"),
+                (":authority", _grpc_authority(self.host, self.port)),
+                (":path", path),
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("user-agent", "RedPosture/1.0"),
+            ]
+            headers.extend(normalized_metadata)
+            if normalized_authorization:
+                headers.append(("authorization", normalized_authorization))
+            stream_closed = False
+            framed_payload = _encode_grpc_frame(payload)
 
-        with self._lock:
-            response_headers: dict[str, str] = {}
-            response_trailers: dict[str, str] = {}
-            body = bytearray()
-            connection_terminated = False
-            try:
-                sock, conn = self._ensure_connection(call_timeout)
-                result["transport_ok"] = True
-                stream_id = conn.get_next_available_stream_id()
-                headers: list[tuple[str, str]] = [
-                    (":method", "POST"),
-                    (":scheme", "https" if self.use_tls else "http"),
-                    (":authority", _grpc_authority(self.host, self.port)),
-                    (":path", path),
-                    ("content-type", "application/grpc"),
-                    ("te", "trailers"),
-                    ("user-agent", "RedPosture/1.0"),
-                ]
-                headers.extend(normalized_metadata)
-                if normalized_authorization:
-                    headers.append(("authorization", normalized_authorization))
+            def _handle_events(events: Sequence[Any]) -> None:
+                nonlocal stream_closed, connection_terminated
+                for event in events:
+                    event_stream_id = getattr(event, "stream_id", stream_id)
+                    if isinstance(event, DataReceived):
+                        conn.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
+                        if event_stream_id == stream_id:
+                            body.extend(event.data)
+                    elif isinstance(event, ResponseReceived) and event_stream_id == stream_id:
+                        response_headers.update(_http2_headers_to_map(list(event.headers)))
+                    elif isinstance(event, TrailersReceived) and event_stream_id == stream_id:
+                        response_trailers.update(_http2_headers_to_map(list(event.headers)))
+                    elif isinstance(event, StreamEnded) and event_stream_id == stream_id:
+                        stream_closed = True
+                    elif isinstance(event, StreamReset) and event_stream_id == stream_id:
+                        result["error"] = f"stream reset by peer (code={int(event.error_code)})"
+                        stream_closed = True
+                    elif isinstance(event, ConnectionTerminated):
+                        connection_terminated = True
+                        if not stream_closed and result.get("error") is None:
+                            result["error"] = f"HTTP/2 connection terminated (code={event.error_code})"
 
-                stream_closed = False
-                framed_payload = _encode_grpc_frame(payload)
-
-                def _handle_events(events: Sequence[Any]) -> None:
-                    nonlocal stream_closed, connection_terminated
-                    for event in events:
-                        event_stream_id = getattr(event, "stream_id", stream_id)
-                        if isinstance(event, DataReceived):
-                            conn.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
-                            if event_stream_id == stream_id:
-                                body.extend(event.data)
-                        elif isinstance(event, ResponseReceived) and event_stream_id == stream_id:
-                            response_headers.update(_http2_headers_to_map(list(event.headers)))
-                        elif isinstance(event, TrailersReceived) and event_stream_id == stream_id:
-                            response_trailers.update(_http2_headers_to_map(list(event.headers)))
-                        elif isinstance(event, StreamEnded) and event_stream_id == stream_id:
-                            stream_closed = True
-                        elif isinstance(event, StreamReset) and event_stream_id == stream_id:
-                            result["error"] = f"stream reset by peer (code={int(event.error_code)})"
-                            stream_closed = True
-                        elif isinstance(event, ConnectionTerminated):
-                            connection_terminated = True
-                            if not stream_closed and result.get("error") is None:
-                                result["error"] = f"HTTP/2 connection terminated (code={event.error_code})"
-
-                conn.send_headers(stream_id, headers, end_stream=False)
-                offset = 0
-                while offset < len(framed_payload) and not stream_closed and not connection_terminated:
-                    window_getter = getattr(conn, "local_flow_control_window", None)
-                    available_window = (
-                        int(window_getter(stream_id)) if callable(window_getter) else len(framed_payload) - offset
-                    )
-                    window = min(
-                        available_window,
-                        int(getattr(conn, "max_outbound_frame_size", 16_384)),
-                    )
-                    if window <= 0:
-                        pending = conn.data_to_send()
-                        if pending:
-                            sock.sendall(pending)
-                        incoming = sock.recv(64 * 1024)
-                        if not incoming:
-                            result["error"] = "connection closed before request body was sent"
-                            connection_terminated = True
-                            break
-                        _handle_events(conn.receive_data(incoming))
-                        continue
-                    end = min(len(framed_payload), offset + window)
-                    conn.send_data(
-                        stream_id,
-                        framed_payload[offset:end],
-                        end_stream=end == len(framed_payload),
-                    )
-                    offset = end
+            conn.send_headers(stream_id, headers, end_stream=False)
+            offset = 0
+            while offset < len(framed_payload) and (not stream_closed) and (not connection_terminated):
+                window_getter = getattr(conn, "local_flow_control_window", None)
+                available_window = (
+                    int(window_getter(stream_id)) if callable(window_getter) else len(framed_payload) - offset
+                )
+                window = min(available_window, int(getattr(conn, "max_outbound_frame_size", 16384)))
+                if window <= 0:
                     pending = conn.data_to_send()
                     if pending:
-                        sock.sendall(pending)
-
-                while not stream_closed and not connection_terminated:
-                    chunk = sock.recv(64 * 1024)
-                    if not chunk:
-                        result["error"] = "connection closed before gRPC stream ended"
+                        yield _DetectCall(sock.sendall, (pending,), {})
+                    incoming = yield _DetectCall(sock.recv, (64 * 1024,), {})
+                    if not incoming:
+                        result["error"] = "connection closed before request body was sent"
                         connection_terminated = True
                         break
-                    _handle_events(conn.receive_data(chunk))
-
-                    pending = conn.data_to_send()
-                    if pending:
-                        sock.sendall(pending)
-
-                _finish_grpc_call_result(result, response_headers, response_trailers, bytes(body))
-                if connection_terminated:
-                    self._drop_connection()
-            except (OSError, TimeoutError, ValueError, ssl.SSLError) as exc:
-                result["transport_ok"] = False
-                result["error"] = _friendly_error_from_exception(exc)
+                    _handle_events(conn.receive_data(incoming))
+                    continue
+                end = min(len(framed_payload), offset + window)
+                conn.send_data(stream_id, framed_payload[offset:end], end_stream=end == len(framed_payload))
+                offset = end
+                pending = conn.data_to_send()
+                if pending:
+                    yield _DetectCall(sock.sendall, (pending,), {})
+            while not stream_closed and (not connection_terminated):
+                chunk = yield _DetectCall(sock.recv, (64 * 1024,), {})
+                if not chunk:
+                    result["error"] = "connection closed before gRPC stream ended"
+                    connection_terminated = True
+                    break
+                _handle_events(conn.receive_data(chunk))
+                pending = conn.data_to_send()
+                if pending:
+                    yield _DetectCall(sock.sendall, (pending,), {})
+            # An early terminal event while request flow control is blocked
+            # can leave ACK/control output queued. Fully drain it before a
+            # successful socket/H2 state ownership transfer.
+            pending = conn.data_to_send()
+            if pending:
+                yield _DetectCall(sock.sendall, (pending,), {})
+            _finish_grpc_call_result(result, response_headers, response_trailers, bytes(body))
+            if connection_terminated:
                 self._drop_connection()
-            finally:
-                result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        except (OSError, TimeoutError, ValueError, ssl.SSLError) as exc:
+            result["transport_ok"] = False
+            result["error"] = _friendly_error_from_exception(exc)
+            self._drop_connection()
+        finally:
+            result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
         return result
 
 
@@ -616,53 +628,92 @@ def _grpc_call(
     session: _GrpcH2Session | None = None,
     tls_config: GrpcTlsConfig | None = None,
 ) -> _GrpcCallResult:
+    return _run_detect_sync(
+        _grpc_call_detect_steps(
+            host,
+            port,
+            path=path,
+            payload=payload,
+            timeout=timeout,
+            use_tls=use_tls,
+            authorization=authorization,
+            metadata=metadata,
+            session=session,
+            tls_config=tls_config,
+        )
+    )
+
+
+def _grpc_call_detect_steps(
+    host: str,
+    port: int,
+    *,
+    path: str,
+    payload: bytes,
+    timeout: float,
+    use_tls: bool,
+    authorization: str | None,
+    metadata: Sequence[tuple[str, str | bytes]] | None = None,
+    session: _GrpcH2Session | None = None,
+    tls_config: GrpcTlsConfig | None = None,
+):
     if session is not None:
         if (session.host, session.port, session.use_tls) != (host, int(port), bool(use_tls)):
             raise ValueError("gRPC HTTP/2 session target or transport does not match the call")
-        return session.call(
-            path=path,
-            payload=payload,
-            timeout=timeout,
-            authorization=authorization,
-            metadata=metadata,
+        return (
+            yield _DetectCall(
+                session.call,
+                (),
+                {
+                    "path": path,
+                    "payload": payload,
+                    "timeout": timeout,
+                    "authorization": authorization,
+                    "metadata": metadata,
+                },
+            )
         )
-    with _GrpcH2Session(
-        host,
-        port,
-        timeout=timeout,
-        use_tls=use_tls,
-        tls_config=tls_config,
-    ) as owned_session:
-        return owned_session.call(
-            path=path,
-            payload=payload,
-            timeout=timeout,
-            authorization=authorization,
-            metadata=metadata,
+    owned_session = _GrpcH2Session(host, port, timeout=timeout, use_tls=use_tls, tls_config=tls_config)
+    try:
+        return (
+            yield _DetectCall(
+                owned_session.call,
+                (),
+                {
+                    "path": path,
+                    "payload": payload,
+                    "timeout": timeout,
+                    "authorization": authorization,
+                    "metadata": metadata,
+                },
+            )
         )
+    finally:
+        yield _DetectCall(owned_session.close, (), {})
 
 
 def _open_http_socket(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    use_tls: bool,
-    tls_config: GrpcTlsConfig | None = None,
+    host: str, port: int, timeout: float, *, use_tls: bool, tls_config: GrpcTlsConfig | None = None
 ) -> socket.socket:
-    base_sock = socket.create_connection((host, port), timeout=timeout)
-    base_sock.settimeout(timeout)
+    return _run_detect_sync(_open_http_socket_detect_steps(host, port, timeout, use_tls=use_tls, tls_config=tls_config))
+
+
+def _open_http_socket_detect_steps(
+    host: str, port: int, timeout: float, *, use_tls: bool, tls_config: GrpcTlsConfig | None = None
+):
+    base_sock = yield _DetectCall(socket.create_connection, ((host, port),), {"timeout": timeout})
+    yield _DetectCall(base_sock.settimeout, (timeout,), {})
     if not use_tls:
         return base_sock
-    context = _grpc_ssl_context(tls_config, alpn_h2=False)
     try:
+        context = _grpc_ssl_context(tls_config, alpn_h2=False)
         tls = tls_config or GrpcTlsConfig(insecure=True)
-        wrapped = context.wrap_socket(base_sock, server_hostname=tls.server_name or host)
+        wrapped = yield _DetectCall(context.wrap_socket, (base_sock,), {"server_hostname": tls.server_name or host})
     except BaseException:
         base_sock.close()
         raise
     try:
-        wrapped.settimeout(timeout)
+        yield _DetectCall(wrapped.settimeout, (timeout,), {})
     except BaseException:
         wrapped.close()
         raise
@@ -704,10 +755,26 @@ def _chunked_http_body_complete(payload: bytes) -> bool:
         offset = end + 2
 
 
+def _http1_final_response_bytes(raw: bytes) -> bytes:
+    """Skip bodyless informational headers while retaining a terminal 101."""
+
+    while True:
+        header_blob, sep, body = raw.partition(b"\r\n\r\n")
+        if not sep:
+            return raw
+        parts = header_blob.split(b"\r\n", 1)[0].split()
+        if len(parts) < 2 or not parts[1].isdigit():
+            return raw
+        status = int(parts[1])
+        if not 100 <= status < 200 or status == 101:
+            return raw
+        raw = body
+
+
 def _http1_response_complete(raw: bytes) -> bool:
     """Recognize self-delimited HTTP/1 responses without waiting for EOF."""
 
-    header_blob, sep, body = raw.partition(b"\r\n\r\n")
+    header_blob, sep, body = _http1_final_response_bytes(raw).partition(b"\r\n\r\n")
     if not sep:
         return False
     headers: dict[str, str] = {}
@@ -729,6 +796,7 @@ def _http1_response_complete(raw: bytes) -> bool:
 
 
 def _parse_http1_response(raw: bytes) -> tuple[int | None, dict[str, str], bytes, str | None]:
+    raw = _http1_final_response_bytes(raw)
     header_blob, sep, body = raw.partition(b"\r\n\r\n")
     if not sep:
         return None, {}, raw, "truncated HTTP response"
@@ -833,12 +901,39 @@ def _grpc_web_call(
     metadata: Sequence[tuple[str, str | bytes]] | None = None,
     tls_config: GrpcTlsConfig | None = None,
 ) -> _GrpcWebCallResult:
+    return _run_detect_sync(
+        _grpc_web_call_detect_steps(
+            host,
+            port,
+            path=path,
+            payload=payload,
+            timeout=timeout,
+            use_tls=use_tls,
+            authorization=authorization,
+            metadata=metadata,
+            tls_config=tls_config,
+        )
+    )
+
+
+def _grpc_web_call_detect_steps(
+    host: str,
+    port: int,
+    *,
+    path: str,
+    payload: bytes,
+    timeout: float,
+    use_tls: bool,
+    authorization: str | None,
+    metadata: Sequence[tuple[str, str | bytes]] | None = None,
+    tls_config: GrpcTlsConfig | None = None,
+):
     started = time.monotonic()
     base_path = str(getattr(tls_config, "proxy_path", "") or "").rstrip("/")
     if base_path:
         base_path = "/" + base_path.strip("/")
         endpoint = path if path.startswith("/") else "/" + path
-        if endpoint != base_path and not endpoint.startswith(base_path + "/"):
+        if endpoint != base_path and (not endpoint.startswith(base_path + "/")):
             path = base_path + endpoint
     result: _GrpcWebCallResult = _GrpcWebCallResult(
         {
@@ -864,7 +959,9 @@ def _grpc_web_call(
     try:
         normalized_metadata = _normalize_metadata(metadata)
         normalized_authorization = _normalize_authorization(authorization)
-        sock = _open_http_socket(host, port, timeout, use_tls=use_tls, tls_config=tls_config)
+        sock = yield _DetectCall(
+            _open_http_socket, (host, port, timeout), {"use_tls": use_tls, "tls_config": tls_config}
+        )
         result["transport_ok"] = True
         body = _encode_grpc_frame(payload)
         header_lines = [
@@ -882,16 +979,15 @@ def _grpc_web_call(
         if normalized_authorization:
             header_lines.append(f"Authorization: {normalized_authorization}")
         request = ("\r\n".join(header_lines) + "\r\n\r\n").encode("ascii", errors="replace") + body
-        sock.sendall(request)
+        yield _DetectCall(sock.sendall, (request,), {})
         response = bytearray()
         while True:
-            chunk = sock.recv(64 * 1024)
+            chunk = yield _DetectCall(sock.recv, (64 * 1024,), {})
             if not chunk:
                 break
             response.extend(chunk)
             if _http1_response_complete(bytes(response)):
                 break
-
         http_status, response_headers, response_body, parse_error = _parse_http1_response(bytes(response))
         result["http_status"] = http_status
         result["response_headers"] = response_headers
@@ -912,9 +1008,6 @@ def _grpc_web_call(
             result["error"] = parse_error
         if frame_error and result.get("error") is None:
             result["error"] = frame_error
-        # A reverse proxy may copy a gRPC-Web Content-Type onto an HTML login
-        # page or a truncated response. Require a complete protocol response
-        # with a valid status before confirming the service.
         media_type = content_type.split(";", 1)[0].strip().lower()
         valid_media_type = media_type in {
             "application/grpc-web",
@@ -925,10 +1018,10 @@ def _grpc_web_call(
         result["is_grpc_web"] = bool(
             http_status == 200
             and valid_media_type
-            and parse_error is None
-            and frame_error is None
+            and (parse_error is None)
+            and (frame_error is None)
             and isinstance(result["grpc_status"], int)
-            and 0 <= result["grpc_status"] <= 16
+            and (0 <= result["grpc_status"] <= 16)
         )
         result["is_grpc"] = bool(result["is_grpc_web"])
         if not result["is_grpc_web"] and result.get("error") is None:
@@ -956,17 +1049,41 @@ def _health_check_call(
     service_name: str = "",
     session: _GrpcH2Session | None = None,
 ) -> _HealthResult:
-    call = _grpc_call(
-        host,
-        port,
-        path="/grpc.health.v1.Health/Check",
-        payload=_grpc_health_payload(service_name),
-        timeout=timeout,
-        use_tls=use_tls,
-        authorization=authorization,
-        session=session,
+    return _run_detect_sync(
+        _health_check_call_detect_steps(
+            host,
+            port,
+            timeout=timeout,
+            use_tls=use_tls,
+            authorization=authorization,
+            service_name=service_name,
+            session=session,
+        )
     )
 
+
+def _health_check_call_detect_steps(
+    host: str,
+    port: int,
+    *,
+    timeout: float,
+    use_tls: bool,
+    authorization: str | None,
+    service_name: str = "",
+    session: _GrpcH2Session | None = None,
+):
+    call = yield _DetectCall(
+        _grpc_call,
+        (host, port),
+        {
+            "path": "/grpc.health.v1.Health/Check",
+            "payload": _grpc_health_payload(service_name),
+            "timeout": timeout,
+            "use_tls": use_tls,
+            "authorization": authorization,
+            "session": session,
+        },
+    )
     grpc_status = call.get("grpc_status")
     messages = call.get("messages") or []
     serving_status = _parse_health_message(messages[0]) if isinstance(messages, list) and messages else None
@@ -979,7 +1096,6 @@ def _health_check_call(
         health_supported = True
     else:
         health_supported = None
-
     return _HealthResult(
         {
             "call": call,
@@ -1003,15 +1119,40 @@ def _grpc_web_health_check_call(
     service_name: str = "",
     tls_config: GrpcTlsConfig | None = None,
 ) -> _HealthResult:
-    call = _grpc_web_call(
-        host,
-        port,
-        path="/grpc.health.v1.Health/Check",
-        payload=_grpc_health_payload(service_name),
-        timeout=timeout,
-        use_tls=use_tls,
-        authorization=authorization,
-        tls_config=tls_config,
+    return _run_detect_sync(
+        _grpc_web_health_check_call_detect_steps(
+            host,
+            port,
+            timeout=timeout,
+            use_tls=use_tls,
+            authorization=authorization,
+            service_name=service_name,
+            tls_config=tls_config,
+        )
+    )
+
+
+def _grpc_web_health_check_call_detect_steps(
+    host: str,
+    port: int,
+    *,
+    timeout: float,
+    use_tls: bool,
+    authorization: str | None,
+    service_name: str = "",
+    tls_config: GrpcTlsConfig | None = None,
+):
+    call = yield _DetectCall(
+        _grpc_web_call,
+        (host, port),
+        {
+            "path": "/grpc.health.v1.Health/Check",
+            "payload": _grpc_health_payload(service_name),
+            "timeout": timeout,
+            "use_tls": use_tls,
+            "authorization": authorization,
+            "tls_config": tls_config,
+        },
     )
     grpc_status = call.get("grpc_status")
     messages = call.get("messages") or []
@@ -1047,41 +1188,52 @@ def _reflection_call_with_fallback(
     authorization: str | None,
     session: _GrpcH2Session | None = None,
 ) -> tuple[_GrpcCallResult, str]:
-    """Prefer stable Reflection v1 and retry v1alpha only when v1 is unavailable."""
+    return _run_detect_sync(
+        _reflection_call_with_fallback_detect_steps(
+            host, port, payload=payload, timeout=timeout, use_tls=use_tls, authorization=authorization, session=session
+        )
+    )
 
+
+def _reflection_call_with_fallback_detect_steps(
+    host: str,
+    port: int,
+    *,
+    payload: bytes,
+    timeout: float,
+    use_tls: bool,
+    authorization: str | None,
+    session: _GrpcH2Session | None = None,
+):
+    """Prefer stable Reflection v1 and retry v1alpha only when v1 is unavailable."""
     paths: Sequence[tuple[str, str]] = _GRPC_REFLECTION_PATHS
     if session is not None and session._reflection_version == "v1alpha":
         paths = (_GRPC_REFLECTION_PATHS[1],)
-
     last_call: _GrpcCallResult | None = None
     for version, path in paths:
-        call = _grpc_call(
-            host,
-            port,
-            path=path,
-            payload=payload,
-            timeout=timeout,
-            use_tls=use_tls,
-            authorization=authorization,
-            session=session,
+        call = yield _DetectCall(
+            _grpc_call,
+            (host, port),
+            {
+                "path": path,
+                "payload": payload,
+                "timeout": timeout,
+                "use_tls": use_tls,
+                "authorization": authorization,
+                "session": session,
+            },
         )
         last_call = call
         grpc_status = call.get("grpc_status")
-        # A conforming gRPC server reports UNIMPLEMENTED for the unknown v1
-        # method. Some HTTP-aware proxies instead terminate routing with a
-        # plain 404 before the request reaches gRPC, which proves the v1 path
-        # is unavailable just as clearly and should retain the v1alpha
-        # compatibility fallback.
         version_unavailable = grpc_status == _GRPC_UNIMPLEMENTED or (
             grpc_status is None and call.get("http_status") == 404
         )
         if not version_unavailable or version == "v1alpha":
             if session is not None:
                 session._reflection_version = version
-            return call, version
-    # Both entries are static and the loop always returns on v1alpha.
+            return (call, version)
     assert last_call is not None
-    return last_call, "v1alpha"
+    return (last_call, "v1alpha")
 
 
 def _reflection_list_services_call(
@@ -1163,24 +1315,39 @@ def _reflection_capability_call(
     authorization: str | None,
     session: _GrpcH2Session | None = None,
 ) -> _ReflectionCapabilityResult:
-    """Check Reflection without requesting the server's service inventory."""
-
-    probe_symbol = "redposture.probe.__ReflectionCapabilityProbe__"
-    call, reflection_version = _reflection_call_with_fallback(
-        host,
-        port,
-        payload=_grpc_reflection_symbol_payload(probe_symbol),
-        timeout=timeout,
-        use_tls=use_tls,
-        authorization=authorization,
-        session=session,
+    return _run_detect_sync(
+        _reflection_capability_call_detect_steps(
+            host, port, timeout=timeout, use_tls=use_tls, authorization=authorization, session=session
+        )
     )
 
+
+def _reflection_capability_call_detect_steps(
+    host: str,
+    port: int,
+    *,
+    timeout: float,
+    use_tls: bool,
+    authorization: str | None,
+    session: _GrpcH2Session | None = None,
+):
+    """Check Reflection without requesting the server's service inventory."""
+    probe_symbol = "redposture.probe.__ReflectionCapabilityProbe__"
+    call, reflection_version = yield _DetectCall(
+        _reflection_call_with_fallback,
+        (host, port),
+        {
+            "payload": _grpc_reflection_symbol_payload(probe_symbol),
+            "timeout": timeout,
+            "use_tls": use_tls,
+            "authorization": authorization,
+            "session": session,
+        },
+    )
     grpc_status = call.get("grpc_status")
     reflection_enabled: bool | None = None
     embedded_code: int | None = None
     error_message: str | None = None
-
     messages = call.get("messages") or []
     if isinstance(messages, list):
         for msg_bytes in messages:
@@ -1197,17 +1364,13 @@ def _reflection_capability_call(
                 embedded_code = int(response.error_response.error_code)
                 if not error_message:
                     error_message = f"{embedded_code}:{response.error_response.error_message}"
-
     effective_code = embedded_code if embedded_code is not None else grpc_status
     if effective_code == _GRPC_UNIMPLEMENTED:
         reflection_enabled = False
     elif effective_code in _GRPC_AUTH_CODES:
         reflection_enabled = None
     elif grpc_status == _GRPC_OK:
-        # NOT_FOUND for the deliberately absent symbol proves that the
-        # Reflection method handled the request without disclosing inventory.
         reflection_enabled = True
-
     return _ReflectionCapabilityResult(
         {
             "call": call,
@@ -2183,3 +2346,19 @@ def _write_openapi_document(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return len(document.get("paths") or {})
+
+
+# Exact synchronous wrappers are the compatibility/override identities.
+_ASYNC_RETAINED_STEPS = {
+    _open_grpc_socket: _open_grpc_socket_detect_steps,
+    _GrpcH2Session._ensure_connection: _GrpcH2Session._ensure_connection_detect_steps,
+    _GrpcH2Session.close: _GrpcH2Session._close_detect_steps,
+    _GrpcH2Session.call: _GrpcH2Session._call_detect_steps,
+    _grpc_call: _grpc_call_detect_steps,
+    _open_http_socket: _open_http_socket_detect_steps,
+    _grpc_web_call: _grpc_web_call_detect_steps,
+    _health_check_call: _health_check_call_detect_steps,
+    _grpc_web_health_check_call: _grpc_web_health_check_call_detect_steps,
+    _reflection_call_with_fallback: _reflection_call_with_fallback_detect_steps,
+    _reflection_capability_call: _reflection_capability_call_detect_steps,
+}

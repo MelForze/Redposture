@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -28,6 +28,7 @@ from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle
 from .rendering import (
     format_report_line_for_console,
     normalize_report_line_for_storage,
+    order_detection_fields,
     render_colored_marker_line,
     sanitize_report_line,
     suppress_redundant_auth_requirement,
@@ -189,19 +190,18 @@ def _attach_runtime_phase_trace(
     that phase entirely.
     """
 
-    current_payload = current.to_dict()
-    current_stages = [stage.to_dict() for stage in current.stages]
-    current_names = {str(stage.get("stage_name") or "") for stage in current_stages}
+    current_stages = list(current.stages)
+    current_names = {stage.stage_name for stage in current_stages}
 
-    carried: list[dict[str, Any]] = []
+    carried: list[StageTrace] = []
     if prior is not None:
         for stage in prior.stages:
             if stage.stage_name not in current_names:
-                carried.append(stage.to_dict())
+                carried.append(stage)
 
     stages = carried + current_stages
     stage_name = _PHASE_STAGE_NAMES[phase]
-    added = stage_name not in {str(stage.get("stage_name") or "") for stage in stages}
+    added = stage_name not in {stage.stage_name for stage in stages}
     duration = max(0, int(duration_ms))
     if added:
         trace = StageTrace(
@@ -211,7 +211,7 @@ def _attach_runtime_phase_trace(
             result=str(result or "ok"),
             error=str(error).strip() if error else None,
         )
-        stages.append(trace.to_dict())
+        stages.append(trace)
         if debug_emit is not None:
             debug_emit(
                 format_stage_trace(
@@ -226,15 +226,14 @@ def _attach_runtime_phase_trace(
     stage_durations: dict[str, int] = {}
     stage_attempts: dict[str, int] = {}
     if prior is not None:
-        prior_payload = prior.to_dict()
-        prior_durations = prior_payload.get("stage_durations_ms")
-        prior_attempts = prior_payload.get("stage_attempts")
+        prior_durations = prior.extra.get("stage_durations_ms")
+        prior_attempts = prior.extra.get("stage_attempts")
         if isinstance(prior_durations, Mapping):
             stage_durations.update({str(key): int(value or 0) for key, value in prior_durations.items()})
         if isinstance(prior_attempts, Mapping):
             stage_attempts.update({str(key): int(value or 0) for key, value in prior_attempts.items()})
-    current_durations = current_payload.get("stage_durations_ms")
-    current_attempts = current_payload.get("stage_attempts")
+    current_durations = current.extra.get("stage_durations_ms")
+    current_attempts = current.extra.get("stage_attempts")
     if isinstance(current_durations, Mapping):
         stage_durations.update({str(key): int(value or 0) for key, value in current_durations.items()})
     if isinstance(current_attempts, Mapping):
@@ -243,20 +242,13 @@ def _attach_runtime_phase_trace(
         stage_durations.setdefault(stage_name, duration)
         stage_attempts.setdefault(stage_name, 1)
 
-    current_payload["stages"] = stages
-    current_payload["stage_durations_ms"] = stage_durations
-    current_payload["stage_attempts"] = stage_attempts
-    current_payload.setdefault("timestamp", utc_now_iso())
-    if not current_payload.get("stage_failed_at") and added and str(result).lower() in {"error", "fail", "timeout"}:
-        current_payload["stage_failed_at"] = stage_name
-    return (
-        AuditRecord.from_mapping(
-            current_payload,
-            module=current.module,
-            service=current.service,
-        ),
-        added,
-    )
+    extra = dict(current.extra)
+    extra["stage_durations_ms"] = stage_durations
+    extra["stage_attempts"] = stage_attempts
+    extra.setdefault("timestamp", utc_now_iso())
+    if not extra.get("stage_failed_at") and added and str(result).lower() in {"error", "fail", "timeout"}:
+        extra["stage_failed_at"] = stage_name
+    return replace(current, stages=tuple(stages), extra=extra), added
 
 
 def _runtime_phase_outcome(
@@ -375,7 +367,7 @@ class LineOutputSink:
         # the record payload so a target-supplied name cannot forge a report line,
         # add a TSV field, or drive the operator's terminal. A no-op for JSON and
         # run-level lines, which carry no target data (see sanitize_report_line).
-        console_lines = [sanitize_report_line(line) for line in lines if line]
+        console_lines = [order_detection_fields(sanitize_report_line(line)) for line in lines if line]
         if not console_lines:
             return
         with self._lock:
@@ -504,6 +496,10 @@ class ModuleAuditSpec:
     # exact name; aliases and silent type-based defaults are disabled.
     host_stage_options: Mapping[str, Any] | None = None
     detect: Callable[[AuditHookContext], AuditRecord] | None = None
+    # Native async detection is opt-in and tied to the matching sync hook.
+    # dataclasses.replace(detect=...) must not accidentally keep a stale adapter.
+    detect_async: Callable[[AuditHookContext, Any], Awaitable[AuditRecord]] | None = None
+    async_detect_sync_hook: Callable[[AuditHookContext], AuditRecord] | None = None
     auth: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
     capabilities: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
     data: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
@@ -518,6 +514,9 @@ class ModuleAuditSpec:
     colorize: Callable[[Any, str], bool] | None = None
     is_detected: Callable[[AuditRecord], bool] | None = None
     deep_gate: Callable[[AuditRecord], tuple[bool, str]] | None = None
+    # Some product roots require auth while individual public objects remain
+    # readable. Only an explicit discovery request may probe those objects.
+    discover_public_on_auth_required: bool = False
     # Opt in when a data hook needs the confirmed service line visible before
     # it blocks for operator input. The shared phase emitter deduplicates the
     # final record and keeps the text file in the same order as the terminal.
@@ -1298,14 +1297,14 @@ def _build_strict_host_stage_binding(
     return _StrictHostStageBinding(func=resolved, signature=signature, options=normalized)
 
 
-def _invoke_host_stage(
+def _prepare_host_stage_call(
     func: Callable[..., Any],
     *,
     module: str,
     ctx: AuditHookContext,
     run_deep_checks: bool | None = None,
     strict_binding: _StrictHostStageBinding | None = None,
-) -> AuditRecord:
+) -> tuple[Callable[..., Any], list[Any], dict[str, Any]]:
     if strict_binding is not None:
         func = strict_binding.func
         signature = strict_binding.signature
@@ -1384,6 +1383,20 @@ def _invoke_host_stage(
             )
         elif parameter.kind is inspect.Parameter.VAR_KEYWORD:
             continue
+    return func, positional, keyword
+
+
+def _invoke_host_stage(
+    func: Callable[..., Any],
+    *,
+    module: str,
+    ctx: AuditHookContext,
+    run_deep_checks: bool | None = None,
+    strict_binding: _StrictHostStageBinding | None = None,
+) -> AuditRecord:
+    func, positional, keyword = _prepare_host_stage_call(
+        func, module=module, ctx=ctx, run_deep_checks=run_deep_checks, strict_binding=strict_binding
+    )
     payload = func(*positional, **keyword)
     if isinstance(payload, AuditRecord):
         return payload
@@ -1458,7 +1471,7 @@ def render_with_plan(
             continue
         if rendered:
             lines.extend(str(line) for line in rendered if line)
-    return [line for line in lines if line]
+    return [order_detection_fields(line) if output_format == "txt" else line for line in lines if line]
 
 
 def render_record_with_module(
@@ -1467,13 +1480,17 @@ def render_record_with_module(
     return render_with_plan(build_render_plan(render_module), record.to_dict(), output_format, debug=debug)
 
 
-def _record_looks_detected(record: dict[str, Any]) -> bool:
-    marker_values = [value for key, value in record.items() if key.startswith("is_")]
+def _record_looks_detected(record: AuditRecord | dict[str, Any]) -> bool:
+    payload = record.extra if isinstance(record, AuditRecord) else record
+    marker_values = [value for key, value in payload.items() if key.startswith("is_")]
     if any(value is True for value in marker_values):
         return True
     if any(value is False for value in marker_values):
         return False
-    status = str(record.get("status") or "").strip().lower()
+    status_value = (
+        payload.get("status") if "status" in payload else record.status if isinstance(record, AuditRecord) else None
+    )
+    status = str(status_value or "").strip().lower()
     if not status or status == "fail" or status.startswith(("not_", "unknown")):
         return False
     return True
@@ -1569,21 +1586,23 @@ _PRE_DETECT_OPERATIONAL_MARKERS = (
 )
 
 
-def _record_noise_text(record: dict[str, Any]) -> str:
+def _record_noise_text(record: AuditRecord | dict[str, Any]) -> str:
+    payload = record.extra if isinstance(record, AuditRecord) else record
     values: list[str] = []
     for key in ("error", "protocol_error", "detect_error", "last_error"):
-        value = record.get(key)
+        value = payload.get(key)
         if value:
             values.append(str(value))
-    stage_failed_at = record.get("stage_failed_at")
+    stage_failed_at = payload.get("stage_failed_at")
     if stage_failed_at:
         values.append(f"stage_failed_at={stage_failed_at}")
-    stages = record.get("stages")
-    if isinstance(stages, list):
+    stages = payload.get("stages", record.stages if isinstance(record, AuditRecord) else None)
+    if isinstance(stages, list) or (isinstance(record, AuditRecord) and isinstance(stages, tuple)):
         for stage in stages:
-            if isinstance(stage, dict) and stage.get("error"):
-                values.append(str(stage.get("error")))
-    debug_events = record.get("debug_events")
+            stage_error = stage.get("error") if isinstance(stage, dict) else getattr(stage, "error", None)
+            if stage_error:
+                values.append(str(stage_error))
+    debug_events = payload.get("debug_events")
     if isinstance(debug_events, list):
         for event in debug_events:
             if isinstance(event, str):
@@ -1623,13 +1642,16 @@ def is_pre_detect_network_noise(record: AuditRecord | dict[str, Any]) -> bool:
     that already looks like a detected service or an auth/data failure.
     """
 
-    payload = record.to_dict() if isinstance(record, AuditRecord) else dict(record)
-    if _record_looks_detected(payload):
+    payload = record.extra if isinstance(record, AuditRecord) else record
+    if _record_looks_detected(record):
         return False
-    status = str(payload.get("status") or "").lower()
+    status_value = (
+        payload.get("status") if "status" in payload else record.status if isinstance(record, AuditRecord) else None
+    )
+    status = str(status_value or "").lower()
     if status and status not in {"fail", "not_detected", "not_found", "not_service"} and not status.startswith("not_"):
         return False
-    text = _record_noise_text(payload)
+    text = _record_noise_text(record)
     if not text:
         return False
     return any(marker in text for marker in _PRE_DETECT_NOISE_MARKERS)
@@ -1644,12 +1666,12 @@ def is_pre_detect_operational_failure(record: AuditRecord | dict[str, Any]) -> b
     marker classifier remains the compatibility fallback.
     """
 
-    payload = record.to_dict() if isinstance(record, AuditRecord) else dict(record)
-    if _record_looks_detected(payload):
+    payload = record.extra if isinstance(record, AuditRecord) else record
+    if _record_looks_detected(record):
         return False
     if payload.get("operational_failure") is True or payload.get("detection_status") == "transport_failure":
         return True
-    text = _record_noise_text(payload)
+    text = _record_noise_text(record)
     return bool(text and any(marker in text for marker in _PRE_DETECT_OPERATIONAL_MARKERS))
 
 
@@ -1706,6 +1728,10 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         return cfg.debug
     if name == "debug_emit":
         return ctx.debug_emit
+    if name == "discover":
+        return bool(getattr(args, "discover", False))
+    if name in {"discover_time", "discover_max_bytes"}:
+        return getattr(args, name, None)
     if name == "ssrf_capture":
         return getattr(args, "ssrf_capture", None)
     if name == "proxy":
@@ -2053,7 +2079,7 @@ class AuditCommandRunner:
     def _render_record(
         self, record: AuditRecord, render_plan: RenderPlan | None, output_format: str, debug: bool
     ) -> list[str]:
-        if record.extra.get("surface") == "ui":
+        if record.extra.get("surface") == "ui" and self.spec.module != "portainer":
             lines = web_panels.render_panel(record.to_dict(), self.spec.label) if output_format == "txt" else []
         elif self.spec.render is not None:
             lines = [line for line in self.spec.render(record) if line]
@@ -2063,6 +2089,7 @@ class AuditCommandRunner:
             lines = []
         if output_format != "txt":
             return lines
+        lines = [order_detection_fields(line) for line in lines]
         if self.spec.module in data_discovery.DISCOVERY_MODULES:
             lines.extend(data_discovery.render_discovery(self.spec.module, record.to_dict()))
         lines = suppress_redundant_auth_requirement(lines)
@@ -2291,10 +2318,16 @@ class AuditCommandRunner:
             if not cancelled.is_set():
                 sink.emit_many(lines)
 
-        def _run_target(item: tuple[int, str, int, ScanTargetSpec | None]) -> _AuditPipelineOutcome:
+        def _run_target(
+            item: tuple[int, str, int, ScanTargetSpec | None], prepared: _AuditDetectOutcome | None = None
+        ) -> _AuditPipelineOutcome:
             token = _TARGET_LIVE_EMIT.set(_emit_target_live if plan.output_format == "txt" else None)
             try:
-                return self._run_target_pipeline(item[1], item[2], item[3], plan.credential_runs, debug_emit)
+                if prepared is None:
+                    return self._run_target_pipeline(item[1], item[2], item[3], plan.credential_runs, debug_emit)
+                return self._run_target_pipeline(
+                    item[1], item[2], item[3], plan.credential_runs, debug_emit, prepared_detect=prepared
+                )
             finally:
                 _TARGET_LIVE_EMIT.reset(token)
 
@@ -2413,11 +2446,45 @@ class AuditCommandRunner:
 
         total_deep_candidates = 0
         processed_deep = 0
-        try:
-            for (_idx, _host, _port, _target), outcome in scheduler.iter_completed(
+        from .async_detection import AsyncDetectScheduler, async_detection_allowed, automatic_detect_concurrency
+
+        use_async_detect = (
+            getattr(self.spec, "detect_async", None) is not None
+            and self.spec.detect is getattr(self.spec, "async_detect_sync_hook", None)
+            and target_count >= 32
+            and async_detection_allowed(self.args)
+        )
+        detect_concurrency = 0
+        if use_async_detect:
+            override = getattr(self.args, "_async_detect_concurrency", None)
+            detect_concurrency = (
+                max(1, int(override))
+                if override is not None
+                else automatic_detect_concurrency(target_count, deep_workers=worker_count)
+            )
+        if use_async_detect and detect_concurrency > 0:
+
+            async def _detect_item(item: tuple[int, str, int, ScanTargetSpec | None]) -> _AuditDetectOutcome | None:
+                return await self._run_async_detect_with_state(item[1], item[2], item[3], debug_emit)
+
+            outcomes = AsyncDetectScheduler[
+                tuple[int, str, int, ScanTargetSpec | None], _AuditDetectOutcome | None, _AuditPipelineOutcome
+            ](detect_workers=detect_concurrency, deep_workers=worker_count).iter_completed(
                 plan.iter_target_specs(),
+                _detect_item,
                 _run_target,
-            ):
+                inline_finish=lambda _item, prepared: (
+                    prepared is not None and prepared.lifecycle_state is None and not self._is_detected(prepared.record)
+                ),
+            )
+            if debug_emit is not None:
+                debug_emit(
+                    f"detection engine: native_async concurrency={detect_concurrency} deep_workers={worker_count}"
+                )
+        else:
+            outcomes = scheduler.iter_completed(plan.iter_target_specs(), _run_target)
+        try:
+            for (_idx, _host, _port, _target), outcome in outcomes:
                 detected_count += int(outcome.detected)
                 total_deep_candidates += int(outcome.deep_candidate)
                 processed_deep += int(outcome.deep_processed)
@@ -2435,6 +2502,9 @@ class AuditCommandRunner:
             cancelled.set()
             raise
         finally:
+            close_outcomes = getattr(outcomes, "close", None)
+            if callable(close_outcomes):
+                close_outcomes()
             progress.close()
         if debug_emit is not None:
             debug_emit(
@@ -2642,7 +2712,7 @@ class AuditCommandRunner:
             record = self._detect(ctx)
             configured_timeout = float(getattr(self.args, "timeout", 3.0))
             if not self._is_detected(record) and configured_timeout < 7.0:
-                timeout_text = _record_noise_text(record.to_dict()).lower()
+                timeout_text = _record_noise_text(record)
             else:
                 timeout_text = ""
             if "timed out" in timeout_text or "connection timeout" in timeout_text:
@@ -2702,6 +2772,103 @@ class AuditCommandRunner:
                 runtime_stage_telemetry=True,
             )
 
+    async def _run_async_detect_with_state(
+        self,
+        host: str,
+        port: int,
+        target: ScanTargetSpec | None,
+        debug_emit: Callable[[str], None] | None,
+    ) -> _AuditDetectOutcome | None:
+        import asyncio
+
+        from .clients.async_http_detect import AsyncDetectionHttp, AsyncHttpFallback
+        from .clients.tls_cache import shared_client_ssl_context
+        from .detection_steps import NATIVE_DETECT_BODY_MAX_BYTES
+
+        base_ctx = self._ctx(
+            host,
+            port,
+            target,
+            AuditCredentialRun(source="anonymous"),
+            phase="detect",
+            run_deep_checks=False,
+            debug_emit=debug_emit,
+        )
+        factory = self.spec.lifecycle_state_factory
+        state = factory(base_ctx) if factory is not None else None
+        self._register_lifecycle_state(state)
+        ctx = replace(base_ctx, lifecycle_state=state)
+        http = AsyncDetectionHttp(
+            timeout=float(getattr(self.args, "timeout", 3)),
+            retries=int(getattr(self.args, "retries", 0)),
+            max_bytes=NATIVE_DETECT_BODY_MAX_BYTES,
+            ssl_context=shared_client_ssl_context(
+                insecure=not bool(getattr(self.args, "tls_ca", None)),
+                ca_file=getattr(self.args, "tls_ca", None),
+                cert_file=getattr(self.args, "tls_cert", None),
+                key_file=getattr(self.args, "tls_key", None),
+            ),
+        )
+        from .clients.async_resolver import resolver_fallbacks
+
+        resolution_failures: list[str] = []
+        resolution_token = resolver_fallbacks.set(resolution_failures)
+        started = time.monotonic()
+        try:
+            assert self.spec.detect_async is not None
+            record = await self._detect_async(ctx, http)
+            if resolution_failures:
+                raise AsyncHttpFallback("driver resolver failure: " + resolution_failures[0])
+            # Preserve the existing synchronous timeout escalation policy.
+            if not self._is_detected(record) and float(getattr(self.args, "timeout", 3)) < 7:
+                noise = _record_noise_text(record)
+                if "timed out" in noise or "connection timeout" in noise:
+                    self._close_lifecycle_state(state)
+                    return None
+            telemetry = not bool(record.stages)
+            if telemetry:
+                result, error = _runtime_phase_outcome("detect", record)
+                record, _ = _attach_runtime_phase_trace(
+                    record,
+                    phase="detect",
+                    duration_ms=max(1, int((time.monotonic() - started) * 1000)),
+                    result=result,
+                    error=error,
+                    debug_emit=debug_emit,
+                )
+            return _AuditDetectOutcome(record=record, lifecycle_state=state, runtime_stage_telemetry=telemetry)
+        except AsyncHttpFallback as exc:
+            self._close_lifecycle_state(state)
+            if debug_emit is not None:
+                debug_emit(f"async_detect_fallback host={host} port={port} reason={exc}")
+            return None
+        except (asyncio.CancelledError, TypeError):
+            self._close_lifecycle_state(state)
+            raise
+        except Exception as exc:
+            self._close_lifecycle_state(state)
+
+            def failed(error: Exception = exc) -> AuditRecord:
+                raise error
+
+            record = self._safe_record(host, port, failed)
+            record, _ = _attach_runtime_phase_trace(
+                record,
+                phase="detect",
+                duration_ms=max(1, int((time.monotonic() - started) * 1000)),
+                result="error",
+                error=str(exc),
+                debug_emit=debug_emit,
+            )
+            return _AuditDetectOutcome(record=record, runtime_stage_telemetry=True)
+        finally:
+            resolver_fallbacks.reset(resolution_token)
+            await http.close()
+            stats = http.stats()
+            with self._transport_stats_lock:
+                for key in self._transport_stats:
+                    self._transport_stats[key] += int(stats.get(key, 0))
+
     def _run_target_pipeline(
         self,
         host: str,
@@ -2709,6 +2876,8 @@ class AuditCommandRunner:
         target: ScanTargetSpec | None,
         credential_runs: tuple[AuditCredentialRun, ...],
         debug_emit: Callable[[str], None] | None,
+        *,
+        prepared_detect: _AuditDetectOutcome | None = None,
     ) -> _AuditPipelineOutcome:
         """Run one target's entire lifecycle in a single scheduler worker."""
 
@@ -2763,7 +2932,11 @@ class AuditCommandRunner:
 
             phase_emit = _emit_phase
 
-        detect_outcome = self._run_detect_with_state(host, port, target, debug_emit)
+        detect_outcome = (
+            prepared_detect
+            if prepared_detect is not None
+            else self._run_detect_with_state(host, port, target, debug_emit)
+        )
         detect_record = detect_outcome.record
         detected = self._is_detected(detect_record)
         deep_candidate = detected and self._deep_gate(detect_record)[0]
@@ -2820,12 +2993,13 @@ class AuditCommandRunner:
         )
         if bool(getattr(self.args, "discover", False)) and self.spec.module in data_discovery.DISCOVERY_MODULES:
             payload = final_record.to_dict()
-            payload["content_discovery"] = data_discovery.inspect_record(
-                self.spec.module,
-                payload,
-                max_bytes=int(getattr(self.args, "discover_max_bytes", None) or 50 * 1024 * 1024),
-                max_seconds=float(getattr(self.args, "discover_time", None) or 300.0),
-            )
+            if not isinstance(payload.get("content_discovery"), dict):
+                payload["content_discovery"] = data_discovery.inspect_record(
+                    self.spec.module,
+                    payload,
+                    max_bytes=int(getattr(self.args, "discover_max_bytes", None) or 50 * 1024 * 1024),
+                    max_seconds=float(getattr(self.args, "discover_time", None) or 300.0),
+                )
             payload = data_discovery.project_discovery_output(self.args, payload)
             final_record = AuditRecord.from_mapping(
                 payload, module=self.spec.module, service=final_record.service or self.spec.module
@@ -2857,6 +3031,7 @@ class AuditCommandRunner:
         additional_records: tuple[AuditRecord, ...] = ()
         if (
             self.spec.module in web_panels.MODULE_PRODUCTS
+            and self.spec.module != "portainer"
             and target is not None
             and target.surface_hint is None
             and (target.scheme in {"http", "https"} or target.explicit_port is not None)
@@ -3544,32 +3719,73 @@ class AuditCommandRunner:
             )
 
     def _host_stage(self, ctx: AuditHookContext, *, run_deep_checks: bool) -> AuditRecord:
+        steps = self._host_stage_steps(ctx, run_deep_checks=run_deep_checks)
+        value: Any
+        try:
+            action, prior = next(steps)
+            while True:
+                if action == "backend":
+                    assert self.spec.host_stage is not None
+                    value = _invoke_host_stage(
+                        self.spec.host_stage,
+                        module=self.spec.module,
+                        ctx=ctx,
+                        run_deep_checks=prior,
+                        strict_binding=self._strict_host_stage_binding,
+                    )
+                elif action == "panel":
+                    value = web_panels.detect_panel(self.spec.module, ctx)
+                elif action == "auth":
+                    value = web_panels.authenticate_panel(ctx, prior)
+                else:
+                    value = web_panels.enumerate_panel(ctx, prior)
+                action, prior = steps.send(value)
+        except StopIteration as result:
+            return result.value
+        finally:
+            steps.close()
+
+    async def _host_stage_async_detect(self, ctx: AuditHookContext, http: Any) -> AuditRecord:
+        from .clients.async_http_detect import AsyncHttpFallback
+
+        steps = self._host_stage_steps(ctx, run_deep_checks=False)
+        value: Any
+        try:
+            action, prior = next(steps)
+            while True:
+                if action == "backend" and not prior and self.spec.detect_async is not None:
+                    value = _record_to_model(await self.spec.detect_async(ctx, http))
+                elif action == "panel":
+                    value = await web_panels.detect_panel_async(self.spec.module, ctx, http)
+                else:
+                    raise AsyncHttpFallback("host-stage action belongs to synchronous auth/data")
+                action, prior = steps.send(value)
+        except StopIteration as result:
+            return result.value
+        finally:
+            steps.close()
+
+    def _host_stage_steps(self, ctx: AuditHookContext, *, run_deep_checks: bool) -> Any:
         if self.spec.host_stage is None:
             raise TypeError(f"{self.spec.module} spec exposes neither hook overrides nor host_stage")
         forced_surface = getattr(ctx.target, "surface_hint", None)
         ui_first = forced_surface == "ui" or (forced_surface != "backend" and (self._ui_first(ctx) or run_deep_checks))
         native_record: AuditRecord | None = None
         if self.spec.module in web_panels.MODULE_PRODUCTS and not ui_first:
-            native_record = _invoke_host_stage(
-                self.spec.host_stage,
-                module=self.spec.module,
-                ctx=ctx,
-                run_deep_checks=False,
-                strict_binding=self._strict_host_stage_binding,
-            )
+            native_record = yield ("backend", False)
             if self._is_detected(native_record):
                 return native_record
         if self.spec.module in web_panels.MODULE_PRODUCTS and forced_surface != "backend":
-            panel = web_panels.detect_panel(self.spec.module, ctx)
+            panel = yield ("panel", None)
             if panel is not None:
                 if (
                     ctx.credential.username is not None
                     and ctx.credential.password is not None
                     and panel.get("credential_verification_status") == "available"
                 ):
-                    panel = web_panels.authenticate_panel(ctx, panel)
+                    panel = yield ("auth", panel)
                 if run_deep_checks and panel.get("status") in {"open_no_auth", "valid_credentials"}:
-                    panel = web_panels.enumerate_panel(ctx, panel)
+                    panel = yield ("data", panel)
                 panel["provided_username"] = ctx.credential.username
                 panel["provided_password"] = ctx.credential.password
                 panel_ui = panel.get("ui")
@@ -3580,13 +3796,7 @@ class AuditCommandRunner:
                 return AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
         if native_record is not None:
             return native_record
-        return _invoke_host_stage(
-            self.spec.host_stage,
-            module=self.spec.module,
-            ctx=ctx,
-            run_deep_checks=run_deep_checks,
-            strict_binding=self._strict_host_stage_binding,
-        )
+        return (yield ("backend", run_deep_checks))
 
     def _ui_first(self, ctx: AuditHookContext) -> bool:
         if getattr(ctx.target, "surface_hint", None) == "ui":
@@ -3597,10 +3807,51 @@ class AuditCommandRunner:
         return scheme in {"http", "https"} or int(ctx.port) in web_panels.UI_PORTS.get(self.spec.module, ())
 
     def _detect(self, ctx: AuditHookContext) -> AuditRecord:
+        steps = self._detect_steps(ctx)
+        value: Any
+        try:
+            action = next(steps)
+            while True:
+                if action == "panel":
+                    value = web_panels.detect_panel(self.spec.module, ctx)
+                elif action == "host_stage":
+                    value = self._host_stage(ctx, run_deep_checks=False)
+                else:
+                    assert self.spec.detect is not None
+                    value = _record_to_model(self.spec.detect(ctx))
+                action = steps.send(value)
+        except StopIteration as result:
+            return result.value
+        finally:
+            steps.close()
+
+    async def _detect_async(self, ctx: AuditHookContext, http: Any) -> AuditRecord:
+
+        steps = self._detect_steps(ctx)
+        value: Any
+        try:
+            action = next(steps)
+            while True:
+                if action == "panel":
+                    value = await web_panels.detect_panel_async(self.spec.module, ctx, http)
+                elif action == "host_stage":
+                    value = await self._host_stage_async_detect(ctx, http)
+                else:
+                    assert self.spec.detect_async is not None
+                    value = _record_to_model(await self.spec.detect_async(ctx, http))
+                action = steps.send(value)
+        except StopIteration as result:
+            return result.value
+        finally:
+            steps.close()
+
+    def _detect_steps(self, ctx: AuditHookContext) -> Any:
+        if self.spec.module == "portainer" and self.spec.detect is not None:
+            return (yield "backend")
         forced_surface = getattr(ctx.target, "surface_hint", None)
         if self.spec.module in web_panels.MODULE_PRODUCTS:
             if forced_surface == "ui":
-                panel = web_panels.detect_panel(self.spec.module, ctx)
+                panel = yield "panel"
                 if panel is not None:
                     return AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
                 return AuditRecord(
@@ -3612,10 +3863,10 @@ class AuditCommandRunner:
                     extra={f"is_{self.spec.module}": False},
                 )
             if (forced_surface == "backend" or not self._ui_first(ctx)) and self.spec.detect is not None:
-                backend = _record_to_model(self.spec.detect(ctx))
+                backend = yield "backend"
                 if self.spec.module == "minio" and backend.extra.get("detection_status") == "console":
                     if forced_surface != "backend":
-                        panel = web_panels.detect_panel(self.spec.module, ctx)
+                        panel = yield "panel"
                         if panel is not None:
                             return AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
                     return AuditRecord(
@@ -3628,23 +3879,25 @@ class AuditCommandRunner:
                     )
                 if forced_surface == "backend" or self._is_detected(backend):
                     return backend
-                panel = web_panels.detect_panel(self.spec.module, ctx)
+                panel = yield "panel"
                 return (
                     AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
                     if panel
                     else backend
                 )
             if forced_surface != "backend":
-                panel = web_panels.detect_panel(self.spec.module, ctx)
+                panel = yield "panel"
                 if panel is not None:
                     return AuditRecord.from_mapping(panel, module=self.spec.module, service=self.spec.module)
         if self.spec.detect is not None:
-            return _record_to_model(self.spec.detect(ctx))
+            return (yield "backend")
         if self.spec.host_stage is not None:
-            return self._host_stage(ctx, run_deep_checks=False)
+            return (yield "host_stage")
         raise TypeError(f"{self.spec.module} spec requires either detect or host_stage")
 
     def _auth(self, ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRecord:
+        if self.spec.module == "portainer" and self.spec.auth is not None:
+            return _record_to_model(self.spec.auth(ctx, detect_record))
         if detect_record.extra.get("surface") == "ui":
             if ctx.credential.username is None or ctx.credential.password is None:
                 return detect_record
@@ -3679,6 +3932,8 @@ class AuditCommandRunner:
         return record
 
     def _data(self, ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        if self.spec.module == "portainer" and self.spec.data is not None:
+            return _record_to_model(self.spec.data(ctx, record))
         if record.extra.get("surface") == "ui":
             if record.status not in {"open_no_auth", "valid_credentials"}:
                 return record
@@ -3863,6 +4118,13 @@ class AuditCommandRunner:
     def _deep_gate(self, record: AuditRecord) -> tuple[bool, str]:
         if self.spec.deep_gate is not None:
             return self.spec.deep_gate(record)
+        if (
+            self.spec.discover_public_on_auth_required
+            and bool(getattr(self.args, "discover", False))
+            and record.status == "auth_required"
+            and record.extra.get("provided_credentials") is False
+        ):
+            return True, "public content discovery requested"
         return self._default_deep_gate(record)
 
     def _default_deep_gate(self, record: AuditRecord) -> tuple[bool, str]:

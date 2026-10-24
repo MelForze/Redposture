@@ -12,6 +12,8 @@ from ...audit_models import AuditRecord
 from ...clients.grpc import GrpcTlsConfig
 from ...clients.http_api import infer_http_base_path
 from ...console import Console
+from ...detection_io import DetectCall as _DetectCall
+from ...detection_io import run_sync as _run_detect_sync
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
@@ -24,6 +26,7 @@ from ...stage_runtime import (
     sort_default_audit_credential_runs,
 )
 from . import actions, policy, render
+from .async_detect import with_native_detection as _with_native_detection
 
 _DEFAULT_PORT = 50051
 _DEFAULT_PORTS = None
@@ -165,18 +168,18 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
     )
 
     def _detect(ctx: Any) -> AuditRecord:
-        payload = actions.detect_grpc(ctx, options)
+        return _run_detect_sync(_detect_steps(ctx))
+
+    def _detect_steps(ctx: Any):
+        payload = yield _DetectCall(actions.detect_grpc, (ctx, options), {})
         if bool(getattr(ctx.args, "defcreds", False)):
             payload["credential_verification_requested"] = True
-            # A caller-supplied application method can provide its own proof;
-            # otherwise an unprotected/disabled Health and Reflection pair is
-            # not a password verifier for an arbitrary gRPC application.
             if (
                 actions._confirmed_no_credential_verifier(
                     payload.get("health_access"), payload.get("reflection_access")
                 )
-                and not options.get("invoke_path")
-                and not options.get("analyze")
+                and (not options.get("invoke_path"))
+                and (not options.get("analyze"))
             ):
                 payload["credential_verification_status"] = "unavailable"
                 payload["credential_verification_reason"] = "no protected Health or Reflection RPC"
@@ -198,7 +201,7 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
             service="grpc",
         )
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="grpc",
         label="GRPC",
         default_port=_DEFAULT_PORT,
@@ -233,6 +236,8 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
         colorize=render._render_colored_grpc_line,
         is_detected=lambda record: record.extra.get("is_grpc") is True,
     )
+
+    return _with_native_detection(spec, _detect_steps)
 
 
 def run_grpc_stage(args: Any, logger: Any) -> int:

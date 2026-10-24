@@ -278,7 +278,17 @@ def discover_secrets(
     def candidates() -> Iterator[tuple[int, ObjectInfo]]:
         nonlocal enumerated
         candidate_index = 0
-        for obj in obj_iter:
+        while True:
+            if budget.expired():
+                result._partial("timeout")
+                return
+            try:
+                obj = next(obj_iter)
+            except StopIteration:
+                return
+            if budget.expired():
+                result._partial("timeout")
+                return
             if budget.byte_limit_reached():
                 result._partial("max_bytes")
                 return

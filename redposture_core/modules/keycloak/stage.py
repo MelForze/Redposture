@@ -10,6 +10,7 @@ from ...audit_models import AuditRecord
 from ...clients.http_session import HttpSessionPool
 from ...clients.scoped_http import HttpLifecycleState
 from ...console import Console
+from ...detection_steps import with_async_http_detection
 from ...stage_runtime import AuditCommandPlan, ModuleAuditSpec, build_basic_audit_plan, run_basic_host_audit
 from . import actions, policy, render
 
@@ -48,7 +49,7 @@ def build_keycloak_spec(args: Any) -> ModuleAuditSpec:
             actions.data_record(ctx, record.to_dict()), module="keycloak", service="keycloak"
         )
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="keycloak",
         label="KEYCLOAK",
         default_port=8080,
@@ -68,6 +69,8 @@ def build_keycloak_spec(args: Any) -> ModuleAuditSpec:
         defer_detect_output_until_auth=True,
         live_phase_output=True,
     )
+
+    return with_async_http_detection(spec, actions, api_prefixes=())
 
 
 def run_keycloak_stage(args: Any, logger: Any) -> int:

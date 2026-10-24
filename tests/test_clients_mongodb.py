@@ -225,7 +225,7 @@ def test_normalize_mongodb_error_and_auth_detection() -> None:
     assert normalize_mongodb_error(RuntimeError("[Errno 60] Operation timed out")) == "connection timeout"
     assert normalize_mongodb_error(RuntimeError("[Errno 13] Permission denied")) == "Permission denied"
     assert normalize_mongodb_error(RuntimeError("Authentication failed.")) == "authentication failed"
-    assert normalize_mongodb_error(RuntimeError("not authorized on admin")) == "authentication failed"
+    assert normalize_mongodb_error(RuntimeError("not authorized on admin")) == "authorization denied"
     assert normalize_mongodb_error(RuntimeError("temporary failure in name resolution")) == "dns lookup failed"
     assert is_auth_error("Command requires authentication code 13") is True
     assert is_auth_error("Auth error code 18") is True

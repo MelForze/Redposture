@@ -7,7 +7,7 @@ import json
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -46,6 +46,8 @@ from ...clients.kafka import (
     open_kafka_socket,
 )
 from ...console import Console
+from ...detection_io import DetectCall as _DetectCall
+from ...detection_io import run_sync as _run_detect_sync
 from ...rendering import (
     CountColorRule,
     LiteralColorRule,
@@ -154,6 +156,8 @@ class KafkaLifecycleState:
     ui_auth_type: str | None = None
     ui_vendor: str | None = None
     ui_cookie: str = ""
+    ui_csrf: str = ""
+    ui_execution: dict[str, Any] | None = None
     ui_anonymous_clusters: list[dict[str, Any]] | None = None
 
     def stats(self) -> dict[str, int]:
@@ -264,7 +268,7 @@ def _read_topic_messages(
     port: int,
     timeout: float,
     topic: str,
-    max_messages: int,
+    max_messages: int | None,
     username: str | None = None,
     password: str | None = None,
     *,
@@ -312,7 +316,7 @@ def _read_dump_topics(
     port: int,
     timeout: float,
     topics: list[str],
-    max_messages: int,
+    max_messages: int | None,
     username: str | None,
     password: str | None,
     use_tls: bool | None = None,
@@ -1133,12 +1137,12 @@ def _kafka_lifecycle_key(ctx: Any) -> tuple[str | None, str | None, str]:
     return credential.username, credential.password, str(credential.source or "provided")
 
 
-def _kafka_lifecycle_detection_record(
-    ctx: Any,
-    state: KafkaLifecycleState,
-) -> dict[str, Any]:
-    """Detect Kafka while retaining the exact anonymous protocol session."""
+def _kafka_lifecycle_detection_record(ctx: Any, state: KafkaLifecycleState) -> dict[str, Any]:
+    return _run_detect_sync(_kafka_lifecycle_detection_record_detect_steps(ctx, state))
 
+
+def _kafka_lifecycle_detection_record_detect_steps(ctx: Any, state: KafkaLifecycleState):
+    """Detect Kafka while retaining the exact anonymous protocol session."""
     host = str(ctx.host)
     port = int(ctx.port)
     timeout = float(getattr(ctx.args, "timeout", 5.0))
@@ -1188,22 +1192,19 @@ def _kafka_lifecycle_detection_record(
             "transport_mode": state.transport_mode,
         }
 
-    def _sasl_required_record(*, use_tls: bool | None) -> dict[str, Any] | None:
+    def _sasl_required_record(*, use_tls: bool | None) -> Generator[_DetectCall, Any, dict[str, Any] | None]:
         """Confirm a listener that closes ApiVersions until SASL handshake."""
-
         candidate: KafkaSession | None = None
         try:
-            candidate = KafkaSession.open(
-                host,
-                port,
-                timeout,
-                use_tls=use_tls,
-                tls_config=state.tls_config,
+            candidate = yield _DetectCall(
+                KafkaSession.open, (host, port, timeout), {"use_tls": use_tls, "tls_config": state.tls_config}
             )
             state.connections_opened += 1
             state.transport_mode = candidate.transport_mode
             state.protocol_requests += 1
-            ok, correlation, _error = _sasl_handshake_plain(candidate.sock, candidate.correlation_id)
+            ok, correlation, _error = yield _DetectCall(
+                _sasl_handshake_plain, (candidate.sock, candidate.correlation_id), {}
+            )
             candidate.correlation_id = correlation
             if not ok:
                 return None
@@ -1224,22 +1225,20 @@ def _kafka_lifecycle_detection_record(
         for _transport_attempt in range(2):
             session: KafkaSession | None = None
             try:
-                session = KafkaSession.open(
-                    host,
-                    port,
-                    timeout,
-                    use_tls=transport_use_tls,
-                    tls_config=state.tls_config,
+                session = yield _DetectCall(
+                    KafkaSession.open,
+                    (host, port, timeout),
+                    {"use_tls": transport_use_tls, "tls_config": state.tls_config},
                 )
                 state.connections_opened += 1
                 state.transport_mode = session.transport_mode
                 state.protocol_requests += 1
-                api_probe = session.detect()
+                api_probe = yield _DetectCall(session.detect, (), {})
                 if not api_probe.ok:
                     session.close()
                     api_error = api_probe.error or ""
                     if _is_sasl_probe_candidate(api_error):
-                        sasl_record = _sasl_required_record(use_tls=state.transport_mode == "tls")
+                        sasl_record = yield from _sasl_required_record(use_tls=state.transport_mode == "tls")
                         if sasl_record is not None:
                             return sasl_record
                     state.is_kafka = False
@@ -1249,9 +1248,8 @@ def _kafka_lifecycle_detection_record(
                         else "service is not kafka"
                     )
                     return _record(detected=False, status="fail", auth_required=None, error=error)
-
                 state.protocol_requests += 1
-                metadata, metadata_error = session.fetch_metadata(topics=None)
+                metadata, metadata_error = yield _DetectCall(session.fetch_metadata, (), {"topics": None})
                 state.is_kafka = True
                 state.anonymous_metadata = dict(metadata) if metadata is not None else None
                 if metadata is not None:
@@ -1281,7 +1279,7 @@ def _kafka_lifecycle_detection_record(
                     session.close()
                 last_error = _friendly_error_from_exception(exc)
                 if _is_sasl_probe_candidate(last_error):
-                    sasl_record = _sasl_required_record(use_tls=state.transport_mode == "tls")
+                    sasl_record = yield from _sasl_required_record(use_tls=state.transport_mode == "tls")
                     if sasl_record is not None:
                         return sasl_record
                 if state.requested_use_tls is None and transport_use_tls is not True and _should_retry_kafka_tls(exc):
@@ -1290,50 +1288,60 @@ def _kafka_lifecycle_detection_record(
                 break
         if attempt < attempts - 1:
             state.transport_retries += 1
-            time.sleep(_retry_delay(attempt))
+            yield _DetectCall(time.sleep, (_retry_delay(attempt),), {})
     state.is_kafka = False
     return _record(detected=False, status="fail", auth_required=None, error=last_error or "connection failed")
 
 
 def detect_kafka(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
-    """Run Kafka classification once with an anonymous protocol exchange."""
+    return _run_detect_sync(_detect_kafka_detect_steps(ctx, options))
 
+
+def _detect_kafka_detect_steps(ctx: Any, options: Mapping[str, Any]):
+    """Run Kafka classification once with an anonymous protocol exchange."""
     state = ctx.lifecycle_state
     if not isinstance(state, KafkaLifecycleState):
         raise TypeError("kafka lifecycle state is unavailable")
     production_helpers = all(
-        _KAFKA_PRODUCTION_OVERRIDES.get(name) is value
-        for name, value in {
-            "_send_kafka_request": _send_kafka_request,
-            "_probe_apiversions": _probe_apiversions,
-            "_fetch_metadata": _fetch_metadata,
-            "_parse_list_offsets_response": _parse_list_offsets_response,
-            "_parse_fetch_response": _parse_fetch_response,
-            "_sasl_handshake_plain": _sasl_handshake_plain,
-            "_sasl_authenticate_plain": _sasl_authenticate_plain,
-            "_read_topic_messages": _read_topic_messages,
-        }.items()
+        (
+            _KAFKA_PRODUCTION_OVERRIDES.get(name) is value
+            for name, value in {
+                "_send_kafka_request": _send_kafka_request,
+                "_probe_apiversions": _probe_apiversions,
+                "_fetch_metadata": _fetch_metadata,
+                "_parse_list_offsets_response": _parse_list_offsets_response,
+                "_parse_fetch_response": _parse_fetch_response,
+                "_sasl_handshake_plain": _sasl_handshake_plain,
+                "_sasl_authenticate_plain": _sasl_authenticate_plain,
+                "_read_topic_messages": _read_topic_messages,
+            }.items()
+        )
     )
     if _audit_kafka_host is _KAFKA_PRODUCTION_AUDIT_HOST and production_helpers:
-        record = _kafka_lifecycle_detection_record(ctx, state)
+        record = yield _DetectCall(_kafka_lifecycle_detection_record, (ctx, state), {})
     else:
-        record = _audit_kafka_host(
-            str(ctx.host),
-            int(ctx.port),
-            float(getattr(ctx.args, "timeout", 5.0)),
-            int(getattr(ctx.args, "retries", 0) or 0),
-            None,
-            None,
-            False,
-            None,
-            False,
-            int(options["max_messages"]),
-            show_topics_limit=None,
-            probe_write=False,
-            debug_emit=ctx.debug_emit if bool(getattr(ctx.args, "debug", False)) else None,
-            lifecycle_state=state,
-            use_tls=state.requested_use_tls,
-            tls_config=state.tls_config,
+        record = yield _DetectCall(
+            _audit_kafka_host,
+            (
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                int(getattr(ctx.args, "retries", 0) or 0),
+                None,
+                None,
+                False,
+                None,
+                False,
+                int(options["max_messages"] or 10),
+            ),
+            {
+                "show_topics_limit": None,
+                "probe_write": False,
+                "debug_emit": ctx.debug_emit if bool(getattr(ctx.args, "debug", False)) else None,
+                "lifecycle_state": state,
+                "use_tls": state.requested_use_tls,
+                "tls_config": state.tls_config,
+            },
         )
     state.is_kafka = bool(record.get("is_kafka"))
     state.auth_required = record.get("auth_required") if isinstance(record.get("auth_required"), bool) else None
@@ -1510,7 +1518,7 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
     query_topic_name = str(options.get("query_topic") or "").strip()
     show_topics = bool(options["show_topics"])
     dump = bool(options["dump"])
-    max_messages = int(options["max_messages"])
+    max_messages = int(options["max_messages"]) if options["max_messages"] is not None else None
     show_topics_limit = options.get("show_topics_limit")
     probe_write = bool(options["probe_write"])
     write_payload = options.get("write_payload")
@@ -2243,22 +2251,22 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
         tag="KAFKA",
         literals=(
             LiteralColorRule("(tls:True)", "bright_green"),
-            LiteralColorRule("(tls:False)", "red"),
+            LiteralColorRule("(tls:False)", "true_red"),
             LiteralColorRule("(tls:true)", "bright_green"),
-            LiteralColorRule("(tls:false)", "red"),
-            LiteralColorRule("(read:true)", "red"),
+            LiteralColorRule("(tls:false)", "true_red"),
+            LiteralColorRule("(read:true)", "true_red"),
             LiteralColorRule("(read:false)", "bright_green"),
-            LiteralColorRule("(write:true)", "red"),
+            LiteralColorRule("(write:true)", "true_red"),
             LiteralColorRule("(write:false)", "bright_green"),
             LiteralColorRule("(write:unknown)", "orange"),
-            LiteralColorRule("(create:true)", "red"),
+            LiteralColorRule("(create:true)", "true_red"),
             LiteralColorRule("(create:false)", "bright_green"),
-            LiteralColorRule("(delete:true)", "red"),
+            LiteralColorRule("(delete:true)", "true_red"),
             LiteralColorRule("(delete:false)", "bright_green"),
         ),
         counts=(
-            CountColorRule("topics", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("partitions", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("topics", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("partitions", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
         regexes=(RegexColorRule(r"\d+ credential check\(s\) inconclusive", "orange"),),
         extra_spans=lambda marker, right: (
@@ -2289,7 +2297,7 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
             value_start = match.start(2)
             value_end = match.end(2)
             spans.append((match.start(), value_start, "white"))  # "(topics:" / "(partitions:"
-            spans.append((value_start, value_end, "red"))  # the number
+            spans.append((value_start, value_end, "true_red"))  # the number
             spans.append((value_end, match.end(), "white"))  # ")"
         # ACL markers `(read/write/create/delete/tls:true|false)`: whole
         # token (including parens) uniformly painted by semantic — red
@@ -2305,7 +2313,7 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
                 "(create:true)",
                 "(delete:true)",
             }:
-                spans.append((match.start(), match.end(), "red"))
+                spans.append((match.start(), match.end(), "true_red"))
             elif token in {
                 "(tls:true)",
                 "(tls:True)",
@@ -2418,3 +2426,23 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_kafka_host_with_stage_debug
+
+
+# Exact synchronous wrappers are the compatibility/override identities.
+_ASYNC_RETAINED_STEPS = {
+    _kafka_lifecycle_detection_record: _kafka_lifecycle_detection_record_detect_steps,
+    detect_kafka: _detect_kafka_detect_steps,
+}
+
+
+def _sasl_handshake_plain_detect_steps(sock: Any, correlation_id: int) -> Any:
+    # The public compatibility wrapper ordinarily forwards to this exact
+    # client helper, while customized globals keep their legacy execution.
+    from ...clients.async_http_detect import AsyncHttpFallback
+
+    if not all(globals()[name] is original for name, original in _KAFKA_PRODUCTION_OVERRIDES.items()):
+        raise AsyncHttpFallback("Kafka SASL helper override")
+    return (yield _DetectCall(_CLIENT_SASL_HANDSHAKE_PLAIN, (sock, correlation_id), {}))
+
+
+_ASYNC_RETAINED_STEPS[_sasl_handshake_plain] = _sasl_handshake_plain_detect_steps

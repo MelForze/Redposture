@@ -16,14 +16,15 @@ from collections.abc import Mapping
 from contextlib import closing
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
 from .clients.http_api import HttpResponse, infer_http_base_path
 from .clients.http_session import HttpSessionPool
+from .detection_steps import run_requests
 from .rendering import CountColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
 
 UI_PORTS: dict[str, tuple[int, ...]] = {
-    "docker": (9443, 9000),
+    "portainer": (9443, 9000),
     "mongodb": (8081,),
     "elastic": (5601,),
     "redis": (5540,),
@@ -43,7 +44,7 @@ UI_PRODUCTS = {
     "postgrest": "PostgREST",
 }
 MODULE_PRODUCTS: dict[str, tuple[str, ...]] = {
-    "docker": ("portainer",),
+    "portainer": ("portainer",),
     "mongodb": ("mongo_express",),
     "elastic": ("kibana", "opensearch_dashboards"),
     "redis": ("redis_insight",),
@@ -63,6 +64,9 @@ _ANONYMOUS_PROBES = {
     "postgrest": "/",
 }
 _SUFFIXES = (
+    "/api/users/me",
+    "/api/endpoints",
+    "/api/auth",
     "/api/system/status",
     "/api/status",
     "/api/info",
@@ -82,7 +86,40 @@ _DUMP_BYTES = 64 * 1024 * 1024
 _DUMP_SECONDS = 300.0
 _DUMP_COLLECTIONS = 2_000
 _DEFAULT_PAIRS: dict[str, tuple[tuple[str, str], ...]] = {
-    "portainer": (("admin", "admin"), ("admin", "password"), ("admin", "12345678")),
+    "portainer": (
+        ("admin", "admin"),
+        ("admin", "password"),
+        ("admin", "12345678"),
+        ("admin", "portainer"),
+        ("admin", "portainer123"),
+        ("admin", "portainer1234"),
+        ("admin", "Portainer123!"),
+        ("admin", "changeme"),
+        ("admin", "changeit"),
+        ("admin", "admin123"),
+        ("admin", "admin1234"),
+        ("admin", "admin12345"),
+        ("admin", "admin123456"),
+        ("admin", "Admin123!"),
+        ("admin", "Password1"),
+        ("admin", "Password1!"),
+        ("admin", "Password123"),
+        ("admin", "Password123!"),
+        ("admin", "123456789"),
+        ("admin", "1234567890"),
+        ("portainer", "portainer"),
+        ("portainer", "portainer123"),
+        ("portainer", "Portainer123!"),
+        ("portainer", "password"),
+        ("portainer", "12345678"),
+        ("root", "root"),
+        ("root", "portainer"),
+        ("root", "password"),
+        ("root", "12345678"),
+        ("administrator", "administrator"),
+        ("administrator", "password"),
+        ("administrator", "admin"),
+    ),
     "mongo_express": (("admin", "pass"), ("admin", "admin"), ("admin", "password")),
     "kibana": (("elastic", "changeme"), ("elastic", "elastic"), ("kibana", "kibana")),
     "opensearch_dashboards": (("admin", "admin"), ("admin", "password")),
@@ -117,7 +154,9 @@ def _get(
     *,
     headers: Mapping[str, str] | None = None,
     response_size_cap: int = 128 * 1024,
+    timeout: float | None = None,
 ) -> HttpResponse:
+    options: dict[str, Any] = {"timeout": timeout} if timeout is not None else {}
     return pool.request(
         "GET",
         base + path,
@@ -125,6 +164,7 @@ def _get(
         response_size_cap=response_size_cap,
         allow_cross_origin_redirects=False,
         preserve_authorization_on_cross_origin=False,
+        **options,
     )
 
 
@@ -162,22 +202,40 @@ def _version(value: Any) -> str | None:
     return match.group(0) if match else None
 
 
-def _fingerprints(module: str, pool: HttpSessionPool, base: str) -> tuple[str, str | None, list[str]] | None:
+def _fingerprints(
+    module: str, pool: HttpSessionPool, base: str, observations: list[bool] | None = None
+) -> tuple[str, str | None, list[str]] | None:
+    return run_requests(
+        fingerprint_requests(module, base, observations),
+        lambda base, path, options=None: _get(pool, base, path, **(options or {})),
+    )
+
+
+def fingerprint_requests(module: str, base: str, observations: list[bool] | None = None) -> Any:
     """Require two product-specific signals; never confirm a generic page/status."""
-    if module == "docker":
-        status = _get(pool, base, "/api/system/status")
+    if module == "portainer":
+        status = yield (base, "/api/system/status")
         info = _json(status)
-        home = _get(pool, base, "/")
+        home = yield (base, "/")
+        if observations is not None:
+            observations.append(bool(status.status or home.status))
         if (
             isinstance(info, dict)
-            and isinstance(info.get("Version"), str)
-            and ("InstanceID" in info or "Edition" in info or "DatabaseVersion" in info)
-            and _response_contains(home, "portainer")
+            and _version(info.get("Version")) is not None
+            and any(
+                (isinstance(info.get(name), str) and bool(info[name].strip()))
+                or (type(info.get(name)) is int and info[name] > 0)
+                for name in ("InstanceID", "Edition", "DatabaseVersion")
+            )
+            and not home.error
+            and not home.truncated
+            and home.status == 200
+            and re.search(r"<title[^>]*>\s*Portainer(?:\s*[-|:][^<]*)?\s*</title>", home.text[:32768], re.I)
         ):
             return "portainer", _version(info["Version"]), ["portainer_system_status", "portainer_page"]
     elif module == "mongodb":
-        home = _get(pool, base, "/")
-        logo = _get(pool, base, "/public/img/mongo-express-logo.png")
+        home = yield (base, "/")
+        logo = yield (base, "/public/img/mongo-express-logo.png")
         if (
             _response_contains(home, "<title", "mongo express")
             and "/public/img/mongo-express-logo.png" in home.text
@@ -186,23 +244,25 @@ def _fingerprints(module: str, pool: HttpSessionPool, base: str) -> tuple[str, s
         ):
             return "mongo_express", None, ["mongo_express_page", "mongo_express_logo"]
     elif module == "elastic":
-        status = _get(pool, base, "/api/status")
+        status = yield (base, "/api/status")
         info = _json(status)
         if status.status == 401 and _header(status, "osd-name"):
-            login = _get(pool, base, "/app/login")
+            login = yield (base, "/app/login")
             if _header(login, "osd-name") and _response_contains(login, "<title>opensearch dashboards</title>"):
-                return "opensearch_dashboards", None, ["opensearch_auth_challenge", "opensearch_login_page"]
+                version = _version(_header(status, "osd-version")) or _version(_header(login, "osd-version"))
+                return "opensearch_dashboards", version, ["opensearch_auth_challenge", "opensearch_login_page"]
         if status.status == 401 and _header(status, "kbn-name"):
-            login = _get(pool, base, "/login")
+            login = yield (base, "/login")
             if _header(login, "kbn-name") and _response_contains(login, "kibana"):
-                return "kibana", None, ["kibana_auth_challenge", "kibana_login_page"]
+                version = _version(_header(status, "kbn-version")) or _version(_header(login, "kbn-version"))
+                return "kibana", version, ["kibana_auth_challenge", "kibana_login_page"]
         if (
             isinstance(info, dict)
             and isinstance(info.get("version"), dict)
             and isinstance(info["version"].get("number"), str)
         ):
             version = _version(info["version"]["number"])
-            spaces = _get(pool, base, "/api/spaces/space")
+            spaces = yield (base, "/api/spaces/space")
             spaces_info = _json(spaces)
             if (
                 _header(status, "kbn-name")
@@ -211,7 +271,7 @@ def _fingerprints(module: str, pool: HttpSessionPool, base: str) -> tuple[str, s
                 and _header(spaces, "kbn-name")
             ):
                 return "kibana", version, ["kibana_status", "kibana_spaces"]
-            saved = _get(pool, base, "/api/saved_objects/_find?type=dashboard&per_page=1")
+            saved = yield (base, "/api/saved_objects/_find?type=dashboard&per_page=1")
             saved_info = _json(saved)
             if (
                 _header(status, "osd-name")
@@ -221,8 +281,8 @@ def _fingerprints(module: str, pool: HttpSessionPool, base: str) -> tuple[str, s
             ):
                 return "opensearch_dashboards", version, ["opensearch_status", "opensearch_saved_objects"]
     elif module == "redis":
-        home = _get(pool, base, "/")
-        info = _json(_get(pool, base, "/api/info"))
+        home = yield (base, "/")
+        info = _json((yield (base, "/api/info")))
         if (
             _response_contains(home, "<title>redis insight</title>")
             and isinstance(info, dict)
@@ -231,11 +291,11 @@ def _fingerprints(module: str, pool: HttpSessionPool, base: str) -> tuple[str, s
         ):
             return "redis_insight", _version(info.get("appVersion")), ["redis_insight_page", "redis_insight_info"]
     elif module == "postgres":
-        login = _get(pool, base, "/login")
-        ping = _get(pool, base, "/misc/ping")
+        login = yield (base, "/login")
+        ping = yield (base, "/misc/ping")
         if _response_contains(login, "pgadmin") and ping.status == 200 and ping.text.strip().upper() == "PING":
             return "pgadmin", None, ["pgadmin_login", "pgadmin_ping"]
-        root = _get(pool, base, "/", headers={"Accept": "application/openapi+json"})
+        root = yield (base, "/", {"headers": {"Accept": "application/openapi+json"}})
         spec = _json(root)
         if (
             _header(root, "server").lower().startswith("postgrest/")
@@ -246,12 +306,12 @@ def _fingerprints(module: str, pool: HttpSessionPool, base: str) -> tuple[str, s
         ):
             return "postgrest", _version(_header(root, "server")), ["postgrest_server", "postgrest_openapi"]
     elif module == "kubeapi":
-        home = _get(pool, base, "/")
+        home = yield (base, "/")
         if _response_contains(home, "<title>kubernetes dashboard</title>", "<kd-root"):
             return "kubernetes_dashboard", None, ["dashboard_title", "dashboard_angular_root"]
     elif module == "minio":
-        home = _get(pool, base, "/")
-        session = _get(pool, base, "/api/v1/session")
+        home = yield (base, "/")
+        session = yield (base, "/api/v1/session")
         session_info = None
         if session.status == 403:
             try:
@@ -281,15 +341,9 @@ def _candidate(ctx: Any, module: str) -> bool:
     )
 
 
-def detect_panel(module: str, ctx: Any) -> dict[str, Any] | None:
+def detect_panel(module: str, ctx: Any, *, report_failure: bool = False) -> dict[str, Any] | None:
     if not _candidate(ctx, module):
         return None
-    scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
-    schemes = (
-        (scheme,)
-        if scheme in {"http", "https"}
-        else (("https", "http") if int(ctx.port) in {443, 9443} else ("http", "https"))
-    )
     with closing(
         HttpSessionPool(
             timeout=min(3.0, max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0))),
@@ -298,82 +352,151 @@ def detect_panel(module: str, ctx: Any) -> dict[str, Any] | None:
             retries=0,
         )
     ) as pool:
-        for candidate_scheme in schemes:
-            base = _base(ctx, candidate_scheme)
-            fingerprint = _fingerprints(module, pool, base)
-            if fingerprint is None:
-                continue
-            product, version, signals = fingerprint
-            probe_path = _ANONYMOUS_PROBES[product]
-            if product == "mongo_express":
-                home = _get(pool, base, "/")
-                databases = _mongo_links(home.text, r'href=["\']/db/([^/"\']+)/["\']')
-                if databases:
-                    probe_path = f"/db/{quote(databases[0], safe='')}/"
-            access = _get(pool, base, probe_path)
-            auth_required = False if access.status == 200 else True if access.status in {401, 403} else None
-            anonymous_read: bool | None = None
-            if product == "kubernetes_dashboard":
-                # A public login page proves neither anonymous API access nor login.
+        return run_requests(
+            panel_requests(module, ctx, report_failure=report_failure),
+            lambda base, path, options=None: _get(pool, base, path, **(options or {})),
+        )
+
+
+def panel_requests(module: str, ctx: Any, *, report_failure: bool = False) -> Any:
+    if not _candidate(ctx, module):
+        return None
+    scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
+    schemes = (
+        (scheme,)
+        if scheme in {"http", "https"}
+        else (("https", "http") if int(ctx.port) in {443, 9443} else ("http", "https"))
+    )
+    observations: list[bool] = []
+    for candidate_scheme in schemes:
+        base = _base(ctx, candidate_scheme)
+        fingerprint = (
+            (yield from fingerprint_requests(module, base, observations))
+            if report_failure and module == "portainer"
+            else (yield from fingerprint_requests(module, base))
+        )
+        if fingerprint is None:
+            continue
+        product, version, signals = fingerprint
+        probe_path = _ANONYMOUS_PROBES[product]
+        if product == "mongo_express":
+            home = yield (base, "/")
+            databases = _mongo_links(home.text, r'href=["\']/db/([^/"\']+)/["\']')
+            if databases:
+                probe_path = f"/db/{quote(databases[0], safe='')}/"
+        access = yield (base, probe_path)
+        auth_required = False if access.status == 200 else True if access.status in {401, 403} else None
+        if product == "portainer" and access.status == 200:
+            environments = _json(access)
+            if not isinstance(environments, list) or any(
+                not isinstance(item, dict) or type(item.get("Id")) is not int or item["Id"] < 1 for item in environments
+            ):
                 auth_required = None
-            if product == "postgrest":
-                spec = _json(_get(pool, base, "/", headers={"Accept": "application/openapi+json"}))
-                paths = spec.get("paths") if isinstance(spec, dict) else None
-                table_paths = [
-                    name
-                    for name, methods in (paths.items() if isinstance(paths, dict) else ())
-                    if isinstance(name, str)
-                    and name.startswith("/")
-                    and name != "/"
-                    and isinstance(methods, dict)
-                    and "get" in methods
-                ]
-                if table_paths:
-                    probe_path = sorted(table_paths)[0]
-                    table = _get(pool, base, probe_path + "?limit=1")
-                    anonymous_read = table.status == 200 and isinstance(_json(table), list)
-                    auth_required = False if anonymous_read else True if table.status in {401, 403} else None
-            if product == "pgadmin" and access.status == 200:
-                auth_required = urlsplit(access.final_url or "").path != urlsplit(base + "/browser/").path
-            return {
-                "host": str(ctx.host),
-                "port": int(ctx.port),
-                "module": module,
-                "service": module,
-                "status": "open_no_auth"
-                if auth_required is False
-                else "auth_required"
-                if auth_required is True
-                else "unknown_auth",
-                "auth_required": auth_required,
-                "surface": "ui",
-                "ui_product": product,
-                "ui": {
-                    "product": product,
-                    "version": version,
-                    "endpoint": base,
-                    "auth_required": auth_required,
-                    "credential_state": "unverified",
-                    "inventory": {},
-                    "credential_probe_path": probe_path if product == "mongo_express" else None,
-                    "anonymous_read": anonymous_read,
-                },
+        anonymous_read: bool | None = None
+        if product == "kubernetes_dashboard":
+            # A public login page proves neither anonymous API access nor login.
+            auth_required = None
+        if product == "postgrest":
+            spec = _json((yield (base, "/", {"headers": {"Accept": "application/openapi+json"}})))
+            paths = spec.get("paths") if isinstance(spec, dict) else None
+            table_paths = [
+                name
+                for name, methods in (paths.items() if isinstance(paths, dict) else ())
+                if isinstance(name, str)
+                and name.startswith("/")
+                and name != "/"
+                and isinstance(methods, dict)
+                and "get" in methods
+            ]
+            if table_paths:
+                probe_path = sorted(table_paths)[0]
+                table = yield (base, probe_path + "?limit=1")
+                anonymous_read = table.status == 200 and isinstance(_json(table), list)
+                auth_required = False if anonymous_read else True if table.status in {401, 403} else None
+        if product == "pgadmin" and access.status == 200:
+            auth_required = urlsplit(access.final_url or "").path != urlsplit(base + "/browser/").path
+        return {
+            "host": str(ctx.host),
+            "port": int(ctx.port),
+            "module": module,
+            "service": module,
+            "status": "open_no_auth"
+            if auth_required is False
+            else "auth_required"
+            if auth_required is True
+            else "unknown_auth",
+            "auth_required": auth_required,
+            "surface": "ui",
+            "ui_product": product,
+            "ui": {
+                "product": product,
                 "version": version,
-                "is_ui": True,
-                "detection_status": "confirmed",
-                "detection_signals": signals,
-                "credential_verification_status": (
-                    "available"
-                    if auth_required is True
-                    and product not in {"postgrest", "kubernetes_dashboard"}
-                    and (
-                        product != "redis_insight"
-                        or (access.status == 401 and "basic" in _header(access, "www-authenticate").lower())
-                    )
-                    else "unavailable"
-                ),
-            }
+                "endpoint": base,
+                "auth_required": auth_required,
+                "credential_state": "unverified",
+                "inventory": {},
+                "credential_probe_path": probe_path if product == "mongo_express" else None,
+                "anonymous_read": anonymous_read,
+            },
+            "version": version,
+            "is_ui": True,
+            "detection_status": "confirmed",
+            "detection_signals": signals,
+            "credential_verification_status": (
+                "available"
+                if auth_required is True
+                and product not in {"postgrest", "kubernetes_dashboard"}
+                and (
+                    product != "redis_insight"
+                    or (access.status == 401 and "basic" in _header(access, "www-authenticate").lower())
+                )
+                else "unavailable"
+            ),
+        }
+    if report_failure and module == "portainer":
+        state = "not_service" if any(observations) else "transport_failure"
+        return {
+            "host": str(ctx.host),
+            "port": int(ctx.port),
+            "module": module,
+            "service": module,
+            "status": state,
+            "detection_status": state,
+            "detection_signals": ["portainer.probe"],
+            "is_portainer": False,
+        }
     return None
+
+
+async def detect_panel_async(
+    module: str, ctx: Any, http: Any, *, report_failure: bool = False
+) -> dict[str, Any] | None:
+    """Use the exact UI proof and its original transport policy, without threads."""
+    from .clients.async_http_detect import AsyncHttpFallback
+    from .clients.tls_cache import shared_client_ssl_context
+    from .detection_steps import run_async_requests
+
+    if not _candidate(ctx, module):
+        return None
+    saved = (http.timeout, http.retries, http.max_bytes, http.ssl_context)
+    # A backend connection must never be reused under a different UI TLS policy.
+    await http.close()
+    http.timeout = min(3.0, max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0)))
+    http.retries = 0
+    http.max_bytes = 128 * 1024
+    http.ssl_context = shared_client_ssl_context(insecure=not bool(getattr(ctx.args, "secure", False)))
+    try:
+
+        async def send(base: str, path: str, options: dict[str, Any] | None = None) -> HttpResponse:
+            response = await http.get(base + path, headers=(options or {}).get("headers", {}))
+            if response.truncated or (response.status > 0 and response.error):
+                raise AsyncHttpFallback("UI response requires synchronous verification")
+            return response
+
+        return await run_async_requests(panel_requests(module, ctx, report_failure=report_failure), send)
+    finally:
+        await http.close()
+        http.timeout, http.retries, http.max_bytes, http.ssl_context = saved
 
 
 def _cookie(response: HttpResponse) -> str:
@@ -553,7 +676,16 @@ def _mongo_links(source: str, pattern: str, *, limit: int = 20) -> list[str]:
 
 def _mongo_document_paths(source: str) -> list[str]:
     paths = re.findall(r"loadDocument\(['\"]([^'\"]+)['\"]\)", source)
-    return list(dict.fromkeys(html.unescape(path).split("?", 1)[0] for path in paths if path.startswith("/db/")))
+    result: list[str] = []
+    for path in paths:
+        if not path.startswith("/db/"):
+            continue
+        parsed = urlsplit(html.unescape(path))
+        # `skip` only controls return navigation. BSON Binary UUID identities
+        # require their subtype; dropping it addresses a different document.
+        query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "skip"]
+        result.append(parsed.path + ("?" + urlencode(query) if query else ""))
+    return list(dict.fromkeys(result))
 
 
 def _mongo_document(source: str) -> str | None:
@@ -744,8 +876,10 @@ def authenticate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                 token = None
             if isinstance(token, str) and token:
                 who = _get(pool, base, "/api/users/me", headers={"Authorization": f"Bearer {token}"})
+                if _blocked(who):
+                    return _auth_result(record, "rate_limited", proof="Portainer blocked identity verification")
                 info = _json(who)
-                if isinstance(info, dict) and info.get("Username") == username:
+                if _portainer_identity(info) and info.get("Username") == username:
                     result = _auth_result(record, "valid", proof="Portainer identity endpoint")
                     result["ui"]["session_token"] = token
                     return result
@@ -820,7 +954,7 @@ def authenticate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                 browser = _get(pool, base, "/browser/", headers={"Cookie": session})
                 if (
                     browser.status == 200
-                    and urlsplit(browser.final_url or "").path == "/browser/"
+                    and urlsplit(browser.final_url or "").path == urlsplit(base + "/browser/").path
                     and ("pgadmin.browser" in browser.text[:32768] and "login_user" not in browser.text[:32768])
                 ):
                     return _auth_result(record, "valid", proof="pgAdmin authenticated browser", cookie=session)
@@ -860,6 +994,69 @@ def authenticate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                 result["ui"]["auth_boundary"] = "reverse_proxy"
                 return result
     return _auth_result(record, "unverified", proof="no authenticated identity or protected resource proof")
+
+
+def _portainer_identity(info: Any) -> bool:
+    return (
+        isinstance(info, dict)
+        and type(info.get("Id")) is int
+        and info["Id"] > 0
+        and isinstance(info.get("Username"), str)
+        and bool(info["Username"].strip())
+    )
+
+
+def _portainer_inventory_item(category: str, value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    fields = ("Name", "Driver") if category == "volumes" else ("Id",)
+    return all(isinstance(value.get(name), str) and bool(value[name].strip()) for name in fields)
+
+
+def authenticate_portainer_token(ctx: Any, record: dict[str, Any], token: str) -> dict[str, Any]:
+    """Verify a Portainer access token against the current-user identity."""
+    if (
+        not token
+        or not token.isascii()
+        or len(token) > 16384
+        or any(ord(char) <= 32 or ord(char) == 127 for char in token)
+    ):
+        return _auth_result(record, "unverified", proof="Portainer token format is invalid")
+    base = str((record.get("ui") or {}).get("endpoint") or "")
+    api_key = token.startswith("ptr_")
+    headers = {"X-API-Key": token} if api_key else {"Authorization": "Bearer " + token}
+    with closing(
+        HttpSessionPool(
+            timeout=max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0)),
+            insecure=not bool(getattr(ctx.args, "secure", False)),
+            proxy=getattr(ctx.args, "_proxy_config", None),
+            retries=0,
+        )
+    ) as pool:
+        response = _get(pool, base, "/api/users/me", headers=headers)
+        if _blocked(response):
+            return _auth_result(record, "rate_limited", proof="Portainer blocked token verification")
+        if response.status in {401, 403}:
+            return _auth_result(record, "invalid", proof="Portainer rejected token")
+        identity = _json(response)
+        if _portainer_identity(identity):
+            anonymous = _get(pool, base, "/api/users/me", headers={})
+            if _blocked(anonymous):
+                return _auth_result(record, "rate_limited", proof="Portainer blocked anonymous identity comparison")
+            anonymous_identity = _json(anonymous)
+            protected = anonymous.status in {401, 403} and not anonymous.error and not anonymous.truncated
+            changed_identity = _portainer_identity(anonymous_identity) and (identity["Id"], identity["Username"]) != (
+                anonymous_identity["Id"],
+                anonymous_identity["Username"],
+            )
+            if not protected and not changed_identity:
+                return _auth_result(record, "unverified", proof="Portainer token did not prove an identity boundary")
+            result = _auth_result(record, "valid", proof="Portainer identity endpoint")
+            result["ui"]["session_api_key" if api_key else "session_token"] = token
+            result["auth_username"] = identity["Username"]
+            result["auth_method"] = "api_key" if api_key else "jwt"
+            return result
+    return _auth_result(record, "unverified", proof="Portainer token identity could not be verified")
 
 
 def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
@@ -940,7 +1137,16 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
         auth_headers["Authorization"] = "Bearer " + str(ui["session_token"])
     if ui.get("session_authorization"):
         auth_headers["Authorization"] = str(ui["session_authorization"])
+    if ui.get("session_api_key"):
+        auth_headers["X-API-Key"] = str(ui["session_api_key"])
     results: dict[str, Any] = {}
+    portainer_discover = product == "portainer" and bool(getattr(ctx.args, "discover", False))
+    portainer_deadline = time.monotonic() + (
+        float(getattr(ctx.args, "discover_time", None) or _DUMP_SECONDS) if portainer_discover else _DUMP_SECONDS
+    )
+    portainer_remaining = (
+        int(getattr(ctx.args, "discover_max_bytes", None) or _DUMP_BYTES) if portainer_discover else _DUMP_BYTES
+    )
     with closing(
         HttpSessionPool(
             timeout=max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0)),
@@ -951,13 +1157,36 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
     ) as pool:
 
         def get(path: str, *, response_size_cap: int = 128 * 1024) -> HttpResponse:
-            return _get(pool, base, path, headers=auth_headers, response_size_cap=response_size_cap)
+            nonlocal portainer_remaining
+            if product == "portainer":
+                if time.monotonic() >= portainer_deadline or portainer_remaining <= 0:
+                    return HttpResponse(status=0, body=b"", headers={}, error="Portainer inventory budget exhausted")
+                response_size_cap = min(response_size_cap, portainer_remaining)
+            if product == "portainer":
+                response = _get(
+                    pool,
+                    base,
+                    path,
+                    headers=auth_headers,
+                    response_size_cap=response_size_cap,
+                    timeout=min(
+                        max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0)),
+                        max(0.001, portainer_deadline - time.monotonic()),
+                    ),
+                )
+            else:
+                response = _get(pool, base, path, headers=auth_headers, response_size_cap=response_size_cap)
+            if product == "portainer":
+                portainer_remaining -= len(response.body or b"")
+            return response
 
         if product == "portainer":
+            flags.discard("endpoints")
+            flags.discard("discover")
             endpoints: list[dict[str, Any]] = []
             endpoint_ids_seen: set[int] = set()
             endpoint_partial = False
-            endpoint_deadline = time.monotonic() + _DUMP_SECONDS
+            endpoint_deadline = portainer_deadline
             endpoints_response = get("/api/endpoints?start=0&limit=100", response_size_cap=8 * 1024 * 1024)
             first_page = _json(endpoints_response)
             if not isinstance(first_page, list) and endpoints_response.status in {400, 404}:
@@ -966,6 +1195,21 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
             if isinstance(first_page, list):
                 page_items = first_page
                 while True:
+                    if any(
+                        not isinstance(item, dict) or type(item.get("Id")) is not int or item["Id"] < 1
+                        for item in page_items
+                    ):
+                        results["environments"] = {"status": "unavailable", "partial": True}
+                        for flag in flags:
+                            results[flag] = {"status": "unavailable", "partial": True}
+                        ui["inventory"] = results
+                        return {
+                            **record,
+                            "ui": ui,
+                            "_portainer_inventory_bytes_read": (
+                                int(getattr(ctx.args, "discover_max_bytes", None) or _DUMP_BYTES) - portainer_remaining
+                            ),
+                        }
                     new_ids = 0
                     for item in page_items:
                         endpoint_id = item.get("Id") if isinstance(item, dict) else None
@@ -991,6 +1235,24 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                         endpoint_partial = True
                         break
                     page_items = next_page
+                selector = str(getattr(ctx.args, "endpoint", "") or "").strip()
+                if selector:
+                    endpoints = [
+                        item for item in endpoints if str(item.get("Id")) == selector or item.get("Name") == selector
+                    ]
+                    if len(endpoints) != 1:
+                        state = "endpoint_not_found" if not endpoints else "endpoint_ambiguous"
+                        results["environments"] = {"status": state, "partial": True}
+                        for flag in flags:
+                            results[flag] = {"status": state, "partial": True}
+                        ui["inventory"] = results
+                        return {
+                            **record,
+                            "ui": ui,
+                            "_portainer_inventory_bytes_read": (
+                                int(getattr(ctx.args, "discover_max_bytes", None) or _DUMP_BYTES) - portainer_remaining
+                            ),
+                        }
                 results["environments"] = {
                     "count": len(endpoints),
                     "items": _names(endpoints, "Name", limit=_DUMP_COLLECTIONS),
@@ -1028,8 +1290,13 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                         response = get(f"/api/endpoints/{endpoint_id}/docker/{path}", response_size_cap=8 * 1024 * 1024)
                         value = _json(response)
                         if flag == "volumes" and isinstance(value, dict):
-                            value = value.get("Volumes")
-                        if flag == "system" and isinstance(value, dict):
+                            value = [] if "Volumes" in value and value["Volumes"] is None else value.get("Volumes")
+                        if (
+                            flag == "system"
+                            and isinstance(value, dict)
+                            and isinstance(value.get("ServerVersion"), str)
+                            and value["ServerVersion"].strip()
+                        ):
                             found.append(
                                 f"environment:{endpoint_id} server:{str(value.get('ServerVersion') or 'unknown')[:80]}"
                             )
@@ -1039,14 +1306,17 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                                 f"/api/endpoints/{endpoint_id}/docker/system/df", response_size_cap=8 * 1024 * 1024
                             )
                             disk = _json(disk_response)
-                            if isinstance(disk, dict):
+                            if isinstance(disk, dict) and any(
+                                name in disk for name in ("LayersSize", "Images", "Containers", "Volumes")
+                            ):
                                 records[-1]["disk_usage"] = disk
                                 bytes_used += len(disk_response.body or b"")
                             else:
                                 failed = True
                         elif isinstance(value, list):
                             available = max(0, _DUMP_ITEMS - len(records))
-                            selected = value[:available]
+                            valid = [item for item in value if _portainer_inventory_item(flag, item)]
+                            selected = valid[:available]
                             found.extend(
                                 f"environment:{endpoint_id} {name}"
                                 for name in _names(selected, "Name", "Id", "ID", limit=available)
@@ -1055,7 +1325,7 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                                 {"environment": endpoint_id, **item} for item in selected if isinstance(item, dict)
                             )
                             bytes_used += len(response.body or b"")
-                            failed = failed or len(value) > available
+                            failed = failed or len(value) > available or len(valid) != len(value)
                         else:
                             failed = True
                     results[flag] = (
@@ -1063,7 +1333,10 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                             "count": len(records),
                             "items": found,
                             "records": records,
-                            "partial": failed or endpoint_partial or bytes_used >= _DUMP_BYTES,
+                            "partial": failed
+                            or endpoint_partial
+                            or bytes_used >= _DUMP_BYTES
+                            or portainer_remaining <= 0,
                         }
                         if found or not failed
                         else {"status": "unavailable", "partial": True}
@@ -2082,6 +2355,10 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
     ui["inventory"] = results
     payload = dict(record)
     payload["ui"] = ui
+    if product == "portainer" and portainer_discover:
+        payload["_portainer_inventory_bytes_read"] = (
+            int(getattr(ctx.args, "discover_max_bytes", None) or _DUMP_BYTES) - portainer_remaining
+        )
     return payload
 
 
@@ -2339,7 +2616,7 @@ def colorize_panel_line(console: Any, line: str, label: str) -> bool:
         if marker != "[+]":
             return []
         if right.startswith("Anonymous READ"):
-            return [(0, len(right), "red")]
+            return [(0, len(right), "true_red")]
         return [(0, len(right), "true_red")]
 
     return render_colored_marker_line(
@@ -2351,6 +2628,6 @@ def colorize_panel_line(console: Any, line: str, label: str) -> bool:
             RegexColorRule(r"coverage:partial", "orange"),
             RegexColorRule(r"\(reason:[^)]+\)", "orange"),
         ),
-        counts=(CountColorRule("count", "red", unknown_color="orange", zero_color="bright_green"),),
+        counts=(CountColorRule("count", "true_red", unknown_color="orange", zero_color="bright_green"),),
         extra_spans=credential_spans,
     )

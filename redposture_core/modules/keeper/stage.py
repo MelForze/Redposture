@@ -8,8 +8,12 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients import zookeeper as _native_client
+from ...clients.async_retained_socket import with_native_detection as _with_native_detection
 from ...clients.zookeeper import _ZK_ERR_NOAUTH
 from ...console import Console
+from ...detection_io import DetectCall as _DetectCall
+from ...detection_io import run_sync as _run_detect_sync
 from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -82,9 +86,11 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
         )
 
     def _detect(ctx: AuditHookContext) -> AuditRecord:
+        return _run_detect_sync(_detect_steps(ctx))
+
+    def _detect_steps(ctx: AuditHookContext):
         payload = engine.enforce_expected_implementation(
-            engine.detect_zookeeper_implementation(ctx, options),
-            expected_is_keeper=True,
+            (yield _DetectCall(engine.detect_zookeeper_implementation, (ctx, options), {})), expected_is_keeper=True
         )
         payload["module"] = "keeper"
         payload["service"] = "keeper"
@@ -96,7 +102,9 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
                 else None
             )
             access, detail = (
-                actions.probe_ddl_access(client) if client is not None else ("Unknown", "no anonymous session")
+                (yield _DetectCall(actions.probe_ddl_access, (client,), {}))
+                if client is not None
+                else ("Unknown", "no anonymous session")
             )
             payload.update(
                 {
@@ -111,8 +119,6 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
                 and payload.get("credential_verification_requested")
                 and isinstance(state, engine.ZooKeeperImplementationLifecycleState)
             ):
-                # The Keeper-specific DDL probe has established a protected
-                # read path that the generic root/child search may have missed.
                 verifier = state.zookeeper_state
                 verifier.anonymous_auth_probe_results[actions._DDL_QUEUE] = _ZK_ERR_NOAUTH
                 verifier.credential_verification_path = verifier.credential_verification_path or actions._DDL_QUEUE
@@ -257,7 +263,7 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
     def _is_detected(record: AuditRecord) -> bool:
         return bool(record.extra.get("is_zookeeper")) and record.extra.get("is_keeper") is True
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="keeper",
         label="KEEPER",
         default_port=_DEFAULT_PORT,
@@ -284,6 +290,17 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
             "credential_auth_probe_results",
         ),
         suppress_undetected_records_in_text=True,
+    )
+
+    return _with_native_detection(
+        spec,
+        _detect_steps,
+        {
+            **protocol_actions._ASYNC_RETAINED_STEPS,
+            **engine._ASYNC_RETAINED_STEPS,
+            **_native_client._ASYNC_RETAINED_STEPS,
+            **actions._ASYNC_RETAINED_STEPS,
+        },
     )
 
 

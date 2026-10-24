@@ -35,8 +35,8 @@ def reply(status: int, data: Any, **kwargs: Any) -> HttpResponse:
 def test_h01_consul_candidates_do_not_inherit_previous_identity_access(monkeypatch: pytest.MonkeyPatch) -> None:
     state = consul.ConsulLifecycleState(
         scheme="http",
-        anonymous_scopes={name: {"ok": False} for name in ("kv", "services", "agents")},
-        anonymous_self={"ok": False},
+        anonymous_scopes={name: {"ok": False, "status": 403} for name in ("kv", "services", "agents")},
+        anonymous_self={"ok": False, "status": 403},
     )
     ctx = NS(host="h", port=8500, target=None, args=NS(timeout=0.1, retries=0), lifecycle_state=state, debug_emit=None)
 
@@ -363,7 +363,7 @@ def test_h09_consul_scope_requires_resource_shape(monkeypatch: pytest.MonkeyPatc
     result = consul._scope_probe(
         "h", 8500, "/v1/kv/", 0.1, scheme="http", insecure=True, count_fn=consul._count_kv_keys
     )
-    assert result["ok"] is False and result["error"]
+    assert result["ok"] is None and result["error"]
 
 
 @pytest.mark.parametrize("resource", ["namespaces", "pods", "secrets"])
@@ -477,7 +477,7 @@ def test_h13_uncertainty_color_keeps_negative_marker(module: str) -> None:
     )
     console = RecordingConsole()
     assert colorize(console, line)
-    assert ("[-]", "red") in console.paints
+    assert ("[-]", "true_red") in console.paints
     assert any(
         ("u:p" if module == "grafana" else "basic auth") in text and color == "white" for text, color in console.paints
     )

@@ -11,8 +11,11 @@ import time
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
-from ...clients.http_api import HttpResponse, infer_http_base_path
+from ...clients.http_api import HttpResponse, format_http_authority, infer_http_base_path
 from ...clients.http_session import HttpSessionPool
+from ...detection_io import DetectCall as _DetectCall
+from ...detection_io import HttpRead as _HttpRead
+from ...detection_io import run_sync as _run_detect_sync
 from ...ui_export import UIExport
 from ...utils import utc_now_iso
 from . import http_surfaces
@@ -117,22 +120,31 @@ def _base(ctx: Any, scheme: str) -> str:
             "/ui",
         ),
     )
-    return f"{scheme}://{ctx.host}:{ctx.port}{prefix.rstrip('/')}"
+    return f"{scheme}://{format_http_authority(ctx.host, ctx.port)}{prefix.rstrip('/')}"
 
 
 def _get(pool: HttpSessionPool, base: str, path: str, *, cookie: str = "", basic: str = "") -> HttpResponse:
+    return _run_detect_sync(_get_detect_steps(pool, base, path, cookie=cookie, basic=basic))
+
+
+def _get_detect_steps(pool: HttpSessionPool, base: str, path: str, *, cookie: str = "", basic: str = ""):
     headers = {"Accept": "application/json"}
     if cookie:
         headers["Cookie"] = cookie
     if basic:
         headers["Authorization"] = basic
-    return pool.request(
-        "GET",
-        base + path,
-        headers=headers,
-        response_size_cap=128 * 1024,
-        allow_cross_origin_redirects=False,
-        preserve_authorization_on_cross_origin=False,
+    return (
+        yield _HttpRead(
+            pool,
+            "GET",
+            base + path,
+            {
+                "headers": headers,
+                "response_size_cap": 128 * 1024,
+                "allow_cross_origin_redirects": False,
+                "preserve_authorization_on_cross_origin": False,
+            },
+        )
     )
 
 
@@ -140,7 +152,7 @@ def _parse_message_events_page(
     response: HttpResponse, *, limit: int
 ) -> tuple[list[dict[str, Any]], bool, str | None, str | None]:
     content_type = _header(response, "content-type").lower()
-    if response.error:
+    if response.error and (response.status != 200 or not response.body):
         return [], False, response.error, None
     if response.status != 200:
         return [], False, f"HTTP {response.status} from Kafka UI message API", None
@@ -176,7 +188,14 @@ def _parse_message_events_page(
         if not isinstance(value, str) and value is not None:
             return messages, False, "invalid Kafka UI message value", None
         partition, offset = message.get("partition"), message.get("offset")
-        if not isinstance(partition, int) or not isinstance(offset, int):
+        if (
+            not isinstance(partition, int)
+            or isinstance(partition, bool)
+            or partition < 0
+            or not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or offset < 0
+        ):
             return messages, False, "invalid Kafka UI message position", None
         messages.append(
             {
@@ -190,6 +209,8 @@ def _parse_message_events_page(
         )
         if len(messages) > limit:
             return messages[:limit], False, "Kafka UI returned more messages than requested", None
+    if response.error:
+        return messages, False, response.error, None
     if response.truncated:
         return messages, False, "Kafka UI message response exceeded 8 MiB", None
     if not done:
@@ -233,6 +254,7 @@ def _read_ui_messages(
             base + path,
             headers={"Accept": "text/event-stream", **({"Cookie": cookie} if cookie else {})},
             response_size_cap=_MAX_DUMP_RESPONSE_BYTES,
+            preserve_partial_body=True,
             allow_cross_origin_redirects=False,
             preserve_authorization_on_cross_origin=False,
         )
@@ -271,12 +293,18 @@ def _legacy_topic_offsets(
 
 
 def detect_ui(ctx: Any, state: Any) -> dict[str, Any]:
+    return _run_detect_sync(_detect_ui_detect_steps(ctx, state))
+
+
+def _detect_ui_detect_steps(ctx: Any, state: Any):
     """Confirm UI only after two independent product-specific API responses."""
     target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
     schemes = (
         (target_scheme,)
         if target_scheme in {"http", "https"}
-        else (("https", "http") if ctx.port in {443, 8443} else ("http", "https"))
+        else ("https", "http")
+        if ctx.port in {443, 8443}
+        else ("http", "https")
     )
     pool = state.ui_http
     if pool is None:
@@ -291,14 +319,13 @@ def detect_ui(ctx: Any, state: Any) -> dict[str, Any]:
     last_error: str | None = None
     for scheme in schemes:
         base = _base(ctx, scheme)
-        # REST gateways and other consoles have distinct APIs and identities.
-        other = http_surfaces.detect(pool, base, ctx)
+        other = yield _DetectCall(http_surfaces.detect, (pool, base, ctx), {})
         if other is not None:
             state.ui_base = base
             state.ui_vendor = str(other["ui_vendor"])
             state.ui_auth_type = None
             return other
-        info_response = _get(pool, base, "/api/info")
+        info_response = yield _DetectCall(_get, (pool, base, "/api/info"), {})
         if info_response.error:
             last_error = info_response.error
             continue
@@ -313,23 +340,24 @@ def detect_ui(ctx: Any, state: Any) -> dict[str, Any]:
                 base = info_response.final_url[: -len("/api/info")]
         if info_ok:
             signals.append("ui_info_build")
-        auth_response = _get(pool, base, "/api/config/authentication")
+        auth_response = yield _DetectCall(_get, (pool, base, "/api/config/authentication"), {})
         mode = _auth_type(_json(auth_response))
         api_mode = mode
         if mode:
             signals.append("ui_auth_config")
-        authorization_response = _get(pool, base, "/api/authorization")
+        authorization_response = yield _DetectCall(_get, (pool, base, "/api/authorization"), {})
         authorization_ok = _authorization(_json(authorization_response))
         if authorization_ok:
             signals.append("ui_authorization")
-        cluster_response = _get(pool, base, "/api/clusters")
-        clusters = _clusters(_json(cluster_response))
+        cluster_response = yield _DetectCall(_get, (pool, base, "/api/clusters"), {})
+        cluster_payload = _json(cluster_response)
+        clusters = _clusters(cluster_payload)
         if clusters is not None:
             signals.append("ui_cluster_schema")
         login_form = False
         branded_login = False
         if clusters is None and (info_ok or (mode == "LOGIN_FORM" and authorization_ok)):
-            login_probe = _get(pool, base, "/login")
+            login_probe = yield _DetectCall(_get, (pool, base, "/login"), {})
             branded_login = bool(login_probe.status == 200 and _KAFBAT_TITLE.search(login_probe.text[:8192]))
             login_form = bool(
                 login_probe.status == 200
@@ -344,18 +372,20 @@ def detect_ui(ctx: Any, state: Any) -> dict[str, Any]:
                     mode = "LOGIN_FORM"
                 signals.append("ui_login_form")
         confirmed = (
-            (info_ok and (authorization_ok or clusters is not None or (api_mode is not None and login_form)))
+            info_ok
+            and (authorization_ok or clusters is not None or (api_mode is not None and login_form))
             or (clusters is not None and api_mode is not None and authorization_ok)
             or (api_mode == "LOGIN_FORM" and authorization_ok and branded_login)
         )
         if confirmed:
+            if clusters is None and cluster_payload == []:
+                clusters = []
             state.ui_base = base
             state.ui_auth_type = mode
             state.ui_anonymous_clusters = clusters
             auth_required = mode != "DISABLED" if mode is not None else False if clusters is not None else None
-            # The two projects use a shared API. Name a vendor only on an explicit signal.
             if brand is None:
-                home = _get(pool, base, "/")
+                home = yield _DetectCall(_get, (pool, base, "/"), {})
                 page = home.text[:8192].lower() if home.status == 200 else ""
                 brand = "kafbat" if "kafbat" in page else "provectus" if "provectus" in page else None
             state.ui_vendor = brand
@@ -431,6 +461,7 @@ def authenticate_ui(ctx: Any, record: dict[str, Any], state: Any) -> dict[str, A
         verified = isinstance(user_info, dict) and user_info.get("username") == user
     if verified:
         state.ui_cookie = updated_cookie
+        state.ui_csrf = html.unescape(csrf_match.group(1)) if csrf_match else ""
         info_ok, version, brand = _info(_json(_get(pool, base, "/api/info", cookie=updated_cookie)))
         if info_ok:
             payload["version"] = version
@@ -474,6 +505,47 @@ def authenticate_ui(ctx: Any, record: dict[str, Any], state: Any) -> dict[str, A
     return payload
 
 
+def _collect_cluster_inventory(
+    payload: dict[str, Any], pool: Any, base: str, cluster_path: str, name: str, cookie: str, options: dict[str, Any]
+) -> None:
+    if options.get("show_brokers"):
+        response = _get(pool, base, cluster_path + "/brokers", cookie=cookie)
+        items = _json(response)
+        if isinstance(items, list):
+            payload["ui_brokers"].extend(
+                {"cluster": name, "id": item.get("id"), "host": item.get("host")}
+                for item in items
+                if isinstance(item, dict)
+            )
+        else:
+            payload["ui_brokers_partial"] = True
+            payload["ui_brokers_error"] = response.error or f"brokers unavailable: HTTP {response.status}"
+    if options.get("show_consumer_groups"):
+        page = 1
+        seen_groups: set[str] = set()
+        while True:
+            value = _json(
+                _get(pool, base, cluster_path + f"/consumer-groups/paged?page={page}&perPage=100", cookie=cookie)
+            )
+            items = value.get("consumerGroups") if isinstance(value, dict) else value
+            if not isinstance(items, list):
+                payload["ui_consumer_groups_partial"] = True
+                break
+            new_groups = 0
+            for item in items:
+                group = item.get("groupId") or item.get("name") if isinstance(item, dict) else None
+                if isinstance(group, str) and group not in seen_groups:
+                    seen_groups.add(group)
+                    payload["ui_consumer_groups"].append({"cluster": name, "name": group})
+                    new_groups += 1
+            if len(items) < 100:
+                break
+            if not new_groups:
+                payload["ui_consumer_groups_partial"] = True
+                break
+            page += 1
+
+
 def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, Any]) -> dict[str, Any]:
     """Checkpoint every completed message page, keeping messages off the result object."""
     payload = dict(record)
@@ -484,6 +556,13 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
     topic_filter = str(options.get("query_topic") or "")
     payload["ui_dump_records"] = []
     payload["dump"] = False
+    for flag in ("show_clusters", "show_topics", "show_brokers", "show_consumer_groups"):
+        payload[flag] = bool(options.get(flag))
+    payload.update(
+        ui_topics=[], ui_topics_partial=False, ui_brokers=[], ui_consumer_groups=[], ui_consumer_groups_partial=False
+    )
+    topic_limit = options.get("show_topics_limit")
+    max_topics = int(topic_limit) if isinstance(topic_limit, int) and topic_limit > 0 else 2**63 - 1
     try:
         with UIExport(
             ".redposture/ui-exports",
@@ -506,8 +585,9 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
                 for cluster in clusters:
                     cluster_name = str(cluster["name"])
                     cluster_path = "/api/clusters/" + quote(cluster_name, safe="")
-                    topics: list[str] = [topic_filter] if topic_filter else []
-                    if not topic_filter:
+                    _collect_cluster_inventory(payload, pool, base, cluster_path, cluster_name, cookie, options)
+                    topics: list[str] = []
+                    if not topic_filter or options.get("show_topics"):
                         page_number = 1
                         seen_pages: set[tuple[str, ...]] = set()
                         while True:
@@ -532,7 +612,12 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
                             if len(items) < 200:
                                 break
                             page_number += 1
-                    for topic in dict.fromkeys(topics):
+                    if options.get("show_topics"):
+                        payload["ui_topics"].extend(
+                            {"cluster": cluster_name, "name": topic}
+                            for topic in sorted(set(topics))[: max(0, max_topics - len(payload["ui_topics"]))]
+                        )
+                    for topic in [topic_filter] if topic_filter else dict.fromkeys(topics):
                         checkpoint_key = f"topic:{cluster_name}:{topic}"
                         checkpoint = writer.get_meta(checkpoint_key) or {}
                         if checkpoint.get("complete"):
@@ -565,11 +650,7 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
                                 cursor=cursor,
                                 offsets=offsets,
                             )
-                            if not done or error:
-                                raise _FullIncomplete(
-                                    f"Kafka UI {cluster_name}/{topic}: {error or 'incomplete message page'}"
-                                )
-                            if not cursor_supported and offsets is None:
+                            if done and not error and not cursor_supported and offsets is None:
                                 snapshot = _legacy_topic_offsets(pool, base, cluster_name, topic, cookie=cookie)
                                 if snapshot is None:
                                     raise _FullIncomplete(
@@ -577,13 +658,15 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
                                     )
                                 offsets, end = snapshot
                             advanced = 0
+                            next_offsets = dict(offsets) if offsets is not None else None
                             for message in page:
                                 part, position = message["partition"], message["offset"]
                                 if offsets is not None:
                                     assert end is not None
                                     if part not in offsets or not offsets[part] <= position < end[part]:
                                         continue
-                                    offsets[part] = position + 1
+                                    assert next_offsets is not None
+                                    next_offsets[part] = max(next_offsets[part], position + 1)
                                     advanced += 1
                                 key = f"message:{cluster_name}:{topic}:{part}:{position}"
                                 if writer.add(key, "messages", {"cluster": cluster_name, "topic": topic, **message}):
@@ -592,7 +675,12 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
                                         emit(
                                             [f"KAFKA\t{ctx.host}\t{ctx.port}\t [*] UI Export (messages:{writer.count})"]
                                         )
-                            if offsets is not None:
+                            if not done or error:
+                                raise _FullIncomplete(
+                                    f"Kafka UI {cluster_name}/{topic}: {error or 'incomplete message page'}"
+                                )
+                            if next_offsets is not None:
+                                offsets = next_offsets
                                 assert end is not None
                                 complete = all(offsets[part] >= high for part, high in end.items())
                                 writer.set_meta(
@@ -620,6 +708,7 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
     except (OSError, ValueError, sqlite3.Error) as exc:
         result = {"status": "unavailable", "partial": True, "reason": str(exc)}
     payload["ui_export"] = result
+    payload["topic_count"] = len(payload["ui_topics"]) if options.get("show_topics") else None
     return payload
 
 
@@ -653,6 +742,7 @@ def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, 
     payload["ui_topics"] = []
     payload["ui_topics_partial"] = False
     payload["ui_brokers"] = []
+    payload["ui_brokers_partial"] = False
     payload["ui_consumer_groups"] = []
     payload["ui_consumer_groups_partial"] = False
     dump_enabled = bool(options.get("dump"))
@@ -668,6 +758,16 @@ def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, 
     payload["ui_dump_records"] = []
     payload["ui_dump_skipped_topics"] = 0
     payload["ui_dump_partial"] = dump_enabled and isinstance(cluster_data, list) and len(cluster_data) > len(clusters)
+    if _clusters(cluster_data, limit=None) is None:
+        reason = cluster_response.error or f"clusters unavailable: HTTP {cluster_response.status}"
+        payload["ui_clusters_partial"] = True
+        payload["error"] = reason
+        payload["ui_topics_partial"] = bool(options.get("show_topics"))
+        payload["ui_brokers_partial"] = bool(options.get("show_brokers"))
+        payload["ui_brokers_error"] = reason if options.get("show_brokers") else None
+        payload["ui_consumer_groups_partial"] = bool(options.get("show_consumer_groups"))
+        payload["ui_dump_partial"] = dump_enabled
+        return payload
     dump_deadline = time.monotonic() + _MAX_DUMP_SECONDS
     dump_bytes = 0
     topic_limit = options.get("show_topics_limit")
@@ -745,10 +845,20 @@ def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, 
                         cursor=cursor,
                         offsets=legacy_offsets,
                     )
+                    page_positions: set[tuple[int, int]] = set()
+                    unique_page = []
+                    for message in message_page:
+                        position = (message["partition"], message["offset"])
+                        if position not in seen_positions and position not in page_positions:
+                            unique_page.append(message)
+                            page_positions.add(position)
+                    duplicate_only = bool(message_page) and not unique_page
+                    message_page = unique_page
                     message_bytes = len(json.dumps(message_page, ensure_ascii=False).encode())
                     if next_cursor and next_cursor in seen_cursors:
-                        error = "Kafka UI repeated a message cursor"
-                        break
+                        error = error or "Kafka UI repeated a message cursor"
+                    if duplicate_only and next_cursor:
+                        error = error or "Kafka UI made no unique message progress"
                     if dump_bytes + message_bytes > _MAX_DUMP_BYTES:
                         error = "Kafka UI dump byte budget reached"
                         break
@@ -787,6 +897,7 @@ def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, 
                         continue
                     dump_bytes += message_bytes
                     messages.extend(message_page)
+                    seen_positions.update(page_positions)
                     if next_cursor:
                         seen_cursors.add(next_cursor)
                         cursor = next_cursor
@@ -801,40 +912,16 @@ def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, 
                 payload["ui_dump_records"].append(
                     {"cluster": name, "topic": topic, "messages": messages, "complete": complete, "error": error}
                 )
-        if options.get("show_brokers"):
-            items = _json(_get(pool, base, cluster_path + "/brokers", cookie=cookie))
-            if isinstance(items, list):
-                payload["ui_brokers"].extend(
-                    {"cluster": name, "id": item.get("id"), "host": item.get("host")}
-                    for item in items
-                    if isinstance(item, dict)
-                )
-        if options.get("show_consumer_groups"):
-            page = 1
-            seen_groups: set[str] = set()
-            while True:
-                value = _json(
-                    _get(pool, base, cluster_path + f"/consumer-groups/paged?page={page}&perPage=100", cookie=cookie)
-                )
-                items = value.get("consumerGroups") if isinstance(value, dict) else value
-                if not isinstance(items, list):
-                    payload["ui_consumer_groups_partial"] = True
-                    break
-                new_groups = 0
-                for item in items:
-                    group = item.get("groupId") or item.get("name") if isinstance(item, dict) else None
-                    if isinstance(group, str) and group not in seen_groups:
-                        seen_groups.add(group)
-                        payload["ui_consumer_groups"].append({"cluster": name, "name": group})
-                        new_groups += 1
-                if len(items) < 100:
-                    break
-                if not new_groups:
-                    payload["ui_consumer_groups_partial"] = True
-                    break
-                page += 1
+        _collect_cluster_inventory(payload, pool, base, cluster_path, name, cookie, options)
     payload["topic_count"] = len(payload["ui_topics"]) if options.get("show_topics") else None
     payload["ui_dump_partial"] = payload["ui_dump_partial"] or payload["ui_dump_skipped_topics"] > 0
     if any(options.get(key) for key in ("probe_write", "write_payload")):
         payload["ui_unsupported_actions"] = "topic writes are unavailable through Kafka UI"
     return payload
+
+
+# Exact synchronous wrappers are the compatibility/override identities.
+_ASYNC_RETAINED_STEPS = {
+    _get: _get_detect_steps,
+    detect_ui: _detect_ui_detect_steps,
+}

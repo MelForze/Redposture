@@ -263,6 +263,83 @@
         "state": "empty"
       }
     ],
+    "znode_dump_items": [
+      {
+        "value": "cluster=kafka-open"
+      },
+      {
+        "value": "source=seed"
+      },
+      {
+        "value": "host=kafka-open,port=9092"
+      },
+      {
+        "value": "profile=lab,reload_interval=30s"
+      },
+      {
+        "value": "count=4"
+      },
+      {
+        "value": "url=http://grafana:3000,admin_user=admin,admin_password=admin"
+      },
+      {
+        "value": "open=kafka-open:9092,auth=kafka-auth:9092,sasl_user=metrics,sasl_password=metricspass"
+      },
+      {
+        "value": "dsn=postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+      },
+      {
+        "value": "mode=lab,metrics=true"
+      },
+      {
+        "value": "stack=prometheus-grafana,team=sre"
+      },
+      {
+        "value": "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
+      },
+      {
+        "value": "15s"
+      },
+      {
+        "value": "env=lab,owner=platform"
+      },
+      {
+        "value": "service=redposture-api,namespace=observability"
+      },
+      {
+        "value": "rp-zk-key-2026"
+      },
+      {
+        "value": "rp-jwt-lab-2026"
+      },
+      {
+        "value": "oidc-client-secret-lab"
+      },
+      {
+        "value": "backend=redis,host=redis,port=6379"
+      },
+      {
+        "value": "redis://default:redis@redis:6379/0"
+      },
+      {
+        "value": "engine=postgres,host=postgres,port=5432"
+      },
+      {
+        "value": "postgres"
+      },
+      {
+        "value": "lab"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "<empty>"
+      }
+    ],
     "znode_truncated_reason": null,
     "znode_values": [
       "/brokers:cluster=kafka-open",
@@ -582,6 +659,83 @@
         "children": 0,
         "error": null,
         "state": "empty"
+      }
+    ],
+    "znode_dump_items": [
+      {
+        "value": "cluster=kafka-open"
+      },
+      {
+        "value": "source=seed"
+      },
+      {
+        "value": "host=kafka-open,port=9092"
+      },
+      {
+        "value": "profile=lab,reload_interval=30s"
+      },
+      {
+        "value": "count=4"
+      },
+      {
+        "value": "url=http://grafana:3000,admin_user=admin,admin_password=admin"
+      },
+      {
+        "value": "open=kafka-open:9092,auth=kafka-auth:9092,sasl_user=metrics,sasl_password=metricspass"
+      },
+      {
+        "value": "dsn=postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+      },
+      {
+        "value": "mode=lab,metrics=true"
+      },
+      {
+        "value": "stack=prometheus-grafana,team=sre"
+      },
+      {
+        "value": "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
+      },
+      {
+        "value": "15s"
+      },
+      {
+        "value": "env=lab,owner=platform"
+      },
+      {
+        "value": "service=redposture-api,namespace=observability"
+      },
+      {
+        "value": "rp-zk-key-2026"
+      },
+      {
+        "value": "rp-jwt-lab-2026"
+      },
+      {
+        "value": "oidc-client-secret-lab"
+      },
+      {
+        "value": "backend=redis,host=redis,port=6379"
+      },
+      {
+        "value": "redis://default:redis@redis:6379/0"
+      },
+      {
+        "value": "engine=postgres,host=postgres,port=5432"
+      },
+      {
+        "value": "postgres"
+      },
+      {
+        "value": "lab"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "<empty>"
       }
     ],
     "znode_truncated_reason": null,
@@ -905,6 +1059,83 @@
         "state": "empty"
       }
     ],
+    "znode_dump_items": [
+      {
+        "value": "cluster=kafka-open"
+      },
+      {
+        "value": "source=seed"
+      },
+      {
+        "value": "host=kafka-open,port=9092"
+      },
+      {
+        "value": "profile=lab,reload_interval=30s"
+      },
+      {
+        "value": "count=4"
+      },
+      {
+        "value": "url=http://grafana:3000,admin_user=admin,admin_password=admin"
+      },
+      {
+        "value": "open=kafka-open:9092,auth=kafka-auth:9092,sasl_user=metrics,sasl_password=metricspass"
+      },
+      {
+        "value": "dsn=postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+      },
+      {
+        "value": "mode=lab,metrics=true"
+      },
+      {
+        "value": "stack=prometheus-grafana,team=sre"
+      },
+      {
+        "value": "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
+      },
+      {
+        "value": "15s"
+      },
+      {
+        "value": "env=lab,owner=platform"
+      },
+      {
+        "value": "service=redposture-api,namespace=observability"
+      },
+      {
+        "value": "rp-zk-key-2026"
+      },
+      {
+        "value": "rp-jwt-lab-2026"
+      },
+      {
+        "value": "oidc-client-secret-lab"
+      },
+      {
+        "value": "backend=redis,host=redis,port=6379"
+      },
+      {
+        "value": "redis://default:redis@redis:6379/0"
+      },
+      {
+        "value": "engine=postgres,host=postgres,port=5432"
+      },
+      {
+        "value": "postgres"
+      },
+      {
+        "value": "lab"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "<empty>"
+      }
+    ],
     "znode_truncated_reason": null,
     "znode_values": [
       "/brokers:cluster=kafka-open",
@@ -1226,6 +1457,83 @@
         "state": "empty"
       }
     ],
+    "znode_dump_items": [
+      {
+        "value": "cluster=kafka-open"
+      },
+      {
+        "value": "source=seed"
+      },
+      {
+        "value": "host=kafka-open,port=9092"
+      },
+      {
+        "value": "profile=lab,reload_interval=30s"
+      },
+      {
+        "value": "count=4"
+      },
+      {
+        "value": "url=http://grafana:3000,admin_user=admin,admin_password=admin"
+      },
+      {
+        "value": "open=kafka-open:9092,auth=kafka-auth:9092,sasl_user=metrics,sasl_password=metricspass"
+      },
+      {
+        "value": "dsn=postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+      },
+      {
+        "value": "mode=lab,metrics=true"
+      },
+      {
+        "value": "stack=prometheus-grafana,team=sre"
+      },
+      {
+        "value": "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
+      },
+      {
+        "value": "15s"
+      },
+      {
+        "value": "env=lab,owner=platform"
+      },
+      {
+        "value": "service=redposture-api,namespace=observability"
+      },
+      {
+        "value": "rp-zk-key-2026"
+      },
+      {
+        "value": "rp-jwt-lab-2026"
+      },
+      {
+        "value": "oidc-client-secret-lab"
+      },
+      {
+        "value": "backend=redis,host=redis,port=6379"
+      },
+      {
+        "value": "redis://default:redis@redis:6379/0"
+      },
+      {
+        "value": "engine=postgres,host=postgres,port=5432"
+      },
+      {
+        "value": "postgres"
+      },
+      {
+        "value": "lab"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "<empty>"
+      }
+    ],
     "znode_truncated_reason": null,
     "znode_values": [
       "/brokers:cluster=kafka-open",
@@ -1545,6 +1853,83 @@
         "children": 0,
         "error": null,
         "state": "empty"
+      }
+    ],
+    "znode_dump_items": [
+      {
+        "value": "cluster=kafka-open"
+      },
+      {
+        "value": "source=seed"
+      },
+      {
+        "value": "host=kafka-open,port=9092"
+      },
+      {
+        "value": "profile=lab,reload_interval=30s"
+      },
+      {
+        "value": "count=4"
+      },
+      {
+        "value": "url=http://grafana:3000,admin_user=admin,admin_password=admin"
+      },
+      {
+        "value": "open=kafka-open:9092,auth=kafka-auth:9092,sasl_user=metrics,sasl_password=metricspass"
+      },
+      {
+        "value": "dsn=postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+      },
+      {
+        "value": "mode=lab,metrics=true"
+      },
+      {
+        "value": "stack=prometheus-grafana,team=sre"
+      },
+      {
+        "value": "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
+      },
+      {
+        "value": "15s"
+      },
+      {
+        "value": "env=lab,owner=platform"
+      },
+      {
+        "value": "service=redposture-api,namespace=observability"
+      },
+      {
+        "value": "rp-zk-key-2026"
+      },
+      {
+        "value": "rp-jwt-lab-2026"
+      },
+      {
+        "value": "oidc-client-secret-lab"
+      },
+      {
+        "value": "backend=redis,host=redis,port=6379"
+      },
+      {
+        "value": "redis://default:redis@redis:6379/0"
+      },
+      {
+        "value": "engine=postgres,host=postgres,port=5432"
+      },
+      {
+        "value": "postgres"
+      },
+      {
+        "value": "lab"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "<empty>"
       }
     ],
     "znode_truncated_reason": null,

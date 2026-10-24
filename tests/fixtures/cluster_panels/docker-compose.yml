@@ -1,0 +1,53 @@
+# Start one profile at a time. Portainer uses an isolated disposable Docker daemon.
+services:
+  spark:
+    image: apache/spark:3.5.6
+    profiles: [spark]
+    command: [/opt/spark/bin/spark-class, org.apache.spark.deploy.master.Master, --host, spark, --webui-port, '8080']
+    environment:
+      SPARK_MASTER_OPTS: -Dspark.master.rest.enabled=true -Dspark.master.rest.port=6066
+      SPARK_DAEMON_MEMORY: 512m
+    ports: ['127.0.0.1:28085:8080', '127.0.0.1:26066:6066']
+    mem_limit: 1g
+  yarn:
+    image: apache/hadoop:3.3.6
+    platform: linux/amd64
+    profiles: [yarn]
+    hostname: yarn
+    command: [yarn, resourcemanager]
+    environment:
+      YARN-SITE.XML_yarn.resourcemanager.hostname: yarn
+      YARN-SITE.XML_yarn.resourcemanager.webapp.address: 0.0.0.0:8088
+      CORE-SITE.XML_fs.defaultFS: file:///
+      YARN_RESOURCEMANAGER_HEAPSIZE: 512
+    ports: ['127.0.0.1:28088:8088']
+    mem_limit: 1g
+  engine:
+    image: docker:27.5.1-dind
+    profiles: [portainer]
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ''
+    command: [dockerd, --host=tcp://0.0.0.0:2375, --tls=false]
+    healthcheck:
+      test: [CMD, docker, -H, tcp://127.0.0.1:2375, info]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes: [engine-data:/var/lib/docker]
+    mem_limit: 1g
+  portainer:
+    image: portainer/portainer-ce:2.39.7
+    profiles: [portainer]
+    command: [--admin-password-file, /run/qa-password]
+    volumes:
+      - portainer-data:/data
+      - ./password.txt:/run/qa-password:ro
+    ports: ['127.0.0.1:29000:9000', '127.0.0.1:29443:9443']
+    depends_on:
+      engine:
+        condition: service_healthy
+    mem_limit: 512m
+volumes:
+  engine-data:
+  portainer-data:

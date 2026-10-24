@@ -433,7 +433,7 @@ def _render_colored_minio_line(console: Console, line: str) -> bool:
             CountColorRule("buckets", "true_red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("objects", "true_red", unknown_color="orange", zero_color="bright_green"),
             # The `[*] Show … (Count:N)` section headers tie to their orange items.
-            CountColorRule("Count", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("Count", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
         extra_spans=_minio_extra_spans,
     ):

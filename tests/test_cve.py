@@ -31,7 +31,7 @@ from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, 
 
 def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
     catalog = load_catalog()
-    assert catalog.version == "2026-10-20"
+    assert catalog.version == "2026-10-21"
     assert catalog.entries
     keys: set[tuple[str, str]] = set()
     for entry in catalog.entries:
@@ -70,9 +70,12 @@ def test_bundled_catalog_is_valid_and_policy_constrained() -> None:
 
 def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
     counts = Counter(entry["product"] for entry in load_catalog().entries)
-    assert len(load_catalog().entries) == 215
+    assert len(load_catalog().entries) == 218
     assert counts == {
         "apache_airflow": 11,
+        "apache_spark": 1,
+        "apache_hadoop_yarn": 1,
+        "portainer": 1,
         "apache_zookeeper": 2,
         "clickhouse": 3,
         "docker_engine": 2,
@@ -108,7 +111,7 @@ def test_bundled_catalog_has_reviewed_coverage_per_product() -> None:
         "valkey": 3,
     }
     assert Counter(entry["impact"] for entry in load_catalog().entries)["ssrf"] == 32
-    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 98, "L": 115, "H": 2}
+    assert Counter(entry["privileges_required"] for entry in load_catalog().entries) == {"N": 98, "L": 118, "H": 2}
 
 
 @pytest.mark.parametrize(
@@ -495,7 +498,7 @@ def test_unknown_version_finding_colors_match_airflow_baseline() -> None:
     known = enumerate_record("clickhouse", {"server_version": "24.4.2.140"}, catalog=load_catalog(), confirmed=True)
     known_line = render_finding_lines({"cve_enumeration": known}, label="CLICKHOUSE", host="127.0.0.1", port=9000)[1]
     assert render_colored_marker_line(console, known_line, tag="CLICKHOUSE")
-    assert "<red>[!]</red>" in console.lines[-1]
+    assert "<true_red>[!]</true_red>" in console.lines[-1]
     assert "<orange>CVE-2024-6873 potentially affected" in console.lines[-1]
 
 

@@ -9,6 +9,7 @@ from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...clients.http_api import http_target_context
 from ...console import Console
+from ...detection_io import with_async_io_detection
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCredentialRun,
@@ -17,6 +18,7 @@ from ...stage_runtime import (
     merge_audit_credential_runs,
     run_basic_host_audit,
 )
+from ...storage_discovery import DiscoveryCollector, discover_registry_sources
 from . import actions, policy, product_render, render
 
 _DEFAULT_PORT = 5000
@@ -148,9 +150,21 @@ def build_registry_spec(args: Any, *, product: str = "registry") -> ModuleAuditS
             api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth"),
         ):
             result = actions.collect_registry_data(ctx, record, options)
+            if bool(getattr(ctx.args, "discover", False)) and result.get("status") in {
+                "open_no_auth",
+                "valid_credentials",
+                "invalid_credentials_anonymous",
+                "auth_required",
+            }:
+                discovery_record = dict(result)
+                if result.get("status") == "auth_required" and result.get("provided_credentials") is False:
+                    discovery_record["anonymous_access"] = True
+                collector = DiscoveryCollector(product, ctx, discovery_record)
+                discover_registry_sources(ctx, result, collector, product)
+                result["content_discovery"] = collector.result()
         return AuditRecord.from_mapping(result, module=product, service=product)
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module=product,
         label=product.upper(),
         default_port=(_PORTS_BY_PRODUCT.get(product) or (_DEFAULT_PORT,))[0],
@@ -159,6 +173,7 @@ def build_registry_spec(args: Any, *, product: str = "registry") -> ModuleAuditS
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
+        discover_public_on_auth_required=True,
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render if product == "registry" else product_render,
         defer_detect_output_until_auth=product == "nexus",
@@ -181,6 +196,15 @@ def build_registry_spec(args: Any, *, product: str = "registry") -> ModuleAuditS
         skip_credentials_without_verifier=bool(getattr(args, "defcreds", False)),
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
+    )
+
+    return with_async_io_detection(
+        spec,
+        actions,
+        root_name="detect_registry",
+        options=options,
+        api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth"),
+        activate_name="_activate_registry_transport",
     )
 
 

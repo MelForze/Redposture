@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import math
 from collections.abc import Callable
 
 
 def _positive_float(value: str) -> float:
     number = float(value)
+    if not math.isfinite(number):
+        raise argparse.ArgumentTypeError("must be finite")
     if number <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return number

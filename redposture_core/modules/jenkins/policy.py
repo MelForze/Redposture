@@ -5,8 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..execution_api import validate as validate_execution
+
 
 def validate_args(args: Any, console: Any) -> int | None:
+    if (execution_rc := validate_execution(args, console)) is not None:
+        return execution_rc
     token = getattr(args, "api_token", None)
     token_file = getattr(args, "api_token_file", None)
     if token_file:

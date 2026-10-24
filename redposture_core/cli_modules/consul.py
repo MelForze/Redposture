@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..modules.execution_api import add_flags as add_execution_flags
 from ..show_limits import optional_dump_count_kwargs
 
 
@@ -25,8 +26,10 @@ def configure_consul_parser(
     actions = parser.add_argument_group("Actions")
     ssrf_options = parser.add_argument_group("SSRF / Probes")
     revshell_options = parser.add_argument_group("Revshell")
+    execution_options = parser.add_argument_group("Execution")
 
     add_output_flags(common)
+    add_execution_flags(execution_options)
     add_log_flag(common)
     add_scan_host_flags(common, include_profiles=False)
     common.add_argument(

@@ -17,6 +17,7 @@ from http.cookies import SimpleCookie
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urljoin, urlsplit
 
+from ..detection_io import DetectCall, HttpRead, run_sync
 from .http_api import format_http_authority
 
 if TYPE_CHECKING:
@@ -152,16 +153,37 @@ class AirflowClient:
         extra_headers: dict[str, str] | None = None,
         response_size_cap: int = _RESPONSE_CAP,
     ) -> AirflowResponse:
+        return run_sync(
+            AirflowClient._detect_request_steps(
+                self,
+                method,
+                path,
+                authed=authed,
+                body=body,
+                extra_headers=extra_headers,
+                response_size_cap=response_size_cap,
+            )
+        )
+
+    def _detect_request_steps(
+        self,
+        method: str,
+        path: str,
+        *,
+        authed: bool,
+        body: bytes | None = None,
+        extra_headers: dict[str, str] | None = None,
+        response_size_cap: int = _RESPONSE_CAP,
+    ) -> Any:
         headers: dict[str, str] = dict(extra_headers or {})
         if authed:
             headers.update(self._auth_header())
         try:
-            resp = self._pool.request(
+            resp = yield HttpRead(
+                self._pool,
                 method,
                 f"{self.base_url}{self.base_path}{path}",
-                headers=headers,
-                body=body,
-                response_size_cap=response_size_cap,
+                {"headers": headers, "body": body, "response_size_cap": response_size_cap},
             )
         except Exception as exc:  # noqa: BLE001 - transport errors normalized for callers
             return AirflowResponse(http_status=0, headers={}, body=b"", transport_error=str(exc))
@@ -193,8 +215,26 @@ class AirflowClient:
         extra_headers: dict[str, str] | None = None,
         response_size_cap: int = _RESPONSE_CAP,
     ) -> AirflowResponse:
-        return self._request(
-            "GET", path, authed=authed, extra_headers=extra_headers, response_size_cap=response_size_cap
+        return run_sync(
+            AirflowClient._detect_get_steps(
+                self, path, authed=authed, extra_headers=extra_headers, response_size_cap=response_size_cap
+            )
+        )
+
+    def _detect_get_steps(
+        self,
+        path: str,
+        *,
+        authed: bool = True,
+        extra_headers: dict[str, str] | None = None,
+        response_size_cap: int = _RESPONSE_CAP,
+    ) -> Any:
+        return (
+            yield DetectCall(
+                self._request,
+                ("GET", path),
+                {"authed": authed, "extra_headers": extra_headers, "response_size_cap": response_size_cap},
+            )
         )
 
     def post_json(self, path: str, payload: dict[str, Any], *, authed: bool = False) -> AirflowResponse:

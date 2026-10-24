@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import quote
 
 from ...clients.http_api import http_response_requires_https
+from ...detection_steps import DetectionRequests, run_requests
 from ..token_api import ReadBudget, access, bases, json_value, request, safe_path, verdict
 from .types import DetectionStatus
 
@@ -35,20 +36,24 @@ def _contents(data: Any) -> bool:
 
 
 def detect_record(ctx: Any) -> dict[str, Any]:
+    return run_requests(detect_requests(ctx), lambda base, path: _get(ctx, base, path))
+
+
+def detect_requests(ctx: Any) -> DetectionRequests:
     reachable = False
     for base in bases(ctx):
-        response = _get(ctx, base, "/api")
+        response = yield (base, "/api")
         reachable |= response.status > 0
         data = json_value(response)
         version = data.get("version") if isinstance(data, dict) and response.status == 200 else None
-        status_response = _get(ctx, base, "/api/status")
+        status_response = yield (base, "/api/status")
         status = json_value(status_response)
         status_shape = status_response.status == 200 and _status(status)
         signals = ["jupyter.api_version"] if isinstance(version, str) and version else []
         if status_shape:
             signals.append("jupyter.status")
         else:
-            login = _get(ctx, base, "/login")
+            login = yield (base, "/login")
             text = login.text.lower()
             if (
                 login.status == 200
@@ -66,7 +71,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
                 if status_response.status in {401, 403} or "/login" in str(status_response.final_url)
                 else None
             )
-            kernels_response = _get(ctx, base, "/api/kernels") if status_shape else None
+            kernels_response = (yield (base, "/api/kernels")) if status_shape else None
             kernels = json_value(kernels_response) if kernels_response is not None else None
             kernels_allowed = (
                 kernels_response is not None
@@ -74,7 +79,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
                 and isinstance(kernels, list)
                 and all(isinstance(k, dict) and "id" in k and "name" in k for k in kernels)
             )
-            terminals_response = _get(ctx, base, "/api/terminals")
+            terminals_response = yield (base, "/api/terminals")
             terminals = json_value(terminals_response)
             terminals_allowed = (
                 terminals_response.status == 200
@@ -173,39 +178,45 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         result[name + "_access"] = state
         if state == "allowed":
             result[name] = data[:5000]
-            budget.partial |= len(data) > 5000
+            result[name + "_partial"] = len(data) > 5000
+            if result[name + "_partial"]:
+                result[name + "_error"] = "bounded snapshot item limit"
+                budget.partial = True
     discover = bool(getattr(ctx.args, "discover", False))
     if getattr(ctx.args, "show_contents", False) or discover:
-        requested.append("contents")
+        if getattr(ctx.args, "show_contents", False):
+            requested.append("contents")
         pending = deque([str(getattr(ctx.args, "path", "")).rstrip("/")])
         seen: set[str] = set()
         rows: list[dict[str, Any]] = []
         notebooks: list[dict[str, Any]] = []
         content_state = "unknown"
+        content_partial = False
         while pending and budget.allowed():
             path = pending.popleft()
             if path in seen:
                 continue
             seen.add(path)
             if len(seen) > 5000:
-                budget.partial = True
+                content_partial = True
                 break
             response = _get(
                 ctx, base, "/api/contents" + ("/" + quote(path, safe="/") if path else "") + "?content=1", token
             )
             if not budget.consume(response):
+                content_partial = True
                 break
             data = json_value(response)
             state = access(response, _contents(data))
             if len(seen) == 1:
                 content_state = state
             if state != "allowed":
-                budget.partial = True
+                content_partial = True
                 continue
             if data["type"] == "directory":
                 children = data.get("content")
                 if not isinstance(children, list):
-                    budget.partial = True
+                    content_partial = True
                     continue
                 for item in children:
                     if (
@@ -213,10 +224,10 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                         or not safe_path(item["path"])
                         or not item["path"].startswith(path + "/" if path else "")
                     ):
-                        budget.partial = True
+                        content_partial = True
                         continue
                     if len(rows) >= 5000:
-                        budget.partial = True
+                        content_partial = True
                         break
                     rows.append({key: item.get(key) for key in ("name", "path", "type", "size", "writable")})
                     if discover and item["type"] in {"notebook", "directory"}:
@@ -225,13 +236,18 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(data.get("content"), dict):
                     notebooks.append({"path": data["path"], "notebook": data["content"]})
                 else:
-                    budget.partial = True
+                    content_partial = True
             else:
                 rows.append({key: data.get(key) for key in ("name", "path", "type", "size", "writable")})
         states.append(content_state)
         result["contents_access"] = content_state
         if content_state == "allowed":
             result["contents"] = rows
+        content_partial |= bool(pending)
+        result["contents_partial"] = content_partial
+        budget.partial |= content_partial
+        if content_partial:
+            result["contents_error"] = "incomplete content inventory or discovery budget reached"
         if discover:
             result["notebook_contents"] = notebooks
     result["inventory_requested"] = requested
@@ -254,3 +270,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         if not result["execute_verified"] or result["execution"].get("cleanup") == "failed":
             result["operational_failure"] = True
     return result
+
+
+# Native adapters must not bypass an explicitly replaced synchronous detector.
+_SYNC_DETECT_RECORD = detect_record

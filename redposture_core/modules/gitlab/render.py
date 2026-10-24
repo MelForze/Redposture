@@ -6,6 +6,7 @@ from typing import Any
 
 from ...auth_detection import auth_required_text
 from ...console import Console
+from ...discovery_rendering import discovery_color_spans
 from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ..registry import product_render as oci_render
 from .actions import _format_detail_records as _format_web_details
@@ -118,6 +119,7 @@ def _render_colored_gitlab_line(console: Console, line: str) -> bool:
         ),
         extra_spans=lambda marker, payload: (
             ([(0, len(payload), "orange")] if marker == "[!]" else [])
+            + discovery_color_spans(marker, payload)
             + oci_render._registry_marker_value_spans(marker, payload)
         ),
     ):

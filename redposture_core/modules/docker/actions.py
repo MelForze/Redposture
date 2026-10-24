@@ -18,6 +18,7 @@ from ...clients.docker_engine import (
 )
 from ...clients.http_api import http_response_requires_https, infer_http_base_path
 from ...console import Console
+from ...detection_io import DetectCall, DetectDelay, run_sync
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...shell_capture import hex_preview
 from ...stage_runtime import (
@@ -132,6 +133,31 @@ def _probe_docker(
     tls_key: str | None,
     base_path: str = "",
 ) -> tuple[DockerEngineClient | None, dict[str, Any] | None, str | None, str | None, bool | None]:
+    return run_sync(
+        _detect_probe_docker_steps(
+            host,
+            port,
+            timeout,
+            insecure=insecure,
+            tls_ca=tls_ca,
+            tls_cert=tls_cert,
+            tls_key=tls_key,
+            base_path=base_path,
+        )
+    )
+
+
+def _detect_probe_docker_steps(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    insecure: bool,
+    tls_ca: str | None,
+    tls_cert: str | None,
+    tls_key: str | None,
+    base_path: str = "",
+) -> Any:
     last_error: str | None = None
     tls_error: str | None = None
     https_required = False
@@ -149,13 +175,13 @@ def _probe_docker(
             **({"base_path": base_path} if base_path else {}),
         )
         try:
-            client.ping()
+            (yield DetectCall(client.ping, (), {}))
             try:
-                version = client.version()
+                version = yield DetectCall(client.version, (), {})
             except DockerEngineHTTPError as exc:
                 if exc.status not in {404, 405}:
                     raise
-                info = client.info()
+                info = yield DetectCall(client.info, (), {})
                 version = {
                     "Version": info.get("ServerVersion"),
                     "ApiVersion": info.get("ApiVersion"),
@@ -168,7 +194,7 @@ def _probe_docker(
                 # read-only and authorization-sensitive, so use it for the
                 # exposure verdict.
                 try:
-                    info = client.info()
+                    info = yield DetectCall(client.info, (), {})
                 except DockerEngineHTTPError as exc:
                     if exc.status in {401, 403}:
                         return client, version, transport, normalize_docker_error(exc), True
@@ -178,7 +204,7 @@ def _probe_docker(
                 if _looks_like_docker_info_access(info):
                     return client, version, transport, None, False
                 return client, version, transport, "Docker /info response fingerprint mismatch", None
-            info = client.info()
+            info = yield DetectCall(client.info, (), {})
             if _looks_like_docker_info_access(info):
                 version = {
                     "Version": info.get("ServerVersion"),
@@ -323,6 +349,49 @@ def _audit_docker_host(
     run_deep_checks: bool = True,
     target_path: str | None = None,
 ) -> dict[str, Any]:
+    return run_sync(
+        _detect_audit_docker_host_steps(
+            host,
+            port,
+            timeout,
+            retries,
+            insecure=insecure,
+            tls_ca=tls_ca,
+            tls_cert=tls_cert,
+            tls_key=tls_key,
+            show_containers=show_containers,
+            show_images=show_images,
+            show_networks=show_networks,
+            show_volumes=show_volumes,
+            show_system=show_system,
+            container_selector=container_selector,
+            exec_cmd=exec_cmd,
+            run_deep_checks=run_deep_checks,
+            target_path=target_path,
+        )
+    )
+
+
+def _detect_audit_docker_host_steps(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    *,
+    insecure: bool = False,
+    tls_ca: str | None = None,
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
+    show_containers: bool = False,
+    show_images: bool = False,
+    show_networks: bool = False,
+    show_volumes: bool = False,
+    show_system: bool = False,
+    container_selector: str | None = None,
+    exec_cmd: str | None = None,
+    run_deep_checks: bool = True,
+    target_path: str | None = None,
+) -> Any:
     record = _base_record(host, port)
     attempts = max(1, int(retries) + 1)
     client: DockerEngineClient | None = None
@@ -333,20 +402,21 @@ def _audit_docker_host(
 
     for attempt in range(attempts):
         base_path = infer_http_base_path(str(target_path or ""), ("/_ping", "/version", "/info", "/containers"))
-        client, version, transport, last_error, auth_required = _probe_docker(
-            host,
-            port,
-            timeout,
-            insecure=insecure,
-            tls_ca=tls_ca,
-            tls_cert=tls_cert,
-            tls_key=tls_key,
-            **({"base_path": base_path} if base_path else {}),
+        client, version, transport, last_error, auth_required = yield DetectCall(
+            _probe_docker,
+            (host, port, timeout),
+            {
+                "insecure": insecure,
+                "tls_ca": tls_ca,
+                "tls_cert": tls_cert,
+                "tls_key": tls_key,
+                **({"base_path": base_path} if base_path else {}),
+            },
         )
         if client is not None and (version is not None or auth_required):
             break
         if attempt + 1 < attempts:
-            time.sleep(_retry_delay(attempt))
+            (yield DetectDelay(_retry_delay(attempt)))
 
     if auth_required is True:
         record.update(
@@ -400,15 +470,16 @@ def _audit_docker_host(
         # the same read-only Engine probe without the certificate before
         # describing it as an accepted credential.
         base_path = infer_http_base_path(str(target_path or ""), ("/_ping", "/version", "/info", "/containers"))
-        anonymous_client, anonymous_version, _mode, anonymous_error, anonymous_auth_required = _probe_docker(
-            host,
-            port,
-            timeout,
-            insecure=insecure,
-            tls_ca=tls_ca,
-            tls_cert=None,
-            tls_key=None,
-            **({"base_path": base_path} if base_path else {}),
+        anonymous_client, anonymous_version, _mode, anonymous_error, anonymous_auth_required = yield DetectCall(
+            _probe_docker,
+            (host, port, timeout),
+            {
+                "insecure": insecure,
+                "tls_ca": tls_ca,
+                "tls_cert": None,
+                "tls_key": None,
+                **({"base_path": base_path} if base_path else {}),
+            },
         )
         if anonymous_client is not None:
             _close_docker_client(anonymous_client)
@@ -483,7 +554,7 @@ def _audit_docker_host(
     if show_system:
         system: dict[str, Any] = {}
         try:
-            system["info"] = client.info()
+            system["info"] = yield DetectCall(client.info, (), {})
             capabilities["can_read_system_info"] = True
         except DockerEngineError as exc:
             system["info_error"] = normalize_docker_error(exc)
@@ -566,26 +637,73 @@ def _audit_docker_host_stage(
     debug_emit: Callable[[str], None] | None = None,
     target_path: str | None = None,
 ) -> dict[str, Any]:
+    return run_sync(
+        _detect_audit_docker_host_stage_steps(
+            host,
+            port,
+            timeout,
+            retries,
+            insecure=insecure,
+            tls_ca=tls_ca,
+            tls_cert=tls_cert,
+            tls_key=tls_key,
+            show_containers=show_containers,
+            show_images=show_images,
+            show_networks=show_networks,
+            show_volumes=show_volumes,
+            show_system=show_system,
+            container_selector=container_selector,
+            exec_cmd=exec_cmd,
+            run_deep_checks=run_deep_checks,
+            debug=debug,
+            debug_emit=debug_emit,
+            target_path=target_path,
+        )
+    )
+
+
+def _detect_audit_docker_host_stage_steps(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    *,
+    insecure: bool = False,
+    tls_ca: str | None = None,
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
+    show_containers: bool = False,
+    show_images: bool = False,
+    show_networks: bool = False,
+    show_volumes: bool = False,
+    show_system: bool = False,
+    container_selector: str | None = None,
+    exec_cmd: str | None = None,
+    run_deep_checks: bool = True,
+    debug: bool = False,
+    debug_emit: Callable[[str], None] | None = None,
+    target_path: str | None = None,
+) -> Any:
     started = time.monotonic()
     attempts = max(1, int(retries) + 1)
-    record = _audit_docker_host(
-        host,
-        port,
-        timeout,
-        retries,
-        insecure=insecure,
-        tls_ca=tls_ca,
-        tls_cert=tls_cert,
-        tls_key=tls_key,
-        show_containers=show_containers if run_deep_checks else False,
-        show_images=show_images if run_deep_checks else False,
-        show_networks=show_networks if run_deep_checks else False,
-        show_volumes=show_volumes if run_deep_checks else False,
-        show_system=show_system if run_deep_checks else False,
-        container_selector=container_selector if run_deep_checks else None,
-        exec_cmd=exec_cmd if run_deep_checks else None,
-        run_deep_checks=run_deep_checks,
-        **({"target_path": target_path} if target_path else {}),
+    record = yield DetectCall(
+        _audit_docker_host,
+        (host, port, timeout, retries),
+        {
+            "insecure": insecure,
+            "tls_ca": tls_ca,
+            "tls_cert": tls_cert,
+            "tls_key": tls_key,
+            "show_containers": show_containers if run_deep_checks else False,
+            "show_images": show_images if run_deep_checks else False,
+            "show_networks": show_networks if run_deep_checks else False,
+            "show_volumes": show_volumes if run_deep_checks else False,
+            "show_system": show_system if run_deep_checks else False,
+            "container_selector": container_selector if run_deep_checks else None,
+            "exec_cmd": exec_cmd if run_deep_checks else None,
+            "run_deep_checks": run_deep_checks,
+            **({"target_path": target_path} if target_path else {}),
+        },
     )
     elapsed_ms = int((time.monotonic() - started) * 1000)
     status = str(record.get("status") or "fail")
@@ -889,11 +1007,11 @@ def _render_colored_docker_line(console: Console, line: str) -> bool:
         tag=_DOCKER_TAG,
         literals=(("transport:plaintext", "yellow"), ("transport:tls", "bright_green")),
         counts=(
-            CountColorRule("containers", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("images", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("networks", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("volumes", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("count", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("containers", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("images", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("networks", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("volumes", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("count", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
     ):
         return True
@@ -911,3 +1029,13 @@ __all__ = [
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _audit_docker_host_stage
+
+
+_ASYNC_DETECT_STEPS: dict[Any, Any] = {
+    _probe_docker: _detect_probe_docker_steps,
+    _audit_docker_host: _detect_audit_docker_host_steps,
+    _audit_docker_host_stage: _detect_audit_docker_host_stage_steps,
+    DockerEngineClient.ping: DockerEngineClient._detect_ping_steps,
+    DockerEngineClient.version: DockerEngineClient._detect_version_steps,
+    DockerEngineClient.info: DockerEngineClient._detect_info_steps,
+}

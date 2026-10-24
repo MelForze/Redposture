@@ -270,7 +270,7 @@ def test_discovery_finding_and_summary_use_common_colors():
 
     finding_console = _Console()
     assert render._render_colored_airflow_line(finding_console, finding)
-    assert "<red>[!]</red>" in finding_console.lines[0]
+    assert "<true_red>[!]</true_red>" in finding_console.lines[0]
     assert '<orange>Pass Value="secret" Place="dag/run/task/try:1/map:-1$"</orange>' in finding_console.lines[0]
 
 

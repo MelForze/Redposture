@@ -19,7 +19,7 @@ from ...stage_runtime import (
     command_result_exit_code,
     install_record_callback,
 )
-from . import actions, policy, render
+from . import actions, execution, policy, render
 
 _DEFAULT_PORT = 8500
 _DEFAULT_PORTS = (8500, 8501, 18500, 18501, 28500, 28501)
@@ -88,11 +88,9 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
         )
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.collect_consul_data(ctx, record, options),
-            module="consul",
-            service="consul",
-        )
+        payload = actions.collect_consul_data(ctx, record, options)
+        payload = execution.collect(ctx, payload, ctx.lifecycle_state)
+        return AuditRecord.from_mapping(payload, module="consul", service="consul")
 
     def _state_factory(ctx: Any) -> actions.ConsulLifecycleState:
         target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
@@ -137,7 +135,7 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
             ),
         )
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="consul",
         label="CONSUL",
         default_port=_DEFAULT_PORT,
@@ -152,6 +150,10 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
         colorize=render._render_colored_consul_line,
         is_detected=lambda record: record.extra.get("is_consul") is True,
     )
+
+    from .async_detect import bind
+
+    return bind(spec, options)
 
 
 def run_consul_stage(args: Any, logger: Any) -> int:

@@ -163,7 +163,7 @@ def _render_trigger_row(
     logger: AttemptLogger | None = None,
 ) -> None:
     stream = console._diagnostic_stream()
-    marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "red", "[!]": "red"}.get(marker, "white")
+    marker_color = {"[*]": "cyan", "[+]": "bright_green", "[-]": "true_red", "[!]": "true_red"}.get(marker, "white")
     clipped_target = _clip_text(target, 64)
     target_segment = "\t" + clipped_target + "\t-\t"
     line = (
@@ -187,7 +187,7 @@ def _render_trigger_callback_row(
     logger: AttemptLogger | None = None,
 ) -> None:
     stream = console._diagnostic_stream()
-    marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "red", "[!]": "red"}.get(marker, "white")
+    marker_color = {"[*]": "cyan", "[+]": "bright_green", "[-]": "true_red", "[!]": "true_red"}.get(marker, "white")
     clipped_target = _clip_text(callback_target, 64)
     clipped_port = _clip_text(callback_port, 16)
     target_segment = "\t" + clipped_target + "\t" + clipped_port + "\t"
@@ -211,7 +211,7 @@ def _render_trigger_check_row(
     logger: AttemptLogger | None = None,
 ) -> None:
     stream = console._diagnostic_stream()
-    marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "red", "[!]": "red"}.get(marker, "white")
+    marker_color = {"[*]": "cyan", "[+]": "bright_green", "[-]": "true_red", "[!]": "true_red"}.get(marker, "white")
     clipped_target = _clip_text(target, 64)
     clipped_port = _clip_text(port, 16)
     target_segment = "\t" + clipped_target + "\t" + clipped_port + "\t"
@@ -219,12 +219,12 @@ def _render_trigger_check_row(
     spans: list[tuple[int, int, str]] = []
     for fragment, color in (
         ("(auth required:True)", "bright_green"),
-        ("(auth required:False)", "red"),
+        ("(auth required:False)", "true_red"),
         ("(auth required:unknown)", "yellow"),
         ("(auth required:sso)", "bright_green"),
-        ("(superuser:True)", "red"),
-        ("(execute:True)", "red"),
-        ("(read:True)", "red"),
+        ("(superuser:True)", "true_red"),
+        ("(execute:True)", "true_red"),
+        ("(read:True)", "true_red"),
     ):
         idx = body.find(fragment)
         if idx >= 0:
@@ -236,7 +236,7 @@ def _render_trigger_check_row(
 
     key_match = re.search(r"\(keys:(\d+)(?: [^)]*)?\)", body)
     if key_match and key_match.group(1).isdigit() and int(key_match.group(1)) > 0:
-        spans.append((key_match.start(), key_match.end(), "red"))
+        spans.append((key_match.start(), key_match.end(), "true_red"))
 
     body_colored = colorize_spans(console, body, spans)
 

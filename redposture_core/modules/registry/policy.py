@@ -4,13 +4,21 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...discovery_options import validate_discovery_budget
 from ...stage_runtime import validate_basic_module_args
+from ..execution_api import validate as validate_execution
 
 
 def validate_args(args: Any, console: Any, *, product: str = "registry") -> int | None:
+    if bool(getattr(args, "discover", False)):
+        if (budget_error := validate_discovery_budget(args, console)) is not None:
+            return budget_error
     common_rc = validate_basic_module_args(args, console, module=product)
     if common_rc is not None:
         return common_rc
+    if product == "nexus":
+        if (execution_rc := validate_execution(args, console)) is not None:
+            return execution_rc
     if getattr(args, "token", None) and (
         getattr(args, "username", None) is not None or getattr(args, "password", None) is not None
     ):

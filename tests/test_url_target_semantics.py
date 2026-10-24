@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, cast
 
 import pytest
 
@@ -279,6 +280,11 @@ def test_exporter_streamed_urls_without_ports_keep_distinct_schemes(
     observed: list[tuple[str, int, str]] = []
 
     def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        streamed_items = kwargs.get("work_items")
+        if streamed_items is not None:
+            items = list(cast(Iterable[tuple[str, int, str]], streamed_items))
+            observed.extend(items)
+            return len(items), 0, {host: [] for host, _port, _scheme in items}
         hosts = [str(host) for host in kwargs.get("hosts") or []]
         ports = [int(port) for port in kwargs.get("custom_ports") or []]
         scheme = str(kwargs.get("scheme") or "http")
@@ -293,6 +299,16 @@ def test_exporter_streamed_urls_without_ports_keep_distinct_schemes(
     monkeypatch.setattr(f"redposture_core.stage_{stage}.DEFAULT_MAX_NETWORK_HOSTS", 1)
     monkeypatch.setattr(f"redposture_core.stage_{stage}.load_profiles", lambda *_args, **_kwargs: profiles)
     monkeypatch.setattr(f"redposture_core.stage_{stage}.scan_exporter_presence", fake_scan)
+    if stage == "collect":
+        from tests.test_collect_streaming import scan_result
+
+        def fake_probe(host: str, port: int, *_args: object, scheme: str = "http"):
+            observed.append((host, port, scheme))
+            record, _hit = scan_result(host, port, scheme=scheme)
+            record["detected"] = False
+            return record, None
+
+        monkeypatch.setattr("redposture_core.exporters.discover.scan_presence_port_task", fake_probe)
     args = parse_args(["exporters", stage, "-t", "http://127.0.0.1,https://127.0.0.2"])
     rc = run_scan_stage(args) if stage == "scan" else run_collect_stage(args, AttemptLogger())
 

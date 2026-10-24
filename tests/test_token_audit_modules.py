@@ -372,7 +372,7 @@ def test_color_baseline_matches_airflow_semantics(module: str) -> None:
     console.paints.clear()
     record["token_valid"] = False
     assert color(console, render._format_record(record, "txt"))
-    assert any("rejected" in text.lower() and value == "bright_green" for text, value in console.paints)
+    assert any("rejected" in text.lower() and value == "white" for text, value in console.paints)
     assert render._format_detect_record(record, "json") == ""
     assert render._format_record(record, "json") == ""
     assert render._format_inventory_records(record, "json") == []

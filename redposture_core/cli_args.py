@@ -571,6 +571,9 @@ _ROOT_HELP_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("keycloak", "realms, tokens, clients"),
             ("vault", "seal state, tokens, secret engines"),
             ("nomad", "ACL, tokens, jobs and nodes"),
+            ("spark", "standalone Master, workers, apps and REST"),
+            ("yarn", "ResourceManager, apps, nodes and metrics"),
+            ("portainer", "panel credentials and Docker environments"),
             ("jupyter", "notebooks, sessions and kernels"),
             ("kubeapi", "namespaces and workloads"),
             ("proxmox", "nodes, VMs, storage"),
@@ -625,6 +628,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     from .data_discovery import DISCOVERY_MODULES
+    from .discovery_options import add_discovery_budget_flags
 
     discovery_groups = {
         "mongodb": "Discovery / Dump",
@@ -634,6 +638,12 @@ def build_parser() -> argparse.ArgumentParser:
         "vault": "Inventory",
         "nomad": "Inventory",
         "jupyter": "Inventory",
+        "spark": "Inventory",
+        "yarn": "Inventory",
+        "portainer": "Inventory",
+        "nexus": "Nexus repositories / OCI images",
+        "harbor": "OCI images",
+        "docker-registry": "OCI images",
     }
     for name in sorted(DISCOVERY_MODULES):
         subparser = subparsers.choices.get(name)
@@ -647,6 +657,8 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="Read bounded accessible content and inspect it for secrets.",
             )
+            if not any(action.dest == "discover_max_bytes" for action in subparser._actions):
+                add_discovery_budget_flags(group, default_time=300.0, default_bytes=50 * 1024 * 1024)
 
     return parser
 

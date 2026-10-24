@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from redposture_core import stage_collect as collect
-from redposture_core.exporters.output import format_collect_record
+from redposture_core import targeting
 from redposture_core.logger import AttemptLogger
 from redposture_core.stage_collect import run_collect_stage
 
@@ -107,159 +107,35 @@ def test_collect_stage_excludes_out_targets_before_scanning(
     assert "all targets were excluded by --out-target" in capsys.readouterr().err
 
 
-def test_run_collect_stage_large_cidr_chunks_output_and_summary(
+def test_run_collect_stage_large_cidr_streams_output_and_summary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    output_path = tmp_path / "collect.txt"
-    scan_calls: list[list[str]] = []
-    collect_calls: list[tuple[list[str], str]] = []
+    from functools import partial
 
+    from redposture_core.exporters import collect as workflow
+    from redposture_core.exporters import discover
+    from tests.test_collect_streaming import PROFILES, fetch_result, scan_result
+
+    output_path = tmp_path / "collect.txt"
     monkeypatch.setattr(collect, "DEFAULT_MAX_NETWORK_HOSTS", 1)
+    monkeypatch.setattr(collect, "load_profiles", lambda _: PROFILES)
+    monkeypatch.setattr(
+        discover, "scan_presence_port_task", lambda host, port, *_a, **kw: scan_result(host, port, **kw)
+    )
     monkeypatch.setattr(
         collect,
-        "load_profiles",
-        lambda _path: {
-            "discovery_exporters": [{"name": "node_exporter", "port": 9100, "markers": ()}],
-            "collect_exporters": [{"name": "node_exporter", "port": 9100}],
-            "collect_debug_endpoints": ["/debug/vars"],
-        },
+        "collect_exporter_debug_data",
+        partial(workflow.collect_exporter_debug_data, collect_task_fn=fetch_result),
     )
-
-    def fake_scan_exporter_presence(
-        hosts,
-        timeout,
-        output_path,
-        output_format="json",
-        logger=None,
-        emit_line=None,
-        workers=10,
-        retries=3,
-        discovery_exporters=None,
-        custom_ports=None,
-        emit_summary=True,
-        show_progress=False,
-        progress_leave=True,
-        progress_owner=None,
-        stats_sink=None,
-    ):
-        _ = (
-            timeout,
-            output_path,
-            output_format,
-            logger,
-            emit_line,
-            workers,
-            retries,
-            discovery_exporters,
-            custom_ports,
-            emit_summary,
-            show_progress,
-            progress_leave,
-            progress_owner,
-            stats_sink,
-        )
-        host_list = list(hosts)
-        scan_calls.append(host_list)
-        found_by_host = {
-            host: [{"exporter": "node_exporter", "port": 9100, "url": f"http://{host}:9100/metrics"}]
-            for host in host_list
-        }
-        return len(host_list), len(host_list), found_by_host
-
-    def fake_collect_exporter_debug_data(
-        logger,
-        hosts,
-        timeout,
-        output_path,
-        output_format="json",
-        emit_line=None,
-        workers=10,
-        retries=3,
-        collect_exporters=None,
-        collect_debug_endpoints=None,
-        found_by_host=None,
-        save_responses_dir=None,
-        record_callback=None,
-        output_mode="w",
-        index_mode="w",
-        emit_summary=True,
-        adaptive_collect=True,
-        max_inflight_requests=None,
-        resume_completed_jobs=None,
-        checkpoint_path=None,
-        checkpoint_mode="a",
-        stats_sink=None,
-        progress_owner=None,
-    ):
-        _ = (
-            logger,
-            timeout,
-            workers,
-            retries,
-            collect_exporters,
-            collect_debug_endpoints,
-            found_by_host,
-            save_responses_dir,
-            index_mode,
-            emit_summary,
-            adaptive_collect,
-            max_inflight_requests,
-            resume_completed_jobs,
-            checkpoint_path,
-            checkpoint_mode,
-            stats_sink,
-            progress_owner,
-        )
-        host_list = list(hosts)
-        collect_calls.append((host_list, output_mode))
-        lines = []
-        for host in host_list:
-            record = {
-                "timestamp": "2026-03-27T00:00:00Z",
-                "host": host,
-                "exporter": "node_exporter",
-                "port": 9100,
-                "endpoint": "/debug/vars",
-                "url": f"http://{host}:9100/debug/vars",
-                "ok": True,
-                "status": 200,
-                "elapsed_ms": 1,
-                "content_type": "text/plain",
-                "error": None,
-                "truncated": False,
-                "body": "ok",
-            }
-            if record_callback is not None:
-                record_callback(record)
-            lines.append(format_collect_record(record, output_format))
-        if output_path:
-            with open(output_path, output_mode, encoding="utf-8") as fh:
-                for line in lines:
-                    fh.write(line + "\n")
-        if emit_line is not None:
-            for line in lines:
-                emit_line(line)
-        return len(host_list), len(host_list)
-
-    monkeypatch.setattr(collect, "scan_exporter_presence", fake_scan_exporter_presence)
-    monkeypatch.setattr(collect, "collect_exporter_debug_data", fake_collect_exporter_debug_data)
-
-    rc = run_collect_stage(
-        _base_args(targets="10.0.0.0/30", output=str(output_path), workers=1),
-        logger=AttemptLogger(),
+    assert (
+        run_collect_stage(_base_args(targets="10.0.0.0/30", output=str(output_path), workers=1), AttemptLogger()) == 0
     )
-
-    assert rc == 0
-    assert scan_calls == [["10.0.0.1", "10.0.0.2"]]
-    assert collect_calls == [(["10.0.0.1", "10.0.0.2"], "w")]
-    lines = output_path.read_text(encoding="utf-8").splitlines()
+    lines = output_path.read_text().splitlines()
     assert len(lines) == 4
-    assert "Node Exporter" in lines[0]
-    assert "Node Exporter" in lines[1]
-    assert lines[2].startswith("VALIDATE")
-    assert lines[-1].startswith("COLLECT")
-    assert "requests=2" in lines[-1]
-    assert "success=2" in lines[-1]
+    assert "Node Exporter" in lines[0] and "Node Exporter" in lines[1]
+    assert lines[2].startswith("VALIDATE") and lines[-1].startswith("COLLECT")
+    assert "requests=2" in lines[-1] and "success=2" in lines[-1]
+    assert "\x1b" not in output_path.read_text()
 
 
 def test_run_collect_stage_large_cidr_resume_keeps_checkpoint_jobs_lazy(
@@ -1769,61 +1645,108 @@ def test_collect_stage_explicit_url_targets_use_single_global_progress(monkeypat
 
 
 def test_collect_stage_large_list_uses_command_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The huge-target chunked path must also own a single command-level progress bar
-    # (counted by hosts), instead of running with no progress at all.
+    from functools import partial
+
+    from redposture_core.exporters import collect as workflow
+    from redposture_core.exporters import discover
+    from tests.test_collect_streaming import PROFILES, fetch_result, scan_result
+
+    monkeypatch.setattr(collect, "DEFAULT_MAX_NETWORK_HOSTS", 1)
+    monkeypatch.setattr(collect, "load_profiles", lambda _: PROFILES)
+    monkeypatch.setattr(
+        discover, "scan_presence_port_task", lambda host, port, *_a, **kw: scan_result(host, port, **kw)
+    )
+    monkeypatch.setattr(
+        collect,
+        "collect_exporter_debug_data",
+        partial(workflow.collect_exporter_debug_data, collect_task_fn=fetch_result),
+    )
+    totals = []
+    advances = []
+    closed = []
+
+    class Progress:
+        def set_total(self, total):
+            totals.append(total)
+
+        def advance(self, amount=1):
+            advances.append(amount)
+
+        def close(self):
+            closed.append(True)
+
+        def pause_for_output(self):
+            pass
+
+    def start(_label, total, **_kw):
+        totals.append(total)
+        return Progress()
+
+    monkeypatch.setattr(workflow, "start_audit_progress", start)
+    assert run_collect_stage(_base_args(targets="10.0.0.0/30"), AttemptLogger()) == 0
+    assert totals[0] == 2
+    assert totals[-1] == sum(advances) == 4
+    assert closed == [True]
+
+
+def test_large_bare_ipv4_collect_scans_hosts_without_building_specs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "hosts.txt"
+    path.write_text("10.0.0.1\n10.0.0.2\n", encoding="utf-8")
     monkeypatch.setattr(collect, "DEFAULT_MAX_NETWORK_HOSTS", 1)
     monkeypatch.setattr(
         collect,
         "load_profiles",
-        lambda *_a, **_k: {
-            "discovery_exporters": [{"port": 9100}],
-            "collect_exporters": [],
+        lambda _path: {
+            "discovery_exporters": [{"name": "node_exporter", "port": 9100}],
+            "collect_exporters": [{"name": "node_exporter", "port": 9100}],
             "collect_debug_endpoints": ["/debug/vars"],
         },
     )
 
-    scan_show_progress_flags: list[bool] = []
+    def unexpected_specs(_self: object):
+        raise AssertionError("host-only exporter collect must not create ScanTargetSpec")
 
-    def fake_scan(*_a: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
-        scan_show_progress_flags.append(bool(kwargs.get("show_progress", True)))
-        hosts = list(kwargs.get("hosts") or [])
-        # found>0 so the per-chunk collect runs and we can assert it owns no bar
-        return len(hosts), len(hosts), {h: [{"exporter": "node_exporter", "port": 9100}] for h in hosts}
+    monkeypatch.setattr(targeting._IPv4LiteralTargetEntry, "iter_specs", unexpected_specs)
+    observed: list[str] = []
 
-    collect_owner_args: list[object] = []
+    from redposture_core.exporters import discover
+    from tests.test_collect_streaming import scan_result
 
-    def fake_collect(*_a: object, **kwargs: object) -> tuple[int, int]:
-        collect_owner_args.append(kwargs.get("progress_owner"))
-        return 0, 0
+    def fake_scan(host, port, *_args, **kwargs):
+        observed.append(host)
+        record, _hit = scan_result(host, port, **kwargs)
+        record["detected"] = False
+        return record, None
+
+    monkeypatch.setattr(discover, "scan_presence_port_task", fake_scan)
+    assert run_collect_stage(_base_args(targets=str(path)), AttemptLogger()) == 0
+    assert observed == ["10.0.0.1", "10.0.0.2"]
+
+
+@pytest.mark.parametrize(("explicit", "expected_workers"), [(False, 128), (True, 4)])
+def test_collect_worker_profile_scales_only_automatic_large_input(
+    monkeypatch: pytest.MonkeyPatch, explicit: bool, expected_workers: int
+) -> None:
+    monkeypatch.setattr("redposture_core.exporters.workflows.EXPORTER_LARGE_TARGET_THRESHOLD", 2)
+    monkeypatch.setattr(
+        collect,
+        "load_profiles",
+        lambda _path: {
+            "discovery_exporters": [{"name": "node_exporter", "port": 9100}],
+            "collect_exporters": [{"name": "node_exporter", "port": 9100}],
+            "collect_debug_endpoints": ["/debug/vars"],
+        },
+    )
+    observed: list[int] = []
+
+    def fake_scan(*_args: object, **kwargs: object):
+        observed.append(kwargs["workers"])
+        kwargs["stats_sink"]["errors"] = 0
+        return 2, 0, {}
 
     monkeypatch.setattr(collect, "scan_exporter_presence", fake_scan)
-    monkeypatch.setattr(collect, "collect_exporter_debug_data", fake_collect)
-
-    progress_totals: list[int] = []
-    progress_advances: list[int] = []
-    progress_closed = 0
-
-    class _DummyProgress:
-        def __init__(self, _label: str, total: int, **_kw: object) -> None:
-            progress_totals.append(total)
-
-        def advance(self, amount: int = 1) -> None:
-            progress_advances.append(amount)
-
-        def close(self) -> None:
-            nonlocal progress_closed
-            progress_closed += 1
-
-    monkeypatch.setattr(
-        "redposture_core.stage_collect.start_command_progress",
-        lambda _args, label, total, **kw: _DummyProgress(label, total, **kw),
-    )
-
-    rc = run_collect_stage(_base_args(targets="10.0.0.0/30"), AttemptLogger())
-    assert rc == 0
-    assert scan_show_progress_flags and not any(scan_show_progress_flags)  # per-chunk scan progress off
-    assert progress_totals == [2]  # one command-level bar for 10.0.0.1 + 10.0.0.2
-    assert sum(progress_advances) == 2  # advanced by host count across chunks
-    assert progress_closed == 1
-    # per-chunk collect must NOT own its own bar (would close the command-level one)
-    assert collect_owner_args and all(owner is None for owner in collect_owner_args)
+    args = _base_args(targets="10.0.0.1,10.0.0.2", _workers_option_provided=explicit)
+    assert run_collect_stage(args, AttemptLogger()) == 0
+    assert observed == [expected_workers]

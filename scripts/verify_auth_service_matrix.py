@@ -89,6 +89,16 @@ def _credential_accepted(record: dict[str, Any]) -> bool:
     )
 
 
+def _credential_rejected(record: dict[str, Any]) -> bool:
+    return not _credential_accepted(record) and (
+        any(record.get(field) is False for field in ("provided_credentials_ok", "auth_valid", "credentials_valid"))
+        or record.get("credential_state") == "invalid"
+        or record.get("auth_probe_status") == "rejected"
+        or record.get("credential_verification") == "rejected"
+        or record.get("status") == "invalid_credentials"
+    )
+
+
 def _wait_for_anonymous_result(case: AuthCase, timeout: float = 240.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last_error: BaseException | None = None
@@ -121,6 +131,8 @@ def main() -> int:
         invalid = _scan(case, (case.valid_user, "definitely-wrong"))
         if _credential_accepted(invalid):
             raise AssertionError(f"{case.module}: invalid credentials were accepted: {invalid}")
+        if not _credential_rejected(invalid):
+            raise AssertionError(f"{case.module}: wrong-pair rejection unverified: {invalid}")
         if invalid.get("auth_required") is not True:
             raise AssertionError(f"{case.module}: invalid credentials lost auth-required state: {invalid}")
         print(f"[ok] {case.module}: anonymous denied, valid accepted, invalid rejected")

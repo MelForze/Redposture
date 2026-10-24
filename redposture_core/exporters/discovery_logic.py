@@ -171,7 +171,7 @@ def resolve_best_exporter_candidate(
     top_metric_score = int(top_candidate.get("score") or 0)
     top_metric_strong = int(top_candidate.get("strong_count") or 0)
     second_metric_score = int(runner_up.get("score") or 0) if runner_up is not None else -1
-    second_metric_strong = int(runner_up.get("strong_count") or 0) if runner_up is not None else -1
+    second_metric_strong = int(runner_up.get("strong_count") or 0) if runner_up is not None else 0
 
     if top_fp <= 0:
         if top_metric_strong > second_metric_strong and top_metric_score > second_metric_score:

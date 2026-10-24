@@ -110,6 +110,9 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "sql_shell": "interactive SQL shell is intentionally excluded from non-interactive matrix.",
     },
     "consul": {
+        "execute": "Consul execute is covered by focused execution regression and loopback tests; the regular matrix stays read-only.",
+        "execute_timeout": "Consul execute timeout handling is covered by focused execution regression and loopback tests.",
+        "execute_max_bytes": "Consul execute output bounds are covered by focused execution regression and loopback tests.",
         "delete": "destructive check deletion is unit-tested; matrix creates no persistent revshell checks.",
         "listen": "local reverse-shell listener is excluded from sequential matrix.",
         "revshell_check_id": "targeted revshell check IDs are excluded with revshell cleanup behavior.",
@@ -148,6 +151,9 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "show_clients": "Admin client inventory runs in the focused Keycloak suite.",
     },
     "jenkins": {
+        "execute": "Jenkins execute is covered by focused execution regression and loopback tests; the regular matrix stays read-only.",
+        "execute_timeout": "Jenkins execute timeout handling is covered by focused execution regression and loopback tests.",
+        "execute_max_bytes": "Jenkins execute output bounds are covered by focused execution regression and loopback tests.",
         "discover": "Jenkins uses an ephemeral focused loopback stand; live discovery is covered there rather than in the Docker matrix.",
         "debug": "Jenkins diagnostics are covered by focused CLI and output tests.",
         "targets": "prefixed URL targets run in the focused Jenkins loopback suite.",
@@ -172,6 +178,9 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "ca_file": "custom CA verification is covered by shared ZooKeeper TLS tests; the matrix uses default trust.",
     },
     "kafka": {
+        "execute": "Kafka UI execute is covered by the focused Provectus UI execution suite; broker matrix cases remain read-only.",
+        "execute_timeout": "Kafka UI execute timeout handling is covered by the focused Provectus UI execution suite.",
+        "execute_max_bytes": "Kafka UI execute output bounds are covered by the focused Provectus UI execution suite.",
         "show_clusters": "Kafka UI inventory is covered by the focused loopback UI suite; the Docker matrix has broker endpoints only.",
         "show_brokers": "Kafka UI inventory is covered by the focused loopback UI suite; the Docker matrix has broker endpoints only.",
         "show_consumer_groups": "Kafka UI inventory is covered by the focused loopback UI suite; the Docker matrix has broker endpoints only.",
@@ -192,6 +201,11 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "probe_write": "the shared ephemeral write probe is exercised by ZooKeeper lab and Keeper parity unit tests.",
         "tls_cert": "Keeper and ZooKeeper share mTLS validation; certificate pairing is covered by shared tests.",
         "tls_key": "Keeper and ZooKeeper share mTLS validation; key pairing is covered by shared tests.",
+    },
+    "nexus": {
+        "execute": "Nexus execute is covered by focused script API regression tests and the isolated execution stand; the regular matrix stays read-only.",
+        "execute_timeout": "Nexus execute timeout handling is covered by focused script API regression tests.",
+        "execute_max_bytes": "Nexus execute output bounds are covered by focused script API regression tests.",
     },
 }
 
@@ -218,6 +232,45 @@ _FOCUSED_COMMON = frozenset(
     }
 )
 _FOCUSED_ACTIONS = {
+    "spark": _FOCUSED_COMMON
+    | {
+        "show_workers",
+        "show_apps",
+        "probe_submit",
+        "execute",
+        "execute_timeout",
+        "execute_max_bytes",
+        "execute_worker_url",
+    },
+    "yarn": _FOCUSED_COMMON
+    | {
+        "show_apps",
+        "show_nodes",
+        "show_metrics",
+        "probe_submit",
+        "execute",
+        "execute_timeout",
+        "execute_max_bytes",
+        "execute_node_url",
+    },
+    "portainer": _FOCUSED_COMMON
+    | {
+        "username",
+        "password",
+        "defcreds",
+        "secure",
+        "endpoints",
+        "endpoint",
+        "containers",
+        "images",
+        "networks",
+        "volumes",
+        "system",
+        "container",
+        "execute",
+        "execute_timeout",
+        "execute_max_bytes",
+    },
     "vault": _FOCUSED_COMMON | {"defcreds", "show_mounts", "show_auth", "mount"},
     "nomad": _FOCUSED_COMMON
     | {
@@ -252,6 +305,18 @@ _FOCUSED_TESTS = (
     "tests/test_nomad_jupyter_execute.py",
     "tests/test_execution_websocket.py",
     "tests/test_nomad_jupyter_execute_http.py",
+    "tests/test_spark.py",
+    "tests/test_spark_render_stage.py",
+    "tests/test_spark_http_integration.py",
+    "tests/test_yarn_module.py",
+    "tests/test_yarn_http_integration.py",
+    "tests/test_portainer.py",
+    "tests/test_portainer_http.py",
+    "tests/test_cluster_panel_integration.py",
+    "tests/test_cluster_panel_fuzz.py",
+    "tests/test_portainer_budget_regressions.py",
+    "tests/test_portainer_render_contract.py",
+    "tests/test_portainer_live_output.py",
 )
 
 
@@ -263,6 +328,25 @@ def _focused_evidence(path: Path) -> set[str]:
     if not cases or any(case.find(tag) is not None for case in cases for tag in ("failure", "error", "skipped")):
         return set()
     result = set()
+    required = {
+        "spark": (
+            "test_real_http_spark_runner_prefix_tls_and_clean_saved_output[",
+            "test_explicit_probe_real_http_keeps_create_payload_non_executable[",
+        ),
+        "yarn": (
+            "test_runner_prefix_tls_discovery_inventory_and_plain_outputs[",
+            "test_cli_probe_sends_only_application_id_allocation[",
+        ),
+        "portainer": (
+            "test_real_portainer_auth_inventory_prefix_tls_and_clean_files[",
+            "test_full_command_defcreds_stops_after_first_429",
+            "test_real_spray_preserves_portainer_verifier_for_pairs_and_tokens[",
+        ),
+    }
+    names = [str(case.get("name", "")) for case in cases]
+    for module, prefixes in required.items():
+        if all(any(name.startswith(prefix) for name in names) for prefix in prefixes):
+            result.add(module)
     for module in _FOCUSED_ACTIONS:
         if any(
             "test_real_http_runner_prefix_tls_token_inventory_and_discovery[" in str(case.get("name"))

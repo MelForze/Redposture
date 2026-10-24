@@ -84,7 +84,7 @@ def test_sorted_cve_lines_keep_colors_and_no_color_output_is_plain(
     colored_output = capsys.readouterr().out
     uncolored = re.sub(r"\x1b\[[0-9;]*m", "", colored_output)
     assert _ids(uncolored.splitlines()) == _ids(lines)
-    assert "\x1b[1;91m[!]" in colored_output
+    assert "\x1b[1;38;5;196m[!]" in colored_output
     assert "\x1b[1;93m[!]" in colored_output
     console = Console(no_color=True)
     assert all(render_colored_marker_line(console, line, tag="X") for line in lines)

@@ -737,7 +737,7 @@ def test_postgres_name_and_value_helpers_cover_valid_and_invalid_inputs() -> Non
 
     assert _pg_parse_table_reference("appdb.public.users") == ("appdb", "public.users", None)
     assert _pg_parse_table_reference('"weird.db".public."table.name"') == (
-        '"weird.db"',
+        "weird.db",
         'public."table.name"',
         None,
     )
@@ -3382,7 +3382,7 @@ def test_postgres_table_query_helpers_and_colored_renderer(monkeypatch: pytest.M
     assert postgres._render_colored_postgres_line(
         painter, "POSTGRES\t127.0.0.1\t5432\t [*] ACL Inventory (records:4) (partial:False)"
     )
-    assert "<red>records:4</red>" in painter.lines[-1]
+    assert "<true_red>records:4</true_red>" in painter.lines[-1]
     assert "<bright_green>partial:False</bright_green>" in painter.lines[-1]
     assert postgres._render_colored_postgres_line(
         painter, "POSTGRES\t127.0.0.1\t5432\t [*] ACL Inventory (records:0) (partial:True)"

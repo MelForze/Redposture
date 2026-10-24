@@ -228,9 +228,9 @@ def test_confirmed_http_read_lines_use_access_color() -> None:
     assert kafka_render._render_colored_kafka_line(
         console, "KAFKA\tqa\t8082\t [+] Anonymous READ available through Kafka REST Proxy"
     )
-    assert any("Anonymous READ" in value and color == "red" for value, color in console.calls)
+    assert any("Anonymous READ" in value and color == "true_red" for value, color in console.calls)
     console.calls.clear()
     assert web_panels.colorize_panel_line(
         console, "POSTGRES\tqa\t3000\t [+] Anonymous READ available through PostgREST", "POSTGRES"
     )
-    assert any("Anonymous READ" in value and color == "red" for value, color in console.calls)
+    assert any("Anonymous READ" in value and color == "true_red" for value, color in console.calls)

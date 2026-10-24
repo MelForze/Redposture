@@ -27,6 +27,7 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
+from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...stage_runtime import (
     StageTelemetryBuilder,
@@ -140,6 +141,19 @@ def _http_request(
     headers: dict[str, str] | None = None,
     data: bytes | None = None,
 ) -> tuple[int, str, dict[str, str]]:
+    return run_sync(_http_request_steps(host, port, path, timeout, method=method, headers=headers, data=data))
+
+
+def _http_request_steps(
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    data: bytes | None = None,
+) -> Any:
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
@@ -162,13 +176,11 @@ def _http_request(
                 default_scheme=str(scheme),
                 override_bound_scheme=True,
             )
-            response = state.http.request(
+            response = yield HttpRead(
+                state.http,
                 method,
                 url,
-                headers=req_headers,
-                body=data,
-                timeout=timeout,
-                response_size_cap=cap,
+                {"headers": req_headers, "body": data, "timeout": timeout, "response_size_cap": cap},
             )
             if response.error is None and not (
                 scheme == "http"
@@ -186,10 +198,12 @@ def _http_request(
                 break
         assert response is not None
     else:
-        scheme = resolve_http_scheme(host, port, timeout, probe_path="/api/health")
+        scheme = yield DetectCall(resolve_http_scheme, (host, port, timeout), {"probe_path": "/api/health"})
         url = build_http_target_url(host, port, path, default_scheme=scheme)
         client = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True))
-        response = client.request(method, url, headers=req_headers, body=data, timeout=timeout)
+        response = yield DetectCall(
+            client.request, (method, url), {"headers": req_headers, "body": data, "timeout": timeout}
+        )
     if response.error:
         raise urllib.error.URLError(response.error)
     return int(response.status), response.text, response.headers
@@ -216,10 +230,16 @@ def _load_json_list(body: str) -> list[Any] | None:
 
 
 def _fetch_renderer_plugin_version(host: str, port: int, timeout: float, auth_header: str | None) -> str | None:
+    return run_sync(_fetch_renderer_plugin_version_steps(host, port, timeout, auth_header))
+
+
+def _fetch_renderer_plugin_version_steps(host: str, port: int, timeout: float, auth_header: str | None) -> Any:
     """Read the installed renderer version; Grafana's own version is not a substitute."""
     headers = {"Authorization": auth_header} if auth_header else None
     try:
-        status, body, _headers = _http_request(host, port, "/api/plugins", timeout, headers=headers)
+        status, body, _headers = yield DetectCall(
+            _http_request, (host, port, "/api/plugins", timeout), {"headers": headers}
+        )
     except (urllib.error.URLError, OSError, TimeoutError, ValueError):
         return None
     if status != 200:
@@ -409,16 +429,18 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
 
 
 def _fetch_datasources(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    auth_header: str | None = None,
+    host: str, port: int, timeout: float, *, auth_header: str | None = None
 ) -> tuple[list[dict[str, str]] | None, str | None, int]:
+    return run_sync(_fetch_datasources_steps(host, port, timeout, auth_header=auth_header))
+
+
+def _fetch_datasources_steps(host: str, port: int, timeout: float, *, auth_header: str | None = None) -> Any:
     headers: dict[str, str] = {}
     if auth_header:
         headers["Authorization"] = auth_header
-    status, body, _response_headers = _http_request(host, port, "/api/datasources", timeout, headers=headers)
+    status, body, _response_headers = yield DetectCall(
+        _http_request, (host, port, "/api/datasources", timeout), {"headers": headers}
+    )
     if status == 200:
         payload = _load_json_list(body)
         if payload is None:
@@ -444,11 +466,19 @@ def _fetch_datasources(
 def _infer_grafana_auth_required(
     host: str, port: int, timeout: float, *, health_status: int, health_api_ok: bool
 ) -> bool | None:
-    # /api/health is intentionally public on many installations. Only a
-    # resource requiring Grafana permissions can establish anonymous access.
+    return run_sync(
+        _infer_grafana_auth_required_steps(
+            host, port, timeout, health_status=health_status, health_api_ok=health_api_ok
+        )
+    )
+
+
+def _infer_grafana_auth_required_steps(
+    host: str, port: int, timeout: float, *, health_status: int, health_api_ok: bool
+) -> Any:
     _ = (health_status, health_api_ok)
     try:
-        datasources, _error, status = _fetch_datasources(host, port, timeout)
+        datasources, _error, status = yield DetectCall(_fetch_datasources, (host, port, timeout), {})
     except (urllib.error.URLError, OSError, TimeoutError, ValueError):
         return None
     if status in {401, 403}:
@@ -1399,7 +1429,7 @@ def _render_colored_grafana_line(console: Console, line: str) -> bool:
         line,
         tag="GRAFANA",
         literals=(("auth required:sso", "bright_green"), ("provider:keycloak", "cyan")),
-        counts=(CountColorRule("datasources", "red", unknown_color="orange", zero_color="bright_green"),),
+        counts=(CountColorRule("datasources", "true_red", unknown_color="orange", zero_color="bright_green"),),
         extra_spans=lambda marker, payload: (
             [(payload.index("(unverified:"), len(payload), "orange")]
             if marker == "[-]" and "(unverified:" in payload
@@ -1511,6 +1541,10 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 
 
 def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    return run_sync(_detect_grafana_steps(ctx, options))
+
+
+def _detect_grafana_steps(ctx: Any, options: dict[str, Any]) -> Any:
     if isinstance(ctx.lifecycle_state, GrafanaLifecycleState):
         _activate_grafana_transport(ctx.lifecycle_state)
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
@@ -1518,16 +1552,20 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     for attempt in range(attempts):
         started = time.monotonic()
         try:
-            health_status, health_body, _health_headers = _http_request(
-                str(ctx.host), int(ctx.port), "/api/health", float(getattr(ctx.args, "timeout", 5.0))
+            health_status, health_body, _health_headers = yield DetectCall(
+                _http_request,
+                (str(ctx.host), int(ctx.port), "/api/health", float(getattr(ctx.args, "timeout", 5.0))),
+                {},
             )
             health_api_ok = _is_grafana_health_api_response(health_status, health_body)
             is_grafana, version = _looks_like_grafana_health(health_status, health_body)
             login_body = ""
             login_headers: dict[str, str] = {}
             if not health_api_ok or health_status in {401, 403}:
-                login_status, login_body, login_headers = _http_request(
-                    str(ctx.host), int(ctx.port), "/login", float(getattr(ctx.args, "timeout", 5.0))
+                login_status, login_body, login_headers = yield DetectCall(
+                    _http_request,
+                    (str(ctx.host), int(ctx.port), "/login", float(getattr(ctx.args, "timeout", 5.0))),
+                    {},
                 )
                 is_grafana = is_grafana or _looks_like_grafana_login(login_status, login_body, login_headers)
             if not is_grafana:
@@ -1551,20 +1589,20 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                 }
             if not login_body:
                 try:
-                    _login_status, login_body, login_headers = _http_request(
-                        str(ctx.host), int(ctx.port), "/login", float(getattr(ctx.args, "timeout", 5.0))
+                    _login_status, login_body, login_headers = yield DetectCall(
+                        _http_request,
+                        (str(ctx.host), int(ctx.port), "/login", float(getattr(ctx.args, "timeout", 5.0))),
+                        {},
                     )
                 except (urllib.error.URLError, OSError, TimeoutError, ValueError):
                     # /api/health already proved Grafana. SSO enrichment is a
                     # best-effort probe and cannot invalidate that result.
                     login_body, login_headers = "", {}
             sso = _grafana_sso_response(login_body, login_headers)
-            auth_required = _infer_grafana_auth_required(
-                str(ctx.host),
-                int(ctx.port),
-                float(getattr(ctx.args, "timeout", 5.0)),
-                health_status=health_status,
-                health_api_ok=health_api_ok,
+            auth_required = yield DetectCall(
+                _infer_grafana_auth_required,
+                (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+                {"health_status": health_status, "health_api_ok": health_api_ok},
             )
             auth_method = "sso" if sso is not None else None
             if sso is not None:
@@ -1575,8 +1613,12 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                 or getattr(ctx.args, "username", None) is not None
             )
             renderer_version = (
-                _fetch_renderer_plugin_version(
-                    str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), None
+                (
+                    yield DetectCall(
+                        _fetch_renderer_plugin_version,
+                        (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), None),
+                        {},
+                    )
                 )
                 if bool(getattr(ctx.args, "enum_cve", False))
                 else None
@@ -1625,7 +1667,7 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             last_error = _friendly_error_from_exception(exc)
             if attempt >= attempts - 1:
                 break
-            time.sleep(_retry_delay(attempt))
+            (yield DetectDelay(_retry_delay(attempt)))
     return {
         "timestamp": utc_now_iso(),
         "host": str(ctx.host),
@@ -1703,6 +1745,20 @@ def authenticate_grafana(ctx: Any, detect_record: Any, _options: dict[str, Any])
         auth_header = _auth_header(effective_user, effective_password)
         username, password = effective_user, effective_password
     state.auth_attempts.append(attempt)
+    if ok and not record.get("server_version"):
+        try:
+            health_status, health_body, _headers = _http_request(
+                str(ctx.host),
+                int(ctx.port),
+                "/api/health",
+                float(getattr(ctx.args, "timeout", 5.0)),
+                headers={"Authorization": auth_header},
+            )
+            health_ok, version = _looks_like_grafana_health(health_status, health_body)
+            if health_ok and version:
+                record["server_version"] = version
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+            pass  # Optional metadata must not erase a verified login.
     if ok and (state.auth_header is None or bool(getattr(ctx.args, "_spray_capabilities", False))):
         state.auth_header = auth_header
         state.credentials_source = source
@@ -1840,3 +1896,12 @@ def collect_grafana_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_grafana_host_with_stage_debug
+
+
+_ASYNC_DETECT_STEPS = {
+    _fetch_datasources: _fetch_datasources_steps,
+    _fetch_renderer_plugin_version: _fetch_renderer_plugin_version_steps,
+    _http_request: _http_request_steps,
+    _infer_grafana_auth_required: _infer_grafana_auth_required_steps,
+    detect_grafana: _detect_grafana_steps,
+}

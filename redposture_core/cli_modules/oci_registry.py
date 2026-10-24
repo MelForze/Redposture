@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..modules.execution_api import add_flags
+
 
 def add_oci_content_flags(group: argparse._ArgumentGroup, *, product: str) -> None:
     if product == "nexus":
@@ -100,6 +102,8 @@ def configure_oci_registry_parser(
     auth.add_argument("--token", metavar="value", help="Registry Bearer token.")
     auth.add_argument("--defcreds", action="store_true", help="Check a small catalog of weak Basic pairs.")
     add_oci_content_flags(actions, product=product)
+    if product == "nexus":
+        add_flags(parser.add_argument_group("Execution"))
 
 
 def configure_docker_registry_parser(parser: argparse.ArgumentParser, **kwargs: object) -> None:

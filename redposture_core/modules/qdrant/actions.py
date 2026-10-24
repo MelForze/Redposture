@@ -27,6 +27,7 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
+from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
 from ...rendering import (
     CountColorRule,
     RegexColorRule,
@@ -158,6 +159,19 @@ def _http_json_request(
     headers: dict[str, str] | None = None,
     payload: dict[str, Any] | None = None,
 ) -> tuple[int, Any, str | None]:
+    return run_sync(_http_json_request_steps(host, port, method, path, timeout, headers=headers, payload=payload))
+
+
+def _http_json_request_steps(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    headers: dict[str, str] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> Any:
     body_bytes: bytes | None = None
     req_headers = {
         "User-Agent": "RedPosture/1.0",
@@ -188,13 +202,11 @@ def _http_json_request(
                 default_scheme=str(scheme),
                 override_bound_scheme=True,
             )
-            response = state.http.request(
+            response = yield HttpRead(
+                state.http,
                 method,
                 url,
-                headers=req_headers,
-                body=body_bytes,
-                timeout=timeout,
-                response_size_cap=cap,
+                {"headers": req_headers, "body": body_bytes, "timeout": timeout, "response_size_cap": cap},
             )
             if response.error is None and not (
                 scheme == "http"
@@ -212,14 +224,12 @@ def _http_json_request(
                 break
         assert response is not None
     else:
-        scheme = resolve_http_scheme(host, port, timeout, probe_path="/collections")
+        scheme = yield DetectCall(resolve_http_scheme, (host, port, timeout), {"probe_path": "/collections"})
         url = build_http_target_url(host, port, path, default_scheme=scheme)
-        response = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True)).request(
-            method,
-            url,
-            headers=req_headers,
-            body=body_bytes,
-            timeout=timeout,
+        response = yield DetectCall(
+            HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True)).request,
+            (method, url),
+            {"headers": req_headers, "body": body_bytes, "timeout": timeout},
         )
     if response.error:
         return 0, None, _friendly_error_text(response.error)
@@ -363,30 +373,36 @@ def _qdrant_looks_like_response(payload: Any) -> bool:
 
 
 def _qdrant_get_root_info(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    headers: dict[str, str] | None = None,
+    host: str, port: int, timeout: float, *, headers: dict[str, str] | None = None
 ) -> tuple[int, Any, str | None]:
-    status, payload, error = _http_json_request(host, port, "GET", "/", timeout, headers=headers)
+    return run_sync(_qdrant_get_root_info_steps(host, port, timeout, headers=headers))
+
+
+def _qdrant_get_root_info_steps(host: str, port: int, timeout: float, *, headers: dict[str, str] | None = None) -> Any:
+    status, payload, error = yield DetectCall(
+        _http_json_request, (host, port, "GET", "/", timeout), {"headers": headers}
+    )
     if error is None and status not in {0, 404}:
         return status, payload, None
     # Fallback for some deployments/proxies: `/service/info`.
-    status2, payload2, error2 = _http_json_request(host, port, "GET", "/service/info", timeout, headers=headers)
+    status2, payload2, error2 = yield DetectCall(
+        _http_json_request, (host, port, "GET", "/service/info", timeout), {"headers": headers}
+    )
     if error2 is None or error is not None:
         return status2, payload2, error2
     return status, payload, error
 
 
 def _qdrant_get_collections(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    headers: dict[str, str] | None = None,
+    host: str, port: int, timeout: float, *, headers: dict[str, str] | None = None
 ) -> tuple[int, Any, str | None]:
-    return _http_json_request(host, port, "GET", "/collections", timeout, headers=headers)
+    return run_sync(_qdrant_get_collections_steps(host, port, timeout, headers=headers))
+
+
+def _qdrant_get_collections_steps(
+    host: str, port: int, timeout: float, *, headers: dict[str, str] | None = None
+) -> Any:
+    return (yield DetectCall(_http_json_request, (host, port, "GET", "/collections", timeout), {"headers": headers}))
 
 
 def _qdrant_get_collection_info(
@@ -410,6 +426,7 @@ def _qdrant_scroll_payloads(
     offset: Any = None
     seen_offsets: set[str] = set()
     byte_count = 0
+    partial = False
     for _page in range(10):
         request_body: dict[str, Any] = {"limit": 100, "with_payload": True, "with_vector": False}
         if offset is not None:
@@ -427,16 +444,24 @@ def _qdrant_scroll_payloads(
         page_points = result.get("points") if isinstance(result, dict) else None
         if error or status != 200 or not isinstance(page_points, list):
             return points, True
-        selected = [
-            {"id": point.get("id"), "payload": point.get("payload")} for point in page_points if isinstance(point, dict)
-        ]
+        remaining = 1000 - len(points)
+        selected: list[dict[str, Any]] = []
+        for point in page_points:
+            if not isinstance(point, dict):
+                partial = True
+            elif len(selected) < remaining:
+                selected.append({"id": point.get("id"), "payload": point.get("payload")})
+            else:
+                partial = True
         byte_count += len(json.dumps(selected, ensure_ascii=False, default=str).encode())
         if byte_count > 8 * 1024 * 1024:
             return points, True
         points.extend(selected)
         offset = result.get("next_page_offset") if isinstance(result, dict) else None
         if offset is None:
-            return points, False
+            return points, partial
+        if len(points) >= 1000:
+            return points, True
         marker = _json_compact(offset)
         if marker in seen_offsets:
             return points, True
@@ -1600,13 +1625,13 @@ def _render_colored_qdrant_line(console: Console, line: str) -> bool:
         line,
         tag=_QDRANT_TAG,
         regexes=(
-            RegexColorRule(r"(?i)\(idor:true\)", "red"),
-            RegexColorRule(r"API key accepted", "red"),
+            RegexColorRule(r"(?i)\(idor:true\)", "true_red"),
+            RegexColorRule(r"API key accepted", "true_red"),
             RegexColorRule(r"RCE:potential", "orange"),
         ),
         counts=(
-            CountColorRule("collections", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("count", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("collections", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("count", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
     ):
         return True
@@ -1700,6 +1725,10 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 
 
 def detect_qdrant(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    return run_sync(_detect_qdrant_steps(ctx, options))
+
+
+def _detect_qdrant_steps(ctx: Any, options: dict[str, Any]) -> Any:
     state = ctx.lifecycle_state
     if not isinstance(state, QdrantLifecycleState):
         raise TypeError("qdrant lifecycle state is unavailable")
@@ -1716,11 +1745,15 @@ def detect_qdrant(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
         ssrf_urls=list(options["ssrf_urls"]),
     )
     for attempt in range(attempts):
-        root_status, root_payload, root_error = _qdrant_get_root_info(
-            str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), headers=None
+        root_status, root_payload, root_error = yield DetectCall(
+            _qdrant_get_root_info,
+            (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+            {"headers": None},
         )
-        col_status, col_payload, col_error = _qdrant_get_collections(
-            str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), headers=None
+        col_status, col_payload, col_error = yield DetectCall(
+            _qdrant_get_collections,
+            (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+            {"headers": None},
         )
         names = _qdrant_collections_from_payload(col_payload) if col_error is None else None
         is_qdrant = (
@@ -1765,7 +1798,7 @@ def detect_qdrant(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
         if attempt >= attempts - 1:
             record["error"] = last_error
             break
-        time.sleep(_retry_delay(attempt))
+        (yield DetectDelay(_retry_delay(attempt)))
     state.detect_record = dict(record)
     return record
 
@@ -1869,7 +1902,15 @@ def collect_qdrant_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
                     "info_raw": _json_compact(payload) if error is None and status == 200 else None,
                 }
             )
-            if bool(getattr(ctx.args, "discover", False)) and error is None and status == 200:
+            if bool(getattr(ctx.args, "discover", False)):
+                if error is not None or status != 200:
+                    record["payload_discovery_partial"] = True
+                    record.setdefault("payload_discovery_errors", []).append(
+                        {
+                            "collection": str(name),
+                            "error": error or _qdrant_error_text(payload, fallback_status=status),
+                        }
+                    )
                 points, partial = _qdrant_scroll_payloads(host, port, timeout, str(name), headers=headers)
                 record["payload_discovery_partial"] = bool(record.get("payload_discovery_partial") or partial)
                 record.setdefault("payload_discovery_items", []).append({"collection": str(name), "points": points})
@@ -1915,3 +1956,11 @@ def collect_qdrant_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_qdrant_host_with_stage_debug
+
+
+_ASYNC_DETECT_STEPS = {
+    _http_json_request: _http_json_request_steps,
+    _qdrant_get_collections: _qdrant_get_collections_steps,
+    _qdrant_get_root_info: _qdrant_get_root_info_steps,
+    detect_qdrant: _detect_qdrant_steps,
+}

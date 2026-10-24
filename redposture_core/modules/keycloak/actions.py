@@ -9,6 +9,7 @@ from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
 from ...clients.http_api import HttpApiClient, HttpClientConfig, HttpResponse, http_response_requires_https
 from ...clients.http_session import HttpSessionPool
 from ...clients.scoped_http import ScopedHttpClient
+from ...detection_steps import DetectionRequests, run_requests
 
 host_stage = None  # The module uses phase-aware audit hooks.
 
@@ -240,8 +241,12 @@ def _get(client: HttpApiClient | ScopedHttpClient, url: str, token: str | None =
 
 
 def _get_public(client: HttpApiClient | ScopedHttpClient, url: str) -> HttpResponse:
+    return run_requests(_public_requests(url), lambda base, path: _get(client, base + path))
+
+
+def _public_requests(url: str) -> Any:
     """Follow one same-host GET redirect only when the realm endpoint is preserved."""
-    response = _get(client, url)
+    response = yield ("", url)
     if response.status not in {301, 302, 307, 308}:
         return response
     location = next((value for key, value in response.headers.items() if key.lower() == "location"), "")
@@ -258,11 +263,16 @@ def _get_public(client: HttpApiClient | ScopedHttpClient, url: str) -> HttpRespo
         and target_url.path.endswith(endpoint_suffix)
         and not target_url.query
     ):
-        return _get(client, target)
+        return (yield ("", target))
     return response
 
 
 def detect_record(ctx: Any) -> dict[str, Any]:
+    client = _client(ctx)
+    return run_requests(detect_requests(ctx), lambda base, path: _get(client, base + path))
+
+
+def detect_requests(ctx: Any) -> DetectionRequests:
     target_path = str(getattr(ctx.target, "path", "") or "")
     target_scheme = str(getattr(ctx.target, "scheme", "") or "").lower()
     schemes = (
@@ -274,7 +284,6 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         if ctx.port in {443, 8443}
         else ("http", "https")
     )
-    client = _client(ctx)
     signals: list[str] = []
     transport_ok = False
     probable = False
@@ -285,7 +294,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
             for realm in _realms(ctx.args, target_path):
                 quoted = quote(realm, safe="")
                 realm_url = f"{base}/realms/{quoted}"
-                realm_result = _get_public(client, realm_url)
+                realm_result = yield from _public_requests(realm_url)
                 retry_alternate_scheme |= realm_result.status == 0 or http_response_requires_https(
                     realm_result.status, realm_result.body
                 )
@@ -295,7 +304,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
                 if has_realm:
                     signals.append("keycloak.realm_resource")
                 realm_final_url = str(realm_result.final_url or realm_url)
-                oidc_result = _get_public(client, f"{realm_final_url}/.well-known/openid-configuration")
+                oidc_result = yield from _public_requests(f"{realm_final_url}/.well-known/openid-configuration")
                 oidc_data = _json_object(oidc_result)
                 transport_ok |= oidc_result.status > 0
                 has_oidc = _oidc_response(oidc_data, realm)
@@ -318,7 +327,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
                 jwks_url = urlsplit(jwks_uri)
                 realm_final = urlsplit(realm_final_url)
                 if (jwks_url.scheme, jwks_url.netloc) == (realm_final.scheme, realm_final.netloc):
-                    jwks_result = _get(client, jwks_uri)
+                    jwks_result = yield ("", jwks_uri)
                     jwks = _json_object(jwks_result)
                     if jwks is not None and isinstance(jwks.get("keys"), list):
                         signals.append("oidc.jwks")
@@ -330,7 +339,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
                 resolved_base = urlunsplit(
                     (final.scheme, final.netloc, final.path[: -len(f"/realms/{quoted}")], "", "")
                 )
-                admin = _get(client, f"{resolved_base}/admin/serverinfo")
+                admin = yield ("", f"{resolved_base}/admin/serverinfo")
                 admin_data = _json_object(admin)
                 version = _server_version(admin_data)
                 admin_access = admin_data is not None and isinstance(admin_data.get("systemInfo"), dict)
@@ -362,6 +371,9 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         "detection_status": "probable" if probable else "not_service" if transport_ok else "transport_failure",
         "detection_signals": list(dict.fromkeys(signals)),
     }
+
+
+_SYNC_DETECT_RECORD = detect_record
 
 
 def _server_version(data: dict[str, Any] | None) -> str | None:

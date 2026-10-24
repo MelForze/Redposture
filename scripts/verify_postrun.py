@@ -201,6 +201,22 @@ _ALLOWED_EMPTY_JSON_LABELS = frozenset({"exporters_trigger_url_https_transport_m
 _DEBUG_LABELS = frozenset({"airflow_default", "minio_default", "rabbitmq_default"})
 
 _EXTENDED_EXPECTED_LABELS = (
+    "fuzz_jenkins_missing_targets",
+    "consul_extended_discover_budget",
+    "kubeapi_extended_discover_budget",
+    "postgres_extended_discover_budget",
+    "mongodb_extended_discover_budget",
+    "oracle_extended_discover_budget",
+    "redis_extended_discover_budget",
+    "etcd_extended_discover_budget",
+    "qdrant_extended_discover_budget",
+    "kafka_extended_discover_budget",
+    "zookeeper_extended_discover_budget",
+    "keeper_extended_discover_budget",
+    "registry_extended_discover_budget",
+    "nexus_extended_discover_budget",
+    "harbor_extended_discover_budget",
+    "gitlab_extended_discover_budget",
     "exporters_debug_smoke",
     "exporters_scan_extended_controls",
     "exporters_collect_extended_controls",
@@ -312,7 +328,7 @@ _EXTENDED_EXPECTED_LABELS = (
     "fuzz_mongodb_missing_targets",
     "fuzz_oracle_missing_targets",
     "fuzz_docker_missing_targets",
-    "fuzz_docker_defcreds_missing_targets",
+    "fuzz_portainer_defcreds_missing_targets",
     "fuzz_airflow_missing_targets",
     "fuzz_clickhouse_missing_targets",
     "fuzz_redis_missing_targets",
@@ -2483,6 +2499,7 @@ _MISSING_TARGET_MODULES = (
 )
 
 _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
+    "fuzz_jenkins_missing_targets": ("targets are required",),
     "exporters_scan_url_https_transport_fail": ("scan inconclusive: no exporter confirmed",),
     "exporters_collect_url_https_transport_fail": ("collect inconclusive: no exporter confirmed",),
     "exporters_trigger_without_listener": ("trigger inconclusive: no callback attempt was confirmed",),
@@ -2507,7 +2524,7 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_exporters_trigger_json_listen_without_output": ("--format json with listeners enabled requires --output",),
     "fuzz_exporters_trigger_negative_listen_seconds": ("--listen-seconds must be > 0",),
     **{f"fuzz_{module}_missing_targets": (f"{module} requires -t/--targets",) for module in _MISSING_TARGET_MODULES},
-    "fuzz_docker_defcreds_missing_targets": ("docker requires -t/--targets",),
+    "fuzz_portainer_defcreds_missing_targets": ("portainer requires -t/--targets",),
     "fuzz_registry_missing_targets": ("docker-registry requires -t/--targets",),
     "fuzz_airflow_missing_targets": ("targets are required",),
     "fuzz_harbor_option_surface": ("failed to parse targets",),

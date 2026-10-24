@@ -137,16 +137,20 @@ def render(module: str, record: dict[str, Any]) -> list[str]:
         return []
     prefix = f"{module.upper()}\t{record.get('host') or '?'}\t{record.get('port') or 0}\t"
     verified = output.get("executed") is True
-    rows = [f"{prefix} [*] Command Execution (mode:{output.get('mode')})"]
-    if verified:
-        rows.append(f"{prefix} [+] Command (executed:True) (exit:{output.get('exit_code')})")
-    else:
-        rows.append(f"{prefix} [-] Command execution unverified: {output.get('error') or 'no completion evidence'}")
+    rows = [f"{prefix} [*] Execute Command", f"{prefix} command={output.get('command') or ''}"]
+    has_output = False
     for channel in ("stdout", "stderr"):
         for line in str(output.get(channel) or "").splitlines():
-            rows.append(f"{prefix} {channel}: {line}")
+            rows.append(f"{prefix} {line}")
+            has_output = True
+    if not verified:
+        rows.append(f"{prefix} <error:{output.get('error') or 'execution not verified'}>")
+    elif isinstance(output.get("exit_code"), int) and output["exit_code"] != 0:
+        rows.append(f"{prefix} <error:command exited with status {output['exit_code']}>")
+    elif not has_output:
+        rows.append(f"{prefix} <no output>")
     if output.get("status") == "partial":
-        rows.append(f"{prefix} [*] Execution output (status:partial)")
+        rows.append(f"{prefix} <error:output incomplete>")
     if output.get("cleanup") == "failed":
-        rows.append(f"{prefix} [-] Cleanup failed: {output.get('cleanup_error') or 'unknown error'}")
+        rows.append(f"{prefix} <error:cleanup failed: {output.get('cleanup_error') or 'unknown error'}>")
     return rows

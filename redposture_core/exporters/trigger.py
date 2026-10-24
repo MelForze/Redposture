@@ -400,6 +400,7 @@ def scan_exporters_and_trigger(
     tls_context: ssl.SSLContext | None = None,
     profile_delay: float = 0.0,
 ) -> dict[str, Any]:
+    native_transport = http_get_text_fn is None
     if http_get_text_fn is None:
         from .http_client import http_get_text
 
@@ -472,21 +473,77 @@ def scan_exporters_and_trigger(
             scheme,
         )
 
-    for (host, exporter), result in detect_scheduler.iter_completed(detect_jobs, _detect_job):
-        try:
-            if result["detected"]:
-                total_detected += 1
-                host_detected[host] = True
-                by_host[host]["detected"] += 1
-                exporter_name = str(result.get("exporter") or "")
-                if exporter_name in by_exporter:
-                    by_exporter[exporter_name]["detected"] += 1
-                detected_pairs.append((host, exporter))
-                if callback_list and progress_add_total is not None:
-                    progress_add_total(len(callback_list) * len(trigger_query_variants(exporter)))
-        finally:
-            if progress_advance is not None:
-                progress_advance(1)
+    from ..async_detection import AsyncDetectScheduler, async_detection_allowed, automatic_detect_concurrency
+
+    detect_limit = (
+        automatic_detect_concurrency(detect_total, deep_workers=max(1, workers))
+        if native_transport and detect_total >= 32 and async_detection_allowed(None)
+        else 0
+    )
+    outcomes: Any
+    if detect_limit:
+        from ..clients.async_http_detect import AsyncHttpFallback
+        from .async_detect import prefetch_metrics
+
+        async def prepare(job: tuple[str, dict[str, Any]]) -> Any:
+            host, exporter = job
+            try:
+                details = await prefetch_metrics(
+                    host,
+                    int(exporter["port"]),
+                    scheme,
+                    timeout,
+                    retries,
+                    tls_context,
+                    path=str(exporter["detect_path"]),
+                )
+                if details.get("error") or details.get("truncated"):
+                    return None
+                return details
+            except AsyncHttpFallback:
+                return None
+
+        def finish(job: tuple[str, dict[str, Any]], details: Any) -> Any:
+            if details is None:
+                return _detect_job(job)
+            host, exporter = job
+            return detect_trigger_exporter_task(
+                logger,
+                host,
+                exporter,
+                timeout,
+                retries,
+                lambda *_args: (int(details["status"] or 0), str(details["body"] or "")),
+                log_trigger_events_only,
+                emit_trigger_event,
+                scheme,
+            )
+
+        outcomes = AsyncDetectScheduler[tuple[str, dict[str, Any]], Any, Any](
+            detect_workers=detect_limit, deep_workers=max(1, workers)
+        ).iter_completed(detect_jobs, prepare, finish)
+    else:
+        outcomes = detect_scheduler.iter_completed(detect_jobs, _detect_job)
+    try:
+        for (host, exporter), result in outcomes:
+            try:
+                if result["detected"]:
+                    total_detected += 1
+                    host_detected[host] = True
+                    by_host[host]["detected"] += 1
+                    exporter_name = str(result.get("exporter") or "")
+                    if exporter_name in by_exporter:
+                        by_exporter[exporter_name]["detected"] += 1
+                    detected_pairs.append((host, exporter))
+                    if callback_list and progress_add_total is not None:
+                        progress_add_total(len(callback_list) * len(trigger_query_variants(exporter)))
+            finally:
+                if progress_advance is not None:
+                    progress_advance(1)
+    finally:
+        close_outcomes = getattr(outcomes, "close", None)
+        if callable(close_outcomes):
+            close_outcomes()
     detect_ms = int((time.monotonic() - detect_started_at) * 1000)
     if emit_stage_event is not None:
         emit_stage_event(

@@ -9,28 +9,18 @@ from ...audit_config import AuditConfig
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
-    AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
-    merge_audit_credential_runs,
     run_basic_host_audit,
 )
 from . import actions, policy, render
 
 _DEFAULT_PORT = 2375
-_DEFAULT_PORTS: tuple[int, ...] | None = (2375, 2376, 4243, 12375, 12376, 9443, 9000)
+_DEFAULT_PORTS: tuple[int, ...] | None = (2375, 2376, 4243, 12375, 12376)
 
 
 def build_docker_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
-    if bool(getattr(args, "defcreds", False)):
-        from ...web_panels import default_pairs
-
-        defaults = tuple(
-            AuditCredentialRun(username=user, password=password, source="default")
-            for user, password in default_pairs("portainer")
-        )
-        plan = replace(plan, credential_runs=merge_audit_credential_runs(plan.credential_runs, defaults))
     explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
     if not explicit_port and plan.target_plan is not None:
         plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
@@ -38,7 +28,7 @@ def build_docker_plan(args: Any) -> AuditCommandPlan:
 
 
 def build_docker_spec(args: Any) -> ModuleAuditSpec:
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="docker",
         label="DOCKER",
         default_port=_DEFAULT_PORT,
@@ -48,9 +38,11 @@ def build_docker_spec(args: Any) -> ModuleAuditSpec:
         is_detected=lambda record: record.extra.get("is_docker") is True,
         # E3 opt-in: Docker Engine anon-open API needs no credentials.
         keep_anonymous_open_no_auth=True,
-        continue_after_credential_success=bool(getattr(args, "defcreds", False)),
-        continue_after_credential_error=bool(getattr(args, "defcreds", False)),
     )
+
+    from .async_detect import bind
+
+    return bind(spec)
 
 
 def run_docker_stage(args: Any, logger: Any) -> int:

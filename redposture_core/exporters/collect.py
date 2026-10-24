@@ -7,18 +7,20 @@ import os
 import ssl
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any
+from typing import Any, cast
 
 from ..constants import COLLECT_DEBUG_ENDPOINTS, COLLECT_EXPORTERS
 from ..logger import AttemptLogger
 from ..scheduler import BoundedScheduler
 from ..stage_runtime import start_audit_progress
 from ..utils import utc_now_iso
+from . import discover
 from .artifacts import save_collect_body
+from .detection import build_scan_error_record
 from .http_client import activate_exporter_tls_context, build_http_url, http_get_details
 from .http_pool import HTTPConnectionPool, activate_http_pool
 from .output import emit_line as emit_output_line
-from .output import format_collect_record
+from .output import format_collect_record, format_scan_record
 from .postprocess import AsyncPostprocessWorker
 from .workflows import (
     COLLECT_PPROF_PREFLIGHT_MAX_TARGETS,
@@ -30,6 +32,8 @@ from .workflows import (
     should_preflight_collect,
     sort_collect_targets,
 )
+
+_NATIVE_SCAN_TASK = discover.scan_presence_port_task
 
 HttpGetDetails = Callable[..., dict[str, Any]]
 CollectTask = Callable[[str, str, int, str, float, int], tuple[dict[str, Any], bool]]
@@ -261,6 +265,10 @@ def collect_exporter_debug_data(
     activate_pool_fn: ActivatePool = activate_http_pool,
     postprocess_worker_cls: type[AsyncPostprocessWorker] = AsyncPostprocessWorker,
     preflight_max_targets: int = COLLECT_PPROF_PREFLIGHT_MAX_TARGETS,
+    scan_work_items: Iterable[tuple[str, int, str]] | None = None,
+    scan_work_items_count: int = 0,
+    discovery_exporters: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    scan_task_fn: Callable[..., Any] | None = None,
 ) -> tuple[int, int]:
     exporters = list(collect_exporters or COLLECT_EXPORTERS)
     endpoints = tuple(collect_debug_endpoints or COLLECT_DEBUG_ENDPOINTS)
@@ -270,6 +278,12 @@ def collect_exporter_debug_data(
     transport_errors = 0
     max_workers = max(1, workers)
     max_inflight = collect_max_inflight(max_workers, max_inflight_requests)
+    streaming = scan_work_items is not None
+    discovery_checks = discovery_found = discovery_errors = 0
+    scan_task = scan_task_fn or discover.scan_presence_port_task
+    scan_exporters = list(discovery_exporters or discover.DISCOVERY_EXPORTERS)
+    enabled_exporters = {str(item.get("name") or "") for item in exporters}
+    discovered_targets = 0
 
     out_fh: Any = None
     index_fh: Any = None
@@ -322,15 +336,21 @@ def collect_exporter_debug_data(
         )
 
     try:
-        collect_targets = sort_collect_targets(
-            hosts,
-            dedupe_collect_targets(build_collect_targets(hosts, exporters, found_by_host)),
+        collect_targets = (
+            []
+            if streaming
+            else sort_collect_targets(
+                hosts,
+                dedupe_collect_targets(build_collect_targets(hosts, exporters, found_by_host)),
+            )
         )
 
         completed_jobs = resume_completed_jobs or set()
         completed_by_target = completed_jobs_by_target(completed_jobs)
         skipped_jobs = 0
-        preflight_enabled = should_preflight_collect(
+        # Streaming discovers targets incrementally. All requested endpoints are
+        # still fetched, without constructing a target list just to count it.
+        preflight_enabled = not streaming and should_preflight_collect(
             adaptive_collect=adaptive_collect,
             target_count=len(collect_targets),
             endpoints=endpoints,
@@ -423,10 +443,13 @@ def collect_exporter_debug_data(
             )
             if not already_output:
                 emit_output_line(out_fh, emit_line, output_line)
-                if bool(record.get("ok")):
+                # Streaming roots are already unique. Retaining every new
+                # success here would grow memory with the full target list.
+                if bool(record.get("ok")) and not streaming:
                     if record_key is not None:
                         existing_success_keys.add(record_key)
-                    existing_success_lines.add(output_line)
+                    if output_format != "json":
+                        existing_success_lines.add(output_line)
 
             if logger is not None:
                 logger.log(
@@ -443,13 +466,16 @@ def collect_exporter_debug_data(
         pool = build_exporter_http_pool(max_workers, pool_cls, tls_context=tls_context)
         with activate_exporter_tls_context(tls_context), activate_pool_fn(pool):
             scheduled_jobs = 0
-            estimated_jobs = len(collect_targets) * len(endpoints)
-            collect_progress = start_audit_progress(
-                "COLLECT", len(collect_targets) * len(endpoints), enabled=True, owner=progress_owner
-            )
+            estimated_jobs = scan_work_items_count if streaming else len(collect_targets) * len(endpoints)
+            collect_progress = start_audit_progress("COLLECT", estimated_jobs, enabled=True, owner=progress_owner)
 
             def _run_job(job: tuple[Any, ...]) -> Any:
-                kind, host, exporter_name, port, endpoint = job
+                kind, host, exporter_name, port, endpoint, item_scheme = job
+                if kind == "scan":
+                    try:
+                        return scan_task(host, port, scan_exporters, timeout, retries, scheme=item_scheme)
+                    except Exception as exc:
+                        return build_scan_error_record(host, port, exc), None
                 if kind == "plan":
                     if not preflight_enabled:
                         return endpoints, {}
@@ -464,15 +490,49 @@ def collect_exporter_debug_data(
                         completed_by_target.get((host, exporter_name, int(port))),
                     )
                     if plan_collect_fn is None:
-                        return plan_collect_endpoints_for_target(*args, scheme=scheme)
+                        return plan_collect_endpoints_for_target(*args, scheme=item_scheme)
                     return plan_collect(*args)
                 if collect_task_fn is collect_task:
-                    return collect_task(host, exporter_name, port, endpoint, timeout, retries, scheme=scheme)
+                    return collect_task(host, exporter_name, port, endpoint, timeout, retries, scheme=item_scheme)
+                if streaming and item_scheme != "http":
+                    return cast(Callable[..., tuple[dict[str, Any], bool]], collect_task_fn)(
+                        host, exporter_name, port, endpoint, timeout, retries, scheme=item_scheme
+                    )
                 return collect_task_fn(host, exporter_name, port, endpoint, timeout, retries)
 
             def _child_jobs(job: tuple[Any, ...], result: Any) -> Iterator[tuple[Any, ...]]:
-                nonlocal scheduled_jobs, skipped_jobs, estimated_jobs
-                kind, host, exporter_name, port, _endpoint = job
+                nonlocal scheduled_jobs, skipped_jobs, estimated_jobs, discovered_targets
+                nonlocal discovery_checks, discovery_found, discovery_errors
+                kind, host, exporter_name, port, _endpoint, item_scheme = job
+                if kind == "scan":
+                    record, hit = result
+                    discovery_checks += 1
+                    discovery_errors += bool(record.get("error"))
+                    if hit is not None:
+                        discovery_found += 1
+                    if emit_line is not None and output_format == "txt" and (hit is not None or logger is not None):
+                        collect_progress.pause_for_output()
+                        emit_line(format_scan_record(record, "txt"))
+                    if logger is not None:
+                        logger.log(
+                            "scan",
+                            (host, port),
+                            exporter=record["exporter"],
+                            detected=record["detected"],
+                            method=record["method"],
+                            status=record["status"],
+                            error=record["error"],
+                            output=None,
+                        )
+                    eligible = hit is not None and str(hit.get("exporter")) in enabled_exporters
+                    if eligible:
+                        discovered_targets += 1
+                        estimated_jobs += len(endpoints)
+                        collect_progress.set_total(estimated_jobs)
+                    collect_progress.advance()
+                    if eligible:
+                        yield "plan", host, str(hit["exporter"]), int(hit["port"]), None, item_scheme
+                    return
                 if kind != "plan":
                     return
                 planned_endpoints, prefetched = result
@@ -491,27 +551,108 @@ def collect_exporter_debug_data(
                         _process_record(record, ok, pause_before_emit=collect_progress.pause_for_output)
                         collect_progress.advance()
                     else:
-                        yield "fetch", host, exporter_name, port, endpoint
+                        yield "fetch", host, exporter_name, port, endpoint, item_scheme
 
             roots: Iterable[tuple[Any, ...]] = (
-                ("plan", host, exporter_name, port, None) for host, exporter_name, port in collect_targets
+                (("scan", host, None, port, None, item_scheme) for host, port, item_scheme in scan_work_items)
+                if scan_work_items is not None
+                else (
+                    ("plan", host, exporter_name, port, None, scheme) for host, exporter_name, port in collect_targets
+                )
             )
             scheduler: BoundedScheduler[tuple[Any, ...], Any] = BoundedScheduler(
                 max_workers=max_workers,
                 max_inflight=max_inflight,
             )
+            from ..async_detection import AsyncDetectScheduler, async_detection_allowed, automatic_detect_concurrency
+
+            use_async_detect = (
+                streaming
+                and scan_work_items_count >= 32
+                and scan_task_fn is None
+                and scan_task is _NATIVE_SCAN_TASK
+                and pool_cls is HTTPConnectionPool
+                and activate_pool_fn is activate_http_pool
+                and async_detection_allowed(None)
+            )
+            if use_async_detect:
+                detect_concurrency = automatic_detect_concurrency(
+                    scan_work_items_count,
+                    deep_workers=max_workers,
+                    max_inflight=max_inflight if max_inflight_requests is not None else None,
+                    retained_fds=pool._max_idle_total,
+                )
+                if stats_sink is not None:
+                    stats_sink["detect_concurrency"] = detect_concurrency
+                    stats_sink["deep_workers"] = max_workers
+                use_async_detect = detect_concurrency > 0
+            if use_async_detect:
+                from ..clients.async_http_detect import AsyncHttpFallback
+                from .async_detect import prefetch_metrics, scan_with_prefetched_metrics
+
+                async_inflight = detect_concurrency + max_workers * 2
+                if max_inflight_requests is not None:
+                    async_inflight = min(max_inflight, async_inflight)
+
+                async def _prepare_job(job: tuple[Any, ...]) -> Any:
+                    if job[0] != "scan":
+                        return None
+                    try:
+                        return await prefetch_metrics(job[1], job[3], job[5], timeout, retries, tls_context)
+                    except AsyncHttpFallback:
+                        return None
+
+                def _finish_job(job: tuple[Any, ...], prepared: Any) -> Any:
+                    if job[0] != "scan" or prepared is None:
+                        return _run_job(job)
+                    try:
+                        return scan_with_prefetched_metrics(
+                            job[1], job[3], scan_exporters, timeout, retries, job[5], prepared
+                        )
+                    except Exception as exc:
+                        return build_scan_error_record(job[1], job[3], exc), None
+
+                outcomes = AsyncDetectScheduler[tuple[Any, ...], Any, Any](
+                    detect_workers=detect_concurrency,
+                    deep_workers=max_workers,
+                    max_inflight=async_inflight,
+                ).iter_completed(
+                    roots,
+                    _prepare_job,
+                    _finish_job,
+                    children=_child_jobs,
+                    inline_finish=lambda job, prepared: (
+                        job[0] == "scan"
+                        and prepared is not None
+                        and not (200 <= int(prepared.get("status") or 0) < 300)
+                    ),
+                )
+            else:
+                outcomes = scheduler.iter_expanding(roots, _run_job, _child_jobs)
             try:
-                for job, result in scheduler.iter_expanding(roots, _run_job, _child_jobs):
+                for job, result in outcomes:
                     if job[0] == "fetch":
                         record, ok = result
                         _process_record(record, ok, pause_before_emit=collect_progress.pause_for_output)
                         collect_progress.advance()
                 if stats_sink is not None:
-                    stats_sink["targets"] = len(collect_targets)
+                    stats_sink["targets"] = discovered_targets if streaming else len(collect_targets)
                     stats_sink["scheduled_jobs"] = scheduled_jobs
                     stats_sink["skipped_jobs"] = skipped_jobs
+                    if streaming:
+                        stats_sink["discovery_checks"] = discovery_checks
+                        stats_sink["discovery_found"] = discovery_found
+                        stats_sink["discovery_errors"] = discovery_errors
+                if streaming:
+                    collect_progress.set_total(discovery_checks + total)
             finally:
+                close_outcomes = getattr(outcomes, "close", None)
+                if callable(close_outcomes):
+                    close_outcomes()
                 collect_progress.close()
+                close_items = getattr(scan_work_items, "close", None)
+                if callable(close_items):
+                    close_items()
 
         _finalize_postprocess()
         if emit_summary:

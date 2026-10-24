@@ -842,13 +842,29 @@ def test_oracle_unconfirmed_descriptor_does_not_try_passwords(monkeypatch: pytes
     assert not record.get("credential_attempts")
 
 
-def test_oracle_default_worker_cap_does_not_override_explicit_workers() -> None:
+@pytest.mark.parametrize(
+    ("argv", "expected_endpoints", "expected_workers"),
+    [
+        (["-t", "127.0.0.1"], 3, 64),
+        (["-t", "10.0.0.1-10.0.3.231", "--port", "1521"], 999, 64),
+        (["-t", "10.0.0.1-10.0.3.232", "--port", "1521"], 1000, 128),
+        (["-t", "10.0.0.1-10.0.1.78"], 1002, 128),
+        (["-t", "127.0.0.1", "--workers", "16"], 3, 16),
+        (["-t", "10.0.0.1-10.0.3.232", "--port", "1521", "-w", "7"], 1000, 7),
+        (["-t", "10.0.0.1-10.0.3.232", "--port", "1521", "-w", "256"], 1000, 256),
+    ],
+)
+def test_oracle_uses_shared_worker_profile_and_preserves_explicit_workers(
+    argv: list[str], expected_endpoints: int, expected_workers: int
+) -> None:
     from redposture_core.cli_args import parse_args
 
-    automatic = parse_args(["oracle", "-t", "127.0.0.1"])
-    assert oracle.build_oracle_plan(automatic).workers == 8
-    explicit = parse_args(["oracle", "-t", "127.0.0.1", "--workers", "16"])
-    assert oracle.build_oracle_plan(explicit).workers == 16
+    args = parse_args(["oracle", *argv])
+    plan = oracle.build_oracle_plan(args)
+    assert plan.target_count == expected_endpoints
+    assert plan.workers == expected_workers
+    assert args.workers == expected_workers
+    assert args._audit_worker_profile["workers"] == expected_workers
 
 
 def test_oracle_restricted_listener_skips_descriptor_guesses_and_keeps_txt_clean(

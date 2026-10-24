@@ -151,6 +151,8 @@ def _portainer(
                     yield f"{endpoint_id}:disk", "disk_usage", {"environment": endpoint_id, "usage": disk}
                     continue
                 values = data.get("Volumes") if category == "volumes" and isinstance(data, dict) else data
+                if category == "volumes" and isinstance(data, dict) and "Volumes" in data and values is None:
+                    values = []
                 if not isinstance(values, list):
                     raise _Incomplete(f"Portainer {category}: invalid list")
                 for index, value in enumerate(values):
@@ -191,6 +193,8 @@ def _mongo(
             rf'href=["\']/db/{re.escape(quote(database, safe=""))}/([^/"\']+)["\']',
             limit=1_000_000,
         )
+        if not names and "mongo express" not in page.text.lower():
+            raise _Incomplete(f"mongo-express database {database}: collection page identity unavailable")
         for name in names:
             if (
                 selected_collections
@@ -224,7 +228,7 @@ def _mongo(
                     yield f"document:{document_path}", "documents", {"collection": identity, "content": content}
                 page_info = wp._mongo_page_size_and_count(response.text)
                 if page_info is None:
-                    if paths:
+                    if paths or "mongo express" not in response.text.lower():
                         raise _Incomplete(f"mongo-express {identity}: pagination unavailable")
                     break
                 page_size, total = page_info
@@ -325,6 +329,8 @@ def _minio(
                 f"MinIO Console {name} object list",
             )
             objects = value.get("objects") if isinstance(value, dict) else None
+            if isinstance(value, dict) and "objects" in value and objects is None:
+                objects = []
             if not isinstance(objects, list):
                 raise _Incomplete(f"MinIO Console {name}: invalid object list")
             for item in objects:
@@ -422,7 +428,9 @@ def _elastic(
                 raise _Incomplete(f"{product} {index}: scroll response has no continuation proof")
             if not rows:
                 break
-            signature = (str(rows[0].get("_id")), str(rows[-1].get("_id")))
+            first_id = rows[0].get("_id") if isinstance(rows[0], dict) else None
+            last_id = rows[-1].get("_id") if isinstance(rows[-1], dict) else None
+            signature = (str(first_id), str(last_id))
             if signature in seen_pages:
                 raise _Incomplete(f"{product} {index}: repeated scroll page")
             seen_pages.add(signature)

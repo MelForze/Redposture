@@ -10,6 +10,7 @@ from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...clients.http_api import http_target_context
 from ...console import Console
+from ...detection_io import with_async_io_detection
 from ...show_limits import dump_flag_enabled, dump_flag_limit
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -101,7 +102,7 @@ def build_qdrant_spec(args: Any) -> ModuleAuditSpec:
             result = actions.collect_qdrant_data(ctx, record, options)
         return AuditRecord.from_mapping(result, module="qdrant", service="qdrant")
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="qdrant",
         label="QDRANT",
         default_port=_DEFAULT_PORT,
@@ -125,6 +126,15 @@ def build_qdrant_spec(args: Any) -> ModuleAuditSpec:
         # E3 opt-in: Qdrant anon-open (no --api-key-set config) is confirmed
         # by the detect probe.
         keep_anonymous_open_no_auth=True,
+    )
+
+    return with_async_io_detection(
+        spec,
+        actions,
+        root_name="detect_qdrant",
+        options=options,
+        api_prefixes=("/collections", "/service/info"),
+        activate_name="_activate_qdrant_transport",
     )
 
 

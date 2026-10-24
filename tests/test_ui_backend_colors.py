@@ -1,4 +1,4 @@
-"""Backend credentials must retain their module palette with UI support enabled."""
+"""Backend and UI pairs share the accepted/rejected credential palette."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import pytest
 from redposture_core import web_panels
 from redposture_core.console import Console
 from redposture_core.stage_runtime import AuditCommandRunner, LineOutputSink, ModuleAuditSpec
+from tests.test_credential_color_contract import _assert_color
 
 
 class _ColorConsole(Console):
@@ -35,22 +36,23 @@ def _runner(module: str, *, no_color: bool = False) -> AuditCommandRunner:
     )
 
 
-@pytest.mark.parametrize("module", ["docker", "mongodb", "elastic", "redis", "postgres", "kubeapi", "minio"])
+@pytest.mark.parametrize(
+    "module", ["docker", "portainer", "mongodb", "elastic", "redis", "postgres", "kubeapi", "minio"]
+)
 @pytest.mark.parametrize("credential", ["logstash:logstash", "user:password with spaces", "user:"])
-def test_backend_pairs_are_white_with_ui_routing_enabled(module, credential, capsys):
+def test_accepted_backend_pairs_are_red_with_ui_routing_enabled(module, credential, capsys):
     runner = _runner(module)
     runner.emit_line(f"{module.upper()}\t127.0.0.1\t9200\t [+] {credential}")
     text = capsys.readouterr().out
-    assert f"\x1b[1;97m{credential}" in text
-    assert "\x1b[1;38;5;196m" not in text
+    _assert_color(text, credential, "1;38;5;196")
     assert "\x1b[1;92m[+]\x1b[0m" in text
 
 
 @pytest.mark.parametrize("module,credential", [("elastic", "apikey auth"), ("kubeapi", "token auth")])
-def test_backend_token_auth_keeps_its_own_palette(module, credential, capsys):
+def test_backend_token_auth_uses_confirmed_access_color(module, credential, capsys):
     runner = _runner(module)
     runner.emit_line(f"{module.upper()}\t127.0.0.1\t9200\t [+] {credential}")
-    assert f"\x1b[1;97m{credential}" in capsys.readouterr().out
+    assert f"\x1b[1;38;5;196m{credential}" in capsys.readouterr().out
 
 
 def test_opensearch_denials_and_access_use_independent_colors(capsys):
@@ -61,20 +63,21 @@ def test_opensearch_denials_and_access_use_independent_colors(capsys):
         " (Cluster:Allowed) (Nodes:3) (Users:Access Denied)"
     )
     text = capsys.readouterr().out
-    assert "\x1b[1;97mlogstash:logstash (" in text
+    _assert_color(text, "logstash:logstash", "1;38;5;196")
     for resource in ("Indices", "Documents", "Users"):
         assert f"\x1b[1;92m{resource}:Access Denied\x1b[0m" in text
     for resource in ("Cluster:Allowed", "Nodes:3"):
         assert f"\x1b[1;38;5;196m{resource}\x1b[0m" in text
 
 
-@pytest.mark.parametrize("module", ["docker", "mongodb", "elastic", "redis", "postgres", "kubeapi", "minio"])
+@pytest.mark.parametrize("module", ["portainer", "mongodb", "elastic", "redis", "postgres", "kubeapi", "minio"])
 @pytest.mark.parametrize("marker", ["[+]", "[-]"])
-def test_ui_pairs_are_white_with_ui_suffix_and_no_color_is_plain(module, marker, capsys):
+def test_ui_pairs_follow_the_verdict_with_neutral_ui_suffix_and_no_color(module, marker, capsys):
     line = f"{module.upper()}\t127.0.0.1\t9001\t {marker} user:secret (UI)"
     _runner(module).emit_line(line)
     text = capsys.readouterr().out
-    assert "\x1b[1;97muser:secret (UI)\x1b[0m" in text
+    _assert_color(text, "user:secret", "1;38;5;196" if marker == "[+]" else "1;97")
+    _assert_color(text, "(UI)", "1;97")
     if marker == "[+]":
         assert "\x1b[1;92m[+]\x1b[0m" in text
     _runner(module, no_color=True).emit_line(line)
@@ -83,7 +86,7 @@ def test_ui_pairs_are_white_with_ui_suffix_and_no_color_is_plain(module, marker,
     assert "\x1b" not in plain
 
 
-@pytest.mark.parametrize("module", ["docker", "mongodb", "elastic", "redis", "postgres", "kubeapi", "minio"])
+@pytest.mark.parametrize("module", ["portainer", "mongodb", "elastic", "redis", "postgres", "kubeapi", "minio"])
 def test_ui_detection_version_is_white_with_ui_suffix(module, capsys):
     record = {
         "host": "127.0.0.1",
@@ -95,7 +98,8 @@ def test_ui_detection_version_is_white_with_ui_suffix(module, capsys):
     assert line.endswith("(version:2.14.0) (UI)")
     _runner(module).emit_line(line)
     text = capsys.readouterr().out
-    assert "\x1b[1;97m) (version:2.14.0) (UI)\x1b[0m" in text
+    _assert_color(text, "(version:2.14.0)", "1;97")
+    _assert_color(text, "(UI)", "1;97")
     assert "\x1b[1;92mauth required:True\x1b[0m" in text
 
 
@@ -130,10 +134,11 @@ def test_kafka_ui_version_and_pairs_share_standard_palette(vendor, capsys):
     assert "\x1b[1;97m) (version:1.4.2) (UI)\x1b[0m" in text
     render._render_colored_kafka_line(console, pair)
     text = capsys.readouterr().out
-    assert "\x1b[1;97muser:secret (UI)\x1b[0m" in text
+    _assert_color(text, "user:secret", "1;38;5;196")
+    _assert_color(text, "(UI)", "1;97")
 
 
-@pytest.mark.parametrize("module", ["docker", "mongodb", "elastic", "redis", "postgres", "kubeapi", "minio"])
+@pytest.mark.parametrize("module", ["portainer", "mongodb", "elastic", "redis", "postgres", "kubeapi", "minio"])
 def test_saved_reports_and_no_color_preserve_plain_backend_payload(module, tmp_path: Path, capsys):
     line = f"{module.upper()}\t127.0.0.1\t9200\t [+] user:secret (Nodes:3)"
     text_path = tmp_path / "result.txt"

@@ -131,6 +131,7 @@
         "state": "empty"
       }
     ],
+    "znode_dump_items": null,
     "znode_truncated_reason": null,
     "znode_values": null,
     "znodes": [

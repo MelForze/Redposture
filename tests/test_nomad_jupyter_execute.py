@@ -418,8 +418,8 @@ def test_execute_output_palette_and_no_ansi_storage(module, capsys, tmp_path, mo
     for line in lines:
         colorize(console, line, module)
     text = capsys.readouterr().out
-    assert "\x1b[1;38;5;196mexecuted:True\x1b[0m" in text
-    assert "\x1b[1;38;5;208m stdout: qa\x1b[0m" in text
+    assert "Execute Command" in text
+    assert "\x1b[1;38;5;208m qa\x1b[0m" in text
     plain = Console(no_color=True)
     path = tmp_path / "result.txt"
     sink = LineOutputSink(str(path), lambda line: colorize(plain, line, module))

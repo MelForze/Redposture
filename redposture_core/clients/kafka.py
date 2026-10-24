@@ -13,8 +13,10 @@ import zlib
 from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
+from ..detection_io import DetectCall as _DetectCall
+from ..detection_io import run_sync as _run_detect_sync
 from . import transport
 from .tls_cache import shared_client_ssl_context
 
@@ -120,22 +122,34 @@ class KafkaSession:
         use_tls: bool | None = None,
         tls_config: KafkaTlsConfig | None = None,
     ) -> KafkaSession:
-        sock, transport_mode = _open_kafka_socket_configured(
-            host,
-            port,
-            timeout,
-            use_tls=use_tls,
-            tls_config=tls_config,
-        )
-        return cls(
-            sock=sock,
-            transport_mode=transport_mode,
-            identity=(username, password),
-            api_versions={},
+        return _run_detect_sync(
+            cls._open_detect_steps(
+                host, port, timeout, username=username, password=password, use_tls=use_tls, tls_config=tls_config
+            )
         )
 
+    @classmethod
+    def _open_detect_steps(
+        cls,
+        host: str,
+        port: int,
+        timeout: float,
+        *,
+        username: str | None = None,
+        password: str | None = None,
+        use_tls: bool | None = None,
+        tls_config: KafkaTlsConfig | None = None,
+    ):
+        sock, transport_mode = yield _DetectCall(
+            _open_kafka_socket_configured, (host, port, timeout), {"use_tls": use_tls, "tls_config": tls_config}
+        )
+        return cls(sock=sock, transport_mode=transport_mode, identity=(username, password), api_versions={})
+
     def detect(self) -> KafkaApiVersionsResult:
-        result = _probe_apiversions(self.sock, self.correlation_id)
+        return _run_detect_sync(self._detect_detect_steps())
+
+    def _detect_detect_steps(self):
+        result = yield _DetectCall(_probe_apiversions, (self.sock, self.correlation_id), {})
         self.correlation_id += 1
         if result.versions:
             assert self.api_versions is not None
@@ -159,13 +173,16 @@ class KafkaSession:
         return ok, error
 
     def fetch_metadata(self, *, topics: list[str] | None = None) -> tuple[dict[str, Any] | None, str | None]:
-        metadata, error = _fetch_metadata(self.sock, self.correlation_id, topics=topics)
+        return _run_detect_sync(self._fetch_metadata_detect_steps(topics=topics))
+
+    def _fetch_metadata_detect_steps(self, *, topics: list[str] | None = None):
+        metadata, error = yield _DetectCall(_fetch_metadata, (self.sock, self.correlation_id), {"topics": topics})
         self.correlation_id += 1
         if metadata is not None:
             if self.api_versions:
                 metadata["api_versions"] = dict(self.api_versions)
             self.metadata = metadata
-        return metadata, error
+        return (metadata, error)
 
     def close(self) -> None:
         if self.closed:
@@ -322,13 +339,16 @@ def _classify_ssl_error(exc: ssl.SSLError) -> str:
 
 
 def open_kafka_socket(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    use_tls: bool | None = None,
-    tls_config: KafkaTlsConfig | None = None,
+    host: str, port: int, timeout: float, *, use_tls: bool | None = None, tls_config: KafkaTlsConfig | None = None
 ) -> tuple[socket.socket, str]:
+    return _run_detect_sync(
+        _open_kafka_socket_detect_steps(host, port, timeout, use_tls=use_tls, tls_config=tls_config)
+    )
+
+
+def _open_kafka_socket_detect_steps(
+    host: str, port: int, timeout: float, *, use_tls: bool | None = None, tls_config: KafkaTlsConfig | None = None
+):
     """Open a TCP (or TLS-wrapped) socket to a Kafka broker.
 
     Returns `(sock, transport_mode)` where transport_mode is `"plaintext"` or
@@ -348,41 +368,31 @@ def open_kafka_socket(
     `_open_grpc_socket` in `redposture_core/clients/grpc.py`.
     """
     tls_inferred = use_tls is None
-    resolved = use_tls if use_tls is not None else (port in _TLS_FIRST_PORTS)
-    base = socket.create_connection((host, port), timeout=timeout)
-    base.settimeout(timeout)
+    resolved = use_tls if use_tls is not None else port in _TLS_FIRST_PORTS
+    base = yield _DetectCall(socket.create_connection, ((host, port),), {"timeout": timeout})
+    yield _DetectCall(base.settimeout, (timeout,), {})
     if not resolved:
-        return base, "plaintext"
+        return (base, "plaintext")
     tls = tls_config or KafkaTlsConfig(insecure=True)
     try:
         ctx = shared_client_ssl_context(
-            insecure=tls.insecure,
-            ca_file=tls.ca_file,
-            cert_file=tls.cert_file,
-            key_file=tls.key_file,
+            insecure=tls.insecure, ca_file=tls.ca_file, cert_file=tls.cert_file, key_file=tls.key_file
         )
     except ValueError:
         base.close()
         raise
     try:
-        wrapped = ctx.wrap_socket(base, server_hostname=tls.server_name or host)
-        wrapped.settimeout(timeout)
+        wrapped = yield _DetectCall(ctx.wrap_socket, (base,), {"server_hostname": tls.server_name or host})
+        yield _DetectCall(wrapped.settimeout, (timeout,), {})
     except ssl.SSLError as ssl_exc:
         try:
             base.close()
         except OSError:
             pass
         if tls_inferred:
-            # Auto-fallback: reopen as plaintext. If it really is Kafka
-            # on the "TLS-first" port, the ApiVersions probe upstairs
-            # will confirm; if it isn't, the non-Kafka detection path
-            # (`_identify_non_kafka_prelude`) surfaces a clean summary.
-            fallback = socket.create_connection((host, port), timeout=timeout)
-            fallback.settimeout(timeout)
-            return fallback, "plaintext"
-        # Caller forced TLS explicitly — surface the friendly reason so
-        # the audit line reads e.g. `not a TLS listener` instead of
-        # `[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:992)`.
+            fallback = yield _DetectCall(socket.create_connection, ((host, port),), {"timeout": timeout})
+            yield _DetectCall(fallback.settimeout, (timeout,), {})
+            return (fallback, "plaintext")
         raise ValueError(f"TLS handshake failed: {_classify_ssl_error(ssl_exc)}") from ssl_exc
     except BaseException:
         try:
@@ -390,21 +400,24 @@ def open_kafka_socket(
         except OSError:
             pass
         raise
-    return wrapped, "tls"
+    return (wrapped, "tls")
 
 
 def _open_kafka_socket_configured(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    use_tls: bool | None,
-    tls_config: KafkaTlsConfig | None,
+    host: str, port: int, timeout: float, *, use_tls: bool | None, tls_config: KafkaTlsConfig | None
 ) -> tuple[socket.socket, str]:
+    return _run_detect_sync(
+        _open_kafka_socket_configured_detect_steps(host, port, timeout, use_tls=use_tls, tls_config=tls_config)
+    )
+
+
+def _open_kafka_socket_configured_detect_steps(
+    host: str, port: int, timeout: float, *, use_tls: bool | None, tls_config: KafkaTlsConfig | None
+):
     kwargs: dict[str, Any] = {"use_tls": use_tls}
     if tls_config is not None:
         kwargs["tls_config"] = tls_config
-    return open_kafka_socket(host, port, timeout, **kwargs)
+    return (yield _DetectCall(open_kafka_socket, (host, port, timeout), {**kwargs}))
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -639,45 +652,38 @@ def _identify_non_kafka_prelude(raw: bytes) -> str | None:
 
 
 def _recv_kafka_frame(sock: socket.socket) -> bytes:
-    raw_size = _recv_exact(sock, 4)
+    return _run_detect_sync(_recv_kafka_frame_detect_steps(sock))
+
+
+def _recv_kafka_frame_detect_steps(sock: socket.socket):
+    raw_size = yield _DetectCall(_recv_exact, (sock, 4), {})
     if _is_tls_record_prelude(raw_size):
         raise _TlsProbeError(f"plaintext read returned TLS record prelude: {raw_size!r}")
     non_kafka_kind = _identify_non_kafka_prelude(raw_size)
     if non_kafka_kind is not None:
-        # Peek a bit more to preview what the peer is actually saying so the
-        # operator can jump straight to the culprit. Non-blocking best-effort:
-        # if the socket has no more data ready or it errors, we still surface
-        # the first 4 bytes.
         peek = b""
-        previous_timeout = sock.gettimeout()
+        previous_timeout = yield _DetectCall(sock.gettimeout, (), {})
         try:
-            sock.settimeout(0.2)
-            peek = sock.recv(120)
+            yield _DetectCall(sock.settimeout, (0.2,), {})
+            peek = yield _DetectCall(sock.recv, (120,), {})
         except (OSError, TimeoutError, ValueError):
             peek = b""
         finally:
             try:
-                sock.settimeout(previous_timeout)
+                yield _DetectCall(sock.settimeout, (previous_timeout,), {})
             except (OSError, ValueError):
                 pass
         preview = (raw_size + peek).decode("ascii", errors="replace").strip().splitlines()
         first_line = preview[0][:60] if preview else raw_size.decode("ascii", errors="replace")
         raise ValueError(
-            f"not a Kafka broker: peer sent {non_kafka_kind} "
-            f"({first_line!r}). Check the port — an HTTP service or admin "
-            f"panel is likely listening here instead of Kafka."
+            f"not a Kafka broker: peer sent {non_kafka_kind} ({first_line!r}). Check the port — an HTTP service or admin panel is likely listening here instead of Kafka."
         )
     (frame_size,) = struct.unpack(">i", raw_size)
     if frame_size <= 0 or frame_size > KAFKA_MAX_FRAME:
-        # Fall-through: printable-ASCII was already filtered above, so if we
-        # got here the bytes are genuinely binary garbage. Include the raw
-        # hex so the operator can eyeball it against a wire trace.
         raise ValueError(
-            f"invalid Kafka frame size {frame_size} (raw bytes: 0x{raw_size.hex()}; "
-            f"expected 1..{KAFKA_MAX_FRAME}). The peer may be a load balancer "
-            f"or proxy speaking an unknown protocol."
+            f"invalid Kafka frame size {frame_size} (raw bytes: 0x{raw_size.hex()}; expected 1..{KAFKA_MAX_FRAME}). The peer may be a load balancer or proxy speaking an unknown protocol."
         )
-    return _recv_exact(sock, frame_size)
+    return (yield _DetectCall(_recv_exact, (sock, frame_size), {}))
 
 
 def _encode_kafka_string(value: str) -> bytes:
@@ -706,17 +712,26 @@ def _build_request_header(api_key: int, api_version: int, correlation_id: int, c
 
 
 def _send_kafka_request(
-    sock: socket.socket,
-    *,
-    api_key: int,
-    api_version: int,
-    correlation_id: int,
-    client_id: str,
-    body: bytes = b"",
+    sock: socket.socket, *, api_key: int, api_version: int, correlation_id: int, client_id: str, body: bytes = b""
 ) -> bytes:
+    return _run_detect_sync(
+        _send_kafka_request_detect_steps(
+            sock,
+            api_key=api_key,
+            api_version=api_version,
+            correlation_id=correlation_id,
+            client_id=client_id,
+            body=body,
+        )
+    )
+
+
+def _send_kafka_request_detect_steps(
+    sock: socket.socket, *, api_key: int, api_version: int, correlation_id: int, client_id: str, body: bytes = b""
+):
     frame = _build_request_header(api_key, api_version, correlation_id, client_id) + body
-    sock.sendall(struct.pack(">i", len(frame)) + frame)
-    return _recv_kafka_frame(sock)
+    yield _DetectCall(sock.sendall, (struct.pack(">i", len(frame)) + frame,), {})
+    return (yield _DetectCall(_recv_kafka_frame, (sock,), {}))
 
 
 class _KafkaReader:
@@ -796,17 +811,17 @@ def _parse_apiversions_response(payload: bytes, expected_correlation_id: int) ->
 
         error_code = reader.read_i16()
         versions: dict[int, tuple[int, int]] = {}
-        if reader.remaining() >= 4:
-            count = reader.read_i32()
-            if count >= 0:
-                for _ in range(count):
-                    if reader.remaining() < 6:
-                        return KafkaApiVersionsResult(False, error_code, "invalid ApiVersions entry payload", versions)
-                    api_key = reader.read_i16()
-                    min_version = reader.read_i16()
-                    max_version = reader.read_i16()
-                    if min_version <= max_version:
-                        versions[int(api_key)] = (int(min_version), int(max_version))
+        count = reader.read_i32()
+        if count < 0:
+            return KafkaApiVersionsResult(False, error_code, "invalid ApiVersions array size", versions)
+        for _ in range(count):
+            if reader.remaining() < 6:
+                return KafkaApiVersionsResult(False, error_code, "invalid ApiVersions entry payload", versions)
+            api_key = reader.read_i16()
+            min_version = reader.read_i16()
+            max_version = reader.read_i16()
+            if min_version <= max_version:
+                versions[int(api_key)] = (int(min_version), int(max_version))
         return KafkaApiVersionsResult(True, int(error_code), None, versions)
     except (ValueError, struct.error) as exc:
         return KafkaApiVersionsResult(False, None, f"invalid ApiVersions response: {exc}", {})
@@ -906,13 +921,20 @@ def _build_metadata_request_body(topics: list[str] | None) -> bytes:
 
 
 def _probe_apiversions(sock: socket.socket, correlation_id: int) -> KafkaApiVersionsResult:
-    payload = _send_kafka_request(
-        sock,
-        api_key=KAFKA_API_VERSIONS,
-        api_version=0,
-        correlation_id=correlation_id,
-        client_id=KAFKA_CLIENT_ID,
-        body=b"",
+    return _run_detect_sync(_probe_apiversions_detect_steps(sock, correlation_id))
+
+
+def _probe_apiversions_detect_steps(sock: socket.socket, correlation_id: int):
+    payload = yield _DetectCall(
+        _send_kafka_request,
+        (sock,),
+        {
+            "api_key": KAFKA_API_VERSIONS,
+            "api_version": 0,
+            "correlation_id": correlation_id,
+            "client_id": KAFKA_CLIENT_ID,
+            "body": b"",
+        },
     )
     return _parse_apiversions_response(payload, correlation_id)
 
@@ -947,18 +969,22 @@ def _bootstrap_known_kafka_session(
 
 
 def _fetch_metadata(
-    sock: socket.socket,
-    correlation_id: int,
-    *,
-    topics: list[str] | None = None,
+    sock: socket.socket, correlation_id: int, *, topics: list[str] | None = None
 ) -> tuple[dict[str, Any] | None, str | None]:
-    payload = _send_kafka_request(
-        sock,
-        api_key=KAFKA_METADATA,
-        api_version=0,
-        correlation_id=correlation_id,
-        client_id=KAFKA_CLIENT_ID,
-        body=_build_metadata_request_body(topics),
+    return _run_detect_sync(_fetch_metadata_detect_steps(sock, correlation_id, topics=topics))
+
+
+def _fetch_metadata_detect_steps(sock: socket.socket, correlation_id: int, *, topics: list[str] | None = None):
+    payload = yield _DetectCall(
+        _send_kafka_request,
+        (sock,),
+        {
+            "api_key": KAFKA_METADATA,
+            "api_version": 0,
+            "correlation_id": correlation_id,
+            "client_id": KAFKA_CLIENT_ID,
+            "body": _build_metadata_request_body(topics),
+        },
     )
     return _parse_metadata_response(payload, correlation_id)
 
@@ -1184,6 +1210,8 @@ def _decompress_kafka_records(codec: int, payload: bytes) -> bytes:
             result = stream.decompress(payload, KAFKA_MAX_DECOMPRESSED_BYTES + 1)
             if stream.unconsumed_tail or len(result) > KAFKA_MAX_DECOMPRESSED_BYTES:
                 raise KafkaCompressionError("Kafka decompressed payload exceeds 16 MiB")
+            if not stream.eof:
+                raise KafkaCompressionError("invalid Kafka gzip compressed batch: incomplete gzip stream")
             return result
         if codec == 2:
             return _decode_xerial_snappy(payload, importlib.import_module("snappy"))
@@ -1211,13 +1239,19 @@ def _decompress_kafka_records(codec: int, payload: bytes) -> bytes:
 
 
 def _parse_record_entries(
-    reader: _KafkaReader, base_offset: int, record_count: int, max_messages: int
+    reader: _KafkaReader,
+    base_offset: int,
+    record_count: int,
+    max_messages: int | None,
+    *,
+    min_offset: int | None = None,
+    max_offset: int | None = None,
 ) -> list[tuple[int, str]]:
     items: list[tuple[int, str]] = []
     if record_count > KAFKA_MAX_PARSE_STEPS:
         raise ValueError("Kafka record count exceeds parse budget")
     for _ in range(record_count):
-        if len(items) >= max_messages:
+        if max_messages is not None and len(items) >= max_messages:
             break
         record_size = _read_varint(reader)
         if record_size < 0:
@@ -1231,15 +1265,26 @@ def _parse_record_entries(
         _ = _read_var_bytes(record_reader)
         value = _read_var_bytes(record_reader)
         _skip_record_headers(record_reader)
+        offset = int(base_offset) + int(offset_delta)
+        if (min_offset is not None and offset < min_offset) or (max_offset is not None and offset >= max_offset):
+            continue
         if value is None:
             continue
         decoded = value.decode("utf-8", errors="replace")
         if decoded:
-            items.append((int(base_offset) + int(offset_delta), decoded))
+            items.append((offset, decoded))
     return items
 
 
-def _parse_record_batch_entries(base_offset: int, batch: bytes, max_messages: int) -> list[tuple[int, str]]:
+def _parse_record_batch_entries(
+    base_offset: int,
+    batch: bytes,
+    max_messages: int | None,
+    *,
+    min_offset: int | None = None,
+    max_offset: int | None = None,
+    progress: dict[str, int] | None = None,
+) -> list[tuple[int, str]]:
     reader = _KafkaReader(batch)
     if reader.remaining() < 49:
         return []
@@ -1250,7 +1295,9 @@ def _parse_record_batch_entries(base_offset: int, batch: bytes, max_messages: in
     _ = reader.read_i32()  # crc
     attributes = reader.read_i16()
     compression = int(attributes) & 0x07
-    _ = reader.read_i32()  # last offset delta
+    last_offset_delta = reader.read_i32()
+    if last_offset_delta < 0:
+        raise ValueError("invalid Kafka record batch last offset delta")
     _ = reader.read_i64()  # first timestamp
     _ = reader.read_i64()  # max timestamp
     _ = reader.read_i64()  # producer id
@@ -1259,22 +1306,45 @@ def _parse_record_batch_entries(base_offset: int, batch: bytes, max_messages: in
     record_count = reader.read_i32()
     if record_count < 0:
         raise ValueError("invalid Kafka record batch count")
+    next_offset = int(base_offset) + last_offset_delta + 1
+    if attributes & 0x20:  # Transaction COMMIT/ABORT markers are broker metadata.
+        if progress is not None:
+            progress["next_offset"] = max(progress.get("next_offset", next_offset), next_offset)
+        return []
     if compression:
+        # Empty compressed batches have no payload to decode. Treat them as
+        # empty while leaving the fetch wrapper responsible for reporting an
+        # otherwise non-empty malformed record set.
+        if reader.remaining() == 0:
+            return []
         decompressed = _decompress_kafka_records(compression, reader._read(reader.remaining()))  # noqa: SLF001
-        if not decompressed:
+        if not decompressed and record_count:
             return []
         reader = _KafkaReader(decompressed)
-    return _parse_record_entries(reader, base_offset, record_count, max_messages)
+    items = _parse_record_entries(
+        reader, base_offset, record_count, max_messages, min_offset=min_offset, max_offset=max_offset
+    )
+    if progress is not None:
+        progress["next_offset"] = max(progress.get("next_offset", next_offset), next_offset)
+    return items
 
 
-def _parse_message_set_entries(message_set: bytes, max_messages: int, *, _depth: int = 0) -> list[tuple[int, str]]:
+def _parse_message_set_entries(
+    message_set: bytes,
+    max_messages: int | None,
+    *,
+    _depth: int = 0,
+    min_offset: int | None = None,
+    max_offset: int | None = None,
+    progress: dict[str, int] | None = None,
+) -> list[tuple[int, str]]:
     if _depth > KAFKA_MAX_COMPRESSION_DEPTH:
         raise KafkaCompressionError("Kafka compression nesting exceeds 4 levels")
     items: list[tuple[int, str]] = []
     reader = _KafkaReader(message_set)
 
     parse_steps = 0
-    while reader.remaining() >= 12 and len(items) < max_messages:
+    while reader.remaining() >= 12 and (max_messages is None or len(items) < max_messages):
         parse_steps += 1
         if parse_steps > KAFKA_MAX_PARSE_STEPS:
             raise ValueError("Kafka message set exceeds parse budget")
@@ -1286,7 +1356,16 @@ def _parse_message_set_entries(message_set: bytes, max_messages: int, *, _depth:
 
             message_body = reader._read(message_size)  # noqa: SLF001
             if len(message_body) >= 5 and message_body[4] == 2:
-                items.extend(_parse_record_batch_entries(int(offset), message_body, max_messages - len(items)))
+                items.extend(
+                    _parse_record_batch_entries(
+                        int(offset),
+                        message_body,
+                        None if max_messages is None else max_messages - len(items),
+                        min_offset=min_offset,
+                        max_offset=max_offset,
+                        progress=progress,
+                    )
+                )
                 continue
 
             message_reader = _KafkaReader(message_body)
@@ -1301,15 +1380,28 @@ def _parse_message_set_entries(message_set: bytes, max_messages: int, *, _depth:
 
             _ = message_reader.read_bytes(nullable=True)  # key
             value = message_reader.read_bytes(nullable=True)
+            if progress is not None:
+                progress["next_offset"] = max(progress.get("next_offset", int(offset) + 1), int(offset) + 1)
             if value is None:
                 continue
 
             compression = int(attributes) & 0x07
             if compression:
                 nested = _decompress_kafka_records(compression, value)
-                items.extend(_parse_message_set_entries(nested, max_messages - len(items), _depth=_depth + 1))
+                items.extend(
+                    _parse_message_set_entries(
+                        nested,
+                        None if max_messages is None else max_messages - len(items),
+                        _depth=_depth + 1,
+                        min_offset=min_offset,
+                        max_offset=max_offset,
+                        progress=progress,
+                    )
+                )
                 continue
 
+            if (min_offset is not None and offset < min_offset) or (max_offset is not None and offset >= max_offset):
+                continue
             decoded = value.decode("utf-8", errors="replace")
             if decoded:
                 items.append((int(offset), decoded))
@@ -1326,9 +1418,11 @@ def _parse_fetch_response(
     expected_correlation_id: int,
     *,
     expected_partition: int,
-    max_messages: int,
+    max_messages: int | None,
     api_version: int = KAFKA_FETCH_API_VERSION,
     progress: dict[str, int] | None = None,
+    min_offset: int | None = None,
+    max_offset: int | None = None,
 ) -> tuple[list[tuple[int, str]] | None, str | None]:
     """Parse a Fetch v10 response.
 
@@ -1417,8 +1511,17 @@ def _parse_fetch_response(
                     )
                 if progress is not None:
                     progress["high_watermark"] = high_watermark
-                entries = _parse_message_set_entries(records, max_messages)
-                if not entries and records:
+                parsed_progress: dict[str, int] = {}
+                entries = _parse_message_set_entries(
+                    records,
+                    max_messages,
+                    min_offset=min_offset,
+                    max_offset=min(high_watermark, max_offset) if max_offset is not None else high_watermark,
+                    progress=parsed_progress,
+                )
+                if progress is not None:
+                    progress.update(parsed_progress)
+                if not entries and records and "next_offset" not in parsed_progress:
                     # Broker returned records bytes but our parser produced
                     # zero application messages. This can be an empty/control
                     # compressed batch or otherwise unsupported record shape.
@@ -1507,7 +1610,7 @@ def _read_partition_messages_on_leader(
     correlation: int,
     topic: str,
     partition: int,
-    remaining: int,
+    remaining: int | None,
     *,
     fetch_api_version: int = KAFKA_FETCH_API_VERSION,
 ) -> tuple[list[str], int, str | None]:
@@ -1532,7 +1635,7 @@ def _read_partition_messages_on_leader(
     items: list[str] = []
     next_offset = earliest_offset
     snapshot_end: int | None = None
-    while len(items) < remaining:
+    while remaining is None or len(items) < remaining:
         try:
             fetch_payload = _send_kafka_request(
                 leader_sock,
@@ -1551,9 +1654,11 @@ def _read_partition_messages_on_leader(
             fetch_payload,
             correlation,
             expected_partition=partition,
-            max_messages=remaining - len(items),
+            max_messages=None if remaining is None else remaining - len(items),
             api_version=fetch_api_version,
             progress=progress,
+            min_offset=next_offset,
+            max_offset=snapshot_end,
         )
         correlation += 1
         if fetch_error:
@@ -1566,11 +1671,17 @@ def _read_partition_messages_on_leader(
             if offset >= next_offset and (snapshot_end is None or offset < snapshot_end)
         ]
         if not accepted:
+            advanced_offset = progress.get("next_offset", next_offset)
+            if advanced_offset > next_offset:
+                next_offset = advanced_offset
+                if snapshot_end is not None and next_offset >= snapshot_end:
+                    return items, correlation, None
+                continue
             if snapshot_end is not None and next_offset < snapshot_end:
                 return items, correlation, "Fetch made no progress before partition high watermark (partial dump)"
             return items, correlation, None
         items.extend(f"p{partition}@{offset} {text}" for offset, text in accepted)
-        next_offset = max(offset for offset, _text in accepted) + 1
+        next_offset = max(max(offset for offset, _text in accepted) + 1, progress.get("next_offset", next_offset))
         if snapshot_end is None or next_offset >= snapshot_end:
             break
     return items, correlation, None
@@ -2360,7 +2471,7 @@ def _read_topic_messages(
     port: int,
     timeout: float,
     topic: str,
-    max_messages: int,
+    max_messages: int | None,
     *,
     username: str | None = None,
     password: str | None = None,
@@ -2372,7 +2483,7 @@ def _read_topic_messages(
     existing_session: KafkaSession | None = None,
     leader_pool: KafkaLeaderPool | None = None,
 ) -> tuple[list[str] | None, str | None, str]:
-    """Read up to `max_messages` messages from `topic` across all partitions.
+    """Read to the partition high watermark when `max_messages` is None; otherwise read up to `max_messages` messages from `topic` across all partitions.
 
     Partition-aware routing: after Metadata, we group each partition by its
     leader broker (multi-broker Kafka clusters have leaders spread across
@@ -2385,7 +2496,7 @@ def _read_topic_messages(
     from the client, we fall back to running everything on the bootstrap
     socket — same as the pre-fix behavior.
     """
-    if max_messages <= 0:
+    if max_messages is not None and max_messages <= 0:
         return [], None, "plaintext"
 
     try:
@@ -2459,14 +2570,14 @@ def _read_topic_messages(
             def _handle_partitions(leader_sock: socket.socket, partitions: list[int], corr_start: int) -> int:
                 corr = corr_start
                 for partition in partitions:
-                    if len(out) >= max_messages:
+                    if max_messages is not None and len(out) >= max_messages:
                         break
                     items, corr, err = _read_partition_messages_on_leader(
                         leader_sock,
                         corr,
                         topic,
                         partition,
-                        max_messages - len(out),
+                        None if max_messages is None else max_messages - len(out),
                         fetch_api_version=fetch_api_version,
                     )
                     out.extend(items)
@@ -2476,7 +2587,7 @@ def _read_topic_messages(
 
             # 1) Per-leader connections for partitions with a known leader.
             for leader_id, partitions in partitions_by_leader.items():
-                if len(out) >= max_messages:
+                if max_messages is not None and len(out) >= max_messages:
                     break
                 leader_host, leader_port = broker_map[leader_id]
                 # Bootstrap-broker shortcut: if the leader IS the broker
@@ -2557,7 +2668,7 @@ def _read_topic_messages(
 
             # 2) Partitions without a known leader / broker_map miss:
             #    fall back to the bootstrap socket (best-effort).
-            if unassigned_partitions and len(out) < max_messages:
+            if unassigned_partitions and (max_messages is None or len(out) < max_messages):
                 correlation = _handle_partitions(sock, unassigned_partitions, correlation)
 
             if partition_errors:
@@ -2586,15 +2697,22 @@ def _read_topic_messages(
 
 
 def _sasl_handshake_plain(sock: socket.socket, correlation_id: int) -> tuple[bool, int, str | None]:
+    return _run_detect_sync(_sasl_handshake_plain_detect_steps(sock, correlation_id))
+
+
+def _sasl_handshake_plain_detect_steps(sock: socket.socket, correlation_id: int):
     versions = (1, 0)
     for version in versions:
-        payload = _send_kafka_request(
-            sock,
-            api_key=KAFKA_SASL_HANDSHAKE,
-            api_version=version,
-            correlation_id=correlation_id,
-            client_id=KAFKA_CLIENT_ID,
-            body=_encode_kafka_string("PLAIN"),
+        payload = yield _DetectCall(
+            _send_kafka_request,
+            (sock,),
+            {
+                "api_key": KAFKA_SASL_HANDSHAKE,
+                "api_version": version,
+                "correlation_id": correlation_id,
+                "client_id": KAFKA_CLIENT_ID,
+                "body": _encode_kafka_string("PLAIN"),
+            },
         )
         try:
             reader = _KafkaReader(payload)
@@ -2609,12 +2727,12 @@ def _sasl_handshake_plain(sock: socket.socket, correlation_id: int) -> tuple[boo
             if error_code == 35:
                 continue
             if error_code != 0:
-                return False, correlation_id + 1, f"SASL handshake failed: {_kafka_error_name(int(error_code))}"
+                return (False, correlation_id + 1, f"SASL handshake failed: {_kafka_error_name(int(error_code))}")
             _ = reader.read_string_array()
-            return True, correlation_id + 1, None
+            return (True, correlation_id + 1, None)
         except (ValueError, struct.error) as exc:
-            return False, correlation_id + 1, f"invalid SASL handshake response: {exc}"
-    return False, correlation_id + 1, "SASL handshake failed: UNSUPPORTED_VERSION"
+            return (False, correlation_id + 1, f"invalid SASL handshake response: {exc}")
+    return (False, correlation_id + 1, "SASL handshake failed: UNSUPPORTED_VERSION")
 
 
 def _sasl_authenticate_plain(
@@ -2779,7 +2897,7 @@ def _read_dump_topics(
     port: int,
     timeout: float,
     topics: list[str],
-    max_messages: int,
+    max_messages: int | None,
     username: str | None,
     password: str | None,
     use_tls: bool | None = None,
@@ -2813,3 +2931,18 @@ def _read_dump_topics(
         if read_error:
             dump_errors[topic_name] = read_error
     return dump_results, dump_errors
+
+
+# Exact synchronous wrappers are the compatibility/override identities.
+_ASYNC_RETAINED_STEPS = {
+    cast(Any, KafkaSession.open).__func__: cast(Any, KafkaSession._open_detect_steps).__func__,
+    KafkaSession.detect: KafkaSession._detect_detect_steps,
+    KafkaSession.fetch_metadata: KafkaSession._fetch_metadata_detect_steps,
+    open_kafka_socket: _open_kafka_socket_detect_steps,
+    _open_kafka_socket_configured: _open_kafka_socket_configured_detect_steps,
+    _recv_kafka_frame: _recv_kafka_frame_detect_steps,
+    _send_kafka_request: _send_kafka_request_detect_steps,
+    _probe_apiversions: _probe_apiversions_detect_steps,
+    _fetch_metadata: _fetch_metadata_detect_steps,
+    _sasl_handshake_plain: _sasl_handshake_plain_detect_steps,
+}

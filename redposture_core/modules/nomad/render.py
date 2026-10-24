@@ -6,6 +6,8 @@ from ..token_render import colorize, credential, detect, inventory
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
+    if record.get("submit_probe_requested") and not isinstance(record.get("submit_probe"), dict):
+        return ""
     return detect("nomad", "HashiCorp Nomad", record, output_format)
 
 

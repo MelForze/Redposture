@@ -36,9 +36,9 @@ def test_collect_color_spans_supports_literal_and_regex_rule_shapes() -> None:
 
     spans = collect_color_spans(
         text,
-        literals=(LiteralColorRule("token", "orange"), ("", "red")),
+        literals=(LiteralColorRule("token", "orange"), ("", "true_red")),
         regexes=(
-            (r"count=(\d+)", "red", 1),
+            (r"count=(\d+)", "true_red", 1),
             RegexColorRule(re.compile(r"compiled=(\d+)"), "yellow"),
             (r"missing", "blue"),
         ),
@@ -48,7 +48,7 @@ def test_collect_color_spans_supports_literal_and_regex_rule_shapes() -> None:
     assert colored_fragments == [
         ("token", "orange"),
         ("token", "orange"),
-        ("count=2", "red"),
+        ("count=2", "true_red"),
         ("compiled=7", "yellow"),
     ]
 
@@ -56,7 +56,7 @@ def test_collect_color_spans_supports_literal_and_regex_rule_shapes() -> None:
 def test_colorize_spans_skips_empty_and_overlapping_ranges() -> None:
     console = _Console()
 
-    rendered = colorize_spans(console, "abcdef", [(1, 1, "red"), (1, 4, "orange"), (2, 5, "yellow")])
+    rendered = colorize_spans(console, "abcdef", [(1, 1, "true_red"), (1, 4, "orange"), (2, 5, "yellow")])
 
     assert rendered
     assert ("bcd", "orange") in console.paint_calls
@@ -114,17 +114,17 @@ def test_collect_stage_payload_spans_handles_common_auth_bool_and_count_rules() 
             BooleanColorRule("write"),
         ),
         counts=(
-            CountColorRule("keys", "red"),
+            CountColorRule("keys", "true_red"),
             CountColorRule("items", "orange"),
-            CountColorRule("missing", "red"),
+            CountColorRule("missing", "true_red"),
         ),
     )
 
     colored_fragments = [(text[start:end], color) for start, end, color in spans]
     assert ("(auth required:unknown)", "yellow") in colored_fragments
-    assert ("(read:True)", "red") in colored_fragments
+    assert ("(read:True)", "true_red") in colored_fragments
     assert ("(write:False)", "bright_green") in colored_fragments
-    assert ("(keys:0)", "red") not in colored_fragments
+    assert ("(keys:0)", "true_red") not in colored_fragments
     assert ("(items:3)", "orange") in colored_fragments
     assert ("(missing:unknown)", "yellow") in colored_fragments
 
@@ -183,20 +183,20 @@ def test_render_colored_marker_line_applies_declarative_rules_and_extra_spans() 
         console,
         "REDIS\t127.0.0.1\t6379\t [+] anonymous access (keys:2) token=abc",
         tag="REDIS",
-        counts=(CountColorRule("keys", "red"),),
+        counts=(CountColorRule("keys", "true_red"),),
         extra_spans=lambda _marker, payload: [(payload.index("token="), len(payload), "orange")],
     )
 
     assert rendered is True
     assert ("REDIS", "blue") in console.paint_calls
     assert ("[+]", "bright_green") in console.paint_calls
-    assert any(text == "keys:2" and color == "red" for text, color in console.paint_calls)
+    assert any(text == "keys:2" and color == "true_red" for text, color in console.paint_calls)
     assert any("token=abc" in text and color == "orange" for text, color in console.paint_calls)
 
 
 def test_count_color_rule_can_distinguish_positive_zero_and_unknown() -> None:
     console = _Console()
-    rule = CountColorRule("keys", "red", unknown_color="orange", zero_color="bright_green")
+    rule = CountColorRule("keys", "true_red", unknown_color="orange", zero_color="bright_green")
 
     for value in ("7", "0", "unknown"):
         assert render_colored_marker_line(
@@ -206,6 +206,6 @@ def test_count_color_rule_can_distinguish_positive_zero_and_unknown() -> None:
             counts=(rule,),
         )
 
-    assert any(text == "keys:7" and color == "red" for text, color in console.paint_calls)
+    assert any(text == "keys:7" and color == "true_red" for text, color in console.paint_calls)
     assert any(text == "keys:0" and color == "bright_green" for text, color in console.paint_calls)
     assert any(text == "keys:unknown" and color == "orange" for text, color in console.paint_calls)

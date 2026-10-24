@@ -23,10 +23,22 @@ def prefix(module: str, record: dict[str, Any]) -> str:
 def detect(module: str, title: str, record: dict[str, Any], fmt: str) -> str:
     if fmt != "txt" or not record.get("is_" + module):
         return ""
-    line = f"{prefix(module, record)} [*] {title} (auth required:{auth_required_text(record.get('auth_required'), None)}) (version:{record.get('version') or 'unknown'})"
+    line = f"{prefix(module, record)} [*] {title}"
+    auth = auth_required_text(record.get("auth_required"), None)
+    if auth != "unknown":
+        line += f" (auth required:{auth})"
     if module == "nomad":
         value = record.get("acl_enabled")
-        line += f" (ACL enabled:{value if type(value) is bool else 'unknown'})"
+        if type(value) is bool:
+            line += f" (ACL enabled:{value})"
+        probe = record.get("submit_probe")
+        access = probe.get("access") if isinstance(probe, dict) else None
+        if access in {"allowed", "denied"}:
+            line += f" (Job registration allowed:{access == 'allowed'})"
+    if record.get("rce_potential") and not record.get("execute_verified"):
+        line += " (RCE:Possible)"
+    if record.get("version"):
+        line += f" (version:{record['version']})"
     return line
 
 
@@ -42,19 +54,6 @@ def inventory(module: str, record: dict[str, Any], fmt: str) -> list[str]:
         return []
     pre = prefix(module, record)
     lines: list[str] = []
-    if record.get("rce_potential") and not record.get("execute_verified"):
-        reason = (
-            (
-                "job registration allowed; code execution not exercised"
-                if record.get("submit_access") == "allowed"
-                else "ACL disabled; job submission not exercised"
-            )
-            if module == "nomad"
-            else "anonymous "
-            + "/".join(record.get("rce_surfaces") or ["kernel"])
-            + " API; code execution not exercised"
-        )
-        lines.append(f"{pre} [!] RCE:potential ({reason})")
     order = ("jobs", "nodes", "members") if module == "nomad" else ("contents", "sessions", "kernels", "terminals")
     for name in order:
         if name not in (record.get("inventory_requested") or []):
@@ -100,6 +99,7 @@ def colorize(console: Any, line: str, module: str) -> bool:
         booleans=(
             BooleanColorRule("auth required", true_color="bright_green", false_color="true_red"),
             BooleanColorRule("ACL enabled", true_color="bright_green", false_color="true_red"),
+            BooleanColorRule("Job registration allowed", true_color="true_red", false_color="bright_green"),
             BooleanColorRule("executed", true_color="true_red", false_color="orange"),
         ),
         regexes=(
@@ -114,6 +114,7 @@ def colorize(console: Any, line: str, module: str) -> bool:
             RegexColorRule(r"\(access:unverified\)", "orange"),
             RegexColorRule(r"\([^()]*unknown\)", "orange"),
             RegexColorRule(r"\(version:[^)]+\)", "orange"),
+            RegexColorRule(r"\(RCE:Possible\)", "true_red"),
             RegexColorRule(r"\(status:(?:partial|unavailable)\)", "orange"),
             RegexColorRule(r"Token verification unavailable", "orange"),
             RegexColorRule(r"reason=.*", "orange"),
@@ -125,7 +126,9 @@ def colorize(console: Any, line: str, module: str) -> bool:
             *discovery_color_spans(marker, payload),
             *(
                 [(0, len(payload), "true_red")]
-                if marker == "[!]" or payload == "Token accepted"
+                if marker == "[!]"
+                else [(0, len(payload), "true_red")]
+                if payload == "Token accepted"
                 else [(0, len(payload), "bright_green")]
                 if payload == "Token rejected"
                 else [(0, len(payload), "orange")]
@@ -136,8 +139,5 @@ def colorize(console: Any, line: str, module: str) -> bool:
     ):
         return True
     if line.startswith(tag) and "\t" in line:
-        payload = line.rsplit("\t", 1)[-1].lstrip()
-        return render_tagged_detail_line(
-            console, line, tag=tag, default_color="orange" if payload.startswith(("stdout:", "stderr:")) else "white"
-        )
+        return render_tagged_detail_line(console, line, tag=tag, default_color="orange")
     return False

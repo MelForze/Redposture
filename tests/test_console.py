@@ -61,9 +61,9 @@ def test_console_paint_skips_ansi_when_piped(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.delenv("NO_COLOR", raising=False)
     console = Console(debug=False)
     piped = _FakeStream(tty=False)
-    assert console._paint("hello", "green", stream=piped) == "hello"
+    assert console._paint("hello", "bright_green", stream=piped) == "hello"
     tty = _FakeStream(tty=True)
-    assert "\x1b[" in console._paint("hello", "green", stream=tty)
+    assert "\x1b[" in console._paint("hello", "bright_green", stream=tty)
 
 
 def test_paint_returns_plain_text_for_unknown_color() -> None:
@@ -73,7 +73,7 @@ def test_paint_returns_plain_text_for_unknown_color() -> None:
 
 def test_paint_wraps_known_color_with_ansi() -> None:
     console = Console(debug=False)
-    rendered = console._paint("hello", "green", stream=sys.stdout)
+    rendered = console._paint("hello", "bright_green", stream=sys.stdout)
     assert "\x1b[" in rendered
     assert "hello" in rendered
 
@@ -154,7 +154,7 @@ def test_set_console_no_color_disables_ansi_rendering() -> None:
     set_console_no_color(True)
     try:
         console = Console(debug=False)
-        rendered = console._paint("hello", "green", stream=sys.stdout)
+        rendered = console._paint("hello", "bright_green", stream=sys.stdout)
         assert rendered == "hello"
     finally:
         set_console_no_color(False)
@@ -164,7 +164,7 @@ def test_console_constructor_no_color_overrides_global() -> None:
     set_console_no_color(True)
     try:
         console = Console(debug=False, no_color=False)
-        rendered = console._paint("hello", "green", stream=sys.stdout)
+        rendered = console._paint("hello", "bright_green", stream=sys.stdout)
         assert "\x1b[" in rendered
     finally:
         set_console_no_color(False)

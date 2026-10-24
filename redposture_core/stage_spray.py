@@ -7,6 +7,7 @@ import hashlib
 import importlib
 import ipaddress
 import json
+import math
 import os
 import re
 import sqlite3
@@ -18,7 +19,7 @@ from bisect import bisect_right
 from collections.abc import Generator, Iterable, Iterator, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from itertools import groupby, zip_longest
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any, overload
 from urllib.parse import urlsplit
@@ -43,9 +44,20 @@ from .stage_runtime import (
 )
 from .targeting import TargetParsePolicy, stream_scan_target_specs
 
+_PREFETCHED_SPRAY: ContextVar[Any] = ContextVar("prefetched_spray", default=None)
+
 _COOPERATIVE_SPRAY: ContextVar[bool] = ContextVar("cooperative_spray", default=False)
 
-_PAIR_MODULES = frozenset(AUDIT_MODULE_NAMES) - {"keycloak", "qdrant", "vault", "nomad", "jupyter"}
+_PAIR_MODULES = frozenset(AUDIT_MODULE_NAMES) - {
+    "keycloak",
+    "qdrant",
+    "vault",
+    "nomad",
+    "jupyter",
+    "spark",
+    "yarn",
+    "docker",
+}
 _TOKEN_MODULES = frozenset(
     {
         "consul",
@@ -63,6 +75,7 @@ _TOKEN_MODULES = frozenset(
         "vault",
         "nomad",
         "jupyter",
+        "portainer",
     }
 )
 # These keys are auth/transport settings only.  Never copy arbitrary JSON keys
@@ -105,6 +118,9 @@ _DISPLAY_NAMES = {
     "vault": "HashiCorp Vault",
     "nomad": "HashiCorp Nomad",
     "jupyter": "Jupyter Server",
+    "spark": "Apache Spark Standalone Master",
+    "yarn": "Hadoop YARN ResourceManager",
+    "portainer": "Portainer",
 }
 
 
@@ -217,7 +233,7 @@ def _source_values(value: str, *, passwords: bool = False) -> list[str]:
 
 
 def load_candidates(args: Any) -> Sequence[Candidate]:
-    if bool(args.users) != bool(args.passwords):
+    if bool(args.users) != (args.passwords is not None):
         raise ValueError("--users and --passwords must be supplied together")
     if not any((args.pairs, args.users, args.tokens)):
         raise ValueError("at least one of --pairs, --users/--passwords or --tokens is required")
@@ -315,6 +331,11 @@ class AttemptJournal:
             raise ValueError("checkpoint already exists; use --resume or another path")
         _private_file(path)
         self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db.execute("PRAGMA temp_store=FILE")
+        self.db.execute(
+            "CREATE TEMP TABLE replayed_targets (module TEXT, host TEXT, port INTEGER, "
+            "PRIMARY KEY (module, host, port))"
+        )
         self.lock = threading.RLock()
         self.closed = False
         self.on_result: Any = None
@@ -327,12 +348,22 @@ class AttemptJournal:
         )
         if not any(row[1] == "detail" for row in self.db.execute("PRAGMA table_info(results)")):
             self.db.execute("ALTER TABLE results ADD COLUMN detail TEXT NOT NULL DEFAULT ''")
+        self.db.execute("CREATE INDEX IF NOT EXISTS results_target ON results (module, host, port)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS results_endpoint ON results (host, port)")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS rate_state (origin TEXT NOT NULL, account TEXT NOT NULL, "
+            "ready REAL NOT NULL, reason TEXT NOT NULL DEFAULT '', PRIMARY KEY (origin, account))"
+        )
         previous = self.db.execute("SELECT value FROM meta WHERE key='fingerprint'").fetchone()
+        self.legacy_pacing = (
+            bool(previous) and not self.db.execute("SELECT 1 FROM meta WHERE key='pacing_version'").fetchone()
+        )
         if previous and previous[0] != fingerprint:
             self.db.close()
             raise ValueError("checkpoint inputs or settings changed; refusing resume")
         if not previous:
             self.db.execute("INSERT INTO meta VALUES ('fingerprint', ?)", (fingerprint,))
+            self.db.execute("INSERT INTO meta VALUES ('pacing_version', '1')")
             self.db.commit()
         elif resume:
             self.db.execute(
@@ -384,11 +415,86 @@ class AttemptJournal:
             if self.on_result is not None:
                 self.on_result(module, host, port, candidate, status, evidence, detail)
 
-    def rows(self) -> list[tuple[str, str, int, int | None, str, str, str]]:
+    def _iter_query(self, query: str, parameters: tuple[Any, ...] = ()) -> Iterator[Any]:
         with self.lock:
-            return self.db.execute(
-                "SELECT module, host, port, candidate, status, evidence, detail FROM results ORDER BY rowid"
-            ).fetchall()
+            cursor = self.db.execute(query, parameters)
+        try:
+            while True:
+                with self.lock:
+                    page = cursor.fetchmany(128)
+                if not page:
+                    return
+                yield from page
+        finally:
+            with self.lock:
+                cursor.close()
+
+    def rows(self) -> Iterator[tuple[str, str, int, int | None, str, str, str]]:
+        return self._iter_query(
+            "SELECT module, host, port, candidate, status, evidence, detail FROM results ORDER BY rowid"
+        )
+
+    def last_rowid(self) -> int:
+        with self.lock:
+            return int(self.db.execute("SELECT COALESCE(MAX(rowid), 0) FROM results").fetchone()[0])
+
+    def target_rows(self, module: str, host: str, port: int, *, max_rowid: int | None = None) -> Iterator[Any]:
+        return self._iter_query(
+            "SELECT module, host, port, candidate, status, evidence, detail FROM results "
+            "WHERE module=? AND host=? AND port=? AND rowid<=? ORDER BY rowid",
+            (module, host, port, self.last_rowid() if max_rowid is None else max_rowid),
+        )
+
+    def endpoint_rows(self, host: str, port: int) -> Iterator[Any]:
+        return self._iter_query(
+            "SELECT module, host, port, candidate, status, evidence, detail FROM results "
+            "WHERE host=? AND port=? ORDER BY rowid",
+            (host, port),
+        )
+
+    def complete_rows(self, candidates: int) -> Iterator[Any]:
+        """Replay completed targets in first-seen order, without Python grouping."""
+        return self._iter_query(
+            "WITH targets AS (SELECT module, host, port, MIN(rowid) AS first_seen FROM results "
+            "GROUP BY module, host, port HAVING COUNT(DISTINCT candidate)=? "
+            "AND MIN(candidate)>=0 AND MAX(candidate)<?) "
+            "SELECT r.module, r.host, r.port, r.candidate, r.status, r.evidence, r.detail "
+            "FROM targets t JOIN results r USING (module, host, port) ORDER BY t.first_seen, r.rowid",
+            (candidates, candidates),
+        )
+
+    def target_complete(
+        self, module: str, host: str, port: int, candidates: int, *, max_rowid: int | None = None
+    ) -> bool:
+        with self.lock:
+            row = self.db.execute(
+                "SELECT COUNT(DISTINCT candidate), MIN(candidate), MAX(candidate) FROM results "
+                "WHERE module=? AND host=? AND port=? AND rowid<=?",
+                (module, host, port, self.last_rowid() if max_rowid is None else max_rowid),
+            ).fetchone()
+        return row[0] == candidates and row[1] is not None and row[1] >= 0 and row[2] < candidates
+
+    def claim_target_replay(self, module: str, host: str, port: int) -> bool:
+        with self.lock:
+            return (
+                self.db.execute(
+                    "INSERT OR IGNORE INTO replayed_targets VALUES (?, ?, ?)", (module, host, port)
+                ).rowcount
+                == 1
+            )
+
+    def save_dispatch(self, origin: str, account: str, origin_ready: float, account_ready: float) -> None:
+        with self.lock:
+            self.db.executemany(
+                "INSERT OR REPLACE INTO rate_state VALUES (?, ?, ?, '')",
+                ((origin, "", origin_ready), (origin, account, account_ready)),
+            )
+            self.db.commit()
+
+    def save_stop(self, origin: str, reason: str) -> None:
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO rate_state VALUES (?, '', 0, ?)", (origin, reason))
+            self.db.commit()
 
     def close(self) -> None:
         with self.lock:
@@ -398,7 +504,14 @@ class AttemptJournal:
 
 
 class RateGate:
-    def __init__(self, origin_rate: float, account_interval: float) -> None:
+    def __init__(self, origin_rate: float, account_interval: float, *, journal: AttemptJournal | None = None) -> None:
+        if (
+            not math.isfinite(origin_rate)
+            or origin_rate <= 0
+            or not math.isfinite(account_interval)
+            or account_interval < 0
+        ):
+            raise ValueError("spray pacing must be finite, with positive origin rate and non-negative account interval")
         self.origin_interval = 1 / origin_rate
         self.account_interval = account_interval
         self.next_origin: dict[str, float] = {}
@@ -408,6 +521,46 @@ class RateGate:
         self.sent_account: dict[tuple[str, str], float] = {}
         self.lock = threading.Lock()
         self.cancelled = threading.Event()
+        self.journal = journal
+        if journal is not None:
+            wall, monotonic = time.time(), time.monotonic()
+            for origin, account, ready, reason in journal._iter_query(
+                "SELECT origin, account, ready, reason FROM rate_state"
+            ):
+                deadline = monotonic + max(0.0, ready - wall)
+                if account:
+                    self.sent_account[(origin, account)] = deadline
+                    self.next_account[(origin, account)] = deadline
+                else:
+                    self.sent_origin[origin] = deadline
+                    self.next_origin[origin] = deadline
+                    if reason:
+                        self.stopped[origin] = reason
+
+    def restore_legacy(self, origin: str, rows: Iterable[Any], candidates: Sequence[Candidate]) -> None:
+        if self.journal is None or not self.journal.legacy_pacing:
+            return
+        with self.lock:
+            if origin in self.stopped:
+                return
+            now, wall = time.monotonic(), time.time()
+            for _module, _host, _port, index, status, evidence, _detail in rows:
+                if index is None or not 0 <= index < len(candidates) or status == "unsupported":
+                    continue
+                if status == "rate_limited":
+                    self.journal.save_stop(origin, evidence)
+                    self.stopped[origin] = evidence
+                    return
+                account = candidates[index].account
+                if (origin, account) in self.sent_account:
+                    continue
+                origin_ready = max(self.sent_origin.get(origin, now), now + self.origin_interval)
+                self.journal.save_dispatch(origin, account, wall + origin_ready - now, wall + self.account_interval)
+                self.sent_origin[origin] = origin_ready
+                self.next_origin[origin] = max(self.next_origin.get(origin, now), origin_ready)
+                self.sent_account[(origin, account)] = self.next_account[(origin, account)] = (
+                    now + self.account_interval
+                )
 
     def reserve(self, origin: str, account: str) -> tuple[bool, str | float]:
         with self.lock:
@@ -424,16 +577,23 @@ class RateGate:
     def claim(self, origin: str, account: str) -> float:
         """Recheck actual dispatch, so late resumptions cannot bunch attempts."""
         with self.lock:
+            if origin in self.stopped or self.cancelled.is_set():
+                return 0.0
             now = time.monotonic()
             ready = max(now, self.sent_origin.get(origin, now), self.sent_account.get((origin, account), now))
             if ready > now:
                 return ready - now
+            if self.journal is not None:
+                wall = time.time()
+                self.journal.save_dispatch(origin, account, wall + self.origin_interval, wall + self.account_interval)
             self.sent_origin[origin] = now + self.origin_interval
             self.sent_account[(origin, account)] = now + self.account_interval
             return 0.0
 
     def stop(self, origin: str, reason: str) -> None:
         with self.lock:
+            if self.journal is not None:
+                self.journal.save_stop(origin, reason)
             self.stopped[origin] = reason
 
     def cancel(self) -> None:
@@ -515,15 +675,13 @@ def classify(record: AuditRecord, credential: AuditCredentialRun, runner: AuditC
 
 
 def _supported(module: str, candidate: Candidate, detection: AuditRecord) -> bool:
-    if detection.extra.get("surface") == "ui" and candidate.kind != "pair":
+    if detection.extra.get("surface") == "ui" and candidate.kind != "pair" and module != "portainer":
         return False
     if candidate.kind == "pair":
         if detection.extra.get("surface") == "ui" and (
             detection.extra.get("credential_verification_status") != "available"
         ):
             return False
-        if module == "docker":
-            return detection.extra.get("ui_product") == "portainer"
         if module == "kubeapi":
             return detection.extra.get("credential_verification_status") == "available"
         return module in _PAIR_MODULES
@@ -643,8 +801,16 @@ def _readonly_keeper_detection(ctx: AuditHookContext, args: Any) -> AuditRecord:
 
 
 def _oracle_spray_preflight(host: str, port: int, args: Any) -> bool:
+    """Keep the original synchronous hook and monkeypatch boundary intact."""
+    from .detection_io import run_sync
+
+    return run_sync(_oracle_spray_preflight_steps(host, port, args))
+
+
+def _oracle_spray_preflight_steps(host: str, port: int, args: Any) -> Any:
     """Avoid the Oracle driver on unrelated ports; its connect can outlive --timeout."""
     from .clients.oracle import tns_listener_command, tns_service_fingerprint
+    from .detection_io import DetectCall
     from .modules.oracle.actions import _protocols, _status_confirms_oracle, _target_candidates
 
     protocols = _protocols(str(getattr(args, "protocol", "auto")), port)
@@ -657,22 +823,34 @@ def _oracle_spray_preflight(host: str, port: int, args: Any) -> bool:
     timeout = min(max(float(getattr(args, "timeout", 1.0)), 0.1), 1.0)
     insecure = not bool(getattr(args, "secure", False))
     for protocol in protocols:
-        status = tns_listener_command(host, port, "status", timeout=timeout, protocol=protocol, insecure=insecure)
+        status = yield DetectCall(
+            tns_listener_command,
+            (host, port, "status"),
+            {"timeout": timeout, "protocol": protocol, "insecure": insecure},
+        )
         if _status_confirms_oracle(status):
             return True
         if candidates:
             candidate = candidates[0]
-            if tns_service_fingerprint(
-                host,
-                port,
-                service=candidate.get("service"),
-                sid=candidate.get("sid"),
-                timeout=timeout,
-                protocol=protocol,
-                insecure=insecure,
+            if (
+                yield DetectCall(
+                    tns_service_fingerprint,
+                    (host, port),
+                    {
+                        "service": candidate.get("service"),
+                        "sid": candidate.get("sid"),
+                        "timeout": timeout,
+                        "protocol": protocol,
+                        "insecure": insecure,
+                    },
+                )
             ):
                 return True
     return False
+
+
+_ORACLE_SPRAY_PREFLIGHT_IMPL = _oracle_spray_preflight
+_ORACLE_SPRAY_PREFLIGHT_STEPS = _oracle_spray_preflight_steps
 
 
 def _credential_detail(spec: ModuleAuditSpec, record: AuditRecord, candidate: Candidate) -> str:
@@ -706,6 +884,10 @@ def _credential_detail(spec: ModuleAuditSpec, record: AuditRecord, candidate: Ca
 
 def _record_version(record: AuditRecord) -> str | None:
     fields = record.extra
+    if fields.get("surface") == "ui" and isinstance(fields.get("ui"), dict):
+        value = fields["ui"].get("version")
+        if isinstance(value, str) and value.strip().lower() not in {"", "-", "unknown", "none"}:
+            return _clean(value.strip()[:80])
     for key in ("version", "server_version", "redis_version", "valkey_version"):
         value = fields.get(key)
         if isinstance(value, str) and value.strip().lower() not in {"", "-", "unknown", "none"}:
@@ -780,22 +962,34 @@ def _run_target_steps(
     *,
     _surface_id: str | None = None,
 ) -> Generator[float, None, bool]:
-    ns = copy.copy(base_ns)
-    if module == "oracle" and not _oracle_spray_preflight(host, port, ns):
-        return True
-    stage = importlib.import_module(f"redposture_core.modules.{module.replace('-', '_')}.stage")
-    spec = getattr(stage, f"build_{module.replace('-', '_')}_spec")(ns)
-    runner = AuditCommandRunner(args=ns, spec=spec, logger=logger, emit_line=lambda _line: None)
-    anonymous = AuditCredentialRun(source="anonymous")
-    context = AuditHookContext(ns, logger, host, port, anonymous, target=target, run_deep_checks=False, phase="detect")
-    state = None
+    prepared = _PREFETCHED_SPRAY.get()
+    _PREFETCHED_SPRAY.set(None)
+    if prepared is None:
+        ns = copy.copy(base_ns)
+        if module == "oracle" and not _oracle_spray_preflight(host, port, ns):
+            return True
+        stage = importlib.import_module(f"redposture_core.modules.{module.replace('-', '_')}.stage")
+        spec = getattr(stage, f"build_{module.replace('-', '_')}_spec")(ns)
+        runner = AuditCommandRunner(args=ns, spec=spec, logger=logger, emit_line=lambda _line: None)
+        anonymous = AuditCredentialRun(source="anonymous")
+        context = AuditHookContext(
+            ns, logger, host, port, anonymous, target=target, run_deep_checks=False, phase="detect"
+        )
+        state = None
+    else:
+        ns, spec, runner, context, native = prepared
+        state = native.lifecycle_state
     detection: AuditRecord | None = None
     try:
-        if spec.lifecycle_state_factory is not None:
+        if prepared is None and spec.lifecycle_state_factory is not None:
             state = spec.lifecycle_state_factory(context)
             context = replace(context, lifecycle_state=state)
         try:
-            detection = _readonly_keeper_detection(context, ns) if module == "keeper" else runner._detect(context)
+            detection = (
+                native.record
+                if prepared is not None
+                else (_readonly_keeper_detection(context, ns) if module == "keeper" else runner._detect(context))
+            )
         except Exception as exc:
             if getattr(ns, "debug", False):
                 print(f"[d] spray detection {module} {host}:{port}: {type(exc).__name__}", file=sys.stderr)
@@ -808,6 +1002,7 @@ def _run_target_steps(
                 is_pre_detect_operational_failure(detection)
                 or str(detection.status or "").lower() == "connection_failed"
             )
+        output_surface = _surface_id or ("ui" if module == "portainer" else None)
         detection_key = _attempt_id(module, target, port, None, surface=_surface_id)
         prior_detection = journal.get(detection_key)
         detection_version = _record_version(detection)
@@ -818,25 +1013,26 @@ def _run_target_steps(
             ui_product = detection.extra.get("ui_product")
             if isinstance(ui_product, str) and ui_product:
                 evidence += f"; ui product:{ui_product}"
-            if _surface_id is not None:
-                evidence += f"; surface:{_surface_id}"
+            if output_surface is not None:
+                evidence += f"; surface:{output_surface}"
             journal.put(detection_key, module, host, port, None, "confirmed", _clean(evidence))
         origin = _effective_origin(detection, target, host, port)
+        gate.restore_legacy(origin, journal.endpoint_rows(host, port), candidates)
         for index, candidate in enumerate(candidates):
             key = _attempt_id(module, target, port, index, surface=_surface_id)
             if journal.get(key) is not None:
                 continue
             if not _supported(module, candidate, detection):
                 reason = "no trustworthy verifier for this credential type"
-                if _surface_id is not None:
-                    reason += f"; surface:{_surface_id}"
+                if output_surface is not None:
+                    reason += f"; surface:{output_surface}"
                 journal.put(key, module, host, port, index, "unsupported", reason)
                 continue
             allowed, delay_or_reason = gate.reserve(origin, candidate.account)
             if not allowed:
                 reason = str(delay_or_reason)
-                if _surface_id is not None:
-                    reason += f"; surface:{_surface_id}"
+                if output_surface is not None:
+                    reason += f"; surface:{output_surface}"
                 journal.put(key, module, host, port, index, "rate_limited", reason)
                 continue
             if delay_or_reason:
@@ -848,7 +1044,7 @@ def _run_target_steps(
             with gate.lock:
                 stopped_reason = gate.stopped.get(origin)
             if stopped_reason:
-                reason = stopped_reason + (f"; surface:{_surface_id}" if _surface_id is not None else "")
+                reason = stopped_reason + (f"; surface:{output_surface}" if output_surface is not None else "")
                 journal.put(key, module, host, port, index, "rate_limited", reason)
                 continue
             credential = AuditCredentialRun(candidate.username, candidate.password, candidate.token, "provided")
@@ -858,8 +1054,8 @@ def _run_target_steps(
                 if hasattr(ns, name):
                     setattr(ns, name, candidate.token)
             started_reason = "request begun; no automatic retry"
-            if _surface_id is not None:
-                started_reason += f"; surface:{_surface_id}"
+            if output_surface is not None:
+                started_reason += f"; surface:{output_surface}"
             journal.put(key, module, host, port, index, "started", started_reason)
             detail = ""
             try:
@@ -891,19 +1087,22 @@ def _run_target_steps(
             for secret in (candidate.password, candidate.token):
                 if secret:
                     safe_evidence = safe_evidence.replace(secret, "<redacted>")
-            if _surface_id is not None:
-                safe_evidence += f"; surface:{_surface_id}"
-            journal.put(key, module, host, port, index, status, safe_evidence, detail)
+            if output_surface is not None:
+                safe_evidence += f"; surface:{output_surface}"
             if status == "rate_limited":
-                gate.stop(origin, evidence)
+                gate.stop(origin, safe_evidence)
+            journal.put(key, module, host, port, index, status, safe_evidence, detail)
     finally:
-        if state is not None and spec.lifecycle_state_close is not None:
+        if prepared is not None:
+            runner._close_all_lifecycle_states()
+        elif state is not None and spec.lifecycle_state_close is not None:
             spec.lifecycle_state_close(state)
     if (
         detection is not None
         and runner._is_detected(detection)
         and _surface_id is None
         and module in web_panels.MODULE_PRODUCTS
+        and module != "portainer"
         and (getattr(target, "scheme", None) in {"http", "https"} or getattr(target, "explicit_port", None) is not None)
         and not gate.cancelled.is_set()
     ):
@@ -981,7 +1180,7 @@ def _render_rows(
             if status == "valid" and detail:
                 payload["credential_detail"] = detail
             suffix = f" {detail}" if status == "valid" and detail else ""
-            if surface:
+            if surface and f"({'UI' if surface == 'ui' else 'backend'})" not in suffix:
                 suffix += f" ({'UI' if surface == 'ui' else 'backend'})"
             diagnostic = f" (evidence:{_clean(evidence)})" if debug else ""
             text = f"{markers.get(status, '[!]')} {_clean(candidate.display)}{suffix}{diagnostic}"
@@ -1010,6 +1209,8 @@ class SpraySink:
         self.console = console
         self.debug = debug
         self.group_targets = group_targets
+        self._replay_journal: AttemptJournal | None = None
+        self._replay_rowid = 0
         self.lock = threading.Lock()
         self._target_buffer: ContextVar[Any] = ContextVar("spray_target_buffer", default=None)
         self._deferred_rows: dict[tuple[str, str, int], list[tuple[str, str, int, int | None, str, str, str]]] = {}
@@ -1026,11 +1227,29 @@ class SpraySink:
     ) -> None:
         self._deferred_rows[key] = rows
 
+    @property
+    def replay_journal(self) -> AttemptJournal | None:
+        return self._replay_journal
+
+    @replay_journal.setter
+    def replay_journal(self, journal: AttemptJournal | None) -> None:
+        self._replay_journal = journal
+        self._replay_rowid = journal.last_rowid() if journal is not None else 0
+
     def begin_target(self, module: str = "", host: str = "", port: int = 0) -> None:
         if self.fmt == "txt" and self.group_targets:
             # Large password lists spill to a private temporary file instead
             # of retaining every pending row for every concurrent target.
             self._target_buffer.set(tempfile.SpooledTemporaryFile(max_size=256 * 1024, mode="w+t", encoding="utf-8"))
+            if (
+                self.replay_journal is not None
+                and not self.replay_journal.target_complete(
+                    module, host, port, len(self.candidates), max_rowid=self._replay_rowid
+                )
+                and self.replay_journal.claim_target_replay(module, host, port)
+            ):
+                for row in self.replay_journal.target_rows(module, host, port, max_rowid=self._replay_rowid):
+                    self._buffer_row(self._target_buffer.get(), row)
             for row in self._deferred_rows.pop((module, host, port), ()):
                 self._buffer_row(self._target_buffer.get(), row)
 
@@ -1130,6 +1349,10 @@ def _group_txt_replay_rows(
 
 def run_spray_stage(args: Any, logger: Any) -> int:
     try:
+        if any(
+            not math.isfinite(value) or value <= 0 for value in (args.timeout, args.origin_rate, args.account_interval)
+        ):
+            raise ValueError("--timeout, --origin-rate and --account-interval must be finite and positive")
         if args.workers < 1 or args.retries < 0:
             raise ValueError("--workers must be positive and --retries non-negative")
         modules = _modules(args.modules)
@@ -1153,7 +1376,7 @@ def run_spray_stage(args: Any, logger: Any) -> int:
             if build_plan is not None:
                 plan = build_plan(ns)
                 ns._spray_target_plan = plan
-                surfaces = 2 if module in web_panels.MODULE_PRODUCTS else 1
+                surfaces = 2 if module in web_panels.MODULE_PRODUCTS and module != "portainer" else 1
                 planned_work += plan.target_count * surfaces * (len(candidates) + 1)
         if not candidates:
             raise ValueError("credential files contain no candidates")
@@ -1187,7 +1410,7 @@ def run_spray_stage(args: Any, logger: Any) -> int:
             raise ValueError("output/checkpoint must not overwrite an input file")
         journal = AttemptJournal(checkpoint, _input_fingerprint(args, modules, config), args.resume)
         try:
-            gate = RateGate(args.origin_rate, args.account_interval)
+            gate = RateGate(args.origin_rate, args.account_interval, journal=journal)
 
             console = Console(debug=args.debug, no_color=args.no_color, structured_output=args.output_format == "json")
             group_targets = args.output_format == "txt" and len(modules) > 1
@@ -1220,19 +1443,12 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                 progress_thread.start()
             completed_normally = False
             try:
-                replay_rows = journal.rows()
                 if group_targets:
-                    replay_rows = _group_txt_replay_rows(replay_rows)
-                    for key, grouped in groupby(replay_rows, key=lambda row: (row[0], row[1], row[2])):
-                        group_rows = list(grouped)
-                        finished = {row[3] for row in group_rows if row[3] is not None}
-                        if len(finished) == len(candidates) and all(0 <= index < len(candidates) for index in finished):
-                            for row in group_rows:
-                                sink.emit(*row)
-                        else:
-                            sink.defer_replay_rows(key, group_rows)
+                    for row in journal.complete_rows(len(candidates)):
+                        sink.emit(*row)
+                    sink.replay_journal = journal
                 else:
-                    for row in replay_rows:
+                    for row in journal.rows():
                         sink.emit(*row)
                 progress_done: ContextVar[int] = ContextVar("spray_progress_done", default=0)
 
@@ -1261,9 +1477,11 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                     module, ns, host, port, target = job
                     progress_done.set(0)
                     job_key = _attempt_id(module, target, port, -1)
-                    surfaces = 2 if module in web_panels.MODULE_PRODUCTS else 1
+                    surfaces = 2 if module in web_panels.MODULE_PRODUCTS and module != "portainer" else 1
                     budget = surfaces * (len(candidates) + 1)
                     if journal.job_finished(job_key):
+                        sink.begin_target(module, host, port)
+                        sink.end_target()
                         progress.advance(budget)
                         return
                     sink.begin_target(module, host, port)
@@ -1279,7 +1497,34 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                         if not gate.cancelled.is_set():
                             progress.advance(max(0, budget - progress_done.get()))
 
-                outcomes = scheduler.iter_paused(_spray_jobs(modules, module_args), work, cancelled=gate.cancelled)
+                from .async_detection import async_detection_allowed, automatic_detect_concurrency
+                from .spray_async_detect import PreparedSource
+
+                target_count = sum(
+                    getattr(getattr(ns, "_spray_target_plan", None), "target_count", 0) for ns in module_args.values()
+                )
+                limit = (
+                    automatic_detect_concurrency(target_count, deep_workers=args.workers)
+                    if target_count >= 32 and async_detection_allowed(args)
+                    else 0
+                )
+                if limit:
+                    source = PreparedSource(
+                        _spray_jobs(modules, module_args), logger, gate, journal, limit, args.workers
+                    )
+
+                    def prepared_work(pair: Any) -> Generator[float, None, None]:
+                        job, prepared = pair
+                        token = _PREFETCHED_SPRAY.set(prepared)
+                        try:
+                            yield from work(job)
+                        finally:
+                            _PREFETCHED_SPRAY.reset(token)
+                            source.release(prepared)
+
+                    outcomes = scheduler.iter_paused(source, prepared_work, cancelled=gate.cancelled, poll_source=True)
+                else:
+                    outcomes = scheduler.iter_paused(_spray_jobs(modules, module_args), work, cancelled=gate.cancelled)
                 try:
                     for _job, _result in outcomes:
                         pass

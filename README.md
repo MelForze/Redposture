@@ -3,13 +3,13 @@
   <a href="https://github.com/MelForze/Redposture/blob/main/LICENSE"><img src="https://img.shields.io/github/license/MelForze/Redposture?style=flat-square" alt="License"></a>
   <a href="https://github.com/MelForze/Redposture/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/MelForze/Redposture/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="https://pypi.org/project/redposture/"><img src="https://img.shields.io/pypi/v/redposture?style=flat-square" alt="PyPI version"></a>
-  <img src="https://img.shields.io/badge/audit_modules-26-2b2f36?style=flat-square" alt="26 audit modules">
+  <img src="https://img.shields.io/badge/audit_modules-32-2b2f36?style=flat-square" alt="32 audit modules">
   <img src="https://img.shields.io/badge/Python-3.12%2B-2b2f36?style=flat-square" alt="Python 3.12+">
 </p>
 
 # RedPosture
 
-CLI for authorized audits of exposed services. It identifies products, verifies access, reads available inventory, discovers secrets, and checks a bundled offline CVE catalog. Python 3.12+; 26 audit modules plus `spray` and exporter workflows.
+CLI for authorized audits of exposed services. It identifies products, verifies access, reads available inventory, discovers secrets, and checks a bundled offline CVE catalog. Python 3.12+; 32 audit modules plus `spray` and exporter workflows.
 
 ## Install
 
@@ -26,9 +26,21 @@ For the current repository code, use `python -m venv .venv`, `source .venv/bin/a
 
 Run `redposture MODULE -t TARGET`; `TARGET` can be a host, `host:port`, URL, CIDR/range, comma-separated list, or file. Use `redposture MODULE -h` for flags. `-o FILE` saves output; `-f json` selects JSON instead of TXT. `--debug` shows diagnostics. TXT contains confirmed services; unconfirmed detections remain in debug/JSON. Saved files contain no ANSI colors. `-ot, --out-target` removes matching hosts before ports are expanded; for example, `--out-target exclusions.txt`.
 
+All 32 modules, their UI probes, `spray` discovery and exporters `scan/collect/trigger` support native async detection for batches of at least 32 endpoints. Authentication, inventory, discovery and execution keep synchronous workers and the same checks. Exporters collect continuously without waiting for a whole batch to finish.
+
+| Endpoints after port expansion | Async detection limit |
+| --- | ---: |
+| 32–999 | 64 |
+| 1,000–9,999 | 128 |
+| 10,000–99,999 | 256 |
+| 100,000–999,999 | 512 |
+| 1,000,000+ | 1,024 |
+
+The limit also respects the target count and available file descriptors. `--workers` controls synchronous work; smaller lists, hostnames, active proxies and unsupported responses use the original client. The higher limits are scheduling limits, not a claim that a million hosts have been tested.
+
 ## Default credential checks
 
-`--defcreds` tries product-specific weak candidates only after detection. The table lists the actual candidates; it is not a list of guaranteed factory passwords. The `docker` command supports `--defcreds` only for a confirmed Portainer UI, not Docker Engine.
+`--defcreds` tries product-specific weak candidates only after detection. The table lists the actual candidates; it is not a list of guaranteed factory passwords. Use `portainer` for panel authentication; `docker` checks Docker Engine only.
 
 | Module | Credential pairs checked |
 | --- | --- |
@@ -51,7 +63,7 @@ Run `redposture MODULE -t TARGET`; `TARGET` can be a host, `host:port`, URL, CID
 | GitLab | `root:root`, `root:password`, `root:admin`, `root:changeme`, `root:gitlab`, `root:admin123`, `admin:admin`, `admin:password`, `admin:changeme`, `admin:gitlab`, `gitlab:gitlab`, `gitlab:password`, `gitlab:admin`, `user:user`, `user:password`, `test:test`, `guest:guest`, `dev:dev`, `root:12345678` |
 | Harbor | `admin:Harbor12345`, `admin:harbor`, `admin:harbor123`, `admin:Harbor123`, `harbor:harbor`, `harbor:password`, then `admin:admin`, `admin:password`, `admin:changeme`, `admin:admin123`, `admin:123456`, `root:root`, `root:password`, `root:admin`, `root:changeme`, `user:user`, `user:password`, `test:test`, `guest:guest`, `dev:dev`, `service:service`, `admin:12345678` |
 | Nexus | `admin:admin123`, `nexus:nexus`, `admin:nexus`, `admin:nexus123`, `admin:sonatype`, `nexus:password`, `nexus:admin`, then `admin:admin`, `admin:password`, `admin:changeme`, `admin:123456`, `root:root`, `root:password`, `root:admin`, `root:changeme`, `user:user`, `user:password`, `test:test`, `guest:guest`, `dev:dev`, `service:service`, `admin:12345678` |
-| Docker (Portainer only) | `admin:admin`, `admin:password`, `admin:12345678` |
+| Portainer | `admin:admin`, `admin:password`, `admin:12345678`, `admin:portainer`, `admin:portainer123`, `admin:portainer1234`, `admin:Portainer123!`, `admin:changeme`, `admin:changeit`, `admin:admin123`, `admin:admin1234`, `admin:admin12345`, `admin:admin123456`, `admin:Admin123!`, `admin:Password1`, `admin:Password1!`, `admin:Password123`, `admin:Password123!`, `admin:123456789`, `admin:1234567890`, `portainer:portainer`, `portainer:portainer123`, `portainer:Portainer123!`, `portainer:password`, `portainer:12345678`, `root:root`, `root:portainer`, `root:password`, `root:12345678`, `administrator:administrator`, `administrator:password`, `administrator:admin` |
 | Docker Registry | `registry:registry`, `registry:password`, `registry:admin`, `registry:changeme`, `registry:registry123`, `docker:docker`, `docker:password`, then `admin:admin`, `admin:password`, `admin:changeme`, `admin:admin123`, `admin:123456`, `root:root`, `root:password`, `root:admin`, `root:changeme`, `user:user`, `user:password`, `test:test`, `guest:guest`, `dev:dev`, `service:service`, `admin:12345678` |
 | KubeAPI | `admin:admin`, `admin:password`, `root:root`, `root:password`, `kubeadmin:kubeadmin`, `kubernetes:kubernetes`, `user:user`, `test:test`, `admin:12345678` |
 | RabbitMQ | `admin:admin`, `admin:changeme`, `admin:password`, `admin:rabbitmq`, `guest:guest`, `guest:password`, `rabbitmq:admin`, `rabbitmq:password`, `rabbitmq:rabbitmq`, `root:password`, `root:root`, `service:password`, `service:service`, `test:test`, `user:password`, `user:user`, `admin:12345678` |
@@ -72,7 +84,7 @@ duplicates removed from the module catalog:
 
 ## Offline CVE coverage
 
-Every audit command accepts `--enum-cve`, but a confirmed product, suitable version and catalog match are needed for a finding. The bundled catalog contains **215 records** (revision `2026-10-20`):
+Every audit command accepts `--enum-cve`, but a confirmed product, suitable version and catalog match are needed for a finding. The bundled catalog contains **218 records** (revision `2026-10-21`):
 
 | Product | CVEs | Product | CVEs |
 | --- | ---: | --- | ---: |
@@ -92,8 +104,9 @@ Every audit command accepts `--enum-cve`, but a confirmed product, suitable vers
 | OpenSearch | 1 | pgAdmin 4 | 1 |
 | Proxmox VE | 1 | | |
 | Vault / Vault Enterprise | 1 / 1 | Nomad / Nomad Enterprise | 1 / 1 |
-| Jupyter Server | 1 | | |
-| **Total** | **215** | | |
+| Jupyter Server | 1 | Apache Spark | 1 |
+| Hadoop YARN ResourceManager | 1 | Portainer | 1 |
+| **Total** | **218** | | |
 
 Known-version matches mean *potentially affected*, not confirmed exploitability; backports and configuration matter. With an unknown version, catalogued CVEs from the last four years appear as yellow speculative findings. The window uses publication dates or a conservative CVE-year fallback. `PR:L` requires verified anonymous access or explicit credentials, not merely `--defcreds`; elevated-permission entries are omitted when the version is unknown. Some Nexus, Grafana and Keycloak entries have additional prerequisites that version matching does not prove. The catalog focuses on High/Critical network issues other than pure DoS. Generic Docker Registry and gRPC have no product match; Kafka broker lacks an exact release and Keeper has no entries. UI-only targets use their own product/version. JSON includes ranges, fixes, CVSS and references.
 
@@ -104,7 +117,9 @@ These are product-specific HTTP probes, not browser automation. UI login never p
 | Module | Covered web UI / API | Surface |
 | --- | --- | --- |
 | `airflow` | Airflow webserver/API | Native |
-| `docker` | Portainer | Related panel |
+| `portainer` | Portainer web/API and proxied environment inventory | Native |
+| `spark` | Standalone Master UI and submission REST | Native |
+| `yarn` | Hadoop YARN ResourceManager UI/API | Native |
 | `elastic` | Kibana, OpenSearch Dashboards | Related panels |
 | `gitlab` | GitLab web/API and Container Registry | Native |
 | `grafana` | Grafana web/API | Native |
@@ -137,6 +152,51 @@ redposture spray -t targets.txt --modules keycloak,kubeapi --tokens tokens.txt -
 ```
 
 `-u/-p` accept literals or files (`@file` requires an existing file); `--pairs` splits at the first colon. Defaults: two attempts/s per origin, 60 seconds between attempts for the same account/origin. `--resume` does not repeat completed or interrupted attempts. Results expose supplied secrets; output and checkpoint files use mode `0600`. `--module-config` accepts auth/transport settings only. Docker Engine and Keycloak cannot verify username/password pairs; Portainer can.
+
+Spray checkpoints preserve cooldowns and stopped origins on resume. Older checkpoints use conservative account delays because they lack dispatch timestamps and exact redirect origins. ClickHouse discovery resumes only with a matching scan scope and chunk configuration; populated checkpoints without a scope signature require a fresh scan.
+
+## Secret discovery
+
+`--discover` scans readable content and streams findings with their object/path. Storage coverage includes:
+
+| Module | Sources | Scope selectors |
+| --- | --- | --- |
+| `gitlab` | Project files, branches/history, CI configuration, accessible project/group variables, job logs and artifacts | `--project` |
+| `portainer` | Environment/container metadata, stack files and readable Docker configs | `--endpoint` |
+| `harbor` | Accessible repositories, image configs and files in OCI layers | `--repository`, `--image`, `--tag` |
+| `nexus` | Accessible repositories/assets, image configs and files in OCI layers | `--repository`, `--image`, `--tag`, `--asset` |
+| `docker-registry` | Accessible images, configs and files in OCI layers | `--repository`, `--image`, `--tag` |
+
+With no selector, these modules traverse accessible sources within `--discover-max-bytes` and `--discover-time` (50 MiB / 300 seconds by default). Downloads and archive expansion are bounded. Denied, truncated or unreadable sources are reported as `partial` or `unavailable`; hidden values and Swarm secret metadata are not treated as recovered secrets. Panel access and registry access are checked separately.
+
+```bash
+redposture gitlab -t https://gitlab.example --token-file token.txt --project team/app --discover -o gitlab_discover_result.txt
+redposture nexus -t https://nexus.example -u auditor -p 'password' --repository releases --discover -o nexus_discover_result.txt
+```
+
+## Command execution
+
+The newer `--execute COMMAND` paths run only when explicitly requested:
+
+| Module | Execution surface / requirements |
+| --- | --- |
+| `kafka` | Provectus Kafka UI Groovy filters; runs in the UI container, requires a readable topic. Broker and Kafbat execution are unsupported. |
+| `portainer` | Docker exec inside an existing container selected by `--endpoint` and `--container`. |
+| `jenkins` | Controller Script Console; requires its administrative permission. |
+| `consul` | Temporary agent script check; script checks must be enabled. |
+| `nexus` | Temporary Groovy script; requires enabled scripting and Script API permissions. |
+| `nomad` | Temporary `raw_exec` job, or an existing `--allocation` / `--task`. |
+| `jupyter` | Temporary Python kernel; `--execute-via terminal` selects a terminal instead. |
+| `spark` | Standalone REST submission; the generated local Python artifact must also be readable at the same path by the cluster. |
+| `yarn` | Temporary application; NodeManager logs must be readable to verify command output. |
+
+Use `--execute-timeout` and `--execute-max-bytes` to bound execution and output. TXT uses `Execute Command`, `command=...`, then command output; JSON retains stdout/stderr, exit status, proof and cleanup details. A submission acknowledgment alone does not confirm execution. Temporary resources are cleaned up where supported; cleanup failures remain in the result.
+
+```bash
+redposture portainer -t https://portainer.example:9443 --token-file token.txt --endpoint production --container app --execute 'id'
+redposture jenkins -t https://ci.example -u auditor --api-token-file token.txt --execute 'id'
+redposture kafka -t http://kafka-ui.example:8080 --execute 'id'
+```
 
 ## Module examples
 
@@ -175,6 +235,39 @@ redposture consul -t http://consul.example:8500 --token "$CONSUL_TOKEN" --key ap
 redposture docker -t http://docker.example:2375 --containers --images --system
 redposture docker -t https://docker.example:2376 --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --containers
 ```
+
+### Portainer
+
+```bash
+redposture portainer -t https://portainer.example:9443 --defcreds
+redposture portainer -t https://portainer.example:9443 -u admin -p 'password' --show-endpoints --show-containers --show-images --show-networks --show-volumes --show-system --discover --enum-cve
+redposture portainer -t https://portainer.example:9443 --token-file token.txt --endpoint production --show-containers
+```
+
+Pairs are verified through the current-user identity API; access tokens and JWT
+use their own headers. `--endpoint` selects one environment by ID or exact name.
+Panel access does not validate Docker Engine credentials. Portainer support moved
+from `docker` to `portainer`; Docker Engine ports and mTLS options stay in `docker`.
+
+### Spark / Hadoop YARN
+
+```bash
+redposture spark -t http://spark.example:8080 --show-workers --show-apps --discover --enum-cve
+redposture spark -t http://spark.example:6066 --probe-submit
+redposture yarn -t http://yarn.example:8088 --show-apps --show-nodes --show-metrics --discover --enum-cve
+redposture yarn -t http://yarn.example:8088 --probe-submit
+```
+
+Spark and YARN are separate products. Discovery reads exposed metadata; neither
+has a portable password verifier or `--defcreds`. Native Spark RPC on 7077 is not
+an HTTP surface: use UI 8080 or REST 6066. Inventory snapshots are capped at 5,000
+items and explicitly report partial coverage when a cap is reached.
+`--probe-submit` sends an invalid Spark create request or allocates a YARN
+application ID. It never submits a job or starts a driver; `RCE:potential` does
+not prove execution permission. YARN CVE-2021-25642 additionally requires access
+to the scheduler's ZooKeeper configuration store.
+
+[Isolated local fixtures and commands](tests/fixtures/cluster_panels/README.md).
 
 ### Elastic / OpenSearch
 
@@ -297,7 +390,7 @@ redposture oracle -t targets.txt --listener-dump
 redposture oracle -t oracle.example --service ORCLPDB1 -u auditor -p 'password' --show-schemas --show-tables --privesc-check
 ```
 
-Oracle needs the correct service name for database authentication. Its default limit is 8 concurrent targets; `--workers` overrides it.
+Oracle needs the correct service name for database authentication. It uses 64 workers by default, or 128 for plans with at least 1,000 host:port endpoints; `--workers` overrides this profile.
 
 ### PostgreSQL
 

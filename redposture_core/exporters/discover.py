@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import ssl
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from ..constants import DISCOVERY_EXPORTERS
@@ -289,6 +289,9 @@ def scan_presence_port_task(
     )
 
 
+_NATIVE_SCAN_TASK = scan_presence_port_task
+
+
 def scan_exporter_presence(
     hosts: list[str],
     timeout: float,
@@ -313,7 +316,12 @@ def scan_exporter_presence(
     pool_cls: type[HTTPConnectionPool] = HTTPConnectionPool,
     activate_pool_fn: ActivatePool = activate_http_pool,
     postprocess_worker_cls: type[AsyncPostprocessWorker] = AsyncPostprocessWorker,
+    work_items: Iterable[tuple[str, int, str]] | None = None,
+    work_items_count: int = 0,
+    suppress_negative_lines: bool = False,
 ) -> tuple[int, int, dict[str, list[dict[str, Any]]]]:
+    # Collect hides ordinary misses in its live output. Keep every probe and
+    # every requested scan-file record; only skip unused console formatting.
     exporters = list(discovery_exporters or DISCOVERY_EXPORTERS)
     if custom_ports:
         ports = list(dict.fromkeys(int(port) for port in custom_ports))
@@ -324,12 +332,13 @@ def scan_exporter_presence(
     total_checks = 0
     total_found = 0
     total_errors = 0
-    found_by_host: dict[str, list[dict[str, Any]]] = {str(host): [] for host in hosts}
+    found_by_host: dict[str, list[dict[str, Any]]] = {str(host): [] for host in hosts} if work_items is None else {}
     max_workers = max(1, workers)
     max_inflight = scan_max_inflight(max_workers)
-    work_item_count = scan_work_item_count(hosts, ports)
+    work_item_count = scan_work_item_count(hosts, ports) if work_items is None else work_items_count
     scan_task = scan_task_fn or scan_presence_port_task
 
+    outcomes: Any = None
     out_fh: Any = None
     postprocess_worker: AsyncPostprocessWorker | None = None
 
@@ -376,12 +385,12 @@ def scan_exporter_presence(
         try:
             pool = build_exporter_http_pool(max_workers, pool_cls, tls_context=tls_context)
             with activate_exporter_tls_context(tls_context), activate_pool_fn(pool):
-                scheduler: BoundedScheduler[tuple[str, int], tuple[dict[str, Any], dict[str, Any] | None]] = (
+                scheduler: BoundedScheduler[tuple[str, int, str], tuple[dict[str, Any], dict[str, Any] | None]] = (
                     BoundedScheduler(max_workers=max_workers, max_inflight=max_inflight)
                 )
 
-                def _scan_item(item: tuple[str, int]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-                    host, port = item
+                def _scan_item(item: tuple[str, int, str]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+                    host, port, item_scheme = item
                     try:
                         if scan_task_fn is None:
                             return scan_presence_port_task(
@@ -390,15 +399,68 @@ def scan_exporter_presence(
                                 exporters,
                                 timeout,
                                 retries,
-                                scheme=scheme,
+                                scheme=item_scheme,
                             )
-                        if scheme == "http":
+                        if item_scheme == "http":
                             return scan_task(host, port, exporters, timeout, retries)
-                        return scan_task(host, port, exporters, timeout, retries, scheme=scheme)
+                        return scan_task(host, port, exporters, timeout, retries, scheme=item_scheme)
                     except Exception as exc:
                         return build_scan_error_record(host, port, exc), None
 
-                for _item, result in scheduler.iter_completed(iter_scan_work_items(hosts, ports), _scan_item):
+                items = (
+                    work_items
+                    if work_items is not None
+                    else ((host, port, scheme) for host, port in iter_scan_work_items(hosts, ports))
+                )
+                from ..async_detection import (
+                    AsyncDetectScheduler,
+                    async_detection_allowed,
+                    automatic_detect_concurrency,
+                )
+
+                detect_limit = (
+                    automatic_detect_concurrency(
+                        work_item_count, deep_workers=max_workers, retained_fds=pool._max_idle_total
+                    )
+                    if (
+                        work_item_count >= 32
+                        and scan_task_fn is None
+                        and scan_presence_port_task is _NATIVE_SCAN_TASK
+                        and pool_cls is HTTPConnectionPool
+                        and activate_pool_fn is activate_http_pool
+                        and async_detection_allowed(None)
+                    )
+                    else 0
+                )
+                if detect_limit:
+                    from ..clients.async_http_detect import AsyncHttpFallback
+                    from .async_detect import prefetch_metrics, scan_with_prefetched_metrics
+
+                    async def prepare(item: tuple[str, int, str]) -> Any:
+                        try:
+                            return await prefetch_metrics(item[0], item[1], item[2], timeout, retries, tls_context)
+                        except AsyncHttpFallback:
+                            return None
+
+                    def finish(item: tuple[str, int, str], prepared: Any) -> Any:
+                        if prepared is None:
+                            return _scan_item(item)
+                        try:
+                            return scan_with_prefetched_metrics(
+                                item[0], item[1], exporters, timeout, retries, item[2], prepared
+                            )
+                        except Exception as exc:
+                            return build_scan_error_record(item[0], item[1], exc), None
+
+                    outcomes = AsyncDetectScheduler[tuple[str, int, str], Any, Any](
+                        detect_workers=detect_limit, deep_workers=max_workers
+                    ).iter_completed(items, prepare, finish)
+                    if stats_sink is not None:
+                        stats_sink["detect_concurrency"] = detect_limit
+                        stats_sink["deep_workers"] = max_workers
+                else:
+                    outcomes = scheduler.iter_completed(items, _scan_item)
+                for _item, result in outcomes:
                     record, hit = result
                     total_checks += 1
                     if record.get("error"):
@@ -407,18 +469,22 @@ def scan_exporter_presence(
                         total_found += 1
                         found_by_host.setdefault(str(record["host"]), []).append(hit)
 
-                    line = format_scan_record(record, output_format)
-                    progress.pause_for_output()
-                    if emit_line is not None:
-                        emit_line(line)
+                    should_emit_line = emit_line is not None and (
+                        not suppress_negative_lines or hit is not None or bool(record.get("error"))
+                    )
+                    needs_line = out_fh is not None or postprocess_worker is not None or should_emit_line
+                    if needs_line:
+                        line = format_scan_record(record, output_format)
+                        if should_emit_line and emit_line is not None:
+                            progress.pause_for_output()
+                            emit_line(line)
+                        if postprocess_worker is not None:
+                            postprocess_worker.put((line, record))
+                            postprocess_worker.raise_if_failed()
+                        else:
+                            emit_output_line(out_fh, None, line)
+                            _log_scan_record(record)
                     progress.advance()
-
-                    if postprocess_worker is not None:
-                        postprocess_worker.put((line, record))
-                        postprocess_worker.raise_if_failed()
-                    else:
-                        emit_output_line(out_fh, None, line)
-                        _log_scan_record(record)
         finally:
             progress.close()
         _finalize_postprocess()
@@ -442,6 +508,8 @@ def scan_exporter_presence(
             stats_sink["found"] = total_found
             stats_sink["errors"] = total_errors
     finally:
+        if outcomes is not None:
+            outcomes.close()
         _finalize_postprocess()
         if out_fh is not None:
             out_fh.close()

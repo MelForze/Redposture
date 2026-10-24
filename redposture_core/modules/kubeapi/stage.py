@@ -9,6 +9,7 @@ from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...clients.http_api import http_target_context
 from ...console import Console
+from ...detection_io import with_async_io_detection
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
@@ -112,7 +113,7 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
             return False, f"status={status}"
         return _deep_gate(record)
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="kubeapi",
         label="KUBEAPI",
         default_port=_DEFAULT_PORT,
@@ -135,6 +136,13 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
         progress_refresh_interval_s=0.1,
+    )
+    return with_async_io_detection(
+        spec,
+        actions,
+        root_name="detect_kubeapi",
+        options=options,
+        api_prefixes=("/version", "/api", "/apis"),
     )
 
 

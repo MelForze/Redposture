@@ -29,12 +29,14 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
+from ...detection_io import DetectCall, DetectDelay, Steps, run_sync
 from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...shell_capture import DEFAULT_CAPTURE_BYTES, hex_preview, is_binary
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
 )
+from .detection import http_response_steps as _native_kube_http_response_steps
 from .http_session import KubeApiHttpSession, shared_ssl_context
 
 _KUBE_TAG = "KUBEAPI"
@@ -264,6 +266,10 @@ def _kube_api_headers(token: str | None, username: str | None, password: str | N
     return headers
 
 
+def _kube_http_response(client: Any, method: str, url: str, **options: Any) -> Any:
+    return client.request(method, url, **options)
+
+
 def _http_request(
     host: str,
     port: int,
@@ -279,6 +285,39 @@ def _http_request(
     client: HttpApiClient | None = None,
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
+    return run_sync(
+        _http_request_steps(
+            host,
+            port,
+            method,
+            path,
+            timeout,
+            use_https=use_https,
+            insecure=insecure,
+            ca_file=ca_file,
+            headers=headers,
+            body=body,
+            client=client,
+            response_size_cap=response_size_cap,
+        )
+    )
+
+
+def _http_request_steps(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+    client: HttpApiClient | None = None,
+    response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
+) -> Steps[tuple[int, bytes, dict[str, str], str | None]]:
     scheme = "https" if use_https else "http"
     url = build_http_target_url(host, port, path, default_scheme=scheme, override_bound_scheme=True)
     request_headers = {
@@ -302,7 +341,7 @@ def _http_request(
     }
     if isinstance(request_client, (KubeApiHttpSession, HttpSessionPool)):
         request_kwargs["response_size_cap"] = int(response_size_cap)
-    response = request_client.request(method, url, **request_kwargs)
+    response = yield DetectCall(_kube_http_response, (request_client, method, url), {**request_kwargs})
     response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
     if client is not None and response.final_url and bool(getattr(response, "redirected", False)):
         response_headers[_KUBE_EFFECTIVE_URL_HEADER] = response.final_url
@@ -337,20 +376,54 @@ def _api_get_json(
     client: HttpApiClient | None = None,
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
 ) -> tuple[int, Any, dict[str, str], str | None]:
-    return _api_request_json(
-        host,
-        port,
-        "GET",
-        path,
-        timeout,
-        use_https=use_https,
-        insecure=insecure,
-        ca_file=ca_file,
-        token=token,
-        username=username,
-        password=password,
-        client=client,
-        response_size_cap=response_size_cap,
+    return run_sync(
+        _api_get_json_steps(
+            host,
+            port,
+            path,
+            timeout,
+            use_https=use_https,
+            insecure=insecure,
+            ca_file=ca_file,
+            token=token,
+            username=username,
+            password=password,
+            client=client,
+            response_size_cap=response_size_cap,
+        )
+    )
+
+
+def _api_get_json_steps(
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    *,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    client: HttpApiClient | None = None,
+    response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
+) -> Steps[tuple[int, Any, dict[str, str], str | None]]:
+    return (
+        yield DetectCall(
+            _api_request_json,
+            (host, port, "GET", path, timeout),
+            {
+                "use_https": use_https,
+                "insecure": insecure,
+                "ca_file": ca_file,
+                "token": token,
+                "username": username,
+                "password": password,
+                "client": client,
+                "response_size_cap": response_size_cap,
+            },
+        )
     )
 
 
@@ -371,24 +444,60 @@ def _api_request_json(
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
     json_body: Any = None,
 ) -> tuple[int, Any, dict[str, str], str | None]:
+    return run_sync(
+        _api_request_json_steps(
+            host,
+            port,
+            method,
+            path,
+            timeout,
+            use_https=use_https,
+            insecure=insecure,
+            ca_file=ca_file,
+            token=token,
+            username=username,
+            password=password,
+            client=client,
+            response_size_cap=response_size_cap,
+            json_body=json_body,
+        )
+    )
+
+
+def _api_request_json_steps(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    client: Any = None,
+    response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
+    json_body: Any = None,
+) -> Steps[tuple[int, Any, dict[str, str], str | None]]:
     headers = _kube_api_headers(token, username, password)
     body = None
     if json_body is not None:
         body = json.dumps(json_body, separators=(",", ":")).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    status, payload, headers, error = _http_request(
-        host,
-        port,
-        method,
-        path,
-        timeout,
-        use_https=use_https,
-        insecure=insecure,
-        ca_file=ca_file,
-        headers=headers,
-        body=body,
-        client=client,
-        response_size_cap=response_size_cap,
+    status, payload, headers, error = yield DetectCall(
+        _http_request,
+        (host, port, method, path, timeout),
+        {
+            "use_https": use_https,
+            "insecure": insecure,
+            "ca_file": ca_file,
+            "headers": headers,
+            "body": body,
+            "client": client,
+            "response_size_cap": response_size_cap,
+        },
     )
     if error:
         return status, None, headers, error
@@ -439,6 +548,45 @@ def _api_request_json_with_retries(
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
     json_body: Any = None,
 ) -> tuple[int, Any, dict[str, str], str | None]:
+    return run_sync(
+        _api_request_json_with_retries_steps(
+            host,
+            port,
+            method,
+            path,
+            timeout,
+            retries=retries,
+            use_https=use_https,
+            insecure=insecure,
+            ca_file=ca_file,
+            token=token,
+            username=username,
+            password=password,
+            client=client,
+            response_size_cap=response_size_cap,
+            json_body=json_body,
+        )
+    )
+
+
+def _api_request_json_with_retries_steps(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    retries: int,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    client: Any = None,
+    response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
+    json_body: Any = None,
+) -> Steps[tuple[int, Any, dict[str, str], str | None]]:
     result: tuple[int, Any, dict[str, str], str | None] = (0, None, {}, "request failed")
     attempts = max(1, int(retries) + 1)
     for attempt in range(attempts):
@@ -456,23 +604,17 @@ def _api_request_json_with_retries(
             kwargs["client"] = client
         try:
             if method.upper() == "GET" and json_body is None:
-                result = _api_get_json(host, port, path, timeout, **kwargs)
+                result = yield DetectCall(_api_get_json, (host, port, path, timeout), {**kwargs})
             else:
-                result = _api_request_json(
-                    host,
-                    port,
-                    method,
-                    path,
-                    timeout,
-                    json_body=json_body,
-                    **kwargs,
+                result = yield DetectCall(
+                    _api_request_json, (host, port, method, path, timeout), {"json_body": json_body, **kwargs}
                 )
         except (OSError, ssl.SSLError, TimeoutError, ConnectionError, ValueError) as exc:
             result = (0, None, {}, _friendly_error_from_exception(exc))
         if not _is_retryable_request_error(result[3]):
             return result
         if attempt + 1 < attempts:
-            time.sleep(_retry_delay(attempt))
+            (yield DetectDelay(_retry_delay(attempt)))
     return result
 
 
@@ -993,9 +1135,21 @@ def _invoke_kube_list_items(
     retries: int,
     **kwargs: Any,
 ) -> Any:
+    return run_sync(_invoke_kube_list_items_steps(host, port, base_path, timeout, retries=retries, **kwargs))
+
+
+def _invoke_kube_list_items_steps(
+    host: str,
+    port: int,
+    base_path: str,
+    timeout: float,
+    *,
+    retries: int,
+    **kwargs: Any,
+) -> Steps[Any]:
     if retries:
         kwargs["retries"] = retries
-    return _kube_list_items(host, port, base_path, timeout, **kwargs)
+    return (yield DetectCall(_kube_list_items, (host, port, base_path, timeout), {**kwargs}))
 
 
 def _kube_list_items(
@@ -1016,6 +1170,45 @@ def _kube_list_items(
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
     retries: int = 0,
 ) -> KubeListResult:
+    return run_sync(
+        _kube_list_items_steps(
+            host,
+            port,
+            base_path,
+            timeout,
+            use_https=use_https,
+            insecure=insecure,
+            ca_file=ca_file,
+            token=token,
+            username=username,
+            password=password,
+            limit=limit,
+            max_pages=max_pages,
+            client=client,
+            response_size_cap=response_size_cap,
+            retries=retries,
+        )
+    )
+
+
+def _kube_list_items_steps(
+    host: str,
+    port: int,
+    base_path: str,
+    timeout: float,
+    *,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    limit: int = _KUBE_LIST_PAGE_LIMIT,
+    max_pages: int | None = None,
+    client: HttpApiClient | None = None,
+    response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
+    retries: int = 0,
+) -> Steps[KubeListResult]:
     items: list[dict[str, Any]] = []
     continue_token: str | None = None
     seen_continue_tokens: set[str] = set()
@@ -1036,14 +1229,8 @@ def _kube_list_items(
             request_kwargs["client"] = client
         if response_size_cap != _KUBE_DATA_RESPONSE_CAP:
             request_kwargs["response_size_cap"] = response_size_cap
-        status, payload, _headers, error = _api_request_json_with_retries(
-            host,
-            port,
-            "GET",
-            path,
-            timeout,
-            retries=retries,
-            **request_kwargs,
+        status, payload, _headers, error = yield DetectCall(
+            _api_request_json_with_retries, (host, port, "GET", path, timeout), {"retries": retries, **request_kwargs}
         )
         last_status = status
         if error:
@@ -1140,11 +1327,10 @@ def _list_namespaces(
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
     retries: int = 0,
 ) -> KubeListResult:
-    result = _coerce_list_result(
-        _invoke_kube_list_items(
+    return run_sync(
+        _list_namespaces_steps(
             host,
             port,
-            "/api/v1/namespaces",
             timeout,
             use_https=use_https,
             insecure=insecure,
@@ -1157,6 +1343,46 @@ def _list_namespaces(
             max_pages=max_pages,
             response_size_cap=response_size_cap,
             retries=retries,
+        )
+    )
+
+
+def _list_namespaces_steps(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    client: HttpApiClient | None = None,
+    limit: int = _KUBE_LIST_PAGE_LIMIT,
+    max_pages: int | None = None,
+    response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
+    retries: int = 0,
+) -> Steps[KubeListResult]:
+    result = _coerce_list_result(
+        (
+            yield DetectCall(
+                _invoke_kube_list_items,
+                (host, port, "/api/v1/namespaces", timeout),
+                {
+                    "use_https": use_https,
+                    "insecure": insecure,
+                    "ca_file": ca_file,
+                    "token": token,
+                    "username": username,
+                    "password": password,
+                    "client": client,
+                    "limit": limit,
+                    "max_pages": max_pages,
+                    "response_size_cap": response_size_cap,
+                    "retries": retries,
+                },
+            )
         )
     )
     items, status, error = result
@@ -1180,23 +1406,55 @@ def _probe_namespace_access(
     client: HttpApiClient | None = None,
     retries: int = 0,
 ) -> tuple[bool | None, int, str | None]:
+    return run_sync(
+        _probe_namespace_access_steps(
+            host,
+            port,
+            timeout,
+            use_https=use_https,
+            insecure=insecure,
+            ca_file=ca_file,
+            token=token,
+            username=username,
+            password=password,
+            client=client,
+            retries=retries,
+        )
+    )
+
+
+def _probe_namespace_access_steps(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    client: HttpApiClient | None = None,
+    retries: int = 0,
+) -> Steps[tuple[bool | None, int, str | None]]:
     """Check namespace-list access with exactly one bounded response page."""
 
-    namespaces, status, error = _list_namespaces(
-        host,
-        port,
-        timeout,
-        use_https=use_https,
-        insecure=insecure,
-        ca_file=ca_file,
-        token=token,
-        username=username,
-        password=password,
-        client=client,
-        limit=1,
-        max_pages=1,
-        response_size_cap=_KUBE_AUTH_RESPONSE_CAP,
-        retries=retries,
+    namespaces, status, error = yield DetectCall(
+        _list_namespaces,
+        (host, port, timeout),
+        {
+            "use_https": use_https,
+            "insecure": insecure,
+            "ca_file": ca_file,
+            "token": token,
+            "username": username,
+            "password": password,
+            "client": client,
+            "limit": 1,
+            "max_pages": 1,
+            "response_size_cap": _KUBE_AUTH_RESPONSE_CAP,
+            "retries": retries,
+        },
     )
     if namespaces is not None:
         # A continuation token is expected here: this probe intentionally reads
@@ -2638,10 +2896,10 @@ def _render_colored_kubeapi_line(console: Console, line: str) -> bool:
             BooleanColorRule("pods access", true_color="true_red", false_color="bright_green", unknown_color="orange"),
         ),
         counts=(
-            CountColorRule("secrets", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("pods", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("namespaces", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("keys", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("secrets", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("pods", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("namespaces", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("keys", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
         regexes=((r"coverage:partial.*", "orange"),),
     ):
@@ -2679,6 +2937,23 @@ def _lifecycle_get_json_with_retries(
     username: str | None = None,
     password: str | None = None,
 ) -> tuple[int, Any, dict[str, str], str | None]:
+    return run_sync(
+        _lifecycle_get_json_with_retries_steps(
+            ctx, state, path, response_size_cap=response_size_cap, token=token, username=username, password=password
+        )
+    )
+
+
+def _lifecycle_get_json_with_retries_steps(
+    ctx: Any,
+    state: KubeApiLifecycleState,
+    path: str,
+    *,
+    response_size_cap: int,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+) -> Steps[tuple[int, Any, dict[str, str], str | None]]:
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
     timeout = float(getattr(ctx.args, "timeout", 5.0))
     last_result: tuple[int, Any, dict[str, str], str | None] = (0, None, {}, "request failed")
@@ -2686,21 +2961,20 @@ def _lifecycle_get_json_with_retries(
     scheme_fallback_attempted = False
     while attempt < attempts:
         client = _state_http_client_or_none(state, response_size_cap=response_size_cap)
-        last_result = _api_request_json_with_retries(
-            str(state.host or ctx.host),
-            int(state.port or ctx.port),
-            "GET",
-            path,
-            timeout,
-            retries=0,
-            use_https=state.use_https,
-            insecure=state.insecure,
-            ca_file=state.ca_file,
-            token=token,
-            username=username,
-            password=password,
-            response_size_cap=response_size_cap,
-            **({"client": client} if client is not None else {}),
+        last_result = yield DetectCall(
+            _api_request_json_with_retries,
+            (str(state.host or ctx.host), int(state.port or ctx.port), "GET", path, timeout),
+            {
+                "retries": 0,
+                "use_https": state.use_https,
+                "insecure": state.insecure,
+                "ca_file": state.ca_file,
+                "token": token,
+                "username": username,
+                "password": password,
+                "response_size_cap": response_size_cap,
+                **({"client": client} if client is not None else {}),
+            },
         )
         _adopt_kubeapi_origin(state, last_result[2])
         error = last_result[3]
@@ -2719,7 +2993,7 @@ def _lifecycle_get_json_with_retries(
             return last_result
         attempt += 1
         if attempt < attempts:
-            time.sleep(_retry_delay(attempt - 1))
+            (yield DetectDelay(_retry_delay(attempt - 1)))
     return last_result
 
 
@@ -2800,6 +3074,18 @@ def _probe_pod_access(
     username: str | None = None,
     password: str | None = None,
 ) -> tuple[bool | None, int, str | None]:
+    return run_sync(_probe_pod_access_steps(ctx, state, options, token=token, username=username, password=password))
+
+
+def _probe_pod_access_steps(
+    ctx: Any,
+    state: KubeApiLifecycleState,
+    options: dict[str, Any],
+    *,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+) -> Steps[tuple[bool | None, int, str | None]]:
     """Check one PodList page per requested scope; never follow continuation."""
     namespaces = list(options.get("namespace_filters") or [])
     paths = (
@@ -2812,14 +3098,10 @@ def _probe_pod_access(
     last_status = 0
     errors: list[str] = []
     for path in paths:
-        status, payload, _headers, error = _lifecycle_get_json_with_retries(
-            ctx,
-            state,
-            path + "?limit=1",
-            response_size_cap=_KUBE_AUTH_RESPONSE_CAP,
-            token=token,
-            username=username,
-            password=password,
+        status, payload, _headers, error = yield DetectCall(
+            _lifecycle_get_json_with_retries,
+            (ctx, state, path + "?limit=1"),
+            {"response_size_cap": _KUBE_AUTH_RESPONSE_CAP, "token": token, "username": username, "password": password},
         )
         last_status = status
         if (
@@ -2847,6 +3129,10 @@ def _resource_auth_required(namespaces: bool | None, pods: bool | None) -> bool 
 
 
 def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    return run_sync(detect_kubeapi_steps(ctx, options))
+
+
+def detect_kubeapi_steps(ctx: Any, options: dict[str, Any]) -> Steps[dict[str, Any]]:
     state = ctx.lifecycle_state
     if not isinstance(state, KubeApiLifecycleState):
         raise TypeError("kubeapi lifecycle state is unavailable")
@@ -2858,11 +3144,8 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     state.insecure = not bool(state.ca_file)
     state.proxy = getattr(ctx.args, "_proxy_config", None)
     state.configure_transport(str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)))
-    version_status, version_payload, _headers, version_error = _lifecycle_get_json_with_retries(
-        ctx,
-        state,
-        "/version",
-        response_size_cap=_KUBE_DETECT_RESPONSE_CAP,
+    version_status, version_payload, _headers, version_error = yield DetectCall(
+        _lifecycle_get_json_with_retries, (ctx, state, "/version"), {"response_size_cap": _KUBE_DETECT_RESPONSE_CAP}
     )
     version_confirmed = version_status == 200 and _looks_like_kube_version_info(version_payload)
     version_auth_status = _looks_like_kube_auth_status(version_status, version_payload)
@@ -2870,11 +3153,8 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     api_payload: Any = None
     api_error: str | None = None
     if not version_confirmed:
-        api_status, api_payload, _headers, api_error = _lifecycle_get_json_with_retries(
-            ctx,
-            state,
-            "/api",
-            response_size_cap=_KUBE_DETECT_RESPONSE_CAP,
+        api_status, api_payload, _headers, api_error = yield DetectCall(
+            _lifecycle_get_json_with_retries, (ctx, state, "/api"), {"response_size_cap": _KUBE_DETECT_RESPONSE_CAP}
         )
 
     api_confirmed = api_status == 200 and _looks_like_kube_api_versions(api_payload)
@@ -2915,17 +3195,18 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     ns_status: int
     ns_error: str | None
     # Permissions on /version and /api do not establish resource-list rights.
-    namespace_access, ns_status, ns_error = _probe_namespace_access(
-        str(state.host or ctx.host),
-        int(state.port or ctx.port),
-        float(getattr(ctx.args, "timeout", 5.0)),
-        use_https=state.use_https,
-        insecure=state.insecure,
-        ca_file=state.ca_file,
-        client=_state_http_client_or_none(state, response_size_cap=_KUBE_AUTH_RESPONSE_CAP),
-        retries=int(getattr(ctx.args, "retries", 0) or 0),
+    namespace_access, ns_status, ns_error = yield DetectCall(
+        _probe_namespace_access,
+        (str(state.host or ctx.host), int(state.port or ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+        {
+            "use_https": state.use_https,
+            "insecure": state.insecure,
+            "ca_file": state.ca_file,
+            "client": _state_http_client_or_none(state, response_size_cap=_KUBE_AUTH_RESPONSE_CAP),
+            "retries": int(getattr(ctx.args, "retries", 0) or 0),
+        },
     )
-    pod_probe = _probe_pod_access(ctx, state, options)
+    pod_probe = yield DetectCall(_probe_pod_access, (ctx, state, options), {})
     state.anonymous_pod_probe = state.access_pod_probe = pod_probe
     namespaces: list[str] | None = [] if namespace_access is True else None
     state.anonymous_namespaces = namespaces
@@ -2996,11 +3277,10 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
         "error": None,
     }
     if bool(getattr(ctx.args, "defcreds", False)):
-        basic_status, _basic_payload, basic_headers, _basic_error = _lifecycle_get_json_with_retries(
-            ctx,
-            state,
-            "/api/v1/namespaces",
-            response_size_cap=_KUBE_AUTH_RESPONSE_CAP,
+        basic_status, _basic_payload, basic_headers, _basic_error = yield DetectCall(
+            _lifecycle_get_json_with_retries,
+            (ctx, state, "/api/v1/namespaces"),
+            {"response_size_cap": _KUBE_AUTH_RESPONSE_CAP},
         )
         challenge = str(basic_headers.get("www-authenticate") or "")
         result["credential_verification_status"] = (
@@ -3359,3 +3639,21 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_kubeapi_host_with_thread_debug
+
+
+# Only these original helper identities may execute in native detection.
+
+_ASYNC_DETECT_STEPS: dict[Callable[..., Any], Callable[..., Steps[Any]]] = {
+    _api_get_json: _api_get_json_steps,
+    _api_request_json: _api_request_json_steps,
+    _api_request_json_with_retries: _api_request_json_with_retries_steps,
+    _http_request: _http_request_steps,
+    _invoke_kube_list_items: _invoke_kube_list_items_steps,
+    _kube_list_items: _kube_list_items_steps,
+    _lifecycle_get_json_with_retries: _lifecycle_get_json_with_retries_steps,
+    _list_namespaces: _list_namespaces_steps,
+    _probe_namespace_access: _probe_namespace_access_steps,
+    _probe_pod_access: _probe_pod_access_steps,
+    detect_kubeapi: detect_kubeapi_steps,
+    _kube_http_response: _native_kube_http_response_steps,
+}

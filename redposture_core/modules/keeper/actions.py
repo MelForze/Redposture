@@ -14,6 +14,8 @@ from ...clients.zookeeper import (
     _ZK_ERR_OK,
     _zk_error_name,
 )
+from ...detection_io import DetectCall as _DetectCall
+from ...detection_io import run_sync as _run_detect_sync
 from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line
 from ..zookeeper.actions import (
     _format_credential_attempts_records,
@@ -41,58 +43,61 @@ def _ddl_host_spans(_marker: str, text: str) -> list[tuple[int, int, str]]:
 
 
 def _reset_probe_session(client: Any) -> str | None:
-    """Expire any ambiguous ephemeral marker before later lifecycle stages."""
+    return _run_detect_sync(_reset_probe_session_detect_steps(client))
 
+
+def _reset_probe_session_detect_steps(client: Any):
+    """Expire any ambiguous ephemeral marker before later lifecycle stages."""
     try:
-        client.close()
-        client.connect()
+        yield _DetectCall(client.close, (), {})
+        yield _DetectCall(client.connect, (), {})
     except (TimeoutError, ConnectionError, OSError, ValueError, TypeError, AttributeError) as exc:
         return f"session reset failed: {exc}"
     return None
 
 
 def probe_ddl_access(client: Any) -> tuple[str, str | None]:
-    """Classify anonymous DDL-queue access using an ephemeral non-task child."""
+    return _run_detect_sync(_probe_ddl_access_detect_steps(client))
 
+
+def _probe_ddl_access_detect_steps(client: Any):
+    """Classify anonymous DDL-queue access using an ephemeral non-task child."""
     try:
-        _children, read_err, _stat = client.get_children2(_DDL_QUEUE)
+        _children, read_err, _stat = yield _DetectCall(client.get_children2, (_DDL_QUEUE,), {})
         read_err = int(read_err)
     except (TimeoutError, ConnectionError, OSError, ValueError, TypeError, AttributeError) as exc:
-        return "Unknown", str(exc)
+        return ("Unknown", str(exc))
     if read_err == _ZK_ERR_NONODE:
-        return "Absent", None
+        return ("Absent", None)
     readable = read_err == _ZK_ERR_OK
     if not readable and read_err != _ZK_ERR_NOAUTH:
-        return "Unknown", f"read: {_zk_error_name(read_err)}"
-
+        return ("Unknown", f"read: {_zk_error_name(read_err)}")
     for _attempt in range(3):
         marker = f"{_DDL_QUEUE}/redposture-probe-{secrets.token_hex(12)}"
         try:
-            create_err = int(client.create(marker, b"", flags=_ZK_CREATE_EPHEMERAL))
+            create_err = int((yield _DetectCall(client.create, (marker, b""), {"flags": _ZK_CREATE_EPHEMERAL})))
         except (TimeoutError, ConnectionError, OSError, ValueError, TypeError, AttributeError) as exc:
-            reset_error = _reset_probe_session(client)
+            reset_error = yield _DetectCall(_reset_probe_session, (client,), {})
             detail = str(exc)
-            return ("Read" if readable else "Unknown"), (f"{detail}; {reset_error}" if reset_error else detail)
+            return ("Read" if readable else "Unknown", f"{detail}; {reset_error}" if reset_error else detail)
         if create_err == _ZK_ERR_NODEEXISTS:
             continue
         if create_err == _ZK_ERR_NOAUTH:
-            return ("Read" if readable else "Denied"), None
+            return ("Read" if readable else "Denied", None)
         if create_err != _ZK_ERR_OK:
-            return ("Read" if readable else "Unknown"), f"create: {_zk_error_name(create_err)}"
-
+            return ("Read" if readable else "Unknown", f"create: {_zk_error_name(create_err)}")
         try:
-            delete_err = int(client.delete(marker, -1))
+            delete_err = int((yield _DetectCall(client.delete, (marker, -1), {})))
         except (TimeoutError, ConnectionError, OSError, ValueError, TypeError, AttributeError) as exc:
-            reset_error = _reset_probe_session(client)
+            reset_error = yield _DetectCall(_reset_probe_session, (client,), {})
             detail = f"delete: {exc}"
-            return "Write", f"{detail}; {reset_error}" if reset_error else detail
+            return ("Write", f"{detail}; {reset_error}" if reset_error else detail)
         if delete_err != _ZK_ERR_OK:
-            reset_error = _reset_probe_session(client)
+            reset_error = yield _DetectCall(_reset_probe_session, (client,), {})
             detail = f"delete: {_zk_error_name(delete_err)}"
-            return "Write", f"{detail}; {reset_error}" if reset_error else detail
-        return "Write", None
-
-    return ("Read" if readable else "Unknown"), "marker collision"
+            return ("Write", f"{detail}; {reset_error}" if reset_error else detail)
+        return ("Write", None)
+    return ("Read" if readable else "Unknown", "marker collision")
 
 
 def _render_colored_keeper_line(console: Any, line: str) -> bool:
@@ -155,3 +160,10 @@ __all__ = [
     "_render_colored_keeper_line",
     "host_stage",
 ]
+
+
+# Exact synchronous wrappers are the compatibility/override identities.
+_ASYNC_RETAINED_STEPS = {
+    _reset_probe_session: _reset_probe_session_detect_steps,
+    probe_ddl_access: _probe_ddl_access_detect_steps,
+}

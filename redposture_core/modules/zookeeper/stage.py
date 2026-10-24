@@ -7,7 +7,11 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients import zookeeper as _native_client
+from ...clients.async_retained_socket import with_native_detection as _with_native_detection
 from ...console import Console
+from ...detection_io import DetectCall as _DetectCall
+from ...detection_io import run_sync as _run_detect_sync
 from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -86,15 +90,13 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
         )
 
     def _detect(ctx: AuditHookContext) -> AuditRecord:
+        return _run_detect_sync(_detect_steps(ctx))
+
+    def _detect_steps(ctx: AuditHookContext):
         payload = engine.enforce_expected_implementation(
-            engine.detect_zookeeper_implementation(ctx, options),
-            expected_is_keeper=False,
+            (yield _DetectCall(engine.detect_zookeeper_implementation, (ctx, options), {})), expected_is_keeper=False
         )
-        return AuditRecord.from_mapping(
-            payload,
-            module="zookeeper",
-            service="zookeeper",
-        )
+        return AuditRecord.from_mapping(payload, module="zookeeper", service="zookeeper")
 
     def _auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         return AuditRecord.from_mapping(
@@ -129,7 +131,7 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
     def _is_detected(record: AuditRecord) -> bool:
         return bool(record.extra.get("is_zookeeper")) and record.extra.get("is_keeper") is False
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="zookeeper",
         label="ZOOKEEPER",
         default_port=_DEFAULT_PORT,
@@ -157,6 +159,12 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
             "credential_auth_probe_results",
         ),
         suppress_undetected_records_in_text=True,
+    )
+
+    return _with_native_detection(
+        spec,
+        _detect_steps,
+        {**actions._ASYNC_RETAINED_STEPS, **engine._ASYNC_RETAINED_STEPS, **_native_client._ASYNC_RETAINED_STEPS},
     )
 
 

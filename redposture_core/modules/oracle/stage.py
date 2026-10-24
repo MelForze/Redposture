@@ -17,26 +17,14 @@ from ...stage_runtime import (
     merge_audit_credential_runs,
     sort_default_audit_credential_runs,
 )
-from . import actions, policy, render
+from . import actions, async_detect, policy, render
 
 _DEFAULT_PORT = 1521
 _DEFAULT_PORTS: tuple[int, ...] | None = (1521, 2484, 11521)
-_DEFAULT_ORACLE_WORKERS = 8
 
 
 def build_oracle_plan(args: Any) -> AuditCommandPlan:
-    plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
-    if getattr(args, "_workers_option_provided", None) is False:
-        from dataclasses import replace
-
-        plan = replace(plan, workers=min(plan.workers, _DEFAULT_ORACLE_WORKERS))
-        args.workers = plan.workers
-        args._audit_worker_profile = {
-            "endpoint_count": plan.target_count,
-            "workers": plan.workers,
-            "automatic": True,
-        }
-    return plan
+    return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
 
 
 def build_oracle_spec(args: Any) -> ModuleAuditSpec:
@@ -45,6 +33,7 @@ def build_oracle_spec(args: Any) -> ModuleAuditSpec:
         label="ORACLE",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
+        detect_async=async_detect.detect,
         render_module=render,
         colorize=render._render_colored_oracle_line,
         is_detected=lambda record: record.extra.get("is_oracle") is True,

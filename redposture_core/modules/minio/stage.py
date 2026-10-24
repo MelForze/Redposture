@@ -8,6 +8,7 @@ from typing import Any
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...console import Console
+from ...detection_io import with_async_io_detection
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCredentialRun,
@@ -70,7 +71,7 @@ def build_minio_spec(args: Any) -> ModuleAuditSpec:
         prior = record.to_dict() if hasattr(record, "to_dict") else dict(record)
         return AuditRecord.from_mapping(actions.data_record(ctx, prior), module="minio", service="minio")
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="minio",
         label="MINIO",
         default_port=_DEFAULT_PORT,
@@ -94,6 +95,8 @@ def build_minio_spec(args: Any) -> ModuleAuditSpec:
         defer_phase_output_until_final=True,
         emit_capabilities_before_data=bool(getattr(args, "discover", False)),
     )
+
+    return with_async_io_detection(spec, actions, root_name="detect_record", options=None, api_prefixes=())
 
 
 def run_minio_stage(args: Any, logger: Any) -> int:

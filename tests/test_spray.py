@@ -309,7 +309,7 @@ def test_legacy_spray_checkpoint_can_resume_with_empty_credential_detail(tmp_pat
             )
     journal = AttemptJournal(str(path), "same", True)
     try:
-        assert journal.rows() == [("jenkins", "localhost", 8080, 0, "valid", "identity verified", "")]
+        assert list(journal.rows()) == [("jenkins", "localhost", 8080, 0, "valid", "identity verified", "")]
     finally:
         journal.close()
 
@@ -696,20 +696,20 @@ def test_spray_separates_ui_and_backend_on_one_explicit_origin(monkeypatch: pyte
 
     def backend(ctx: AuditHookContext) -> AuditRecord:
         return AuditRecord.from_mapping(
-            {"host": ctx.host, "port": ctx.port, "status": "open_no_auth", "is_docker": True},
-            module="docker",
-            service="docker",
+            {"host": ctx.host, "port": ctx.port, "status": "open_no_auth", "is_kubeapi": True},
+            module="kubeapi",
+            service="kubeapi",
         )
 
     spec = ModuleAuditSpec(
-        module="docker",
-        label="DOCKER",
+        module="kubeapi",
+        label="KUBEAPI",
         default_port=2375,
         detect=backend,
-        is_detected=lambda record: record.extra.get("is_docker") is True,
+        is_detected=lambda record: record.extra.get("is_kubeapi") is True,
     )
     monkeypatch.setattr(
-        spray.importlib, "import_module", lambda _name: SimpleNamespace(build_docker_spec=lambda _args: spec)
+        spray.importlib, "import_module", lambda _name: SimpleNamespace(build_kubeapi_spec=lambda _args: spec)
     )
     monkeypatch.setattr(
         spray.web_panels,
@@ -721,7 +721,7 @@ def test_spray_separates_ui_and_backend_on_one_explicit_origin(monkeypatch: pyte
             "auth_required": True,
             "surface": "ui",
             "is_ui": True,
-            "ui_product": "portainer",
+            "ui_product": "kubernetes_dashboard",
             "ui": {"endpoint": "https://qa:9443", "auth_required": True},
             "credential_verification_status": "available",
         },
@@ -739,7 +739,7 @@ def test_spray_separates_ui_and_backend_on_one_explicit_origin(monkeypatch: pyte
     journal = AttemptJournal(str(tmp_path / "journal.sqlite3"), "same", False)
     try:
         _run_target(
-            "docker",
+            "kubeapi",
             Namespace(),
             "qa",
             9443,
@@ -749,14 +749,14 @@ def test_spray_separates_ui_and_backend_on_one_explicit_origin(monkeypatch: pyte
             RateGate(1000, 0.001),
             None,
         )
-        rows = journal.rows()
+        rows = list(journal.rows())
         assert [row[4] for row in rows] == ["confirmed", "valid", "confirmed", "unsupported"]
-        assert "ui product:portainer" in rows[0][5]
+        assert "ui product:kubernetes_dashboard" in rows[0][5]
         assert "surface:backend" in rows[2][5]
         assert "surface:backend" in rows[3][5]
         rendered = _render_rows(rows, (Candidate("pair", "admin", "secret"),), "txt")
-        assert "Portainer" in rendered[0]
-        assert "Docker Engine" in rendered[2]
+        assert "Kubernetes Dashboard" in rendered[0]
+        assert "Kubernetes API" in rendered[2]
         assert rendered[3].endswith("(backend)")
     finally:
         journal.close()
@@ -1057,7 +1057,7 @@ def test_spray_colors_follow_airflow_semantics() -> None:
     assert "<bright_green>auth required:True</bright_green>" in console.lines[0]
     assert "<orange>version:unknown</orange>" in console.lines[0]
     assert "<true_red>alice:secret</true_red>" in console.lines[1]
-    assert "<green>[+]</green>" in console.lines[1]
+    assert "<bright_green>[+]</bright_green>" in console.lines[1]
     assert "<true_red>Jobs:2</true_red>" in console.lines[1]
     assert "<true_red>[-]</true_red>" in console.lines[2]
     assert "<white>alice:secret</white>" in console.lines[2]
@@ -1245,7 +1245,7 @@ def test_spray_valid_result_uses_module_capabilities_but_never_inventory(
             None,
         )
         assert calls == ["detect", "auth", "capabilities"]
-        assert journal.rows()[1][6] == "(Dags:3)"
+        assert list(journal.rows())[1][6] == "(Dags:3)"
         assert b"secret" not in (tmp_path / "journal.sqlite3").read_bytes()
     finally:
         journal.close()
@@ -1333,7 +1333,7 @@ def test_spray_reads_verified_capability_count_without_inventory(
             None,
         )
         assert calls == ["detect", "auth", "auth", "data"]
-        assert journal.rows()[2][6] == suffix
+        assert list(journal.rows())[2][6] == suffix
     finally:
         journal.close()
 
@@ -1630,7 +1630,7 @@ def test_fuzz_txt_and_json_keep_four_fields_and_no_terminal_escape(username: str
 def test_credential_type_matrix_and_ambiguous_evidence(module: str) -> None:
     detected = AuditRecord.from_mapping({"host": "localhost", "port": 1, "status": "detected"})
     assert _supported(module, Candidate("pair", "u", "p"), detected) == (
-        module not in {"docker", "keycloak", "qdrant", "kubeapi", "vault", "nomad", "jupyter"}
+        module not in {"docker", "keycloak", "qdrant", "kubeapi", "vault", "nomad", "jupyter", "spark", "yarn"}
     )
     assert _supported(module, Candidate("token", token="jwt"), detected) == (
         module
@@ -1650,6 +1650,7 @@ def test_credential_type_matrix_and_ambiguous_evidence(module: str) -> None:
             "vault",
             "nomad",
             "jupyter",
+            "portainer",
         }
     )
 

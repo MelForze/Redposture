@@ -17,7 +17,7 @@ from ...stage_runtime import (
     merge_audit_credential_runs,
     sort_default_audit_credential_runs,
 )
-from . import actions, policy, render
+from . import actions, async_detect, policy, render
 
 _DEFAULT_PORT = 27017
 _DEFAULT_PORTS: tuple[int, ...] | None = (27017, 27018, 27019, 8081)
@@ -33,6 +33,7 @@ def build_mongodb_spec(args: Any) -> ModuleAuditSpec:
         label="MONGODB",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
+        detect_async=async_detect.detect,
         render_module=render,
         colorize=render._render_colored_mongodb_line,
         is_detected=lambda record: record.extra.get("is_mongodb") is True,

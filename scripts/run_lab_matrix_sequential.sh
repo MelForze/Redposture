@@ -59,6 +59,10 @@ if [ "${MATRIX_PROFILE}" = "extended" ]; then
   "${PYTHON_BIN}" -m pytest -q \
     tests/test_token_audit_modules.py tests/test_token_api_http_integration.py \
     tests/test_nomad_jupyter_execute.py tests/test_execution_websocket.py tests/test_nomad_jupyter_execute_http.py \
+    tests/test_spark.py tests/test_spark_render_stage.py tests/test_spark_http_integration.py \
+    tests/test_yarn_module.py tests/test_yarn_http_integration.py tests/test_portainer.py tests/test_portainer_http.py \
+    tests/test_cluster_panel_integration.py tests/test_cluster_panel_fuzz.py tests/test_portainer_budget_regressions.py \
+    tests/test_portainer_render_contract.py tests/test_portainer_live_output.py \
     --junitxml="${OUT_DIR}/focused-token-apis.xml"
 fi
 if [ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" = "1" ]; then
@@ -501,6 +505,7 @@ run_raw_case() {
 }
 
 run_negative_cli_cases() {
+  run_raw_case jenkins fuzz_jenkins_missing_targets 2 jenkins -ot excluded.invalid --discover --discover-time 10 --discover-max-bytes 52428800
   run_raw_case exporters fuzz_exporters_scan_missing_targets 2 exporters scan -p 9100 -ot excluded.invalid
   run_raw_case exporters fuzz_exporters_scan_invalid_ports 2 exporters scan -t 127.0.0.1 -p bad
   run_raw_case exporters fuzz_exporters_scan_zero_timeout 2 exporters scan -t 127.0.0.1 --timeout 0
@@ -521,8 +526,8 @@ run_negative_cli_cases() {
   run_raw_case postgres fuzz_postgres_missing_targets 2 postgres -ot excluded.invalid --show-databases --pgadmin-server-password qa-only --sslmode verify-full --ssl-ca /nonexistent/postgres-ca.crt --ssl-cert /nonexistent/postgres-client.crt --ssl-key /nonexistent/postgres-client.key --ssl-server-name postgres.internal
   run_raw_case mongodb fuzz_mongodb_missing_targets 2 mongodb -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/mongodb-ca.crt --tls-cert-key /nonexistent/mongodb-client.pem
   run_raw_case oracle fuzz_oracle_missing_targets 2 oracle -ot excluded.invalid --service FREEPDB1
-  run_raw_case docker fuzz_docker_missing_targets 2 docker -ot excluded.invalid -u qa -p qa --containers
-  run_raw_case docker fuzz_docker_defcreds_missing_targets 2 docker -ot excluded.invalid --defcreds --containers
+  run_raw_case docker fuzz_docker_missing_targets 2 docker -ot excluded.invalid --containers
+  run_raw_case portainer fuzz_portainer_defcreds_missing_targets 2 portainer -ot excluded.invalid --defcreds --show-containers
   run_raw_case airflow fuzz_airflow_missing_targets 2 airflow -ot excluded.invalid --show-dags --dump --dag qa --key qa --connection qa
   run_raw_case clickhouse fuzz_clickhouse_missing_targets 2 clickhouse -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/clickhouse-ca.crt --tls-cert /nonexistent/clickhouse-client.crt --tls-key /nonexistent/clickhouse-client.key --tls-server-name clickhouse.internal
   run_raw_case redis fuzz_redis_missing_targets 2 redis -ot excluded.invalid --show-keys --tls --tls-ca /nonexistent/redis-ca.crt --tls-cert /nonexistent/redis-client.crt --tls-key /nonexistent/redis-client.key
@@ -662,6 +667,8 @@ run_registry_cases() {
   run_case docker-registry registry_multi_instance_urls 0 docker-registry -t "http://127.0.0.1:15000/v2/_catalog,http://127.0.0.1:15010/v2/_catalog,http://127.0.0.1:15011/v2/_catalog,http://127.0.0.1:15012/v2/_catalog,http://127.0.0.1:15013/v2/_catalog" --images
   run_text_case docker-registry registry_debug_smoke 0 docker-registry -t 127.0.0.1 --port 15000 --images --debug
   if is_extended_matrix; then
+    run_case docker-registry registry_extended_discover_budget 0 docker-registry -t 127.0.0.1 --port 15000 --image redposture/demo-api:latest --discover --discover-time 10 --discover-max-bytes 52428800
+    run_case nexus nexus_extended_discover_budget 0 nexus -t 127.0.0.1 --port 15004 -u admin -p 'NexusAdmin!2026' --repository raw-security --asset artifacts/sbom/redposture-api-2.6.0.spdx.json --discover --discover-time 10 --discover-max-bytes 52428800
     run_case docker-registry registry_extended_tags_metadata 0 docker-registry -t 127.0.0.1 --port 15000 --repository redposture/demo-api --show-tags --tag latest --metadata --inspect --image redposture/demo-api:latest --download --download-dir "${OUT_DIR}/registry_downloads"
     run_case docker-registry registry_extended_ports_flag 0 docker-registry -t 127.0.0.1 --ports 15000 --images
     run_case docker-registry fuzz_registry_malformed_target 2 docker-registry -t "http://[invalid:url" --images
@@ -672,6 +679,9 @@ run_registry_cases() {
 run_registry_harbor_cases() {
   run_case harbor registry_harbor 0 harbor -t http://127.0.0.1:18280 --timeout 15 --images -u admin -p Harbor12345
   run_case harbor registry_harbor_weak_pairs 0 harbor -t http://127.0.0.1:18280 --timeout 15 --defcreds
+  if is_extended_matrix; then
+    run_case harbor harbor_extended_discover_budget 0 harbor -t http://127.0.0.1:18280 --timeout 15 -u admin -p Harbor12345 --image core/control-plane:latest --discover --discover-time 10 --discover-max-bytes 52428800
+  fi
 }
 
 run_valkey_cases() {
@@ -731,6 +741,7 @@ run_gitlab_cases() {
   run_case gitlab gitlab_multi_instance_urls 0 gitlab -t "http://127.0.0.1:18080/users/sign_in,http://127.0.0.1:18081/users/sign_in,http://127.0.0.1:18082/users/sign_in,http://127.0.0.1:18083/users/sign_in,http://127.0.0.1:18084/users/sign_in"
   run_text_case gitlab gitlab_debug_smoke 0 gitlab -t 127.0.0.1 --port 18080 --debug
   if is_extended_matrix; then
+    run_case gitlab gitlab_extended_discover_budget 0 gitlab -t http://127.0.0.1:18080 --token glpat-redposture-lab-analyst-2026 --project redposture-lab/public-api --discover --discover-time 10 --discover-max-bytes 52428800
     run_case gitlab gitlab_extended_token_project_clone 0 gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-analyst-2026 --project redposture-lab/public-api --clone --clone-dir "${OUT_DIR}/gitlab_clones"
     run_case gitlab gitlab_extended_ports_flag 0 gitlab -t 127.0.0.1 --ports 18080
     run_case gitlab fuzz_gitlab_invalid_port 2 gitlab -t 127.0.0.1 --port 99999
@@ -756,6 +767,7 @@ run_consul_cases() {
   run_case consul consul_multi_instance_urls 0 consul -t "http://127.0.0.1:8500/v1/status/leader,http://127.0.0.1:8501/v1/status/leader,http://127.0.0.1:8502/v1/status/leader,http://127.0.0.1:8503/v1/status/leader,http://127.0.0.1:8504/v1/status/leader" --dump
   run_text_case consul consul_debug_smoke 0 consul -t 127.0.0.1 --port 8500 --debug
   if is_extended_matrix; then
+    run_case consul consul_extended_discover_budget 0 consul -t 127.0.0.1 --port 8500 --dump --discover --discover-time 10 --discover-max-bytes 52428800
     run_case consul consul_extended_ports_basic_auth 0 consul -t 127.0.0.1 --ports 8500 -u matrix -p "" --keys
     run_case consul consul_extended_inventory_filters 0 consul -t 127.0.0.1 --port 8500 --keys --services --agents --checks --nodes --key redposture/kafka/sasl_password --service redposture-api --agent redposture-lab-consul --node redposture-lab-consul --dump 3
     run_case consul consul_extended_ssrf_probe 0 consul -t 127.0.0.1 --port 8500 --ssrf-target consul --ssrf-port 8500 --ssrf-path /v1/status/leader --checks
@@ -782,6 +794,7 @@ run_kubeapi_cases() {
   run_case kubeapi kubeapi_multi_instance_urls 0 kubeapi -t "https://127.0.0.1:26443/version,https://127.0.0.1:26444/version,https://127.0.0.1:26445/version,https://127.0.0.1:26446/version,https://127.0.0.1:26447/version" --namespaces
   run_text_case kubeapi kubeapi_debug_smoke 0 kubeapi -t 127.0.0.1 --port 26443 --debug
   if is_extended_matrix; then
+    run_case kubeapi kubeapi_extended_discover_budget 0 kubeapi -t 127.0.0.1 --port 16443 --token "${kube_admin_token}" --namespace redposture-lab --secrets --discover --discover-time 10 --discover-max-bytes 52428800
     run_case kubeapi kubeapi_extended_ports_flag 0 kubeapi -t 127.0.0.1 --ports 26443 --namespaces
     run_case kubeapi kubeapi_extended_selectors_basic_auth 0 kubeapi -t 127.0.0.1 --port 26443 --namespace default --namespaces --pods --username audit --password ""
     run_case kubeapi fuzz_kubeapi_zero_timeout 2 kubeapi -t 127.0.0.1 --timeout 0
@@ -792,6 +805,7 @@ run_kubeapi_cases() {
 run_postgres_cases() {
   run_case postgres postgres_default 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --show-databases --show-tables --dump 20 --discover
   if is_extended_matrix; then
+    run_case postgres postgres_extended_discover_budget 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --database postgres --table redposture.demo_accounts --dump 5 --discover --discover-time 10 --discover-max-bytes 52428800
     run_case postgres postgres_idempotency 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --show-databases --show-tables --dump 20 --discover
   fi
   run_case postgres postgres_multi_ports 0 postgres -t 127.0.0.1 -u postgres -p postgres --ports "5432,25432,25433,25434,25435" --show-databases
@@ -816,6 +830,7 @@ run_mongodb_cases() {
   run_case mongodb mongodb_open 0 mongodb -t 127.0.0.1 --port 27017 --show-databases --show-collections --show-indexes --dump 20 --discover
   run_case mongodb mongodb_auth 0 mongodb -t 127.0.0.1 --port 27018 -u root -p root --show-databases --show-collections --dump 20
   if is_extended_matrix; then
+    run_case mongodb mongodb_extended_discover_budget 0 mongodb -t 127.0.0.1 --port 27017 --database redposture --collection demo_accounts --dump 5 --discover --discover-time 10 --discover-max-bytes 52428800
     run_case mongodb mongodb_idempotency 0 mongodb -t 127.0.0.1 --port 27018 -u root -p root --show-databases --show-collections --dump 20
   fi
   run_case mongodb mongodb_defcreds 0 mongodb -t 127.0.0.1 --port 27018 --defcreds --show-databases --show-collections
@@ -867,6 +882,7 @@ run_oracle_cases() {
   run_text_case oracle oracle_debug_smoke 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --debug
   run_case oracle oracle_json_smoke 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --show-pdbs
   if is_extended_matrix; then
+    run_case oracle oracle_extended_discover_budget 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --schema REDPOSTURE --table ACCOUNTS --dump 5 --discover --discover-time 10 --discover-max-bytes 52428800
     run_case oracle oracle_extended_schema_sensitive_protocol 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --protocol tcp --service FREEPDB1 -u redposture -p "OracleLab!2026" --schema REDPOSTURE --table ACCOUNTS --show-roles --show-privs --show-schemas --show-tables --dump 2 --sensitive-scan
     run_case oracle fuzz_oracle_invalid_port 2 oracle -t 127.0.0.1 --port -1 --service FREEPDB1
     run_case oracle fuzz_oracle_zero_timeout 2 oracle -t 127.0.0.1 --timeout 0 --service FREEPDB1
@@ -915,6 +931,7 @@ run_clickhouse_cases() {
 run_redis_cases() {
   run_case redis redis_default 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --show-keys --dump --discover
   if is_extended_matrix; then
+    run_case redis redis_extended_discover_budget 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --key svc:grafana --dump 3 --discover --discover-time 10 --discover-max-bytes 52428800
     run_case redis redis_idempotency 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --show-keys --dump --discover
   fi
   run_case redis redis_multi_ports 0 redis -t 127.0.0.1 -u redis -p redis --ports "6379,26380,26381,26382,26383" --show-keys
@@ -942,6 +959,7 @@ run_redis_cases() {
 run_etcd_cases() {
   run_case etcd etcd_open 0 etcd -t 127.0.0.1 --port 2379 --show-keys --dump --discover
   if is_extended_matrix; then
+    run_case etcd etcd_extended_discover_budget 0 etcd -t 127.0.0.1 --port 2379 --key /offlineStocks:city_4949:552400 --dump 3 --discover --discover-time 10 --discover-max-bytes 52428800
     run_case etcd etcd_idempotency 0 etcd -t 127.0.0.1 --port 2379 --show-keys --dump --discover
   fi
   run_case etcd etcd_auth 0 etcd -t 127.0.0.1 --port 22379 --show-keys --dump
@@ -971,6 +989,7 @@ run_qdrant_cases() {
   run_case qdrant qdrant_multi_instance_urls 0 qdrant -t "http://127.0.0.1:6333/collections,http://127.0.0.1:26333/collections,http://127.0.0.1:26334/collections,http://127.0.0.1:26335/collections,http://127.0.0.1:26336/collections" --collections --dump
   run_text_case qdrant qdrant_debug_smoke 0 qdrant -t 127.0.0.1 --port 6333 --collections --debug
   if is_extended_matrix; then
+    run_case qdrant qdrant_extended_discover_budget 0 qdrant -t 127.0.0.1 --port 6333 --collection demo_vectors --dump 3 --discover --discover-time 10 --discover-max-bytes 52428800
     local snapshot_json
     local snapshot_name
     local snapshot_path
@@ -1058,6 +1077,7 @@ run_grpc_cases() {
 run_kafka_cases() {
   run_case kafka kafka_open 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50 --discover
   if is_extended_matrix; then
+    run_case kafka kafka_extended_discover_budget 0 kafka -t 127.0.0.1 --port 9092 --topic orders --dump 3 --discover --discover-time 10 --discover-max-bytes 52428800
     run_case kafka kafka_idempotency 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50 --discover
   fi
   run_case kafka kafka_auth 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
@@ -1099,6 +1119,7 @@ run_zookeeper_cases() {
   run_case zookeeper zookeeper_multi_ports 0 zookeeper -t 127.0.0.1 --ports "2181,22181,22182,22183,22184" --show-znodes --dump
   run_text_case zookeeper zookeeper_debug_smoke 0 zookeeper -t 127.0.0.1 --port 2181 --debug
   if is_extended_matrix; then
+    run_case zookeeper zookeeper_extended_discover_budget 0 zookeeper -t 127.0.0.1 --port 2181 --znode /redposture/app/api_key --dump 1 --max-znodes 10 --enum-workers 2 --discover --discover-time 10 --discover-max-bytes 52428800
     run_case zookeeper zookeeper_extended_znode_limits 0 zookeeper -t 127.0.0.1 --port 2181 --znode /redposture/app/api_key --show-znodes 5 --dump 3 --max-znodes 10 --enum-workers 2
     run_case zookeeper zookeeper_extended_empty_password 0 zookeeper -t 127.0.0.1 --port 2181 -u zkuser -p "" --show-znodes 1
     run_case zookeeper fuzz_zookeeper_invalid_port 2 zookeeper -t 127.0.0.1 --port abc --show-znodes
@@ -1113,6 +1134,7 @@ run_zookeeper_auth_cases() {
 run_keeper_cases() {
   run_case keeper keeper_cluster 0 keeper -t 127.0.0.1 --port "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3 --discover
   if is_extended_matrix; then
+    run_case keeper keeper_extended_discover_budget 0 keeper -t 127.0.0.1 --port 19181 --znode /redposture/app/api_key --dump 1 --max-znodes 10 --enum-workers 2 --discover --discover-time 10 --discover-max-bytes 52428800
     run_case keeper keeper_ddl_topology 0 keeper -t 127.0.0.1 --port 19181 --show-cluster --show-hosts
   fi
   run_case keeper keeper_tls 0 keeper -t 127.0.0.1 --port 19281 --show-znodes 10 --dump 10

@@ -8,6 +8,7 @@ from typing import Any
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...console import Console
+from ...detection_io import with_async_io_detection
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCredentialRun,
@@ -64,7 +65,7 @@ def build_rabbitmq_spec(args: Any) -> ModuleAuditSpec:
             actions.data_record(ctx, record.to_dict()), module="rabbitmq", service="rabbitmq"
         )
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="rabbitmq",
         label="RABBITMQ",
         default_port=15672,
@@ -96,6 +97,8 @@ def build_rabbitmq_spec(args: Any) -> ModuleAuditSpec:
         suppress_undetected_records_in_text=True,
         defer_phase_output_until_final=True,
     )
+
+    return with_async_io_detection(spec, actions, root_name="detect_record", options=None, api_prefixes=())
 
 
 def run_rabbitmq_stage(args: Any, logger: Any) -> int:

@@ -29,7 +29,7 @@ from ...stage_runtime import (
     sort_default_audit_credential_runs,
 )
 from ...utils import is_signature_compat_typeerror
-from . import actions, policy, render
+from . import actions, async_detect, policy, render
 
 _DEFAULT_PORT = 5432
 _DEFAULT_PORTS: tuple[int, ...] | None = (5432, 6432, 15432, 16432, 25432, 26432, 80, 443, 3000)
@@ -614,6 +614,8 @@ def build_postgres_spec(args: Any) -> ModuleAuditSpec:
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
         detect=_postgres_detect,
+        detect_async=async_detect.detect,
+        async_detect_sync_hook=_postgres_detect,
         auth=_postgres_auth,
         data=_postgres_data,
         lifecycle_state_factory=_postgres_lifecycle_state_factory,

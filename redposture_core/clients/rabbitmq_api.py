@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
 
+from ..detection_io import DetectCall, HttpRead, run_sync
 from .http_session import HttpSessionPool
 
 RESPONSE_CAP = 2 * 1024 * 1024
@@ -67,6 +68,9 @@ class RabbitMQClient:
         self.password = password
 
     def get(self, path: str, params: dict[str, str | int] | None = None) -> RabbitMQResponse:
+        return run_sync(RabbitMQClient._detect_get_steps(self, path, params))
+
+    def _detect_get_steps(self, path: str, params: dict[str, str | int] | None = None) -> Any:
         url = self.base_url + path
         if params:
             url += "?" + urlencode(params)
@@ -75,12 +79,11 @@ class RabbitMQClient:
             encoded = base64.b64encode(f"{self.username}:{self.password}".encode()).decode("ascii")
             headers["Authorization"] = f"Basic {encoded}"
         try:
-            response = self.pool.request(
+            response = yield HttpRead(
+                self.pool,
                 "GET",
                 url,
-                headers=headers,
-                response_size_cap=RESPONSE_CAP,
-                allow_cross_origin_redirects=True,
+                {"headers": headers, "response_size_cap": RESPONSE_CAP, "allow_cross_origin_redirects": True},
             )
         except Exception as exc:  # noqa: BLE001 - normalize per-target transport failures
             return RabbitMQResponse(0, error=str(exc))
@@ -104,14 +107,17 @@ class RabbitMQClient:
         )
 
     def collection(
-        self,
-        path: str,
-        *,
-        limit: int,
-        page_size: int = 100,
-        columns: str = "",
-        paginated: bool = True,
+        self, path: str, *, limit: int, page_size: int = 100, columns: str = "", paginated: bool = True
     ) -> RabbitMQCollection:
+        return run_sync(
+            RabbitMQClient._detect_collection_steps(
+                self, path, limit=limit, page_size=page_size, columns=columns, paginated=paginated
+            )
+        )
+
+    def _detect_collection_steps(
+        self, path: str, *, limit: int, page_size: int = 100, columns: str = "", paginated: bool = True
+    ) -> Any:
         """Accept paginated responses and older endpoints returning plain lists.
 
         The item limit also bounds the number of requests, even if a broken
@@ -124,7 +130,7 @@ class RabbitMQClient:
             params: dict[str, str | int] = {"pagination": "true", "page": page, "page_size": size} if paginated else {}
             if columns:
                 params["columns"] = columns
-            response = self.get(path, params)
+            response = yield DetectCall(self.get, (path, params), {})
             if response.outcome != "ok":
                 return RabbitMQCollection(items, response.outcome, bool(items) or response.truncated, response.status)
             data = response.data

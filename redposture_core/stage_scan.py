@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import ssl
 import sys
 import time
 from collections.abc import Iterable, Iterator
+from contextlib import closing
 from dataclasses import replace
 from typing import Any
 
@@ -16,6 +18,7 @@ from .exporters.discover import scan_exporter_presence
 from .exporters.http_client import build_exporter_tls_context
 from .exporters.output import emit_line as emit_output_line
 from .exporters.output import format_scan_record
+from .exporters.workflows import exporter_worker_count
 from .logger import AttemptLogger
 from .profiles import default_exporter_ports, load_profiles
 from .stage_runtime import progress_total_from_groups, should_use_global_progress, start_command_progress
@@ -111,64 +114,64 @@ def _run_large_scan_stage(
     found = 0
     errors = 0
     found_by_host: dict[str, list[dict[str, object]]] = {}
-    chunk_index = 0
-    try:
+    matrix_ports = tuple(
+        custom_ports
+        or (
+            default_ports
+            if target_plan.has_explicit_port_targets
+            else dict.fromkeys(
+                int(exporter["port"]) for exporter in discovery_exporters if exporter.get("port") is not None
+            )
+        )
+    )
+
+    def work_items() -> Iterator[tuple[str, int, str]]:
         if not target_plan.has_explicit_port_targets:
-            for scheme, hosts in _chunk_target_specs_by_scheme(target_plan.iter_specs()):
-                part_stats: dict[str, int] = {}
-                part_checks, part_found, part_found_by_host = scan_exporter_presence(
-                    hosts=hosts,
-                    timeout=args.timeout,
-                    output_path=args.output,
-                    output_format=args.output_format,
-                    logger=logger if args.debug else None,
-                    emit_line=emit_line,
-                    workers=args.workers,
-                    retries=args.retries,
-                    discovery_exporters=discovery_exporters,
-                    custom_ports=custom_ports or None,
-                    emit_summary=False,
-                    show_progress=False,
-                    output_mode="a" if chunk_index else "w",
-                    progress_owner=getattr(args, "_progress_owner", None),
-                    stats_sink=part_stats,
-                    **_exporter_transport_kwargs(scheme, tls_context),
-                )
-                chunk_index += 1
-                checks += part_checks
-                found += part_found
-                errors += int(part_stats.get("errors", 0))
-                found_by_host.update({host: hits for host, hits in part_found_by_host.items() if hits})
-        else:
-            matrix_ports = tuple(custom_ports or default_ports)
+            if not target_plan.schemes:
+                for host in target_plan.iter_hosts():
+                    for port in matrix_ports:
+                        yield host, int(port), "http"
+                return
+            for spec in target_plan.iter_specs():
+                for port in matrix_ports:
+                    yield str(spec.host), int(port), str(spec.scheme or "http").lower()
+            return
+        # URL paths and bare hosts can resolve to one metrics endpoint. Keep
+        # deduplication on disk so large ranges do not build a Python host set.
+        with closing(sqlite3.connect("")) as seen:
+            seen.execute("CREATE TABLE endpoints (host TEXT, scheme TEXT, PRIMARY KEY (host, scheme))")
             for port in target_plan.execution_ports(matrix_ports):
-                for scheme, hosts in _chunk_target_specs_by_scheme(
-                    target_plan.iter_specs_for_port(int(port), matrix_ports)
-                ):
-                    part_stats = {}
-                    part_checks, part_found, part_found_by_host = scan_exporter_presence(
-                        hosts=hosts,
-                        timeout=args.timeout,
-                        output_path=args.output,
-                        output_format=args.output_format,
-                        logger=logger if args.debug else None,
-                        emit_line=emit_line,
-                        workers=args.workers,
-                        retries=args.retries,
-                        discovery_exporters=discovery_exporters,
-                        custom_ports=[int(port)],
-                        emit_summary=False,
-                        show_progress=False,
-                        output_mode="a" if chunk_index else "w",
-                        progress_owner=getattr(args, "_progress_owner", None),
-                        stats_sink=part_stats,
-                        **_exporter_transport_kwargs(scheme, tls_context),
-                    )
-                    chunk_index += 1
-                    checks += part_checks
-                    found += part_found
-                    errors += int(part_stats.get("errors", 0))
-                    found_by_host.update({host: hits for host, hits in part_found_by_host.items() if hits})
+                seen.execute("DELETE FROM endpoints")
+                for spec in target_plan.iter_specs_for_port(int(port), matrix_ports):
+                    scheme = str(spec.scheme or "http").lower()
+                    inserted = seen.execute(
+                        "INSERT OR IGNORE INTO endpoints VALUES (?, ?)",
+                        (str(spec.host).rstrip(".").lower(), scheme),
+                    ).rowcount
+                    if inserted:
+                        yield str(spec.host), int(port), scheme
+
+    try:
+        stats: dict[str, int] = {}
+        checks, found, found_by_host = scan_exporter_presence(
+            hosts=[],
+            timeout=args.timeout,
+            output_path=args.output,
+            output_format=args.output_format,
+            logger=logger if args.debug else None,
+            emit_line=emit_line,
+            workers=args.workers,
+            retries=args.retries,
+            discovery_exporters=discovery_exporters,
+            custom_ports=custom_ports or None,
+            emit_summary=False,
+            show_progress=False,
+            progress_owner=getattr(args, "_progress_owner", None),
+            stats_sink=stats,
+            work_items=work_items(),
+            **_exporter_transport_kwargs("http", tls_context),
+        )
+        errors = int(stats.get("errors", 0))
     except OSError as exc:
         console.error(f"failed to process scan output: {exc}")
         return 2
@@ -289,6 +292,11 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         console.error("scan requires -t/--targets")
         return 2
 
+    args.workers = exporter_worker_count(
+        args.workers,
+        target_plan.target_count,
+        explicit=getattr(args, "_workers_option_provided", None),
+    )
     stream_to_stdout = not bool(args.output)
     stage_started_at = time.monotonic()
 
@@ -320,7 +328,7 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
             colored = (
                 f"{console._paint(tag_text, 'blue', sys.stdout)}"
                 f"{console._paint(rest_text, 'white', sys.stdout)} "
-                f"{console._paint('[+]', 'green', sys.stdout)} "
+                f"{console._paint('[+]', 'bright_green', sys.stdout)} "
                 f"{console._paint(right, 'white', sys.stdout)}"
             )
             console.plain(colored)
@@ -328,7 +336,7 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         if not args.debug and " [!] " not in line:
             return
         if " [!] " in line:
-            console.plain(line, color="red")
+            console.plain(line, color="true_red")
             return
         if " [-] " in line:
             console.plain(line, color="yellow")

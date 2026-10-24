@@ -11,6 +11,17 @@ from .http_pool import HTTP_POOL_MAX_IDLE_PER_HOST, HTTP_POOL_MAX_IDLE_TOTAL, HT
 COLLECT_PPROF_PREFLIGHT_MAX_TARGETS = 1000
 SCAN_MAX_INFLIGHT_FACTOR = 12
 SCAN_MAX_INFLIGHT_HARD_CAP = 2048
+EXPORTER_LARGE_TARGET_THRESHOLD = 10_000
+EXPORTER_LARGE_WORKERS = 128
+
+
+def exporter_worker_count(workers: int, target_count: int, *, explicit: bool | None) -> int:
+    """Bounded automatic profile for large exporter scans; preserve -w."""
+
+    selected = max(1, int(workers))
+    if explicit is False and target_count >= EXPORTER_LARGE_TARGET_THRESHOLD:
+        return max(selected, EXPORTER_LARGE_WORKERS)
+    return selected
 
 
 def build_exporter_http_pool(
@@ -182,6 +193,7 @@ __all__ = [
     "collect_max_inflight",
     "completed_jobs_by_target",
     "dedupe_collect_targets",
+    "exporter_worker_count",
     "iter_scan_work_items",
     "scan_work_item_count",
     "scan_max_inflight",

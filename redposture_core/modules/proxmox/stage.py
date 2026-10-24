@@ -11,6 +11,7 @@ from ...audit_models import AuditRecord
 from ...clients.http_api import http_target_context
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
+from ...detection_io import DetectCall, run_sync
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCredentialRun,
@@ -151,6 +152,10 @@ def _proxmox_with_action_contract(record: AuditRecord, args: Any) -> AuditRecord
 
 
 def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
+    return run_sync(_detect_proxmox_detect_steps(ctx))
+
+
+def _detect_proxmox_detect_steps(ctx: AuditHookContext) -> Any:
     """Classify the API anonymously before any token/password is applied."""
 
     _activate_transport(ctx)
@@ -187,17 +192,16 @@ def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
             ctx.lifecycle_state.detect_record = record
         return record
     started = time.monotonic()
-    status, payload, response_headers, error = actions._proxmox_request(
-        ctx.host,
-        ctx.port,
-        "/access",
-        cfg.timeout,
-        cfg.retries,
-        pve_api_token="",
-        use_https=use_https,
-        insecure=True,
-        proxy=_proxmox_proxy(ctx.args),
-        auth_headers={},
+    status, payload, response_headers, error = yield DetectCall(
+        actions._proxmox_request,
+        (ctx.host, ctx.port, "/access", cfg.timeout, cfg.retries),
+        {
+            "pve_api_token": "",
+            "use_https": use_https,
+            "insecure": True,
+            "proxy": _proxmox_proxy(ctx.args),
+            "auth_headers": {},
+        },
     )
     use_https = _proxmox_use_https(ctx)
     detected = actions._looks_like_proxmox_response(status, payload, response_headers)
@@ -689,7 +693,7 @@ def build_proxmox_spec(args: Any) -> ModuleAuditSpec:
         ):
             return _proxmox_data(ctx, record)
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="proxmox",
         label="PROXMOX",
         default_port=_DEFAULT_PORT,
@@ -709,6 +713,24 @@ def build_proxmox_spec(args: Any) -> ModuleAuditSpec:
         is_detected=lambda record: record.extra.get("is_proxmox") is True,
         keep_anonymous_open_no_auth=False,
     )
+
+    from ...clients.async_http_detect import AsyncHttpFallback
+    from ...detection_io import detection_thread_locals, run_async
+
+    async def detect_async(ctx: Any, http: Any) -> AuditRecord:
+        if _proxmox_host_stage_is_replaced():
+            raise AsyncHttpFallback("Proxmox detector override")
+        registry = actions._ASYNC_DETECT_STEPS
+        with http_target_context(ctx.target, route_state=ctx.lifecycle_state, api_prefixes=("/api2/json",)):
+            return await run_async(
+                _detect_proxmox_detect_steps(ctx),
+                http,
+                registry,
+                activate=lambda: _activate_transport(ctx),
+                thread_locals=detection_thread_locals(actions),
+            )
+
+    return replace(spec, detect_async=detect_async, async_detect_sync_hook=spec.detect)
 
 
 def _validate_and_prepare_proxmox_args(args: Any, console: Any) -> int | None:

@@ -181,6 +181,15 @@ _SECRET_KEY_SUFFIXES = (
     "apikey",
 )
 _SQL_PASSWORD_RE = re.compile(r"(?i)\b(?:WITH\s+)?PASSWORD\s+['\"]([^'\"\s;]{4,})['\"]")
+_SQL_ACCOUNT_TOKEN = r"(?:'(?:''|\\.|[^'\\])*'|\"(?:\"\"|\\.|[^\"\\])*\"|`(?:``|[^`])*`|[A-Za-z0-9_.$%+-]+)"
+_SQL_IDENTIFIED_BY_RE = re.compile(
+    r"(?i)(?<![\w.])(?:CREATE\s+USER\s+(?:IF\s+NOT\s+EXISTS\s+)?|ALTER\s+USER\s+(?:IF\s+EXISTS\s+)?)"
+    + _SQL_ACCOUNT_TOKEN
+    + r"(?:\s*@\s*"
+    + _SQL_ACCOUNT_TOKEN
+    + r")?\s+IDENTIFIED\s+BY\s+"
+    + r"('(?:''|\\.|[^'\\])*'|\"(?:\"\"|\\.|[^\"\\])*\")(?=$|[\s;,])"
+)
 _XML_SECRET_RE = re.compile(r"(?is)<([A-Za-z][\w:.-]{0,79})\b[^>]{0,2048}>([^<>]{4,4096})</\1\s*>")
 _TAG_RE = re.compile(r"<([A-Za-z][\w:.-]{0,79})\b([^<>]{0,2048})>", re.IGNORECASE)
 _ATTR_RE = re.compile(r"([A-Za-z][\w:.-]{0,79})\s*=\s*([\"'])(.*?)\2", re.DOTALL)
@@ -1007,6 +1016,21 @@ def analyze_value(
     for match in _SQL_PASSWORD_RE.finditer(text):
         if not _looks_placeholder(match.group(1)):
             detections.append(_candidate(match.group(1), "password", 85, "sql_password"))
+    for match in _SQL_IDENTIFIED_BY_RE.finditer(text):
+        literal = match.group(1)
+        quote = literal[0]
+        # Default MySQL string-literal escapes. SQL modes are not available
+        # when scanning stored text; NO_BACKSLASH_ESCAPES is not inferred.
+        escapes = {"0": "\0", "b": "\b", "n": "\n", "r": "\r", "t": "\t", "Z": "\x1a", "%": r"\%", "_": r"\_"}
+        secret = re.sub(
+            r"\\([\s\S])|" + re.escape(quote * 2),
+            lambda escaped, escapes=escapes, quote=quote: (
+                escapes.get(escaped.group(1), escaped.group(1)) if escaped.group(1) else quote
+            ),
+            literal[1:-1],
+        )
+        if len(secret) >= 4 and not _looks_placeholder(secret):
+            detections.append(_candidate(secret, "password", 85, "sql_password"))
     if "\n" in text and "," in text and len(text) <= 64 * 1024:
         try:
             rows = csv.reader(text.splitlines()[:101])
@@ -1990,6 +2014,39 @@ class DiscoverEngine:
     def _parse_resolve_inventory(self, parsed: Any) -> list[IndexInfo] | None:
         if not isinstance(parsed, Mapping):
             return None
+        # Only explicit inventory arrays can establish an empty inventory.
+        inventory_fields = {"indices", "aliases", "data_streams"}.intersection(parsed)
+        if not inventory_fields or any(not isinstance(parsed[name], list) for name in inventory_fields):
+            return None
+
+        def valid_name(value: Any) -> bool:
+            return isinstance(value, str) and bool(value.strip())
+
+        # A partially malformed inventory cannot prove enumeration complete.
+        # Optional metadata may be omitted, but present structural fields must
+        # be usable before any entries are accepted as authoritative.
+        for field_name in inventory_fields:
+            for item in parsed[field_name]:
+                if not isinstance(item, Mapping) or not valid_name(item.get("name")):
+                    return None
+                string_arrays: tuple[str, ...] = ("attributes", "aliases") if field_name == "indices" else ()
+                if field_name == "aliases":
+                    if "indices" not in item:
+                        return None
+                    string_arrays = ("indices",)
+                for array_name in string_arrays:
+                    if array_name in item:
+                        values = item[array_name]
+                        if not isinstance(values, list) or any(not valid_name(value) for value in values):
+                            return None
+                if field_name == "data_streams" and "backing_indices" in item:
+                    backing_values = item["backing_indices"]
+                    if not isinstance(backing_values, list):
+                        return None
+                    for backing_value in backing_values:
+                        name = backing_value.get("name") if isinstance(backing_value, Mapping) else backing_value
+                        if not valid_name(name):
+                            return None
         inventory: dict[str, IndexInfo] = {}
         indices = parsed.get("indices")
         if isinstance(indices, list):
@@ -2015,6 +2072,19 @@ class DiscoverEngine:
                     aliases=aliases,
                     data_stream=data_stream,
                 )
+        alias_entries = parsed.get("aliases")
+        if isinstance(alias_entries, list):
+            for alias in alias_entries:
+                alias_name = alias["name"]
+                for name in alias["indices"]:
+                    existing = inventory.get(name)
+                    existing_aliases = existing.aliases if existing else ()
+                    inventory[name] = IndexInfo(
+                        name=name,
+                        status=existing.status if existing else "open",
+                        aliases=tuple(dict.fromkeys((*existing_aliases, alias_name))),
+                        data_stream=existing.data_stream if existing else None,
+                    )
         data_streams = parsed.get("data_streams")
         if isinstance(data_streams, list):
             for stream in data_streams:

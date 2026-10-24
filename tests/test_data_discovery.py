@@ -3,12 +3,14 @@ from __future__ import annotations
 import importlib
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from redposture_core.cli_args import build_parser, parse_args
 from redposture_core.data_discovery import (
     DISCOVERY_MODULES,
+    discovery_fields,
     inspect_record,
     prepare_discovery_request,
     project_discovery_output,
@@ -52,8 +54,12 @@ def test_discover_help_is_in_module_inventory_group(module: str) -> None:
     title = (
         "Discovery / Dump"
         if module in {"mongodb", "oracle", "postgres"}
+        else "Nexus repositories / OCI images"
+        if module == "nexus"
+        else "OCI images"
+        if module in {"harbor", "docker-registry"}
         else "Inventory"
-        if module in {"jenkins", "vault", "nomad", "jupyter"}
+        if module in {"jenkins", "vault", "nomad", "jupyter", "spark", "yarn", "portainer"}
         else "Actions"
     )
     owner = next(
@@ -72,6 +78,166 @@ def test_discovery_requests_only_existing_read_operations() -> None:
     assert args.dump == 1000
     assert args.show_keys is False
     assert args._discover_implicit_dump is True
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "kafka",
+        "redis",
+        "etcd",
+        "consul",
+        "mongodb",
+        "postgres",
+        "zookeeper",
+        "keeper",
+        "qdrant",
+        "oracle",
+        "kubeapi",
+        "jenkins",
+        "vault",
+        "nomad",
+        "jupyter",
+        "spark",
+        "yarn",
+        "portainer",
+    ],
+)
+def test_shared_discovery_neutral_accessible_content_has_no_false_findings(module: str) -> None:
+    value: Any
+    neutral = {"request_id": "550e8400-e29b-41d4-a716-446655440000", "display_name": "ordinary text"}
+    field = discovery_fields(module)[0]
+    if field in {"key_value_entries", "kv_dump_items"}:
+        value = [{"key": "app/info", "value": neutral}]
+    elif field == "dump_results":
+        value = {"orders": [neutral]}
+    elif field == "documents":
+        value = [{"database": "app", "collection": "items", "document": neutral}]
+    elif field == "table_dumps":
+        value = [{"database": "app", "table": "items", "rows": [neutral]}]
+    elif field == "znode_values":
+        value = ["/app/info:ordinary text"]
+    elif field == "payload_discovery_items":
+        value = [{"collection": "items", "points": [neutral]}]
+    elif field == "rows":
+        value = [{"schema": "APP", "table": "ITEMS", "row": neutral}]
+    elif field == "secrets":
+        value = [{"namespace": "app", "name": "items", "data": neutral}]
+    elif field == "build_logs":
+        value = [{"job": "build", "build": 1, "log": "ordinary text"}]
+    else:
+        value = [neutral]
+    result = inspect_record(module, {"status": "open_no_auth", field: value})
+    assert result["status"] == "complete"
+    assert result["findings"] == []
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "kafka",
+        "redis",
+        "etcd",
+        "consul",
+        "mongodb",
+        "postgres",
+        "zookeeper",
+        "keeper",
+        "qdrant",
+        "oracle",
+        "kubeapi",
+        "jenkins",
+        "vault",
+        "nomad",
+        "jupyter",
+        "spark",
+        "yarn",
+        "portainer",
+    ],
+)
+def test_shared_discovery_detects_token_in_readable_source(module: str) -> None:
+    value: Any
+    token = "glpat-abcdefghijklmnopqrst"
+    field = discovery_fields(module)[0]
+    if field in {"key_value_entries", "kv_dump_items"}:
+        value = [{"key": "app/api_token", "value": token}]
+    elif field == "dump_results":
+        value = {"orders": [{"api_token": token}]}
+    elif field == "documents":
+        value = [{"database": "app", "collection": "items", "document": {"api_token": token}}]
+    elif field == "table_dumps":
+        value = [{"database": "app", "table": "items", "rows": [{"api_token": token}]}]
+    elif field == "znode_values":
+        value = [f"/app/api_token:{token}"]
+    elif field == "payload_discovery_items":
+        value = [{"collection": "items", "points": [{"api_token": token}]}]
+    elif field == "rows":
+        value = [{"schema": "APP", "table": "ITEMS", "row": {"api_token": token}}]
+    elif field == "secrets":
+        value = [{"namespace": "app", "name": "token", "data": {"api_token": token}}]
+    elif field == "build_logs":
+        value = [{"job": "build", "build": 1, "log": f"api_token={token}"}]
+    else:
+        value = [{"api_token": token}]
+    result = inspect_record(module, {"status": "open_no_auth", field: value})
+    assert result["status"] == "complete"
+    assert result["findings"]
+    assert len({(item["type"], item["fingerprint"]) for item in result["findings"]}) == len(result["findings"])
+    assert token not in str(result)
+
+
+def test_kafka_discover_is_partial_when_message_cap_is_reached() -> None:
+    record = {
+        "status": "open_no_auth",
+        "dump_results": {"orders": [{"message": "ordinary text"}]},
+        "max_messages": 1,
+        "dump_coverage": {"complete": True},
+    }
+    result = inspect_record("kafka", record)
+    assert result["status"] == "partial"
+    assert "message_limit_reached" in result["partial_reasons"]
+
+
+def test_kafka_discover_is_complete_below_message_cap() -> None:
+    record = {
+        "status": "open_no_auth",
+        "dump_results": {"orders": [{"message": "ordinary text"}]},
+        "max_messages": 2,
+        "dump_coverage": {"complete": True},
+    }
+    result = inspect_record("kafka", record)
+    assert result["status"] == "complete"
+
+
+def test_mongodb_discover_is_partial_when_collection_document_cap_is_reached() -> None:
+    record = {
+        "status": "open_no_auth",
+        "dump_limit": 1,
+        "documents": [{"database": "app", "collection": "users", "document": {"display_name": "Alice"}}],
+    }
+    result = inspect_record("mongodb", record)
+    assert result["status"] == "partial"
+    assert "document_limit_reached" in result["partial_reasons"]
+
+
+def test_mongodb_discover_is_complete_below_collection_document_cap() -> None:
+    record = {
+        "status": "open_no_auth",
+        "dump_limit": 2,
+        "documents": [{"database": "app", "collection": "users", "document": {"display_name": "Alice"}}],
+    }
+    assert inspect_record("mongodb", record)["status"] == "complete"
+
+
+def test_postgres_discover_marks_table_at_row_cap_partial() -> None:
+    record = {
+        "status": "open_no_auth",
+        "dump_row_limit": 1,
+        "table_dumps": [{"database": "app", "table": "users", "rows": ["(Alice)"]}],
+    }
+    result = inspect_record("postgres", record)
+    assert result["status"] == "partial"
+    assert "row_limit_reached" in result["partial_reasons"]
 
 
 _SECRET = "glpat-abcdefghijklmnopqrst"
@@ -274,6 +440,7 @@ def test_bare_discover_never_emits_raw_values_in_live_or_saved_output(tmp_path, 
         )
 
     def render(record: AuditRecord) -> list[str]:
+        payload: Any
         payload = record.to_dict()
         lines = [f"REDIS {record.host} [*] Redis"]
         for item in payload.get("key_value_entries", []):
@@ -340,6 +507,66 @@ def test_discovery_budget_marks_partial_without_false_findings() -> None:
     assert result["findings"] == []
 
 
+def test_empty_accessible_discovery_source_is_complete() -> None:
+    assert inspect_record("redis", {"status": "open_no_auth", "key_value_entries": []})["status"] == "complete"
+    assert inspect_record("kafka", {"status": "open_no_auth", "dump_results": {}})["status"] == "complete"
+
+
+def test_discovery_reports_partial_after_read_error_without_losing_prior_finding() -> None:
+    record = {
+        "status": "valid_credentials",
+        "kv_dump_items": [{"key": "app/api_token", "value": "glpat-abcdefghijklmnopqrst"}],
+        "kv_dump_error": "reading a later key timed out",
+    }
+    result = inspect_record("consul", record)
+    assert result["status"] == "partial"
+    assert result["findings"]
+    assert all("app/api_token" in finding["object_path"] for finding in result["findings"])
+
+
+def test_discovery_denied_entire_source_is_unavailable() -> None:
+    result = inspect_record("kubeapi", {"status": "auth_required", "secrets_error": "Forbidden"})
+    assert result["status"] == "unavailable"
+    assert result["findings"] == []
+
+
+def test_discovery_denied_sources_with_empty_result_lists_are_unavailable() -> None:
+    record = {
+        "host": "qa",
+        "port": 6443,
+        "status": "auth_required",
+        "secrets": [],
+        "secrets_error": "Forbidden",
+        "secrets_partial": True,
+        "configmaps": [],
+        "configmaps_error": "Forbidden",
+        "configmaps_partial": True,
+    }
+    result = inspect_record("kubeapi", record)
+    assert result["status"] == "unavailable"
+    assert result["findings"] == []
+    assert "secrets_error" in result["partial_reasons"]
+    assert "configmaps_error" in result["partial_reasons"]
+    line = render_discovery("kubeapi", {**record, "content_discovery": result})[0]
+    assert "status:unavailable" in line and "reason:" in line
+    assert "Forbidden" not in line and "\x1b[" not in line
+
+
+def test_discovery_one_accessible_empty_source_and_one_denied_is_partial() -> None:
+    result = inspect_record(
+        "kubeapi",
+        {
+            "status": "auth_required",
+            "secrets": [],
+            "configmaps": [],
+            "configmaps_error": "Forbidden",
+            "configmaps_partial": True,
+        },
+    )
+    assert result["status"] == "partial"
+    assert "configmaps_error" in result["partial_reasons"]
+
+
 def test_postgres_json_row_preserves_column_name() -> None:
     record = {
         "status": "valid_credentials",
@@ -366,6 +593,7 @@ def test_explicit_key_and_znode_paths_are_retained_without_access_denied_false_p
 
 
 def test_kafka_oracle_and_jenkins_source_names_survive_discovery() -> None:
+    value: Any
     value = {"api_token": "glpat-abcdefghijklmnopqrst"}
     records = (
         ("kafka", {"ui_dump_records": [{"cluster": "qa", "topic": "orders", "messages": [value]}]}, "orders"),
@@ -378,6 +606,7 @@ def test_kafka_oracle_and_jenkins_source_names_survive_discovery() -> None:
 
 
 def test_new_discovery_lines_follow_airflow_palette_and_remain_plain_in_storage() -> None:
+
     class PaintConsole:
         def __init__(self) -> None:
             self.calls: list[tuple[str, str]] = []

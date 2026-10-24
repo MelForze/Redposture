@@ -15,6 +15,7 @@ from ...clients.http_api import (
     infer_http_base_path,
 )
 from ...clients.http_session import HttpSessionPool
+from ...detection_io import DetectCall, run_sync
 from ...discovery_rendering import format_discovery_finding_line
 from .discover import (
     DiscoverConfig,
@@ -85,6 +86,10 @@ _DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
 
 
 def detect_airflow(client: AirflowClient, *, prefetched_v2: AirflowResponse | None = None) -> AirflowDetection:
+    return run_sync(_detect_detect_airflow_steps(client, prefetched_v2=prefetched_v2))
+
+
+def _detect_detect_airflow_steps(client: AirflowClient, *, prefetched_v2: AirflowResponse | None = None) -> Any:
     """Probe the public version endpoint (v2 then v1) to confirm Airflow, capture the
     version, and pin the API generation used for later auth."""
     evidence: dict[str, Any] = {}
@@ -95,7 +100,7 @@ def detect_airflow(client: AirflowClient, *, prefetched_v2: AirflowResponse | No
         resp = (
             prefetched_v2
             if generation == "v2" and prefetched_v2 is not None
-            else client.get(_ENDPOINTS[generation]["version"], authed=False)
+            else (yield DetectCall(client.get, (_ENDPOINTS[generation]["version"],), {"authed": False}))
         )
         if resp.transport_error:
             transport_failures += 1
@@ -121,8 +126,10 @@ def detect_airflow(client: AirflowClient, *, prefetched_v2: AirflowResponse | No
     # A version-only JSON document is easy for an unrelated API to imitate.  It
     # becomes conclusive only when the same API generation supplies a second,
     # independently validated Airflow response.
+    corroboration = {}
     for generation, version, candidate_evidence in version_candidates:
-        corroborated, detail = _corroborate_airflow(client, generation)
+        corroborated, detail = yield DetectCall(_corroborate_airflow, (client, generation), {})
+        corroboration[generation] = (corroborated, detail)
         evidence.update(detail)
         if corroborated:
             return AirflowDetection(
@@ -136,7 +143,9 @@ def detect_airflow(client: AirflowClient, *, prefetched_v2: AirflowResponse | No
     # A strict health or DAG shape without a validated version is useful
     # diagnostic evidence, but remains probable and cannot start auth/CVE/data.
     for generation in ("v2", "v1"):
-        corroborated, detail = _corroborate_airflow(client, generation)
+        if generation not in corroboration:
+            corroboration[generation] = yield DetectCall(_corroborate_airflow, (client, generation), {})
+        corroborated, detail = corroboration[generation]
         evidence.update(detail)
         if corroborated:
             return AirflowDetection(
@@ -176,13 +185,17 @@ def _airflow_version(data: Any) -> str | None:
 
 
 def _corroborate_airflow(client: AirflowClient, generation: str) -> tuple[bool, dict[str, Any]]:
+    return run_sync(_detect_corroborate_airflow_steps(client, generation))
+
+
+def _detect_corroborate_airflow_steps(client: AirflowClient, generation: str) -> Any:
     detail: dict[str, Any] = {}
-    health = client.get(_ENDPOINTS[generation]["health"], authed=False)
+    health = yield DetectCall(client.get, (_ENDPOINTS[generation]["health"],), {"authed": False})
     health_valid = not health.transport_error and health.http_status == 200 and _looks_like_health(health)
     detail[f"{generation}_health"] = health_valid
     if health_valid:
         return True, detail
-    dags = client.get(_ENDPOINTS[generation]["dags"], authed=False)
+    dags = yield DetectCall(client.get, (_ENDPOINTS[generation]["dags"],), {"authed": False})
     dags_valid = not dags.transport_error and dags.http_status == 200 and _looks_like_dag_collection(dags)
     problem_valid = (
         not dags.transport_error
@@ -252,9 +265,13 @@ def _looks_like_airflow_token_rejection(resp: AirflowResponse) -> bool:
 
 
 def classify_anonymous(client: AirflowClient, generation: str) -> AnonymousResult:
+    return run_sync(_detect_classify_anonymous_steps(client, generation))
+
+
+def _detect_classify_anonymous_steps(client: AirflowClient, generation: str) -> Any:
     """Probe three collections without credentials, validating successful bodies."""
     endpoints = _ENDPOINTS.get(generation, _ENDPOINTS["v1"])
-    viewer = client.get(endpoints["dags"], authed=False)
+    viewer = yield DetectCall(client.get, (endpoints["dags"],), {"authed": False})
     sso = detect_browser_sso(
         final_url=viewer.final_url,
         redirect_history=viewer.redirect_history,
@@ -273,8 +290,10 @@ def classify_anonymous(client: AirflowClient, generation: str) -> AnonymousResul
         )
     if viewer.transport_error:
         return AnonymousResult(reachable=False)
-    keys_access = _resource_access(client, endpoints["keys"], "variables", authed=False)
-    connections_access = _resource_access(client, endpoints["connections"], "connections", authed=False)
+    keys_access = yield DetectCall(_resource_access, (client, endpoints["keys"], "variables"), {"authed": False})
+    connections_access = yield DetectCall(
+        _resource_access, (client, endpoints["connections"], "connections"), {"authed": False}
+    )
     keys_allowed = True if keys_access.status == "allowed" else False if keys_access.status == "denied" else None
     connections_allowed = (
         True if connections_access.status == "allowed" else False if connections_access.status == "denied" else None
@@ -383,9 +402,13 @@ def verify_credential(pool_client_factory: Any, generation: str, username: str, 
 
 
 def _resource_access(client: AirflowClient, path: str, collection_key: str, *, authed: bool = True) -> ResourceAccess:
+    return run_sync(_detect_resource_access_steps(client, path, collection_key, authed=authed))
+
+
+def _detect_resource_access_steps(client: AirflowClient, path: str, collection_key: str, *, authed: bool = True) -> Any:
     """Return an exact collection count only for a validated Airflow response."""
 
-    resp = client.get(f"{path}?limit=1&offset=0", authed=authed)
+    resp = yield DetectCall(client.get, (f"{path}?limit=1&offset=0",), {"authed": authed})
     if resp.transport_error:
         return ResourceAccess(status="unknown", error="transport_error")
     if resp.http_status in {401, 403}:
@@ -449,17 +472,23 @@ class AirflowLifecycleState:
         )
 
     def _probe_scheme(self, scheme: str) -> AirflowResponse:
+        return run_sync(AirflowLifecycleState._detect_probe_scheme_steps(self, scheme))
+
+    def _detect_probe_scheme_steps(self, scheme: str) -> Any:
         client = AirflowClient(self.pool, scheme=scheme, host=self.host, port=self.port, base_path=self.base_path)
-        return client.get(_ENDPOINTS["v2"]["version"], authed=False)
+        return (yield DetectCall(client.get, (_ENDPOINTS["v2"]["version"],), {"authed": False}))
 
     def resolve_scheme(self) -> str:
+        return run_sync(AirflowLifecycleState._detect_resolve_scheme_steps(self))
+
+    def _detect_resolve_scheme_steps(self) -> Any:
         """Resolve and retain the effective origin used by the Airflow API."""
         if self.resolved_scheme is not None:
             return self.resolved_scheme
         candidates = http_scheme_candidates(self.preferred_scheme, self.port, tls_ports=frozenset({443, 8443}))
         selected = candidates[0]
         for index, candidate in enumerate(candidates):
-            resp = self._probe_scheme(candidate)
+            resp = yield DetectCall(self._probe_scheme, (candidate,), {})
             # A reverse proxy may move the API to a different mount. Keep the
             # candidate path only when the redirect still ends at the exact
             # endpoint we requested; an IdP/login redirect cannot pin it.
@@ -518,15 +547,19 @@ def airflow_lifecycle_state_factory(ctx: Any) -> AirflowLifecycleState:
 
 
 def _client_for(
-    ctx: Any,
-    *,
-    basic_user: str | None = None,
-    basic_password: str | None = None,
-    bearer_token: str | None = None,
+    ctx: Any, *, basic_user: str | None = None, basic_password: str | None = None, bearer_token: str | None = None
 ) -> AirflowClient:
+    return run_sync(
+        _detect_client_for_steps(ctx, basic_user=basic_user, basic_password=basic_password, bearer_token=bearer_token)
+    )
+
+
+def _detect_client_for_steps(
+    ctx: Any, *, basic_user: str | None = None, basic_password: str | None = None, bearer_token: str | None = None
+) -> Any:
     state = getattr(ctx, "lifecycle_state", None)
     if isinstance(state, AirflowLifecycleState):
-        scheme = state.resolve_scheme()
+        scheme = yield DetectCall(state.resolve_scheme, (), {})
         pool = state.pool
         host = state.host
         port = state.port
@@ -555,10 +588,14 @@ def _client_for(
 
 
 def detect_record(ctx: Any) -> dict[str, Any]:
-    client = _client_for(ctx)
+    return run_sync(_detect_detect_record_steps(ctx))
+
+
+def _detect_detect_record_steps(ctx: Any) -> Any:
+    client = yield DetectCall(_client_for, (ctx,), {})
     state = getattr(ctx, "lifecycle_state", None)
     prefetched = state.version_probe if isinstance(state, AirflowLifecycleState) else None
-    detection = detect_airflow(client, prefetched_v2=prefetched)
+    detection = yield DetectCall(detect_airflow, (client,), {"prefetched_v2": prefetched})
     status_word = {
         "confirmed": "detected",
         "probable": "probable",
@@ -579,7 +616,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
     if detection.version:
         record["version"] = detection.version
     if detection.status == "confirmed" and detection.api_generation:
-        anon = classify_anonymous(client, detection.api_generation)
+        anon = yield DetectCall(classify_anonymous, (client, detection.api_generation), {})
         record["auth_required"] = anon.auth_required
         record["dags_allowed"] = anon.dags_allowed
         record["anonymous_dags_allowed"] = anon.dags_allowed
@@ -987,3 +1024,17 @@ __all__ = [
     "airflow_lifecycle_state_factory",
     "host_stage",
 ]
+
+
+_ASYNC_DETECT_STEPS = {
+    AirflowClient._request: AirflowClient._detect_request_steps,
+    AirflowClient.get: AirflowClient._detect_get_steps,
+    detect_record: _detect_detect_record_steps,
+    _client_for: _detect_client_for_steps,
+    detect_airflow: _detect_detect_airflow_steps,
+    _corroborate_airflow: _detect_corroborate_airflow_steps,
+    classify_anonymous: _detect_classify_anonymous_steps,
+    _resource_access: _detect_resource_access_steps,
+    AirflowLifecycleState.resolve_scheme: AirflowLifecycleState._detect_resolve_scheme_steps,
+    AirflowLifecycleState._probe_scheme: AirflowLifecycleState._detect_probe_scheme_steps,
+}

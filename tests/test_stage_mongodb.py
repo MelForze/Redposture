@@ -663,7 +663,7 @@ def test_collect_mongodb_data_handles_collection_and_query_errors() -> None:
     assert data["database_names"] == ["redposture"]
     assert data["collections"] == []
     assert data["capabilities"]["can_list_collections"] is False
-    assert data["query_error"] == "authentication failed"
+    assert data["query_error"] == "authorization denied"
 
 
 def test_try_credentials_and_collect_data_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:

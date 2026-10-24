@@ -159,7 +159,7 @@ def format_result(result: CommandResult, *, preview_bytes: int = 32) -> list[tup
             )
         ]
     if result.error:
-        return [(f"[-] {result.error}", "green")]
+        return [(f"[-] {result.error}", "bright_green")]
     stdout_size = result.stdout_total if result.stdout_total is not None else len(result.stdout)
     stderr_size = result.stderr_total if result.stderr_total is not None else len(result.stderr)
     symbol = "[+]" if result.exit_code == 0 else "[-]"
@@ -168,7 +168,7 @@ def format_result(result: CommandResult, *, preview_bytes: int = 32) -> list[tup
     summary = f"{symbol} exit:{status}{duration}  stdout:{stdout_size} B  stderr:{stderr_size} B"
     if result.truncated:
         summary += "  (truncated)"
-    lines = [(summary, "red" if result.exit_code == 0 else "green")]
+    lines = [(summary, "true_red" if result.exit_code == 0 else "bright_green")]
     for name, data in (("stdout", result.stdout), ("stderr", result.stderr)):
         if not data:
             continue
@@ -233,7 +233,7 @@ class ShellView:
             return True, False
         if operation == "limit":
             try:
-                if len(parts) != 2:
+                if len(parts) != 2 or not parts[1]:
                     raise ValueError("usage: :limit <bytes|N[K|M]>")
                 raw = parts[1].upper()
                 multiplier = {"K": 1024, "M": 1024 * 1024}.get(raw[-1], 1)
@@ -265,7 +265,7 @@ class ShellView:
             except OSError as exc:
                 console.plain(f"[-] Save failed: {exc}", color="orange")
             else:
-                console.plain(f"[+] Saved {written} B to {args[0]}", color="red")
+                console.plain(f"[+] Saved {written} B to {args[0]}", color="true_red")
                 total = self.last.stdout_total if stream == "stdout" else self.last.stderr_total
                 if total is not None and total > written:
                     console.plain("[!] Saved data is partial because capture was truncated", color="orange")

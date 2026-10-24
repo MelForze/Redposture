@@ -8,6 +8,7 @@ from typing import Any
 from ...auth_detection import auth_required_text
 from ...console import Console
 from ...rendering import BooleanColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
+from ..execution_api import render as render_execution
 
 
 def _prefix(record: dict[str, Any]) -> str:
@@ -35,7 +36,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return ""
     results = record.get("credential_results")
     username = (
-        results[0].get("username") if isinstance(results, list) and results and isinstance(results[0], dict) else "?"
+        (results[0].get("username") if isinstance(results, list) and results and isinstance(results[0], dict) else None)
+        or record.get("authenticated_identity")
+        or "?"
     )
     password = record.get("credential_password")
     pair = f"{username} (API token)" if password == "API token" else f"{username}:{password}"
@@ -123,8 +126,9 @@ def _format_inventory_records(record: dict[str, Any], output_format: str) -> lis
                     f"{prefix} [+] {label}={_display(item.get('name'))} (state:{item.get('color') or 'unknown'})"
                 )
             elif field == "builds":
+                result = item.get("result") or ("RUNNING" if item.get("building") is True else "unknown")
                 lines.append(
-                    f"{prefix} [+] Build Job={_display(item.get('job'))} Number={item.get('number')} (result:{item.get('result') or 'unknown'})"
+                    f"{prefix} [+] Build Job={_display(item.get('job'))} Number={item.get('number')} (result:{result})"
                 )
             else:
                 if field == "plugins":
@@ -147,7 +151,20 @@ def _format_inventory_records(record: dict[str, Any], output_format: str) -> lis
                     lines.append(
                         f"{prefix} [+] {label}={_display(item.get('name'))} (job:{_display(item.get('job'))}) (build:{item.get('build')}) (size_bytes:{size})"
                     )
+    if record.get("job_discovery_partial"):
+        reason = json.dumps(record.get("discovery_errors") or ["incomplete discovery"], ensure_ascii=False)
+        lines.append(f"{prefix} [*] Discovery coverage (status:partial) reason={reason}")
+    for field in ("builds", "artifacts"):
+        if record.get(field + "_partial"):
+            reason = json.dumps(record.get(field + "_errors") or ["incomplete inventory"], ensure_ascii=False)
+            lines.append(f"{prefix} [*] {field.title()} coverage (status:partial) reason={reason}")
     return lines
+
+
+def _format_execution_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format != "txt":
+        return []
+    return render_execution("jenkins", record)
 
 
 def _render_colored_jenkins_line(console: Console, line: str) -> bool:
@@ -175,6 +192,8 @@ def _render_colored_jenkins_line(console: Console, line: str) -> bool:
             RegexColorRule(r"\(access:Access Denied\)", "bright_green"),
             RegexColorRule(r"\(access:Unknown\)", "orange"),
             RegexColorRule(r"\(version:-\)", "orange"),
+            RegexColorRule(r"\(status:partial\)", "orange"),
+            RegexColorRule(r"reason=.*", "orange"),
         ),
         extra_spans=lambda marker, payload: (
             [(0, payload.find(" (online:"), "orange")]
@@ -191,7 +210,7 @@ def _render_colored_jenkins_line(console: Console, line: str) -> bool:
     ):
         return True
     if line.startswith("JENKINS") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="JENKINS", default_color="white")
+        return render_tagged_detail_line(console, line, tag="JENKINS", default_color="orange")
     return False
 
 
@@ -200,5 +219,6 @@ __all__ = [
     "_format_record",
     "_format_credential_attempts_records",
     "_format_inventory_records",
+    "_format_execution_records",
     "_render_colored_jenkins_line",
 ]

@@ -34,6 +34,29 @@ def _safe_command(command: list[str]) -> str:
     return " ".join(part.replace(LAB_TOKEN, "<lab-token>") for part in command)
 
 
+def _stop_process_group(child: subprocess.Popen[bytes], first_signal: int, *, grace: float = 2.0) -> None:
+    """Stop our session's descendants even when its leader has already exited."""
+    try:
+        os.killpg(child.pid, first_signal)
+    except ProcessLookupError:
+        child.wait()
+        return
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        child.poll()  # Reap the leader; it does not represent the entire group.
+        try:
+            os.killpg(child.pid, 0)
+        except ProcessLookupError:
+            child.wait()
+            return
+        time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    child.wait()
+
+
 def _run_logged(
     command: list[str],
     log: Path,
@@ -60,28 +83,19 @@ def _run_logged(
         try:
             while True:
                 try:
-                    code = child.wait(timeout=30)
+                    remaining = max(0.01, timeout - (time.monotonic() - started))
+                    code = child.wait(timeout=min(30, remaining))
                     break
                 except subprocess.TimeoutExpired:
                     elapsed = int(time.monotonic() - started)
                     print(f"[running] {log.name}: {elapsed}s; log={log}", flush=True)
                     if elapsed >= timeout:
-                        os.killpg(child.pid, signal.SIGTERM)
-                        try:
-                            child.wait(timeout=20)
-                        except subprocess.TimeoutExpired:
-                            os.killpg(child.pid, signal.SIGKILL)
-                            child.wait()
+                        _stop_process_group(child, signal.SIGTERM)
                         output.write(f"\nQA command timed out after {timeout}s\n".encode())
                         code = 124
                         break
         except KeyboardInterrupt:
-            os.killpg(child.pid, signal.SIGINT)
-            try:
-                child.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
+            _stop_process_group(child, signal.SIGINT)
             raise
     duration = round(time.monotonic() - started, 2)
     print(f"[done] exit={code} elapsed={duration}s log={log}", flush=True)

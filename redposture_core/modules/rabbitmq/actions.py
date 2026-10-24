@@ -14,6 +14,7 @@ from urllib.parse import quote, urlsplit
 from ...clients.http_api import http_response_origin, http_response_requires_https, http_scheme_candidates
 from ...clients.http_session import HttpSessionPool
 from ...clients.rabbitmq_api import RabbitMQClient, RabbitMQResponse
+from ...detection_io import DetectCall, run_sync
 
 # guest:guest is the vendor default; the remaining pairs are common weak
 # deployment credentials, not additional RabbitMQ factory defaults.
@@ -71,6 +72,9 @@ class RabbitMQLifecycleState:
         )
 
     def resolve(self) -> RabbitMQResponse:
+        return run_sync(RabbitMQLifecycleState._detect_resolve_steps(self))
+
+    def _detect_resolve_steps(self) -> Any:
         if self.overview is not None:
             return self.overview
         preferred = self.scheme
@@ -78,7 +82,7 @@ class RabbitMQLifecycleState:
         response = RabbitMQResponse(0, error="connection failed")
         for scheme in candidates:
             self.scheme = scheme
-            response = self.client().get("/api/overview")
+            response = yield DetectCall(self.client().get, ("/api/overview",), {})
             detail = (response.error or "").lower()
             mismatch = any(
                 word in detail
@@ -151,8 +155,12 @@ def _tags(identity: dict[str, Any]) -> list[str]:
 
 
 def detect_record(ctx: Any) -> dict[str, Any]:
+    return run_sync(_detect_detect_record_steps(ctx))
+
+
+def _detect_detect_record_steps(ctx: Any) -> Any:
     state = _state(ctx)
-    response = state.resolve()
+    response = yield DetectCall(state.resolve, (), {})
     client = state.client()
     overview = _overview(response)
     challenge = next((v for k, v in response.headers.items() if k.lower() == "www-authenticate"), "")
@@ -161,7 +169,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
     confirmed = overview is not None or (realm and response.status in {401, 403})
     ui = False
     if not confirmed and not response.error:
-        root = client.get("/")
+        root = yield DetectCall(client.get, ("/",), {})
         ui = not root.error and bool(
             re.search(rb"<title\b[^>]*>\s*RabbitMQ\s+Management\b[^<]*</title\s*>", root.body, re.I)
         )
@@ -193,7 +201,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
     if overview is not None:
         record["version"] = overview["rabbitmq_version"]
         anonymous_endpoints.append("/api/overview")
-    whoami = client.get("/api/whoami")
+    whoami = yield DetectCall(client.get, ("/api/whoami",), {})
     identity = _identity(whoami)
     if identity:
         state.anonymous_identity = identity["name"]
@@ -202,7 +210,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         anonymous_endpoints.append("/api/whoami")
         # A proxy-authenticated identity cannot verify the submitted password.
         record["credential_verification_status"] = "unavailable"
-    vhosts = client.collection("/api/vhosts", limit=1, columns="name", paginated=False)
+    vhosts = yield DetectCall(client.collection, ("/api/vhosts",), {"limit": 1, "columns": "name", "paginated": False})
     if vhosts.status == "ok" and all(isinstance(row.get("name"), str) for row in vhosts.items):
         anonymous_endpoints.append("/api/vhosts")
     record["anonymous_endpoints"] = anonymous_endpoints
@@ -376,3 +384,11 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             enumeration[name] = {**asdict(result), "items": projected}
     record["enumeration"] = enumeration
     return record
+
+
+_ASYNC_DETECT_STEPS = {
+    RabbitMQClient.get: RabbitMQClient._detect_get_steps,
+    RabbitMQClient.collection: RabbitMQClient._detect_collection_steps,
+    detect_record: _detect_detect_record_steps,
+    RabbitMQLifecycleState.resolve: RabbitMQLifecycleState._detect_resolve_steps,
+}

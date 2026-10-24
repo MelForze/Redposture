@@ -605,6 +605,9 @@ def _collect_oracle_data(
     hashes: bool,
     sensitive_scan: bool,
     dblink_check: bool,
+    discover: bool = False,
+    discover_time: float | None = None,
+    discover_max_bytes: int | None = None,
 ) -> dict[str, Any]:
     context: dict[str, Any] = {}
     banner: dict[str, Any] = {}
@@ -631,6 +634,9 @@ def _collect_oracle_data(
         "capabilities": {},
         "error": None,
     }
+    if discover:
+        data["discover_partial"] = False
+        data["discover_reasons"] = []
     try:
         context = client.current_context()
     except Exception as exc:
@@ -673,31 +679,80 @@ def _collect_oracle_data(
         limit = dump_limit if dump_limit is not None else _ORACLE_DUMP_SAFETY_LIMIT
         target_schema = schema
         target_table = table
-        if not target_schema or not target_table:
-            table_rows = as_list(data.get("tables"))
-            if target_table:
-                table_rows = [row for row in table_rows if str(row.get("table_name") or "") == target_table]
-                current_schema = str(context.get("current_schema") or context.get("session_user") or "")
-                current_matches = [
-                    row for row in table_rows if str(row.get("owner") or row.get("schema_name") or "") == current_schema
-                ]
-                if current_matches:
-                    table_rows = current_matches
-                if len(table_rows) > 1:
-                    data["error"] = "ambiguous table owner; specify --schema"
-                    table_rows = []
-            if table_rows:
-                target_schema = target_schema or str(
-                    table_rows[0].get("owner") or table_rows[0].get("schema_name") or ""
+        if discover and not target_schema and not target_table:
+            # A plain --discover has no table selector. The ordinary --dump
+            # path below picks one table for interactive inspection; discovery
+            # must inspect every visible table within its time/byte budget.
+            deadline = time.monotonic() + float(discover_time or 300)
+            remaining = int(discover_max_bytes or 50 * 1024 * 1024)
+            for visible in as_list(data.get("tables")):
+                if time.monotonic() >= deadline or remaining <= 0:
+                    data["discover_partial"] = True
+                    data["discover_reasons"].append("discovery budget reached")
+                    break
+                owner = (
+                    str(visible.get("owner") or visible.get("schema_name") or "") if isinstance(visible, dict) else ""
                 )
-                target_table = target_table or str(table_rows[0].get("table_name") or "")
-        if target_schema and target_table:
-            data["rows"] = [
-                {"schema": target_schema, "table": target_table, "row": row}
-                for row in client.dump_table(target_schema, target_table, limit=limit)
-            ]
+                name = str(visible.get("table_name") or "") if isinstance(visible, dict) else ""
+                if not owner or not name:
+                    data["discover_partial"] = True
+                    data["discover_reasons"].append("table identity unavailable")
+                    continue
+                try:
+                    rows = list(client.dump_table(owner, name, limit=limit))
+                except Exception:
+                    data["discover_partial"] = True
+                    data["discover_reasons"].append(f"{owner}.{name}: read failed")
+                    continue
+                budget_exhausted = False
+                for row in rows:
+                    item = {"schema": owner, "table": name, "row": row}
+                    size = len(json.dumps(item, ensure_ascii=False, default=str).encode("utf-8"))
+                    if size > remaining or time.monotonic() >= deadline:
+                        data["discover_partial"] = True
+                        data["discover_reasons"].append("discovery budget reached")
+                        budget_exhausted = True
+                        break
+                    data["rows"].append(item)
+                    remaining -= size
+                if len(rows) >= limit:
+                    data["discover_partial"] = True
+                    data["discover_reasons"].append(f"{owner}.{name}: row limit reached")
+                if budget_exhausted or remaining <= 0 or time.monotonic() >= deadline:
+                    data["discover_partial"] = True
+                    data["discover_reasons"].append("discovery budget reached")
+                    break
         else:
-            data["error"] = data.get("error") or "--dump requires --schema and --table or at least one visible table"
+            if not target_schema or not target_table:
+                table_rows = as_list(data.get("tables"))
+                if target_table:
+                    table_rows = [row for row in table_rows if str(row.get("table_name") or "") == target_table]
+                    current_schema = str(context.get("current_schema") or context.get("session_user") or "")
+                    current_matches = [
+                        row
+                        for row in table_rows
+                        if str(row.get("owner") or row.get("schema_name") or "") == current_schema
+                    ]
+                    if current_matches:
+                        table_rows = current_matches
+                    if len(table_rows) > 1:
+                        data["error"] = "ambiguous table owner; specify --schema"
+                        table_rows = []
+                if table_rows:
+                    target_schema = target_schema or str(
+                        table_rows[0].get("owner") or table_rows[0].get("schema_name") or ""
+                    )
+                    target_table = target_table or str(table_rows[0].get("table_name") or "")
+            if target_schema and target_table:
+                rows = list(client.dump_table(target_schema, target_table, limit=limit))
+                data["rows"] = [{"schema": target_schema, "table": target_table, "row": row} for row in rows]
+                if discover and len(rows) >= limit:
+                    data["discover_partial"] = True
+                    data["discover_reasons"].append(f"{target_schema}.{target_table}: row limit reached")
+            else:
+                data["error"] = (
+                    data.get("error") or "--dump requires --schema and --table or at least one visible table"
+                )
     if query:
         data["query_rows"] = client.query(query, limit=dump_limit or 200)
     if privesc_check or privesc_chain:
@@ -1120,6 +1175,9 @@ def _audit_oracle_host(
     sensitive_scan: bool,
     dblink_check: bool,
     probe_state: dict[str, Any] | None = None,
+    discover: bool = False,
+    discover_time: float | None = None,
+    discover_max_bytes: int | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, int(retries) + 1)
     last_error: str | None = None
@@ -1482,6 +1540,9 @@ def _audit_oracle_host(
                     hashes=hashes,
                     sensitive_scan=sensitive_scan,
                     dblink_check=dblink_check,
+                    discover=discover,
+                    discover_time=discover_time,
+                    discover_max_bytes=discover_max_bytes,
                 )
             except Exception as exc:
                 data = {"error": normalize_oracle_error(exc), "partial": True}
@@ -1584,6 +1645,9 @@ def _audit_oracle_host_stage(
     debug: bool,
     debug_emit: Callable[[str], None] | None,
     lifecycle_state: dict[str, Any] | None = None,
+    discover: bool = False,
+    discover_time: float | None = None,
+    discover_max_bytes: int | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     record = _audit_oracle_host(
@@ -1630,6 +1694,9 @@ def _audit_oracle_host_stage(
         sensitive_scan=sensitive_scan if run_deep_checks else False,
         dblink_check=dblink_check if run_deep_checks else False,
         probe_state=lifecycle_state,
+        discover=bool(discover) and run_deep_checks,
+        discover_time=discover_time,
+        discover_max_bytes=discover_max_bytes,
     )
     record["show_pdbs_limit"] = show_pdbs_limit if run_deep_checks else None
     record["show_users_limit"] = show_users_limit if run_deep_checks else None
@@ -2138,14 +2205,14 @@ def _render_colored_oracle_line(console: Console, line: str) -> bool:
         line,
         tag=_ORACLE_TAG,
         counts=(
-            CountColorRule("PDBs", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("Users", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("Tables", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("PDBs", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("Users", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("Tables", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
         regexes=(
             RegexColorRule(r"\d+ credential check\(s\) inconclusive", "orange"),
             RegexColorRule(r"\b(?:available|total):0\b", "bright_green"),
-            RegexColorRule(r"\b(?:available|total):[1-9]\d*\b", "red"),
+            RegexColorRule(r"\b(?:available|total):[1-9]\d*\b", "true_red"),
             RegexColorRule(r"\b(CRITICAL|HIGH|MEDIUM|LOW) - [^\n]+", "orange"),
             RegexColorRule(
                 r"\b(service|sid|schema|user|role|name|open_mode|restricted|transport|version|status|weak|tcp|tcps|path|method|result|password_protected)=[^\s]+",

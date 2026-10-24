@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from redposture_core.exporters import discover
 from redposture_core.exporters.discover import (
     fetch_fingerprint_bodies_default,
     scan_exporter_presence,
@@ -141,6 +144,81 @@ def test_scan_exporter_presence_handles_task_exceptions_and_summary() -> None:
     assert any("boom node-1:9100" in line for line in emitted)
     assert emitted[-1].startswith("SCAN")
     assert "found=0" in emitted[-1]
+
+
+def test_scan_collect_emits_only_hits_and_errors_without_formatting_negatives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emitted: list[str] = []
+    original_formatter = discover.format_scan_record
+
+    def formatter(record: dict[str, object], output_format: str) -> str:
+        if not record.get("detected") and not record.get("error"):
+            raise AssertionError("suppressed negative should not be formatted")
+        return original_formatter(record, output_format)
+
+    def task(host: str, port: int, _exporters: object, _timeout: float, _retries: int):
+        if host == "failed":
+            raise OSError("failed")
+        detected = host == "found"
+        return (
+            {"host": host, "port": port, "detected": detected, "exporter": "node_exporter", "error": None},
+            {"exporter": "node_exporter", "port": port} if detected else None,
+        )
+
+    monkeypatch.setattr(discover, "format_scan_record", formatter)
+    checks, found, by_host = scan_exporter_presence(
+        ["missing", "found", "failed"],
+        1.0,
+        None,
+        output_format="txt",
+        emit_line=emitted.append,
+        workers=1,
+        retries=0,
+        discovery_exporters=[{"name": "node_exporter", "port": 9100}],
+        custom_ports=[9100],
+        emit_summary=False,
+        show_progress=False,
+        scan_task_fn=task,
+        suppress_negative_lines=True,
+    )
+    assert (checks, found) == (3, 1)
+    assert len(emitted) == 2
+    assert any("[+]" in line for line in emitted)
+    assert any("[!]" in line for line in emitted)
+    assert len(by_host["found"]) == 1
+
+
+def test_scan_suppressed_console_negatives_remain_in_requested_output(tmp_path: Path) -> None:
+    output = tmp_path / "scan.txt"
+    emitted: list[str] = []
+
+    def task(host: str, port: int, _exporters: object, _timeout: float, _retries: int):
+        detected = host == "found"
+        return (
+            {"host": host, "port": port, "detected": detected, "exporter": "node_exporter", "error": None},
+            {"exporter": "node_exporter", "port": port} if detected else None,
+        )
+
+    checks, found, _by_host = scan_exporter_presence(
+        ["missing", "found"],
+        1.0,
+        str(output),
+        output_format="txt",
+        emit_line=emitted.append,
+        workers=1,
+        retries=0,
+        discovery_exporters=[{"name": "node_exporter", "port": 9100}],
+        custom_ports=[9100],
+        emit_summary=False,
+        show_progress=False,
+        scan_task_fn=task,
+        suppress_negative_lines=True,
+    )
+    assert (checks, found) == (2, 1)
+    assert len(emitted) == 1
+    assert "[+]" in emitted[0]
+    assert "[-]" in output.read_text(encoding="utf-8")
 
 
 def test_scan_exporter_presence_output_file_keeps_failed_records_before_summary(tmp_path: Path) -> None:

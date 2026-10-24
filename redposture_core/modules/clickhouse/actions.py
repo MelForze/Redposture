@@ -20,6 +20,7 @@ from uuid import UUID
 from ...clients import transport
 from ...clients.http_api import infer_http_base_path
 from ...console import Console
+from ...detection_io import DetectCall, DetectDelay, run_sync
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
 from ...rendering import (
     BooleanColorRule,
@@ -1230,7 +1231,7 @@ def _run_sql_query(
             output.append(_row_text(values))
         return output, None
     except Exception as exc:
-        return [], _friendly_error_from_exception(exc)
+        return output, _friendly_error_from_exception(exc)
     finally:
         if stream_owner is not None and hasattr(stream_owner, "__exit__"):
             try:
@@ -1829,10 +1830,15 @@ def _record_payload(record: Any) -> dict[str, Any]:
     return dict(record)
 
 
-def detect_clickhouse(
+def detect_clickhouse(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Use one decision continuation for synchronous and native detection."""
+    return run_sync(detect_clickhouse_steps(ctx, options))
+
+
+def detect_clickhouse_steps(
     ctx: Any,
     options: Mapping[str, Any],
-) -> dict[str, Any]:
+) -> Any:
     state = ctx.lifecycle_state
     if not isinstance(state, ClickHouseLifecycleState):
         raise TypeError("clickhouse lifecycle state is unavailable")
@@ -1840,19 +1846,23 @@ def detect_clickhouse(
     tls_config, proxy = _ch_transport_from_context(ctx)
     max_attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
 
-    def _probe_protocol(protocol: str) -> tuple[_ChProbeResult, int]:
+    def _probe_protocol(protocol: str) -> Any:
         last_result = _probe_result(None, _ChProbeError("connection failed", kind="client_error"))
         for attempt in range(max_attempts):
             result = _coerce_probe_result(
-                _connect_and_probe(
-                    protocol,
-                    str(ctx.host),
-                    int(ctx.port),
-                    float(getattr(ctx.args, "timeout", 5.0)),
-                    "default",
-                    "",
-                    database="default",
-                    **_ch_transport_kwargs(tls_config, proxy),
+                (
+                    yield DetectCall(
+                        _connect_and_probe,
+                        (
+                            protocol,
+                            str(ctx.host),
+                            int(ctx.port),
+                            float(getattr(ctx.args, "timeout", 5.0)),
+                            "default",
+                            "",
+                        ),
+                        {"database": "default", **_ch_transport_kwargs(tls_config, proxy)},
+                    )
                 )
             )
             if result.session is not None or result.confirms_service:
@@ -1860,7 +1870,7 @@ def detect_clickhouse(
             last_result = result
             if not result.retryable or attempt >= max_attempts - 1:
                 return result, attempt + 1
-            time.sleep(_retry_delay(attempt))
+            yield DetectDelay(_retry_delay(attempt))
         return last_result, max_attempts
 
     requested_protocol = str(options["protocol"] or "native").lower()
@@ -1871,21 +1881,21 @@ def detect_clickhouse(
         requested_protocol = "http"
     protocol_order = _protocol_attempt_order(requested_protocol, int(ctx.port))
     primary_protocol = protocol_order[0]
-    probe, used_attempts = _probe_protocol(primary_protocol)
+    probe, used_attempts = yield from _probe_protocol(primary_protocol)
     selected_protocol = primary_protocol
     fallback_used = False
 
     if len(protocol_order) > 1 and probe.session is None and probe.kind == "protocol_mismatch":
         fallback_used = True
         selected_protocol = protocol_order[1]
-        probe, fallback_attempts = _probe_protocol(selected_protocol)
+        probe, fallback_attempts = yield from _probe_protocol(selected_protocol)
         used_attempts += fallback_attempts
 
     state.selected_protocol = selected_protocol
     if probe.session is not None:
         state.anonymous_session = probe.session
         if bool(getattr(ctx.args, "enum_cve", False)):
-            state.server_version = _read_clickhouse_version(probe.session)
+            state.server_version = yield DetectCall(_read_clickhouse_version, (probe.session,), {})
         state.anonymous_access_limited = probe.access_limited
         state.auth_required = False
         return _clickhouse_lifecycle_payload(
@@ -3393,7 +3403,7 @@ def _clickhouse_finding_color_spans(_marker: str, payload: str) -> list[tuple[in
     if status_match:
         status_value = status_match.group(1).strip().lower()
         status_color = (
-            "bright_green" if status_value == "complete" else "yellow" if status_value == "partial" else "red"
+            "bright_green" if status_value == "complete" else "yellow" if status_value == "partial" else "true_red"
         )
         spans.append((status_match.start(), status_match.end(), status_color))
     coverage_match = _DISCOVER_COVERAGE_RE.search(payload)
@@ -3402,11 +3412,13 @@ def _clickhouse_finding_color_spans(_marker: str, payload: str) -> list[tuple[in
             coverage_value = float(coverage_match.group(1))
         except ValueError:
             coverage_value = 0.0
-        coverage_color = "bright_green" if coverage_value >= 100.0 else "yellow" if coverage_value >= 50.0 else "red"
+        coverage_color = (
+            "bright_green" if coverage_value >= 100.0 else "yellow" if coverage_value >= 50.0 else "true_red"
+        )
         spans.append((coverage_match.start(), coverage_match.end(), coverage_color))
     findings_match = _DISCOVER_FINDINGS_RE.search(payload)
     if findings_match:
-        findings_color = "bright_green" if findings_match.group(1) == "0" else "red"
+        findings_color = "bright_green" if findings_match.group(1) == "0" else "true_red"
         spans.append((findings_match.start(), findings_match.end(), findings_color))
     return spans
 
@@ -3422,9 +3434,9 @@ def _render_colored_clickhouse_line(console: Console, line: str) -> bool:
             BooleanColorRule("admin", unknown_color="orange"),
         ),
         counts=(
-            CountColorRule("DBs", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("occurrences", "red", unknown_color="orange", zero_color="bright_green"),
-            CountColorRule("tables", "red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("DBs", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("occurrences", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("tables", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
         extra_spans=_clickhouse_finding_color_spans,
     ):

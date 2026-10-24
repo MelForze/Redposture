@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..execution_api import render as render_execution
 from .actions import (
     _auth_summary_line,
     _cx_prefix,
@@ -23,6 +24,7 @@ def _format_consul_detail_lines(record: dict[str, Any], output_format: str, *, d
         if summary:
             lines.append(f"{prefix} {summary}")
     lines.extend(_detail_lines(record, output_format, debug=debug))
+    lines.extend(render_execution("consul", record))
     return lines
 
 

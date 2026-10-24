@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..modules.execution_api import add_flags as add_execution_flags
 from ..show_limits import (
     non_negative_int,
     optional_dump_count_kwargs,
@@ -364,6 +365,10 @@ def configure_kafka_parser(
         metavar="count",
         help="Maximum number of topic messages to read per topic with --dump.",
     )
+    execution = parser.add_argument_group(
+        "UI command execution", "Provectus Kafka UI Groovy smart-filter API only; not Kafka brokers or Kafbat."
+    )
+    add_execution_flags(execution)
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(
         "-f",

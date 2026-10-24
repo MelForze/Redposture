@@ -1,0 +1,126 @@
+# Opt-in execute QA stands. Start one profile at a time through
+# scripts/run_execute_qa.py; every service is loopback-only.
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    profiles: [kafka]
+    hostname: kafka
+    environment:
+      CLUSTER_ID: "LxzRBSyNT_-nGe7wyn5kSw"
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "127.0.0.1:19092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  kafka-seed:
+    image: confluentinc/cp-kafka:7.6.1
+    profiles: [kafka]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - bash
+      - -ceu
+      - |
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic execute.qa --partitions 1 --replication-factor 1
+        printf '{"execute":"qa-marker","value":"redposture-kafka-execute"}\n' | kafka-console-producer --bootstrap-server kafka:9092 --topic execute.qa >/dev/null
+        touch /tmp/ready
+        tail -f /dev/null
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    profiles: [kafka]
+    depends_on:
+      kafka-seed:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: redposture-execute
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "127.0.0.1:19089:8080"
+
+  portainer-engine:
+    image: docker:27.5.1-dind
+    profiles: [portainer]
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--tls=false"]
+    ports:
+      - "127.0.0.1:19237:2375"
+    healthcheck:
+      test: ["CMD", "docker", "-H", "tcp://127.0.0.1:2375", "info"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  portainer:
+    image: portainer/portainer-ce:2.39.7
+    profiles: [portainer]
+    command: ["--no-setup-token"]
+    depends_on:
+      portainer-engine:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:19443:9443"
+    volumes:
+      - portainer-data:/data
+
+  jenkins:
+    build:
+      context: ./jenkins
+      dockerfile: Dockerfile
+    image: redposture/jenkins-execute:local
+    profiles: [jenkins]
+    environment:
+      JAVA_OPTS: -Djenkins.install.runSetupWizard=false
+    ports:
+      - "127.0.0.1:19580:8080"
+    volumes:
+      - jenkins-data:/var/jenkins_home
+
+  consul:
+    image: hashicorp/consul:1.17.3
+    profiles: [consul]
+    command:
+      - consul
+      - agent
+      - -dev
+      - -client=0.0.0.0
+      - -node=redposture-execute-consul
+      - -enable-script-checks=true
+      - -enable-local-script-checks=true
+    ports:
+      - "127.0.0.1:19500:8500"
+    healthcheck:
+      test: ["CMD-SHELL", "consul version >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  portainer-data: {}
+  jenkins-data: {}

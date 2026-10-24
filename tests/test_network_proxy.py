@@ -516,11 +516,14 @@ def test_http_open_tunnel_sends_connect_and_proxy_auth(monkeypatch: pytest.Monke
     monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
 
     class _FakeHTTPResponse:
-        def __init__(self, transport: _FakeSocket) -> None:
+        def __init__(self, transport: np._TunnelHeadersSocket) -> None:
             self.transport = transport
             self.status = 200
 
         def begin(self) -> None:
+            return
+
+        def close(self) -> None:
             return
 
     monkeypatch.setattr(np.http.client, "HTTPResponse", _FakeHTTPResponse)
@@ -547,11 +550,14 @@ def test_http_open_tunnel_closes_socket_on_non_200(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
 
     class _FakeHTTPResponse:
-        def __init__(self, transport: _FakeSocket) -> None:
+        def __init__(self, transport: np._TunnelHeadersSocket) -> None:
             self.transport = transport
             self.status = 407
 
         def begin(self) -> None:
+            return
+
+        def close(self) -> None:
             return
 
     monkeypatch.setattr(np.http.client, "HTTPResponse", _FakeHTTPResponse)
@@ -584,11 +590,14 @@ def test_https_open_tunnel_wraps_socket_and_closes_both_on_error(monkeypatch: py
     monkeypatch.setattr(np.ssl, "create_default_context", lambda: _FakeContext())
 
     class _FakeHTTPResponse:
-        def __init__(self, transport: _FakeSocket) -> None:
-            assert transport is wrapped_sock
+        def __init__(self, transport: np._TunnelHeadersSocket) -> None:
+            assert transport.transport is wrapped_sock
             self.status = 502
 
         def begin(self) -> None:
+            return
+
+        def close(self) -> None:
             return
 
     monkeypatch.setattr(np.http.client, "HTTPResponse", _FakeHTTPResponse)

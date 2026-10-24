@@ -129,6 +129,7 @@
     "znode_count_partial": false,
     "znode_count_unknown": false,
     "znode_details": null,
+    "znode_dump_items": null,
     "znode_truncated_reason": null,
     "znode_values": null,
     "znodes": [],

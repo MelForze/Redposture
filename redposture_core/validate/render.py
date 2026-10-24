@@ -426,7 +426,7 @@ def _render_validate_complete_row(
     tag = f"{'VALIDATE':<8}"
     prefix = f"\t{_clip(host, 64)}\t{_clip(port, 16)}\t"
     mark = "[+]" if ok else "[!]"
-    mark_color = "green" if ok else "red"
+    mark_color = "bright_green" if ok else "true_red"
     if unreadable_files:
         mark, mark_color = "[!]", "orange"
     status = "incomplete" if unreadable_files else "complete"

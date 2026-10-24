@@ -1191,9 +1191,9 @@ def test_render_colored_qdrant_line_covers_marker_spans() -> None:
     assert qdrant._render_colored_qdrant_line(console, line) is True
     assert console.lines
     rendered = console.lines[-1]
-    assert "<white>" in rendered and "<red>auth required:False</red>" in rendered
-    assert "<red>collections:3</red>" in rendered
-    assert "<red>idor:true</red>" in rendered
+    assert "<white>" in rendered and "<true_red>auth required:False</true_red>" in rendered
+    assert "<true_red>collections:3</true_red>" in rendered
+    assert "<true_red>idor:true</true_red>" in rendered
     assert "<orange>RCE:potential</orange>" in rendered
 
 

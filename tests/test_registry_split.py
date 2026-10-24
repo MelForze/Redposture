@@ -294,6 +294,37 @@ def test_public_nexus_user_listing_does_not_verify_basic_pair(monkeypatch: pytes
     assert reason is not None and "anonymous" in reason
 
 
+@pytest.mark.parametrize("negative_status,expected", [(401, True), (200, None)])
+def test_nexus_restricted_pair_uses_rejected_basic_control(
+    monkeypatch: pytest.MonkeyPatch, negative_status: int, expected: bool | None
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def response(_host: str, _port: int, _method: str, path: str, _timeout: float, **kwargs: object):
+        authorization = str((kwargs.get("headers") or {}).get("Authorization", ""))
+        calls.append((path, authorization))
+        if path == "/service/rest/v1/security/users":
+            return 403, b"", {}, None
+        assert path == "/service/rest/v1/status"
+        if authorization == oci_actions._auth_headers("rp-browse", "correct", None)["Authorization"]:
+            return 200, b"", {}, None
+        assert authorization.startswith("Basic ")
+        assert base64.b64decode(authorization.removeprefix("Basic ")).decode().startswith("rp-browse:rp-verification-")
+        return negative_status, b"", {}, None
+
+    monkeypatch.setattr(oci_actions, "_http_request", response)
+    verified, reason = oci_actions._verify_registry_credential(
+        "nexus", "host", 8081, 1.0, "rp-browse", "correct", None, anonymous_probe=None
+    )
+    assert verified is expected
+    assert reason is None if expected else reason is not None
+    assert [path for path, _ in calls] == [
+        "/service/rest/v1/security/users",
+        "/service/rest/v1/status",
+        "/service/rest/v1/status",
+    ]
+
+
 def test_kubeapi_default_pairs_are_planned_but_basic_403_requires_identity_proof(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

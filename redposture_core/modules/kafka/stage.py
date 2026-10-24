@@ -7,8 +7,12 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients import kafka as _native_client
+from ...clients.async_retained_socket import with_native_detection as _with_native_detection
 from ...clients.kafka import KafkaTlsConfig
 from ...console import Console
+from ...detection_io import DetectCall as _DetectCall
+from ...detection_io import run_sync as _run_detect_sync
 from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -21,7 +25,8 @@ from ...stage_runtime import (
     merge_audit_credential_runs,
     sort_default_audit_credential_runs,
 )
-from . import actions, policy, render, ui
+from . import actions, execution, policy, render, ui
+from . import http_surfaces as _native_surfaces
 
 _DEFAULT_PORT = 9092
 # 9093 = the well-known Kafka SASL_SSL / SSL listener. Many production
@@ -82,7 +87,7 @@ def _build_kafka_lifecycle_options(args: Any) -> dict[str, Any]:
     dump = dump_flag_enabled(getattr(args, "dump", False))
     dump_limit = dump_flag_limit(getattr(args, "dump", False))
     explicit_max = getattr(args, "max_messages", None)
-    max_messages = int(explicit_max if explicit_max is not None else dump_limit if dump_limit is not None else 10)
+    max_messages = int(explicit_max) if explicit_max is not None else dump_limit if dump else 10
     return {
         "show_topics": show_flag_enabled(getattr(args, "show_topics", False)),
         "show_topics_limit": show_flag_limit(getattr(args, "show_topics", False)),
@@ -130,6 +135,16 @@ def _kafka_credential_gate(credential: AuditCredentialRun, record: AuditRecord) 
 def build_kafka_spec(args: Any) -> ModuleAuditSpec:
     full_credential_sweep = bool(getattr(args, "defcreds", False))
     options = _build_kafka_lifecycle_options(args)
+
+    def _ui_record(payload: dict[str, Any]) -> AuditRecord:
+        # These request fields must survive even when auth prevents the data hook.
+        payload.update(
+            show_topics=bool(options["show_topics"]),
+            dump=bool(options["dump"]),
+            max_messages=options["max_messages"] if options["dump"] else None,
+        )
+        return AuditRecord.from_mapping(payload, module="kafka", service="kafka")
+
     resolved_host_stage = getattr(actions, _PRODUCTION_HOST_STAGE.__name__, _PRODUCTION_HOST_STAGE)
     use_lifecycle_hooks = (
         actions.host_stage is _PRODUCTION_HOST_STAGE
@@ -175,20 +190,23 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         )
 
     def _detect(ctx: AuditHookContext) -> AuditRecord:
+        return _run_detect_sync(_detect_steps(ctx))
+
+    def _detect_steps(ctx: AuditHookContext):
         scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
         ui_first = scheme in {"http", "https"} or int(ctx.port) in _UI_PORTS
         ui_record: dict[str, Any] | None = None
         if ui_first:
-            ui_record = ui.detect_ui(ctx, ctx.lifecycle_state)
+            ui_record = yield _DetectCall(ui.detect_ui, (ctx, ctx.lifecycle_state), {})
             if ui_record.get("is_kafka"):
-                return AuditRecord.from_mapping(ui_record, module="kafka", service="kafka")
-        broker_record = actions.detect_kafka(ctx, options)
+                return _ui_record(ui_record)
+        broker_record = yield _DetectCall(actions.detect_kafka, (ctx, options), {})
         if broker_record.get("is_kafka"):
             return AuditRecord.from_mapping(broker_record, module="kafka", service="kafka")
         if not ui_first:
-            ui_record = ui.detect_ui(ctx, ctx.lifecycle_state)
+            ui_record = yield _DetectCall(ui.detect_ui, (ctx, ctx.lifecycle_state), {})
             if ui_record.get("is_kafka"):
-                return AuditRecord.from_mapping(ui_record, module="kafka", service="kafka")
+                return _ui_record(ui_record)
         if ui_record is not None:
             broker_record["ui_detection_status"] = ui_record.get("detection_status")
             broker_record["ui_detection_signals"] = ui_record.get("detection_signals")
@@ -207,6 +225,22 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         )
 
     def _data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        if getattr(args, "execute", None) is not None:
+            result = execution.collect(ctx, record.to_dict(), ctx.lifecycle_state)
+            record = AuditRecord.from_mapping(result, module="kafka", service="kafka")
+            inventory = any(
+                options.get(key)
+                for key in (
+                    "show_topics",
+                    "show_clusters",
+                    "show_brokers",
+                    "show_consumer_groups",
+                    "dump",
+                    "query_topic",
+                )
+            )
+            if not result.get("execute_verified") or not inventory:
+                return record
         if record.extra.get("is_kafka_ui"):
             return AuditRecord.from_mapping(
                 ui.collect_ui(ctx, record.to_dict(), ctx.lifecycle_state, options), module="kafka", service="kafka"
@@ -217,7 +251,7 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
             service="kafka",
         )
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="kafka",
         label="KAFKA",
         default_port=_DEFAULT_PORT,
@@ -232,10 +266,24 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         continue_after_credential_success=full_credential_sweep,
         continue_after_credential_error=full_credential_sweep,
         credential_gate=_kafka_credential_gate,
+        deep_gate=(lambda rec: (rec.extra.get("is_kafka") is True, "explicit UI execution request"))
+        if getattr(args, "execute", None) is not None
+        else None,
         fallback_to_anonymous_detect_record=full_credential_sweep,
         render_module=render,
         colorize=render._render_colored_kafka_line,
         is_detected=lambda record: record.extra.get("is_kafka") is True,
+    )
+
+    return _with_native_detection(
+        spec,
+        _detect_steps,
+        {
+            **actions._ASYNC_RETAINED_STEPS,
+            **ui._ASYNC_RETAINED_STEPS,
+            **_native_surfaces._ASYNC_RETAINED_STEPS,
+            **_native_client._ASYNC_RETAINED_STEPS,
+        },
     )
 
 

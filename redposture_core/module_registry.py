@@ -32,12 +32,15 @@ from .cli_modules.oci_registry import (
     configure_nexus_parser,
 )
 from .cli_modules.oracle import configure_oracle_parser
+from .cli_modules.portainer import configure_portainer_parser
 from .cli_modules.postgres import PostgresHelpFormatter, configure_postgres_parser
 from .cli_modules.proxmox import configure_proxmox_parser
 from .cli_modules.qdrant import configure_qdrant_parser
 from .cli_modules.rabbitmq import configure_rabbitmq_parser
+from .cli_modules.spark import configure_spark_parser
 from .cli_modules.spray import configure_spray_parser
 from .cli_modules.vault import configure_vault_parser
+from .cli_modules.yarn import configure_yarn_parser
 from .cli_modules.zookeeper import configure_zookeeper_parser
 
 COMMAND_LISTEN = "listen"
@@ -76,6 +79,9 @@ COMMAND_ORACLE = "oracle"
 COMMAND_SELFCERT = "selfcert"
 COMMAND_EXPORTERS = "exporters"
 COMMAND_SPRAY = "spray"
+COMMAND_PORTAINER = "portainer"
+COMMAND_SPARK = "spark"
+COMMAND_YARN = "yarn"
 
 
 @dataclass(frozen=True)
@@ -135,6 +141,9 @@ _STAGE_RUNNER_MODULES: dict[str, str] = {
     COMMAND_KEYCLOAK: "redposture_core.modules.keycloak.stage",
     COMMAND_JENKINS: "redposture_core.modules.jenkins.stage",
     COMMAND_NOMAD: "redposture_core.modules.nomad.stage",
+    COMMAND_PORTAINER: "redposture_core.modules.portainer.stage",
+    COMMAND_SPARK: "redposture_core.modules.spark.stage",
+    COMMAND_YARN: "redposture_core.modules.yarn.stage",
     COMMAND_JUPYTER: "redposture_core.modules.jupyter.stage",
     COMMAND_VAULT: "redposture_core.modules.vault.stage",
     COMMAND_GITLAB: "redposture_core.modules.gitlab.stage",
@@ -304,6 +313,26 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Audit Jenkins access, jobs, builds, plugins, and CVEs.",
         runner_attr="run_jenkins_stage",
         configure_parser=_make_configurator(configure_jenkins_parser, _HTTP_MODULE_HELPERS),
+    ),
+    CommandSpec(
+        name=COMMAND_PORTAINER,
+        help="Audit Portainer credentials, environments and visible resources.",
+        runner_attr="run_portainer_stage",
+        configure_parser=_make_configurator(
+            configure_portainer_parser, _HTTP_MODULE_HELPERS + ("append_selected_defaults",)
+        ),
+    ),
+    CommandSpec(
+        name=COMMAND_SPARK,
+        help="Audit Spark standalone Master UI and REST submission surface.",
+        runner_attr="run_spark_stage",
+        configure_parser=_make_configurator(configure_spark_parser, _HTTP_MODULE_HELPERS),
+    ),
+    CommandSpec(
+        name=COMMAND_YARN,
+        help="Audit Hadoop YARN ResourceManager and application access.",
+        runner_attr="run_yarn_stage",
+        configure_parser=_make_configurator(configure_yarn_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_NOMAD,

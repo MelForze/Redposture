@@ -16,6 +16,8 @@ from ...audit_models import AuditRecord
 from ...clients import transport
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
+from ...detection_io import DetectCall as _DetectCall
+from ...detection_io import run_sync as _run_detect_sync
 from ...rendering import (
     CountColorRule,
     RegexColorRule,
@@ -91,9 +93,13 @@ def _encode_resp_array(parts: list[str | bytes]) -> bytes:
 
 
 def _recv_line(sock: socket.socket, max_len: int = 65536) -> bytes:
+    return _run_detect_sync(_recv_line_detect_steps(sock, max_len))
+
+
+def _recv_line_detect_steps(sock: socket.socket, max_len: int = 65536):
     data = bytearray()
     while len(data) < max_len:
-        ch = sock.recv(1)
+        ch = yield _DetectCall(sock.recv, (1,), {})
         if not ch:
             raise ConnectionError("unexpected EOF")
         data += ch
@@ -103,41 +109,47 @@ def _recv_line(sock: socket.socket, max_len: int = 65536) -> bytes:
 
 
 def _read_resp(sock: socket.socket) -> tuple[str, Any]:
-    prefix = _recv_exact(sock, 1)
+    return _run_detect_sync(_read_resp_detect_steps(sock))
+
+
+def _read_resp_detect_steps(sock: socket.socket):
+    prefix = yield _DetectCall(_recv_exact, (sock, 1), {})
     if prefix == b"+":
-        return "simple", _recv_line(sock).decode("utf-8", errors="replace")
+        return ("simple", (yield _DetectCall(_recv_line, (sock,), {})).decode("utf-8", errors="replace"))
     if prefix == b"-":
-        return "error", _recv_line(sock).decode("utf-8", errors="replace")
+        return ("error", (yield _DetectCall(_recv_line, (sock,), {})).decode("utf-8", errors="replace"))
     if prefix == b":":
-        raw = _recv_line(sock).decode("ascii", errors="replace")
-        return "integer", int(raw)
+        raw = (yield _DetectCall(_recv_line, (sock,), {})).decode("ascii", errors="replace")
+        return ("integer", int(raw))
     if prefix == b"$":
-        raw_len = _recv_line(sock).decode("ascii", errors="replace")
+        raw_len = (yield _DetectCall(_recv_line, (sock,), {})).decode("ascii", errors="replace")
         size = int(raw_len)
         if size < 0:
-            return "null", None
-        body = _recv_exact(sock, size + 2)
+            return ("null", None)
+        body = yield _DetectCall(_recv_exact, (sock, size + 2), {})
         if not body.endswith(b"\r\n"):
             raise ValueError("invalid RESP bulk")
-        # Bulk strings are arbitrary octets. Keep them as bytes until the
-        # presentation boundary so invalid UTF-8 is never silently replaced.
-        return "bulk", body[:-2]
+        return ("bulk", body[:-2])
     if prefix == b"*":
-        raw_len = _recv_line(sock).decode("ascii", errors="replace")
+        raw_len = (yield _DetectCall(_recv_line, (sock,), {})).decode("ascii", errors="replace")
         count = int(raw_len)
         if count < 0:
-            return "null", None
+            return ("null", None)
         items: list[Any] = []
         for _ in range(count):
-            _, item_value = _read_resp(sock)
+            _, item_value = yield _DetectCall(_read_resp, (sock,), {})
             items.append(item_value)
-        return "array", items
+        return ("array", items)
     raise ValueError(f"unsupported RESP prefix: {prefix!r}")
 
 
 def _send_cmd(sock: socket.socket, *parts: str | bytes) -> tuple[str, Any]:
-    sock.sendall(_encode_resp_array(list(parts)))
-    return _read_resp(sock)
+    return _run_detect_sync(_send_cmd_detect_steps(sock, *parts))
+
+
+def _send_cmd_detect_steps(sock: socket.socket, *parts: str | bytes):
+    yield _DetectCall(sock.sendall, (_encode_resp_array(list(parts)),), {})
+    return (yield _DetectCall(_read_resp, (sock,), {}))
 
 
 def _is_noauth_error(message: str) -> bool:
@@ -180,13 +192,15 @@ def _redis_server_identity(response_type: str, response_value: Any) -> tuple[str
 
 
 def _capture_redis_server_identity(state: RedisAuditLifecycleState) -> None:
+    return _run_detect_sync(_capture_redis_server_identity_detect_steps(state))
+
+
+def _capture_redis_server_identity_detect_steps(state: RedisAuditLifecycleState):
     if state.sock is None:
         return
     try:
-        response_type, response_value = _send_cmd(state.sock, "INFO", "SERVER")
+        response_type, response_value = yield _DetectCall(_send_cmd, (state.sock, "INFO", "SERVER"), {})
     except (OSError, ValueError, ConnectionError):
-        # INFO is advisory; a denied or interrupted version read must not
-        # change the result of an already verified AUTH exchange.
         return
     implementation, version = _redis_server_identity(response_type, response_value)
     if implementation and version:
@@ -195,17 +209,21 @@ def _capture_redis_server_identity(state: RedisAuditLifecycleState) -> None:
 
 
 def _confirm_redis_error_response(sock: socket.socket, message: str) -> tuple[bool, bool | None]:
+    return _run_detect_sync(_confirm_redis_error_response_detect_steps(sock, message))
+
+
+def _confirm_redis_error_response_detect_steps(sock: socket.socket, message: str):
     if _is_noauth_error(message):
-        return True, True
+        return (True, True)
     upper = message.upper()
     if "REDIS" in upper and any(marker in upper for marker in ("LOADING", "MISCONF", "BUSY")):
-        return True, None
-    info_type, info_value = _send_cmd(sock, "INFO", "SERVER")
+        return (True, None)
+    info_type, info_value = yield _DetectCall(_send_cmd, (sock, "INFO", "SERVER"), {})
     if _redis_info_fingerprint(info_type, info_value):
-        return True, False
+        return (True, False)
     if info_type == "error" and _is_noauth_error(str(info_value)):
-        return True, True
-    return False, None
+        return (True, True)
+    return (False, None)
 
 
 def _open_redis_socket(
@@ -219,23 +237,43 @@ def _open_redis_socket(
     cert_file: str | None = None,
     key_file: str | None = None,
 ) -> socket.socket:
-    sock = socket.create_connection((host, port), timeout=timeout)
-    sock.settimeout(timeout)
-    if not use_tls:
-        return sock
-    try:
-        context = shared_client_ssl_context(
+    return _run_detect_sync(
+        _open_redis_socket_detect_steps(
+            host,
+            port,
+            timeout,
+            use_tls=use_tls,
             insecure=insecure,
             ca_file=ca_file,
             cert_file=cert_file,
             key_file=key_file,
         )
+    )
+
+
+def _open_redis_socket_detect_steps(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    use_tls: bool,
+    insecure: bool = False,
+    ca_file: str | None = None,
+    cert_file: str | None = None,
+    key_file: str | None = None,
+):
+    sock = yield _DetectCall(socket.create_connection, ((host, port),), {"timeout": timeout})
+    yield _DetectCall(sock.settimeout, (timeout,), {})
+    if not use_tls:
+        return sock
+    try:
+        context = shared_client_ssl_context(insecure=insecure, ca_file=ca_file, cert_file=cert_file, key_file=key_file)
     except ValueError:
         sock.close()
         raise
     try:
-        wrapped = context.wrap_socket(sock, server_hostname=host)
-        wrapped.settimeout(timeout)
+        wrapped = yield _DetectCall(context.wrap_socket, (sock,), {"server_hostname": host})
+        yield _DetectCall(wrapped.settimeout, (timeout,), {})
         return wrapped
     except BaseException:
         sock.close()
@@ -393,10 +431,18 @@ def _stream_dump_redis_keys(
     seen: set[bytes] = set()
     cursor = "0"
     rounds = 0
+    stream_error: str | None = None
 
     def _flush_page(keys_page: list[str | bytes]) -> bool:  # returns True when the total cap is reached
+        nonlocal stream_error
         for key_name in sorted(keys_page, key=_format_redis_text):
-            value_text, value_error = _dump_redis_key_value(sock, key_name)
+            value_text: str | None = None
+            value_error = stream_error
+            if value_error is None:
+                try:
+                    value_text, value_error = _dump_redis_key_value(sock, key_name)
+                except (OSError, ValueError) as exc:
+                    stream_error = value_error = str(exc) or type(exc).__name__
             display_name = _format_redis_text(key_name)
             if value_error:
                 entries.append(_redis_kv_entry(display_name, error=_format_redis_text(value_error)))
@@ -406,19 +452,29 @@ def _stream_dump_redis_keys(
                 return True
         return False
 
+    def _scan_failed(error: str) -> tuple[list[dict[str, str | None]], str]:
+        # A failed enumeration does not invalidate keys already discovered.
+        if pending:
+            _flush_page(pending)
+        return entries, error
+
     while True:
         rounds += 1
         if rounds > _DUMP_MAX_SCAN_ROUNDS:
-            return entries, "SCAN aborted: too many iterations"
+            return _scan_failed("SCAN aborted: too many iterations")
 
-        resp_type, resp_value = _send_cmd(sock, "SCAN", cursor, "COUNT", str(count))
+        try:
+            resp_type, resp_value = _send_cmd(sock, "SCAN", cursor, "COUNT", str(count))
+        except (OSError, ValueError) as exc:
+            stream_error = str(exc) or type(exc).__name__
+            return _scan_failed(stream_error)
         if resp_type != "array" or not isinstance(resp_value, list) or len(resp_value) != 2:
-            return entries, f"unexpected SCAN response: {resp_type} {resp_value}"
+            return _scan_failed(f"unexpected SCAN response: {resp_type} {resp_value}")
 
         next_cursor = _format_redis_text(resp_value[0] if resp_value[0] is not None else "0")
         scan_batch = resp_value[1]
         if not isinstance(scan_batch, list):
-            return entries, f"unexpected SCAN keys payload: {type(scan_batch).__name__}"
+            return _scan_failed(f"unexpected SCAN keys payload: {type(scan_batch).__name__}")
 
         for item in scan_batch:
             key = item if isinstance(item, bytes) else str(item)
@@ -432,7 +488,9 @@ def _stream_dump_redis_keys(
             page = pending[:page_size]
             del pending[:page_size]
             if _flush_page(page):
-                return entries, None
+                return entries, stream_error
+            if stream_error:
+                return _scan_failed(stream_error)
             if delay_seconds > 0:
                 time.sleep(delay_seconds)
 
@@ -441,7 +499,7 @@ def _stream_dump_redis_keys(
 
     if pending:
         _flush_page(pending)
-    return entries, None
+    return entries, stream_error
 
 
 def _format_redis_text(value: Any) -> str:
@@ -611,15 +669,20 @@ def _close_redis_lifecycle_socket(state: RedisAuditLifecycleState) -> None:
 
 
 def _open_redis_lifecycle_socket(state: RedisAuditLifecycleState) -> None:
-    state.sock = _open_redis_socket(
-        state.host,
-        state.port,
-        state.timeout,
-        use_tls=state.use_tls,
-        insecure=state.insecure,
-        ca_file=state.tls_ca,
-        cert_file=state.tls_cert,
-        key_file=state.tls_key,
+    return _run_detect_sync(_open_redis_lifecycle_socket_detect_steps(state))
+
+
+def _open_redis_lifecycle_socket_detect_steps(state: RedisAuditLifecycleState):
+    state.sock = yield _DetectCall(
+        _open_redis_socket,
+        (state.host, state.port, state.timeout),
+        {
+            "use_tls": state.use_tls,
+            "insecure": state.insecure,
+            "ca_file": state.tls_ca,
+            "cert_file": state.tls_cert,
+            "key_file": state.tls_key,
+        },
     )
     state.transport_mode = "tls" if state.use_tls else "plaintext"
 
@@ -738,6 +801,10 @@ def _redis_lifecycle_record(state: RedisAuditLifecycleState, *, include_data: bo
 
 
 def redis_detect_hook(ctx: Any) -> AuditRecord:
+    return _run_detect_sync(_redis_detect_hook_detect_steps(ctx))
+
+
+def _redis_detect_hook_detect_steps(ctx: Any):
     state = ctx.lifecycle_state
     if not isinstance(state, RedisAuditLifecycleState):
         raise TypeError("redis lifecycle state is missing")
@@ -745,17 +812,19 @@ def redis_detect_hook(ctx: Any) -> AuditRecord:
     last_error: str | None = None
     for attempt in range(attempts):
         try:
-            _open_redis_lifecycle_socket(state)
-            ping_type, ping_value = _send_cmd(state.sock, "PING")
+            yield _DetectCall(_open_redis_lifecycle_socket, (state,), {})
+            ping_type, ping_value = yield _DetectCall(_send_cmd, (state.sock, "PING"), {})
             if ping_type == "simple" and str(ping_value).upper() == "PONG":
                 state.is_redis = True
                 state.auth_required = False
                 state.status = "open_no_auth"
                 state.error = None
-                _capture_redis_server_identity(state)
+                yield _DetectCall(_capture_redis_server_identity, (state,), {})
                 return _redis_lifecycle_record(state, include_data=False)
             if ping_type == "error":
-                confirmed, auth_required = _confirm_redis_error_response(state.sock, str(ping_value))
+                confirmed, auth_required = yield _DetectCall(
+                    _confirm_redis_error_response, (state.sock, str(ping_value)), {}
+                )
                 if confirmed:
                     state.is_redis = True
                     state.auth_required = auth_required
@@ -773,7 +842,7 @@ def redis_detect_hook(ctx: Any) -> AuditRecord:
             last_error = str(exc)
             _close_redis_lifecycle_socket(state)
             if attempt < attempts - 1:
-                time.sleep(_retry_delay(attempt))
+                yield _DetectCall(time.sleep, (_retry_delay(attempt),), {})
     state.is_redis = False
     state.auth_required = None
     state.status = "fail"
@@ -1627,7 +1696,7 @@ def _render_colored_redis_line(console: Console, line: str) -> bool:
         line,
         tag="REDIS",
         regexes=(RegexColorRule(r"\(version:[^)]+\)", "orange"),),
-        counts=(CountColorRule("keys", "red", unknown_color="orange", zero_color="bright_green"),),
+        counts=(CountColorRule("keys", "true_red", unknown_color="orange", zero_color="bright_green"),),
     ):
         return True
     if line.startswith("REDIS") and "\t" in line:
@@ -1746,3 +1815,16 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_redis_host_with_stage_debug
+
+
+# Exact synchronous wrappers are the compatibility/override identities.
+_ASYNC_RETAINED_STEPS = {
+    _recv_line: _recv_line_detect_steps,
+    _read_resp: _read_resp_detect_steps,
+    _send_cmd: _send_cmd_detect_steps,
+    _capture_redis_server_identity: _capture_redis_server_identity_detect_steps,
+    _confirm_redis_error_response: _confirm_redis_error_response_detect_steps,
+    _open_redis_socket: _open_redis_socket_detect_steps,
+    _open_redis_lifecycle_socket: _open_redis_lifecycle_socket_detect_steps,
+    redis_detect_hook: _redis_detect_hook_detect_steps,
+}

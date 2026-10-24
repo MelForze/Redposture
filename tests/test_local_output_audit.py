@@ -20,35 +20,35 @@ pytestmark = pytest.mark.local_output_audit
 
 _DISCOVERY_MODULES = ("airflow", "minio", "elastic", "clickhouse", "proxmox")
 _CAPABILITY_COLOR_CASES = (
-    ("elastic", "(Indices:7)", "red"),
-    ("elastic", "(Documents:Read)", "red"),
+    ("elastic", "(Indices:7)", "true_red"),
+    ("elastic", "(Documents:Read)", "true_red"),
     ("elastic", "(Users:Access Denied)", "bright_green"),
     ("elastic", "(Cluster:Unknown)", "orange"),
-    ("airflow", "(Dags:7)", "red"),
+    ("airflow", "(Dags:7)", "true_red"),
     ("airflow", "(Keys:Access Denied)", "bright_green"),
     ("airflow", "(Connections:Unknown)", "orange"),
-    ("postgres", "(read:True)", "red"),
+    ("postgres", "(read:True)", "true_red"),
     ("postgres", "(superuser:False)", "bright_green"),
     ("postgres", "(execute:unknown)", "orange"),
-    ("clickhouse", "(read:True)", "red"),
+    ("clickhouse", "(read:True)", "true_red"),
     ("clickhouse", "(admin:False)", "bright_green"),
     ("clickhouse", "(execute:unknown)", "orange"),
-    ("redis", "(keys:7)", "red"),
+    ("redis", "(keys:7)", "true_red"),
     ("redis", "(keys:0)", "bright_green"),
     ("redis", "(keys:unknown)", "orange"),
-    ("consul", "(kv:7)", "red"),
-    ("consul", "(services:7)", "red"),
-    ("consul", "(agent:7)", "red"),
+    ("consul", "(kv:7)", "true_red"),
+    ("consul", "(services:7)", "true_red"),
+    ("consul", "(agent:7)", "true_red"),
     ("consul", "(kv:0)", "bright_green"),
-    ("kubeapi", "(secrets:7)", "red"),
-    ("kubeapi", "(pods:7)", "red"),
-    ("kubeapi", "(namespaces:7)", "red"),
+    ("kubeapi", "(secrets:7)", "true_red"),
+    ("kubeapi", "(pods:7)", "true_red"),
+    ("kubeapi", "(namespaces:7)", "true_red"),
     ("kubeapi", "(secrets:0)", "bright_green"),
-    ("rabbitmq", "(admin:True)", "red"),
+    ("rabbitmq", "(admin:True)", "true_red"),
     ("rabbitmq", "(admin:False)", "bright_green"),
-    ("rabbitmq", "(Count:7)", "red"),
+    ("rabbitmq", "(Count:7)", "true_red"),
     ("rabbitmq", "(Count:0)", "bright_green"),
-    ("docker-registry", "(images:7)", "red"),
+    ("docker-registry", "(images:7)", "true_red"),
     ("docker-registry", "(images:0)", "bright_green"),
 )
 
@@ -83,7 +83,7 @@ def _spec(module: str) -> ModuleAuditSpec:
 
 
 def _contains_color(console: _RecordingConsole, text: str, color: str) -> bool:
-    accepted = {"red", "true_red"} if color == "red" else {color}
+    accepted = {"true_red"} if color == "true_red" else {color}
     return any(text in painted and painted_color in accepted for painted, painted_color in console.paint_calls)
 
 

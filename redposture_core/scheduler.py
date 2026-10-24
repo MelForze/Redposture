@@ -79,7 +79,7 @@ class _DaemonWorkerPool(Generic[T, R]):
         per_key_limit: int,
     ) -> None:
         self._tasks: queue.Queue[_Task[T] | object] = queue.Queue(maxsize=max_inflight)
-        self.results: queue.Queue[_Outcome[T, R]] = queue.Queue()
+        self.results: queue.SimpleQueue[_Outcome[T, R]] = queue.SimpleQueue()
         self._cancelled = threading.Event()
         self._worker = worker
         self._limiter: _KeyLimiter[T, Any] = _KeyLimiter(key_fn, per_key_limit)
@@ -271,6 +271,7 @@ class BoundedScheduler(Generic[T, R]):
         worker: Callable[[T], Generator[float, None, R]],
         *,
         cancelled: threading.Event | None = None,
+        poll_source: bool = False,
     ) -> Iterator[tuple[T, R]]:
         """Run bounded resumable jobs; yielded delays never occupy workers.
 
@@ -320,6 +321,10 @@ class BoundedScheduler(Generic[T, R]):
                     elif not exhausted and len(states) < self.max_inflight:
                         try:
                             index, item = next(source)
+                        except queue.Empty:
+                            if not poll_source:
+                                raise
+                            break
                         except StopIteration:
                             exhausted = True
                             continue
@@ -348,6 +353,9 @@ class BoundedScheduler(Generic[T, R]):
                 else:
                     heapq.heappush(parked, (time.monotonic() + max(0.0, float(value)), outcome.index))
         finally:
+            close_source = getattr(items, "close", None)
+            if poll_source and callable(close_source):
+                close_source()
             abandoned.set()
             if finished:
                 pool.close()

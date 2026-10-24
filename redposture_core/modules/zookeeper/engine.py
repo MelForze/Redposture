@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -12,6 +12,8 @@ from ...clients.zookeeper import (
     ZkTransportConfig,
     fingerprint_zookeeper_implementation,
 )
+from ...detection_io import DetectCall as _DetectCall
+from ...detection_io import run_sync as _run_detect_sync
 from . import actions as zookeeper_actions
 
 _ZOOKEEPER_TELEMETRY_FIELDS = (
@@ -176,12 +178,16 @@ def _implementation_detection_payload(
 
 
 def detect_zookeeper_implementation(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    return _run_detect_sync(_detect_zookeeper_implementation_detect_steps(ctx, options))
+
+
+def _detect_zookeeper_implementation_detect_steps(ctx: Any, options: Mapping[str, Any]):
     state = ctx.lifecycle_state
     if not isinstance(state, ZooKeeperImplementationLifecycleState):
         raise TypeError("ZooKeeper implementation lifecycle state is unavailable")
     zookeeper_options = {**options, "transport_config": state.requested_config}
     zookeeper_ctx = replace(ctx, lifecycle_state=state.zookeeper_state)
-    record = zookeeper_actions.detect_zookeeper(zookeeper_ctx, zookeeper_options)
+    record = yield _DetectCall(zookeeper_actions.detect_zookeeper, (zookeeper_ctx, zookeeper_options), {})
     if not bool(record.get("is_zookeeper")):
         payload = _implementation_detection_payload(
             ctx,
@@ -196,43 +202,43 @@ def detect_zookeeper_implementation(ctx: Any, options: Mapping[str, Any]) -> dic
             if field_name in record:
                 payload[field_name] = record[field_name]
         return payload
-
     selected_config = state.zookeeper_state.selected_transport_config
     selected_transport = (
         selected_config.mode
         if selected_config is not None and selected_config.mode in {"plaintext", "tls"}
         else "plaintext"
     )
-    fingerprint = options["fingerprint_cache"].get_or_probe(
+    fingerprint = yield _DetectCall(
+        _fingerprint_cached,
         (
-            str(ctx.host),
-            int(ctx.port),
-            selected_transport,
-            bool(state.requested_config.insecure),
-            state.requested_config.ca_file,
-            state.requested_config.cert_file,
-            state.requested_config.key_file,
-        ),
-        lambda selected=selected_transport: fingerprint_zookeeper_implementation(
+            options["fingerprint_cache"],
+            (
+                str(ctx.host),
+                int(ctx.port),
+                selected_transport,
+                bool(state.requested_config.insecure),
+                state.requested_config.ca_file,
+                state.requested_config.cert_file,
+                state.requested_config.key_file,
+            ),
             str(ctx.host),
             int(ctx.port),
             float(getattr(ctx.args, "timeout", 5.0)),
-            transport=selected,
-            config=selected_config or replace(state.requested_config, mode=selected),
         ),
+        {
+            "transport": selected_transport,
+            "config": selected_config or replace(state.requested_config, mode=selected_transport),
+        },
     )
     virtual_probe: ZkKeeperVirtualProbe | None = None
     if fingerprint.is_keeper is None and state.zookeeper_state.anonymous_client is not None:
         try:
-            virtual_probe = state.zookeeper_state.anonymous_client.probe_keeper_virtual_nodes()
+            virtual_probe = yield _DetectCall(state.zookeeper_state.anonymous_client.probe_keeper_virtual_nodes, (), {})
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             virtual_probe = ZkKeeperVirtualProbe(confirmed=False, reason=str(exc).strip() or exc.__class__.__name__)
         if virtual_probe.confirmed:
             fingerprint = replace(
-                fingerprint,
-                implementation="clickhouse-keeper",
-                is_keeper=True,
-                confidence="confirmed",
+                fingerprint, implementation="clickhouse-keeper", is_keeper=True, confidence="confirmed"
             )
     state.fingerprint = fingerprint
     record["transport"] = selected_transport
@@ -254,9 +260,7 @@ def detect_zookeeper_implementation(ctx: Any, options: Mapping[str, Any]) -> dic
         else None
     )
     return _decorate_implementation_record(
-        record,
-        fingerprint,
-        service=str(options.get("record_service") or "zookeeper"),
+        record, fingerprint, service=str(options.get("record_service") or "zookeeper")
     )
 
 
@@ -355,3 +359,26 @@ __all__ = [
     "probe_zookeeper_implementation_capabilities",
     "enforce_expected_implementation",
 ]
+
+
+# Exact synchronous wrappers are the compatibility/override identities.
+_ASYNC_RETAINED_STEPS: dict[Callable[..., Any], Callable[..., Any]] = {
+    detect_zookeeper_implementation: _detect_zookeeper_implementation_detect_steps,
+}
+
+
+def _fingerprint_cached(cache: Any, key: tuple[Any, ...], *args: Any, **kwargs: Any) -> ZkImplementationFingerprint:
+    return cache.get_or_probe(key, lambda: fingerprint_zookeeper_implementation(*args, **kwargs))
+
+
+def _fingerprint_cached_detect_steps(cache: Any, key: tuple[Any, ...], *args: Any, **kwargs: Any) -> Any:
+    from ...clients.async_http_detect import AsyncHttpFallback
+    from ...clients.async_retained_socket import FingerprintRead
+    from .types import ZooKeeperFingerprintCache
+
+    if not isinstance(cache, ZooKeeperFingerprintCache):
+        raise AsyncHttpFallback("custom fingerprint cache")
+    return (yield FingerprintRead(cache, key, fingerprint_zookeeper_implementation, args, kwargs))
+
+
+_ASYNC_RETAINED_STEPS[_fingerprint_cached] = _fingerprint_cached_detect_steps

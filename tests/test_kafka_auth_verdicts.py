@@ -151,6 +151,6 @@ def test_pair_colors_follow_airflow_and_no_color_is_plain(capsys, marker):
     )
     airflow = capsys.readouterr().out
     for text in (kafka, airflow):
-        assert ("\x1b[1;91m[-]" if marker == "[-]" else "\x1b[1;92m[+]") in text
+        assert ("\x1b[1;38;5;196m[-]" if marker == "[-]" else "\x1b[1;92m[+]") in text
     actions._render_colored_kafka_line(Console(no_color=True), f"KAFKA\tlocalhost\t9092\t {marker} admin:qa-secret")
     assert "\x1b" not in capsys.readouterr().out

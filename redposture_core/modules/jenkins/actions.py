@@ -17,6 +17,7 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...clients.scoped_http import ScopedHttpClient
+from ...detection_steps import DetectionRequests, run_requests
 
 _VERSION = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
 _MAX_JOBS = 200
@@ -134,22 +135,26 @@ def _confirmed_base(
 
 def detect_record(ctx: Any) -> dict[str, Any]:
     client = _client(ctx, allow_cross_origin_redirects=True)
+    return run_requests(detect_requests(ctx), lambda base, path: _get(client, base, path))
+
+
+def detect_requests(ctx: Any) -> DetectionRequests:
     probable = False
     transport_ok = False
     signals: list[str] = []
     for index, scheme in enumerate(_scheme_order(ctx)):
         base = _base(ctx, scheme)
-        root = _get(client, base, "/")
-        api = _get(client, base, "/api/json?tree=_class,jobs[name],mode,nodeDescription")
+        root = yield (base, "/")
+        api = yield (base, "/api/json?tree=_class,jobs[name],mode,nodeDescription")
         api_data = _json_object(api)
         api_ok = _jenkins_api(api_data)
         version = next((text for item in (root, api) if _VERSION.fullmatch(text := _header(item, "X-Jenkins"))), None)
         # The API shape and version header already satisfy the existing
         # independent-signal rule. Only fetch further evidence when needed.
-        who = None if api_ok and version else _get(client, base, "/whoAmI/api/json")
+        who = None if api_ok and version else (yield (base, "/whoAmI/api/json"))
         who_data = _json_object(who) if who is not None else None
         who_ok = _whoami(who_data)
-        login = None if api_ok and version else _get(client, base, "/login")
+        login = None if api_ok and version else (yield (base, "/login"))
         responses = tuple(item for item in (root, api, who, login) if item is not None)
         transport_ok |= any(item.status > 0 for item in responses)
         version = next((text for item in responses if _VERSION.fullmatch(text := _header(item, "X-Jenkins"))), None)
@@ -200,6 +205,9 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         "detection_status": status,
         "detection_signals": list(dict.fromkeys(signals)),
     }
+
+
+_SYNC_DETECT_RECORD = detect_record
 
 
 def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
@@ -256,6 +264,8 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         else "identity unavailable or Basic authentication not supported"
     )
     if verified:
+        if not result.get("version") and _VERSION.fullmatch(version := _header(identity, "X-Jenkins")):
+            result["version"] = version
         jobs_response = _get(client, base, "/api/json?tree=jobs[name]", _basic(username, secret))
         jobs = _entries(_json_object(jobs_response), "jobs")
         result["credential_jobs_access"] = (
@@ -309,6 +319,15 @@ def _busy_executors(node: dict[str, Any]) -> int | None:
 def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     result = dict(prior)
     args = ctx.args
+    discover = bool(getattr(args, "discover", False))
+
+    def incomplete(reason: str, resource: str = "jobs") -> None:
+        result[resource + "_partial"] = True
+        result.setdefault(resource + "_errors", []).append(reason)
+        if discover:
+            result["job_discovery_partial"] = True
+            result.setdefault("discovery_errors", []).append(reason)
+
     show_artifacts = bool(getattr(args, "show_artifacts", False))
     show_builds = bool(getattr(args, "show_builds", False) or show_artifacts)
     show_jobs = bool(getattr(args, "show_jobs", False) or show_builds)
@@ -333,6 +352,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         jobs = _entries(_json_object(response), "jobs")
         if jobs is None:
             result["jobs_access"] = "denied" if response.status in {401, 403} else "unknown"
+            incomplete("jobs list unavailable")
         else:
             selected = sorted(
                 {
@@ -343,7 +363,9 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             result["jobs"] = [{"name": item["name"], "color": item.get("color")} for item in selected]
             result["jobs_access"] = "allowed"
             result["jobs_count"] = len(jobs)
-            if bool(getattr(args, "discover", False)):
+            if discover:
+                if len(jobs) > len(selected) or len(selected) > 20:
+                    incomplete("job discovery item limit reached")
                 job_configs: list[dict[str, Any]] = []
                 build_logs: list[dict[str, Any]] = []
                 build_envs: list[dict[str, Any]] = []
@@ -353,18 +375,30 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                     config_response = _get(client, base, path + "/config.xml", basic)
                     if config_response.status == 200 and not config_response.error and not config_response.truncated:
                         job_configs.append({"job": job_name, "config": config_response.text[:65536]})
+                        if len(config_response.text) > 65536:
+                            incomplete(f"{job_name}: config text truncated at 65536 characters")
+                    else:
+                        incomplete(f"{job_name}: config unavailable (HTTP {config_response.status})")
                     last = item.get("lastBuild")
                     number = last.get("number") if isinstance(last, dict) else None
                     if isinstance(number, int) and not isinstance(number, bool):
                         log_response = _get(client, base, path + f"/{number}/consoleText", basic)
                         if log_response.status == 200 and not log_response.error and not log_response.truncated:
                             build_logs.append({"job": job_name, "build": number, "log": log_response.text[:65536]})
+                            if len(log_response.text) > 65536:
+                                incomplete(f"{job_name}/{number}: console text truncated at 65536 characters")
+                        else:
+                            incomplete(f"{job_name}/{number}: console unavailable (HTTP {log_response.status})")
                         env_response = _get(client, base, path + f"/{number}/injectedEnvVars/api/json", basic)
                         env_data = _json_object(env_response)
                         if env_data is not None:
                             env_map = env_data.get("envMap")
                             if isinstance(env_map, dict):
                                 build_envs.append({"job": job_name, "build": number, "env": env_map})
+                            else:
+                                incomplete(f"{job_name}/{number}: invalid environment map")
+                        else:
+                            incomplete(f"{job_name}/{number}: environment unavailable (HTTP {env_response.status})")
                 result["job_configs"] = job_configs
                 result["build_logs"] = build_logs
                 result["build_envs"] = build_envs
@@ -376,13 +410,25 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 for item in selected:
                     path = "/job/" + quote(str(item["name"]), safe="")
                     build_fields = (
-                        "number,result,artifacts[fileName,relativePath]" if show_artifacts else "number,result"
+                        "number,result,building,artifacts[fileName,relativePath]"
+                        if show_artifacts
+                        else "number,result,building"
                     )
                     detail = _get(client, base, path + f"/api/json?tree=builds[{build_fields}]{{0,{per_job}}}", basic)
-                    for build in _entries(_json_object(detail), "builds") or []:
+                    child_builds = _entries(_json_object(detail), "builds")
+                    if child_builds is None:
+                        incomplete(f"{item['name']}: build list unavailable (HTTP {detail.status})", "builds")
+                        if show_artifacts:
+                            incomplete(f"{item['name']}: artifact build list unavailable", "artifacts")
+                    for build in child_builds or []:
                         if isinstance(build.get("number"), int) and not isinstance(build.get("number"), bool):
                             builds.append(
-                                {"job": item["name"], "number": build["number"], "result": build.get("result")}
+                                {
+                                    "job": item["name"],
+                                    "number": build["number"],
+                                    "result": build.get("result"),
+                                    **({"building": build["building"]} if type(build.get("building")) is bool else {}),
+                                }
                             )
                             if show_artifacts:
                                 for artifact in _entries(build, "artifacts") or []:

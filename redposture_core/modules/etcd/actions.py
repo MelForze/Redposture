@@ -26,6 +26,7 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
+from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
@@ -212,13 +213,31 @@ def _http_json_request(
     auth_token: str | None = None,
     basic_auth: tuple[str, str] | None = None,
 ) -> tuple[int, str]:
+    return run_sync(
+        _detect_http_json_request_steps(
+            host, port, method, path, timeout, payload=payload, auth_token=auth_token, basic_auth=basic_auth
+        )
+    )
+
+
+def _detect_http_json_request_steps(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    payload: dict[str, Any] | None = None,
+    auth_token: str | None = None,
+    basic_auth: tuple[str, str] | None = None,
+) -> Any:
     lifecycle = getattr(_ETCD_HTTP_LOCAL, "state", None)
     request_host = lifecycle.host or str(host) if isinstance(lifecycle, _EtcdHttpLifecycle) else str(host)
     request_port = lifecycle.port or int(port) if isinstance(lifecycle, _EtcdHttpLifecycle) else int(port)
     scheme = (
         lifecycle.scheme
         if isinstance(lifecycle, _EtcdHttpLifecycle) and lifecycle.scheme in {"http", "https"}
-        else resolve_http_scheme(host, port, timeout, probe_path="/version")
+        else (yield DetectCall(resolve_http_scheme, (host, port, timeout), {"probe_path": "/version"}))
         if not isinstance(lifecycle, _EtcdHttpLifecycle)
         else None
     )
@@ -279,18 +298,24 @@ def _http_json_request(
                 override_bound_scheme=True,
             )
             if isinstance(lifecycle, _EtcdHttpLifecycle):
-                response = lifecycle.pool.request(
+                response = yield HttpRead(
+                    lifecycle.pool,
                     method,
                     url,
-                    headers=headers,
-                    body=body_bytes,
-                    timeout=timeout,
-                    response_size_cap=response_cap,
-                    replay_safe=method.upper() in {"GET", "HEAD"},
+                    {
+                        "headers": headers,
+                        "body": body_bytes,
+                        "timeout": timeout,
+                        "response_size_cap": response_cap,
+                        "replay_safe": method.upper() in {"GET", "HEAD"},
+                    },
+                    readonly_post=method.upper() == "POST" and requested_path in {"/v3/auth/status", "/v3/kv/range"},
                 )
             else:
                 assert client is not None
-                response = client.request(method, url, headers=headers, body=body_bytes, timeout=timeout)
+                response = yield DetectCall(
+                    client.request, (method, url), {"headers": headers, "body": body_bytes, "timeout": timeout}
+                )
             if response.error is None and not (
                 candidate_scheme == "http"
                 and http_response_requires_https(
@@ -743,6 +768,45 @@ def _audit_etcd_host(
     defcreds: bool = False,
     credential_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    return run_sync(
+        _detect_audit_etcd_host_steps(
+            host,
+            port,
+            timeout,
+            retries,
+            show_keys,
+            dump_keys,
+            query_key,
+            show_keys_limit,
+            dump_keys_limit,
+            dump_batch,
+            dump_delay,
+            username=username,
+            password=password,
+            defcreds=defcreds,
+            credential_candidates=credential_candidates,
+        )
+    )
+
+
+def _detect_audit_etcd_host_steps(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    show_keys: bool,
+    dump_keys: bool,
+    query_key: str | None,
+    show_keys_limit: int | None = None,
+    dump_keys_limit: int | None = None,
+    dump_batch: int = 10000,
+    dump_delay: int = 20,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    defcreds: bool = False,
+    credential_candidates: list[dict[str, Any]] | None = None,
+) -> Any:
     attempts = max(1, retries + 1)
     last_error: str | None = None
     normalized_candidates = _build_etcd_credential_candidates(
@@ -760,7 +824,9 @@ def _audit_etcd_host(
     for attempt in range(attempts):
         started = time.monotonic()
         try:
-            version_status, version_body = _http_json_request(host, port, "GET", "/version", timeout)
+            version_status, version_body = yield DetectCall(
+                _http_json_request, (host, port, "GET", "/version", timeout), {}
+            )
             version_json = _load_json(version_body)
 
             server_version: str | None = None
@@ -777,7 +843,9 @@ def _audit_etcd_host(
             key_count_v2_error: str | None = None
             v2_error: str | None = None
 
-            v2_status, v2_body = _http_json_request(host, port, "GET", "/v2/keys?recursive=true", timeout)
+            v2_status, v2_body = yield DetectCall(
+                _http_json_request, (host, port, "GET", "/v2/keys?recursive=true", timeout), {}
+            )
             v2_json = _load_json(v2_body)
             v2_shape_valid = _looks_like_v2_keys_response(v2_body) or (
                 is_etcd and isinstance(v2_json, dict) and isinstance(v2_json.get("node"), dict)
@@ -800,7 +868,9 @@ def _audit_etcd_host(
             v3_error: str | None = None
 
             if v3_supported:
-                auth_status, auth_body = _http_json_request(host, port, "POST", "/v3/auth/status", timeout, payload={})
+                auth_status, auth_body = yield DetectCall(
+                    _http_json_request, (host, port, "POST", "/v3/auth/status", timeout), {"payload": {}}
+                )
                 auth_json = _load_json(auth_body)
                 if auth_status == 200 and isinstance(auth_json, dict) and isinstance(auth_json.get("enabled"), bool):
                     v3_auth_required = bool(auth_json.get("enabled"))
@@ -808,16 +878,15 @@ def _audit_etcd_host(
                     v3_auth_required = True
 
                 if v3_auth_required is None or v3_auth_required is False:
-                    range_status, range_body = _http_json_request(
-                        host,
-                        port,
-                        "POST",
-                        "/v3/kv/range",
-                        timeout,
-                        payload={
-                            "key": _ETCD_V3_ALL_RANGE_KEY_B64,
-                            "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
-                            "count_only": True,
+                    range_status, range_body = yield DetectCall(
+                        _http_json_request,
+                        (host, port, "POST", "/v3/kv/range", timeout),
+                        {
+                            "payload": {
+                                "key": _ETCD_V3_ALL_RANGE_KEY_B64,
+                                "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
+                                "count_only": True,
+                            }
                         },
                     )
                     if range_status == 200:
@@ -925,13 +994,10 @@ def _audit_etcd_host(
                         break
 
             if v2_basic_auth is not None:
-                v2_status, v2_body = _http_json_request(
-                    host,
-                    port,
-                    "GET",
-                    "/v2/keys?recursive=true",
-                    timeout,
-                    basic_auth=v2_basic_auth,
+                v2_status, v2_body = yield DetectCall(
+                    _http_json_request,
+                    (host, port, "GET", "/v2/keys?recursive=true", timeout),
+                    {"basic_auth": v2_basic_auth},
                 )
                 if v2_status == 200 and _count_v2_keys(v2_body) is not None:
                     key_count_v2 = _count_v2_keys(v2_body)
@@ -942,18 +1008,17 @@ def _audit_etcd_host(
             # If we successfully authenticated, re-run the /v3/kv/range probe with
             # the token so downstream key enumeration reflects post-auth state.
             if auth_token is not None:
-                range_status, range_body = _http_json_request(
-                    host,
-                    port,
-                    "POST",
-                    "/v3/kv/range",
-                    timeout,
-                    payload={
-                        "key": _ETCD_V3_ALL_RANGE_KEY_B64,
-                        "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
-                        "count_only": True,
+                range_status, range_body = yield DetectCall(
+                    _http_json_request,
+                    (host, port, "POST", "/v3/kv/range", timeout),
+                    {
+                        "payload": {
+                            "key": _ETCD_V3_ALL_RANGE_KEY_B64,
+                            "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
+                            "count_only": True,
+                        },
+                        "auth_token": auth_token,
                     },
-                    auth_token=auth_token,
                 )
                 if range_status == 200:
                     v3_auth_required = True  # confirmed auth-gated
@@ -1187,7 +1252,7 @@ def _audit_etcd_host(
             last_error = _friendly_error_from_exception(exc)
             if attempt >= attempts - 1:
                 break
-            time.sleep(_retry_delay(attempt))
+            (yield DetectDelay(_retry_delay(attempt)))
 
     return {
         "timestamp": utc_now_iso(),
@@ -1469,7 +1534,7 @@ def _render_colored_etcd_line(console: Console, line: str) -> bool:
         console,
         line,
         tag="ETCD",
-        counts=(CountColorRule("keys", "red", unknown_color="orange", zero_color="bright_green"),),
+        counts=(CountColorRule("keys", "true_red", unknown_color="orange", zero_color="bright_green"),),
     ):
         return True
     if line.startswith("ETCD") and "\t" in line:
@@ -1500,6 +1565,55 @@ def _call_audit_etcd_host_with_stage_debug(
     target_spec: Any | None = None,
     proxy: Any | None = None,
 ) -> dict[str, Any]:
+    return run_sync(
+        _detect_call_audit_etcd_host_with_stage_debug_steps(
+            host,
+            port,
+            timeout,
+            retries,
+            show_keys,
+            dump_keys,
+            query_key,
+            show_keys_limit,
+            dump_keys_limit,
+            dump_batch,
+            dump_delay,
+            username=username,
+            password=password,
+            defcreds=defcreds,
+            credential_candidates=credential_candidates,
+            run_deep_checks=run_deep_checks,
+            debug=debug,
+            debug_emit=debug_emit,
+            target_spec=target_spec,
+            proxy=proxy,
+        )
+    )
+
+
+def _detect_call_audit_etcd_host_with_stage_debug_steps(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    show_keys: bool,
+    dump_keys: bool,
+    query_key: str | None,
+    show_keys_limit: int | None = None,
+    dump_keys_limit: int | None = None,
+    dump_batch: int = 10000,
+    dump_delay: int = 20,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    defcreds: bool = False,
+    credential_candidates: list[dict[str, Any]] | None = None,
+    run_deep_checks: bool,
+    debug: bool,
+    debug_emit: Callable[[str], None] | None,
+    target_spec: Any | None = None,
+    proxy: Any | None = None,
+) -> Any:
     started = time.monotonic()
     audit_limit_kwargs: dict[str, Any] = (
         {"show_keys_limit": show_keys_limit if run_deep_checks else None} if show_keys_limit is not None else {}
@@ -1521,7 +1635,7 @@ def _call_audit_etcd_host_with_stage_debug(
     # `_audit_etcd_host` owns the command retry budget. The reusable transport
     # must not retry again inside every outer attempt (which would square the
     # number of sockets and TLS handshakes).
-    transport_state = _EtcdHttpLifecycle(
+    transport_state = getattr(_ETCD_HTTP_LOCAL, "native_state", None) or _EtcdHttpLifecycle(
         pool=HttpSessionPool(timeout=timeout, insecure=True, proxy=proxy),
         scheme=target_scheme if target_scheme in {"http", "https"} else None,
         host=str(host),
@@ -1531,15 +1645,18 @@ def _call_audit_etcd_host_with_stage_debug(
     with http_target_context(target_spec, api_prefixes=("/version", "/v2", "/v3", "/v3beta", "/v3alpha")):
         try:
             try:
-                record = _audit_etcd_host(
-                    host,
-                    port,
-                    timeout,
-                    retries,
-                    show_keys if run_deep_checks else False,
-                    dump_keys if run_deep_checks else False,
-                    query_key if run_deep_checks else None,
-                    **audit_kwargs,
+                record = yield DetectCall(
+                    _audit_etcd_host,
+                    (
+                        host,
+                        port,
+                        timeout,
+                        retries,
+                        show_keys if run_deep_checks else False,
+                        dump_keys if run_deep_checks else False,
+                        query_key if run_deep_checks else None,
+                    ),
+                    {**audit_kwargs},
                 )
             except TypeError as exc:
                 # Backward-compat: tests patch _audit_etcd_host with a legacy signature.
@@ -1550,15 +1667,18 @@ def _call_audit_etcd_host_with_stage_debug(
                     raise
                 for legacy_key in ("username", "password", "defcreds", "credential_candidates"):
                     audit_kwargs.pop(legacy_key, None)
-                record = _audit_etcd_host(
-                    host,
-                    port,
-                    timeout,
-                    retries,
-                    show_keys if run_deep_checks else False,
-                    dump_keys if run_deep_checks else False,
-                    query_key if run_deep_checks else None,
-                    **audit_kwargs,
+                record = yield DetectCall(
+                    _audit_etcd_host,
+                    (
+                        host,
+                        port,
+                        timeout,
+                        retries,
+                        show_keys if run_deep_checks else False,
+                        dump_keys if run_deep_checks else False,
+                        query_key if run_deep_checks else None,
+                    ),
+                    {**audit_kwargs},
                 )
         finally:
             transport_state.pool.close()
@@ -1612,3 +1732,10 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_etcd_host_with_stage_debug
+
+
+_ASYNC_DETECT_STEPS: dict[Any, Any] = {
+    _call_audit_etcd_host_with_stage_debug: _detect_call_audit_etcd_host_with_stage_debug_steps,
+    _audit_etcd_host: _detect_audit_etcd_host_steps,
+    _http_json_request: _detect_http_json_request_steps,
+}

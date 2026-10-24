@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from .clients.tls_cache import shared_client_ssl_context
 
@@ -264,6 +264,16 @@ def _host_port_for_connect(host: str, port: int) -> str:
     return f"{host}:{port}"
 
 
+class _TunnelHeadersSocket:
+    """Expose an unbuffered header reader without consuming tunnel payload."""
+
+    def __init__(self, transport: socket.socket) -> None:
+        self.transport = transport
+
+    def makefile(self, mode: Literal["rb"]) -> Any:
+        return self.transport.makefile(mode, buffering=0)
+
+
 def _http_open_tunnel(
     proxy: ProxyConfig,
     target_host: str,
@@ -290,10 +300,16 @@ def _http_open_tunnel(
         lines.extend(["", ""])
         transport.sendall("\r\n".join(lines).encode("utf-8", errors="replace"))
 
-        response = http.client.HTTPResponse(transport)
-        response.begin()
-        if int(response.status) != 200:
-            raise OSError(f"http proxy connect failed (status={int(response.status)})")
+        response = http.client.HTTPResponse(cast(Any, _TunnelHeadersSocket(transport)))
+        try:
+            response.begin()
+            if int(response.status) != 200:
+                raise OSError(f"http proxy connect failed (status={int(response.status)})")
+        finally:
+            # Closes only the makefile reference; transport stays owned by
+            # the caller. Buffered HTTPResponse readers can swallow a server
+            # greeting delivered in the same packet as the CONNECT headers.
+            response.close()
         return transport
     except Exception:
         try:

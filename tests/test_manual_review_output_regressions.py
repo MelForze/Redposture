@@ -66,7 +66,9 @@ def test_console_alignment_does_not_touch_structured_or_run_output(line, capsys)
     assert capsys.readouterr().out == line + "\n"
 
 
-@pytest.mark.parametrize("transport,boolean,color", [("tls", "True", "bright_green"), ("plaintext", "False", "red")])
+@pytest.mark.parametrize(
+    "transport,boolean,color", [("tls", "True", "bright_green"), ("plaintext", "False", "true_red")]
+)
 def test_kafka_detection_uses_consistent_boolean_spelling_and_colors(transport, boolean, color) -> None:
     line = kafka._format_detect_record(
         {"host": "127.0.0.1", "port": 9092, "is_kafka": True, "auth_required": True, "transport_mode": transport},
@@ -98,7 +100,7 @@ def test_oracle_auth_required_is_only_in_detection_and_json_is_unchanged() -> No
     assert "[!] connection failed" in oracle._format_record({**record, "status": "fail"}, "txt")
 
 
-@pytest.mark.parametrize("count,color", [(0, "bright_green"), (1, "red"), (20, "red")])
+@pytest.mark.parametrize("count,color", [(0, "bright_green"), (1, "true_red"), (20, "true_red")])
 def test_oracle_listener_counters_are_colored(count, color) -> None:
     line = f"ORACLE\t127.0.0.1\t1521\t [*] Listener Targets (available:{count} total:{count})"
     console = RecordingConsole()
@@ -199,9 +201,7 @@ RESOURCE_COUNTERS = [
 
 
 @pytest.mark.parametrize("module,field", RESOURCE_COUNTERS)
-@pytest.mark.parametrize(
-    "value,colors", [("0", {"green", "bright_green"}), ("2", {"red", "true_red"}), ("unknown", {"orange"})]
-)
+@pytest.mark.parametrize("value,colors", [("0", {"bright_green"}), ("2", {"true_red"}), ("unknown", {"orange"})])
 def test_resource_counter_colors_are_consistent_across_modules(module, field, value, colors) -> None:
     args = parse_args([module, "-t", "127.0.0.1"])
     package = module.replace("-", "_")
@@ -228,9 +228,7 @@ DETAIL_COUNTERS = [
 
 
 @pytest.mark.parametrize("module,field", DETAIL_COUNTERS)
-@pytest.mark.parametrize(
-    "value,colors", [("0", {"green", "bright_green"}), ("2", {"red", "true_red"}), ("unknown", {"orange"})]
-)
+@pytest.mark.parametrize("value,colors", [("0", {"bright_green"}), ("2", {"true_red"}), ("unknown", {"orange"})])
 def test_resource_counters_in_details_are_colored(module, field, value, colors) -> None:
     args = parse_args([module, "-t", "127.0.0.1"])
     package = module.replace("-", "_")

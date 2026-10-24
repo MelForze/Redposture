@@ -1836,7 +1836,7 @@ def test_render_colored_registry_line_paths() -> None:
     )
     assert console.lines
     assert "cyan" in console.lines[0]
-    assert "red" in console.lines[0]
+    assert "true_red" in console.lines[0]
     assert registry._render_colored_registry_line(console, "OTHER\tline") is False
 
 

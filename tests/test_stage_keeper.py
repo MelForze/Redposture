@@ -330,8 +330,9 @@ def test_keeper_unknown_credential_color_and_plain_output(capsys: pytest.Capture
     assert ("admin:wrong", "white") in painted.colors
     denied_line = "KEEPER\t127.0.0.1\t9181\t [-] admin:wrong (no access to protected znodes; credentials unverified)"
     assert keeper_stage.render._render_colored_keeper_line(painted, denied_line)
-    assert ("[-]", "red") in painted.colors
-    assert ("admin:wrong (", "white") in painted.colors
+    assert ("[-]", "true_red") in painted.colors
+    assert ("admin:wrong", "white") in painted.colors
+    assert (" (", "white") in painted.colors
     assert ("no access to protected znodes; credentials unverified", "orange") in painted.colors
     unavailable_line = (
         "KEEPER\t127.0.0.1\t9181\t [-] credential verification unavailable (no protected znodes for verification)"
@@ -421,7 +422,7 @@ def test_keeper_ddl_probe_malformed_read_result_does_not_hide_service() -> None:
 @pytest.mark.parametrize(
     ("status", "color"),
     [
-        ("Write", "red"),
+        ("Write", "true_red"),
         ("Read", "orange"),
         ("Denied", "bright_green"),
         ("Absent", "bright_green"),

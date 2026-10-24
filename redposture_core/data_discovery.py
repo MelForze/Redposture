@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -27,6 +28,13 @@ DISCOVERY_MODULES = frozenset(
         "vault",
         "nomad",
         "jupyter",
+        "spark",
+        "yarn",
+        "portainer",
+        "gitlab",
+        "harbor",
+        "nexus",
+        "docker-registry",
     }
 )
 _FIELDS: dict[str, tuple[str, ...]] = {
@@ -45,6 +53,36 @@ _FIELDS: dict[str, tuple[str, ...]] = {
     "vault": ("kv_dump_items",),
     "nomad": ("job_specs",),
     "jupyter": ("notebook_contents",),
+    "spark": ("spark_metadata",),
+    "yarn": ("app_specs",),
+    "portainer": ("portainer_metadata",),
+}
+_INCOMPLETE_SOURCE_FIELDS: dict[str, tuple[str, ...]] = {
+    "kafka": (
+        "dump_partial",
+        "dump_error",
+        "dump_errors",
+        "topic_read_error",
+        "ui_dump_partial",
+        "ui_dump_limit_reduced",
+    ),
+    "redis": ("dump_partial", "dump_error", "keys_truncated"),
+    "etcd": ("dump_partial", "dump_error", "keys_truncated"),
+    "consul": ("kv_dump_error",),
+    "mongodb": ("dump_partial", "dump_error", "dump_errors", "collections_truncated"),
+    "postgres": ("dump_partial", "dump_error", "dump_errors", "tables_truncated"),
+    "zookeeper": ("dump_partial", "dump_error", "znodes_truncated", "query_znode_dump_error"),
+    "keeper": ("dump_partial", "dump_error", "znodes_truncated", "query_znode_dump_error"),
+    "qdrant": ("payload_discovery_partial", "payload_discovery_errors", "collection_dump_error"),
+    "oracle": ("dump_partial", "dump_error", "tables_truncated", "discover_partial"),
+    "kubeapi": ("secrets_partial", "secrets_error", "configmaps_partial", "configmaps_error"),
+    "jenkins": ("job_discovery_partial",),
+    "vault": ("kv_discovery_partial",),
+    "nomad": ("job_discovery_partial",),
+    "jupyter": ("content_discovery_partial", "contents_partial", "contents_error"),
+    "spark": ("content_discovery_partial",),
+    "yarn": ("app_discovery_partial",),
+    "portainer": ("content_discovery_partial",),
 }
 _MAX_BYTES = 50 * 1024 * 1024
 _MAX_SECONDS = 300.0
@@ -98,8 +136,8 @@ _IMPLICIT_DUMP_FIELDS: dict[str, tuple[str, ...]] = {
     "consul": ("kv_dump_items", "kv_dump_error"),
     "mongodb": ("documents", "dump_safety_limit"),
     "postgres": ("table_dumps", "dump_row_limit"),
-    "zookeeper": ("znode_values", "dump_error", "dump_ms"),
-    "keeper": ("znode_values", "dump_error", "dump_ms"),
+    "zookeeper": ("znode_values", "znode_dump_items", "dump_error", "dump_ms"),
+    "keeper": ("znode_values", "znode_dump_items", "dump_error", "dump_ms"),
     "qdrant": ("collection_dump_items", "collection_dump_error", "payload_discovery_items"),
     "oracle": ("rows",),
 }
@@ -116,9 +154,14 @@ def project_discovery_output(args: Any, record: Mapping[str, Any]) -> dict[str, 
     module = str(getattr(args, "command", "") or "")
     if module not in DISCOVERY_MODULES or not bool(getattr(args, "discover", False)):
         return payload
-    for field in {"vault": ("kv_dump_items",), "nomad": ("job_specs",), "jupyter": ("notebook_contents",)}.get(
-        module, ()
-    ):
+    for field in {
+        "vault": ("kv_dump_items",),
+        "nomad": ("job_specs",),
+        "jupyter": ("notebook_contents",),
+        "spark": ("spark_metadata",),
+        "yarn": ("app_specs",),
+        "portainer": ("portainer_metadata",),
+    }.get(module, ()):
         payload.pop(field, None)
 
     if bool(getattr(args, "_discover_implicit_dump", False)):
@@ -249,6 +292,13 @@ def _items(module: str, record: Mapping[str, Any]) -> Iterable[tuple[str, Any]]:
                     yield f"{path}.{source_key}", item.get(source_key)
             continue
         if field == "znode_values" and isinstance(value, list):
+            structured = record.get("znode_dump_items")
+            if isinstance(structured, list):
+                for item in structured:
+                    if isinstance(item, Mapping) and isinstance(item.get("path"), str) and not item.get("error"):
+                        path = item["path"]
+                        yield f"znode.{path}", {path.rsplit("/", 1)[-1]: item.get("value")}
+                continue
             for item in value:
                 if isinstance(item, str) and ":" in item:
                     path, content = item.split(":", 1)
@@ -263,6 +313,50 @@ def _items(module: str, record: Mapping[str, Any]) -> Iterable[tuple[str, Any]]:
         yield field, value
 
 
+def _minimum_json_size(value: Any, limit: int) -> int:
+    """Cheap lower bound that rejects large strings before JSON copies them."""
+    pending = [value]
+    visited: set[int] = set()
+    size = 0
+    while pending and size <= limit:
+        item = pending.pop()
+        if isinstance(item, str):
+            size += len(item) + 2
+        elif isinstance(item, (dict, list, tuple)):
+            if id(item) in visited:
+                continue
+            visited.add(id(item))
+            size += 2
+            if isinstance(item, dict):
+                for key, child in item.items():
+                    size += len(key) + 3 if isinstance(key, str) else 1
+                    pending.append(child)
+                    if size > limit:
+                        return size
+            else:
+                # Do not duplicate a huge container merely to reject it.
+                size += max(0, len(item) - 1)
+                if size > limit:
+                    return size
+                pending.extend(item)
+        else:
+            size += 1
+    return size
+
+
+def _bounded_json_size(value: Any, limit: int) -> int | None:
+    if _minimum_json_size(value, limit) > limit:
+        return None
+    size = 0
+    for chunk in json.JSONEncoder(ensure_ascii=False, default=str).iterencode(value):
+        if len(chunk) > limit - size:
+            return None
+        size += len(chunk.encode("utf-8"))
+        if size > limit:
+            return None
+    return size
+
+
 def inspect_record(
     module: str, record: Mapping[str, Any], *, max_bytes: int = _MAX_BYTES, max_seconds: float = _MAX_SECONDS
 ) -> dict[str, Any]:
@@ -271,24 +365,50 @@ def inspect_record(
     consumed = 0
     findings: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    inspected_source = False
-    status = (
-        "partial"
-        if any(
-            record.get(key)
-            for key in (
-                "payload_discovery_partial",
-                "dump_partial",
-                "znodes_truncated",
-                "secrets_partial",
-                "configmaps_partial",
-                "kv_discovery_partial",
-                "job_discovery_partial",
-                "content_discovery_partial",
+    source_present = any(record.get(field) is not None for field in _FIELDS.get(module, ()))
+    partial_reasons = [key for key in _INCOMPLETE_SOURCE_FIELDS.get(module, ()) if record.get(key)]
+    if module == "kafka":
+        message_cap = record.get("max_messages")
+        results = record.get("dump_results")
+        if (
+            isinstance(message_cap, int)
+            and not isinstance(message_cap, bool)
+            and message_cap > 0
+            and isinstance(results, Mapping)
+            and any(isinstance(messages, list) and len(messages) >= message_cap for messages in results.values())
+        ):
+            # Reaching a client-side cap does not prove that the topic's high
+            # watermark was reached; the coverage object only counts topics.
+            partial_reasons.append("message_limit_reached")
+    elif module == "mongodb":
+        document_cap = record.get("dump_limit") or record.get("dump_safety_limit")
+        documents = record.get("documents")
+        if (
+            isinstance(document_cap, int)
+            and not isinstance(document_cap, bool)
+            and document_cap > 0
+            and isinstance(documents, list)
+        ):
+            counts = Counter(
+                (doc.get("database"), doc.get("collection")) for doc in documents if isinstance(doc, Mapping)
             )
-        )
-        else "complete"
-    )
+            if any(count >= document_cap for count in counts.values()):
+                partial_reasons.append("document_limit_reached")
+    elif module == "postgres":
+        row_cap = record.get("dump_row_limit")
+        tables = record.get("table_dumps")
+        if (
+            isinstance(row_cap, int)
+            and not isinstance(row_cap, bool)
+            and row_cap > 0
+            and isinstance(tables, list)
+            and any(
+                isinstance(table, Mapping) and isinstance(table.get("rows"), list) and len(table["rows"]) >= row_cap
+                for table in tables
+            )
+        ):
+            partial_reasons.append("row_limit_reached")
+    status = "partial" if partial_reasons else "complete"
     source = (
         "anonymous"
         if record.get("status") == "open_no_auth" or record.get("anonymous_access") is True
@@ -298,17 +418,19 @@ def inspect_record(
         else "access_unverified"
     )
     for path, value in _items(module, record):
-        inspected_source = True
         if time.monotonic() - started >= max_seconds:
             status = "partial"
+            partial_reasons.append("time_budget")
             break
         try:
-            size = len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+            size = _bounded_json_size(value, max_bytes - consumed)
         except (TypeError, ValueError):
             status = "partial"
+            partial_reasons.append("invalid_source")
             continue
-        if consumed + size > max_bytes:
+        if size is None:
             status = "partial"
+            partial_reasons.append("byte_budget")
             break
         consumed += size
         for match in scan_value(value, object_path=f"$.{path}"):
@@ -326,9 +448,22 @@ def inspect_record(
                     "source": source,
                 }
             )
-    if not inspected_source and status == "complete":
+    if not source_present:
         status = "unavailable"
-    return {"status": status, "bytes_inspected": consumed, "source": source, "findings": findings}
+        partial_reasons.append("no_readable_source")
+    elif module == "kubeapi" and status == "partial":
+        # The API client returns an empty list alongside an error for a denied
+        # resource. That list does not prove that the resource was read.
+        requested = [field for field in _FIELDS["kubeapi"] if record.get(field) is not None]
+        if requested and all(not record.get(field) and record.get(f"{field}_error") for field in requested):
+            status = "unavailable"
+    return {
+        "status": status,
+        "bytes_inspected": consumed,
+        "source": source,
+        "findings": findings,
+        "partial_reasons": list(dict.fromkeys(partial_reasons)),
+    }
 
 
 def render_discovery(module: str, record: Mapping[str, Any]) -> list[str]:
@@ -339,7 +474,18 @@ def render_discovery(module: str, record: Mapping[str, Any]) -> list[str]:
     if not isinstance(findings, list):
         return []
     lines: list[str] = []
-    for finding in findings:
+    pending: Iterable[Any]
+    emitted_fingerprints = data.get("emitted_fingerprints")
+    if isinstance(emitted_fingerprints, list):
+        emitted = {str(value) for value in emitted_fingerprints}
+        pending = (
+            finding
+            for finding in findings
+            if isinstance(finding, Mapping) and str(finding.get("fingerprint")) not in emitted
+        )
+    else:
+        pending = () if data.get("live_emitted") else findings
+    for finding in pending:
         if isinstance(finding, Mapping):
             lines.append(
                 format_discovery_finding_line(
@@ -352,7 +498,13 @@ def render_discovery(module: str, record: Mapping[str, Any]) -> list[str]:
                     place=finding.get("object_path"),
                 )
             )
+    reasons = data.get("partial_reasons")
+    reason_text = (
+        " (reason:" + "; ".join(str(reason) for reason in reasons[:3]) + ")"
+        if isinstance(reasons, list) and reasons
+        else ""
+    )
     lines.append(
-        f"{module.upper()}\t{record.get('host') or '?'}\t{record.get('port') or 0}\t [*] Discover Secrets (status:{data.get('status')}) (findings:{len(findings)}) (source:{data.get('source')})"
+        f"{module.upper()}\t{record.get('host') or '?'}\t{record.get('port') or 0}\t [*] Discover Secrets (status:{data.get('status')}) (findings:{len(findings)}) (source:{data.get('source')}){reason_text}"
     )
     return lines

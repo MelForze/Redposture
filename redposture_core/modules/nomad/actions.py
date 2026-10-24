@@ -3,15 +3,30 @@
 from __future__ import annotations
 
 import hmac
+import re
 import uuid
 from typing import Any
 from urllib.parse import urlencode
 
 from ...clients.http_api import http_response_requires_https
+from ...detection_steps import DetectionRequests, run_requests
 from ..token_api import ReadBudget, access, bases, json_value, path_value, request, safe_path, verdict
 from .types import DetectionStatus
 
 host_stage = None
+
+_VERSION = re.compile(r"v?\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9._-]+)?\Z")
+
+
+def _config_version(config: Any) -> str | None:
+    value = config.get("Version") if isinstance(config, dict) else None
+    if isinstance(value, dict):
+        value = value.get("Version")
+    elif isinstance(value, str) and isinstance(config, dict):
+        prerelease = config.get("VersionPrerelease")
+        if isinstance(prerelease, str) and prerelease and "-" not in value and "+" not in value:
+            value += "-" + prerelease
+    return value if isinstance(value, str) and _VERSION.fullmatch(value) else None
 
 
 def _get(ctx: Any, base: str, path: str, token: str | None = None) -> Any:
@@ -31,14 +46,17 @@ def _job_path(ctx: Any, suffix: str = "", namespace: str | None = None) -> str:
 
 
 def detect_record(ctx: Any) -> dict[str, Any]:
+    return run_requests(detect_requests(ctx), lambda base, path: _get(ctx, base, path))
+
+
+def detect_requests(ctx: Any) -> DetectionRequests:
     reachable = False
     for base in bases(ctx):
-        response = _get(ctx, base, "/v1/agent/self")
+        response = yield (base, "/v1/agent/self")
         reachable |= response.status > 0
         data = json_value(response)
         config = data.get("config") if isinstance(data, dict) else None
-        version_data = config.get("Version") if isinstance(config, dict) else None
-        version = version_data.get("Version") if isinstance(version_data, dict) else None
+        version = _config_version(config)
         acl_data = config.get("ACL") if isinstance(config, dict) else None
         acl = acl_data.get("Enabled") if isinstance(acl_data, dict) else None
         self_shape = (
@@ -47,7 +65,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
             and isinstance(config, dict)
             and (isinstance(data.get("stats"), dict) or type(acl) is bool)
         )
-        leader = _get(ctx, base, "/v1/status/leader")
+        leader = yield (base, "/v1/status/leader")
         leader_value = json_value(leader)
         leader_shape = (
             leader.status == 200 and isinstance(leader_value, str) and (not leader_value or ":" in leader_value)
@@ -55,7 +73,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         nomad_header = any(key.lower().startswith("x-nomad-") for item in (response, leader) for key in item.headers)
         ui_shape = False
         if leader_shape and not (self_shape or nomad_header):
-            ui = _get(ctx, base, "/ui/")
+            ui = yield (base, "/ui/")
             ui_shape = (
                 ui.status == 200
                 and not ui.truncated
@@ -63,7 +81,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
                 and "nomad-ui/config/environment" in ui.text
             )
         if leader_shape and (self_shape or nomad_header or ui_shape):
-            jobs_response = _get(ctx, base, _job_path(ctx))
+            jobs_response = yield (base, _job_path(ctx))
             jobs = json_value(jobs_response)
             allowed = jobs_response.status == 200 and _rows(jobs, "ID")
             required = False if allowed else True if jobs_response.status in {401, 403} else None
@@ -86,6 +104,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
                 "anonymous_access": allowed,
                 "rce_potential": acl is False,
                 "submit_access": "unverified",
+                "submit_probe_requested": bool(getattr(ctx.args, "probe_submit", False)),
                 "status": "open_no_auth" if allowed else "auth_required" if required else "detected",
             }
         if response.status > 0 and not http_response_requires_https(response.status, response.body):
@@ -137,10 +156,10 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     if valid:
         server = json_value(_get(ctx, prior["api_endpoint"], "/v1/agent/self", token))
         config = server.get("config") if isinstance(server, dict) else None
-        ver = config.get("Version") if isinstance(config, dict) else None
-        if isinstance(ver, dict) and isinstance(ver.get("Version"), str):
-            result["version"] = ver["Version"]
-            result["enterprise"] = "+ent" in ver["Version"]
+        ver = _config_version(config)
+        if ver:
+            result["version"] = ver
+            result["enterprise"] = "+ent" in ver
         acl = config.get("ACL") if isinstance(config, dict) else None
         if isinstance(acl, dict) and type(acl.get("Enabled")) is bool:
             result["acl_enabled"] = acl["Enabled"]
@@ -171,7 +190,8 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     ):
         if not getattr(ctx.args, "show_" + name, False) and not (name == "jobs" and discover):
             continue
-        requested.append(name)
+        if getattr(ctx.args, "show_" + name, False):
+            requested.append(name)
         rows: list[dict[str, Any]] = []
         next_seen: set[str] = set()
         page_path = path
@@ -263,3 +283,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         if not result["execute_verified"] or result["execution"].get("cleanup") == "failed":
             result["operational_failure"] = True
     return result
+
+
+# Native adapters must not bypass an explicitly replaced synchronous detector.
+_SYNC_DETECT_RECORD = detect_record

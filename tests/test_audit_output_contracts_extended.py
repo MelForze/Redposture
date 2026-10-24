@@ -82,6 +82,14 @@ def _detected_payload(module: str, spec: ModuleAuditSpec) -> dict[str, Any]:
             "jenkins": {"is_jenkins": True, "detection_status": "confirmed", "version": "2.541.3"},
             "gitlab": {"is_gitlab": True, "status": "detected", "login_page": True, "version": "17.0.0"},
             "consul": {"is_consul": True, "anonymous_scopes": {}, "version": "1.22.0"},
+            "spark": {"is_spark": True, "version": "3.5.6", "surface": "master_ui"},
+            "yarn": {"is_yarn": True, "version": "3.3.6"},
+            "portainer": {
+                "is_portainer": True,
+                "surface": "ui",
+                "ui_product": "portainer",
+                "ui": {"version": "2.39.7", "auth_required": False},
+            },
             "nomad": {"is_nomad": True, "version": "1.10.1", "acl_enabled": False},
             "jupyter": {"is_jupyter": True, "version": "2.17.0"},
             "vault": {
@@ -183,7 +191,7 @@ def test_real_audit_specs_enable_findings_only_text_and_explicit_colorizer(modul
 @pytest.mark.parametrize("module", AUDIT_MODULE_NAMES)
 @pytest.mark.parametrize(
     ("marker", "expected_color"),
-    [("[*]", "cyan"), ("[+]", "bright_green"), ("[-]", "red"), ("[!]", "red")],
+    [("[*]", "cyan"), ("[+]", "bright_green"), ("[-]", "true_red"), ("[!]", "true_red")],
 )
 def test_every_real_colorizer_preserves_marker_contract(module: str, marker: str, expected_color: str) -> None:
     spec = _build_real_spec(module)

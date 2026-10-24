@@ -59,7 +59,7 @@ def build_vault_spec(args: Any) -> ModuleAuditSpec:
             value = action(ctx) if record is None else action(ctx, record.to_dict())
         return AuditRecord.from_mapping(value, module="vault", service="vault")
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="vault",
         label="VAULT",
         default_port=8200,
@@ -81,6 +81,10 @@ def build_vault_spec(args: Any) -> ModuleAuditSpec:
         defer_detect_output_until_auth=True,
         live_phase_output=True,
     )
+
+    from ...detection_steps import with_async_http_detection
+
+    return with_async_http_detection(spec, actions, api_prefixes=("/v1",))
 
 
 def run_vault_stage(args: Any, logger: Any) -> int:

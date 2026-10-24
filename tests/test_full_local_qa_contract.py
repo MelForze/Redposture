@@ -262,7 +262,8 @@ def test_every_raw_negative_fuzz_case_has_a_required_output_contract() -> None:
     "label",
     [
         "fuzz_docker_missing_targets",
-        "fuzz_docker_defcreds_missing_targets",
+        "fuzz_jenkins_missing_targets",
+        "fuzz_portainer_defcreds_missing_targets",
         "fuzz_harbor_option_surface",
         "fuzz_nexus_option_surface",
     ],

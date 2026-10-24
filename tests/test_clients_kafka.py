@@ -147,7 +147,7 @@ def test_parse_protocol_response_error_edges() -> None:
     assert error == "ListOffsets failed: REQUEST_TIMED_OUT"
 
 
-def test_apiversions_ignores_reversed_ranges_and_negative_entry_count() -> None:
+def test_apiversions_ignores_reversed_ranges_and_rejects_invalid_array_headers() -> None:
     response = struct.pack(">ihi", 17, 0, 2)
     response += struct.pack(">hhh", 1, 3, 2)  # Invalid min/max range.
     response += struct.pack(">hhh", kafka.KAFKA_FETCH, 0, 10)
@@ -156,12 +156,17 @@ def test_apiversions_ignores_reversed_ranges_and_negative_entry_count() -> None:
     assert result.versions == {kafka.KAFKA_FETCH: (0, 10)}
 
     negative_count = kafka._parse_apiversions_response(struct.pack(">ihi", 17, 0, -1), 17)
-    assert negative_count.ok is True
+    assert negative_count.ok is False
+    assert negative_count.error
     assert negative_count.versions == {}
 
     no_count = kafka._parse_apiversions_response(struct.pack(">ih", 17, 0), 17)
-    assert no_count.ok is True
+    assert no_count.ok is False
+    assert no_count.error
     assert no_count.versions == {}
+
+    empty = kafka._parse_apiversions_response(struct.pack(">ihi", 17, 0, 0), 17)
+    assert empty.ok is True and empty.error is None and empty.versions == {}
 
 
 def test_fetch_version_rejects_unsupported_range_and_encodes_legacy_v4() -> None:

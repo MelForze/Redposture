@@ -191,6 +191,47 @@
         "state": "readable"
       }
     ],
+    "znode_dump_items": [
+      {
+        "value": "cluster=keeper-lab"
+      },
+      {
+        "value": "replicas=3"
+      },
+      {
+        "value": "shard=01"
+      },
+      {
+        "value": "database=redposture,table=events"
+      },
+      {
+        "value": "CREATE TABLE redposture.events (id UInt64, event String) ENGINE=ReplicatedMergeTree"
+      },
+      {
+        "value": "replica_count=1"
+      },
+      {
+        "value": "host=keeper-lab-1"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "2"
+      },
+      {
+        "value": "<base64:wA==>"
+      },
+      {
+        "value": "env=keeper-lab,owner=platform"
+      },
+      {
+        "value": "service=redposture-api"
+      },
+      {
+        "value": "rp-keeper-key-2026"
+      }
+    ],
     "znode_truncated_reason": null,
     "znode_values": [
       "/clickhouse:cluster=keeper-lab",
@@ -414,6 +455,47 @@
         "children": 0,
         "error": null,
         "state": "readable"
+      }
+    ],
+    "znode_dump_items": [
+      {
+        "value": "cluster=keeper-lab"
+      },
+      {
+        "value": "replicas=3"
+      },
+      {
+        "value": "shard=01"
+      },
+      {
+        "value": "database=redposture,table=events"
+      },
+      {
+        "value": "CREATE TABLE redposture.events (id UInt64, event String) ENGINE=ReplicatedMergeTree"
+      },
+      {
+        "value": "replica_count=1"
+      },
+      {
+        "value": "host=keeper-lab-1"
+      },
+      {
+        "value": "<empty>"
+      },
+      {
+        "value": "2"
+      },
+      {
+        "value": "<base64:wA==>"
+      },
+      {
+        "value": "env=keeper-lab,owner=platform"
+      },
+      {
+        "value": "service=redposture-api"
+      },
+      {
+        "value": "rp-keeper-key-2026"
       }
     ],
     "znode_truncated_reason": null,

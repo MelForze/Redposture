@@ -5,6 +5,7 @@ from redposture_core.exporters.workflows import (
     collect_max_inflight,
     completed_jobs_by_target,
     dedupe_collect_targets,
+    exporter_worker_count,
     scan_max_inflight,
     should_preflight_collect,
     sort_collect_targets,
@@ -17,6 +18,15 @@ def test_scan_and_collect_inflight_helpers_are_bounded() -> None:
     assert collect_max_inflight(4, None) == 64
     assert collect_max_inflight(10, 3) == 10
     assert collect_max_inflight(10, 30) == 30
+
+
+def test_large_exporter_worker_profile_is_bounded_and_respects_explicit_value() -> None:
+    assert exporter_worker_count(50, 9_999, explicit=False) == 50
+    assert exporter_worker_count(50, 10_000, explicit=False) == 128
+    assert exporter_worker_count(50, 1_000_000, explicit=False) == 128
+    assert exporter_worker_count(50, 1_000_000, explicit=True) == 50
+    assert exporter_worker_count(50, 1_000_000, explicit=None) == 50
+    assert exporter_worker_count(200, 1_000_000, explicit=False) == 200
 
 
 def test_collect_target_build_dedupe_and_sort() -> None:

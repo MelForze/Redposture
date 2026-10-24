@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,7 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
+from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...scheduler import BoundedScheduler
 from ...stage_runtime import (
@@ -161,7 +163,35 @@ def _http_request(
     use_https: bool,
     headers: dict[str, str] | None = None,
     body: bytes | None = None,
+    response_size_cap: int | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
+    return run_sync(
+        _http_request_steps(
+            host,
+            port,
+            method,
+            path,
+            timeout,
+            use_https=use_https,
+            headers=headers,
+            body=body,
+            response_size_cap=response_size_cap,
+        )
+    )
+
+
+def _http_request_steps(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    use_https: bool,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+    response_size_cap: int | None = None,
+) -> Any:
     request_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         request_headers.update(headers)
@@ -172,6 +202,8 @@ def _http_request(
         if normalized_endpoint in {"/users/sign_in", "/api/v4/version", "/api/v4/user"}
         else 10 * 1024 * 1024
     )
+    if response_size_cap is not None:
+        cap = max(1, int(response_size_cap))
     if isinstance(state, GitLabLifecycleState) and state.http is not None:
         absolute_url = path.startswith("http://") or path.startswith("https://")
         request_host = state.host or str(host)
@@ -195,15 +227,18 @@ def _http_request(
                     override_bound_scheme=True,
                 )
             )
-            response = state.http.request(
+            response = yield HttpRead(
+                state.http,
                 method,
                 url,
-                headers=request_headers,
-                body=body,
-                timeout=timeout,
-                response_size_cap=cap,
-                allow_cross_origin_redirects=True,
-                preserve_authorization_on_cross_origin=True,
+                {
+                    "headers": request_headers,
+                    "body": body,
+                    "timeout": timeout,
+                    "response_size_cap": cap,
+                    "allow_cross_origin_redirects": True,
+                    "preserve_authorization_on_cross_origin": True,
+                },
             )
             if response.error is None and not (
                 not absolute_url
@@ -232,23 +267,24 @@ def _http_request(
                 _normalize_path(path),
                 default_scheme="https" if use_https else "http",
             )
-        response = HttpApiClient(
-            HttpClientConfig(
-                timeout=timeout,
-                insecure=True,
-                response_size_cap=cap,
-                allow_cross_origin_redirects=True,
-            )
-        ).request(
-            method,
-            url,
-            headers=request_headers,
-            body=body,
-            timeout=timeout,
+        response = yield DetectCall(
+            HttpApiClient(
+                HttpClientConfig(
+                    timeout=timeout,
+                    insecure=True,
+                    response_size_cap=cap,
+                    allow_cross_origin_redirects=True,
+                )
+            ).request,
+            (method, url),
+            {"headers": request_headers, "body": body, "timeout": timeout},
         )
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
-    return int(response.status), response.body, {str(k).lower(): str(v) for k, v in response.headers.items()}, None
+    response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+    if getattr(response, "truncated", False):
+        response_headers["x-redposture-truncated"] = "true"
+    return int(response.status), response.body, response_headers, None
 
 
 def _json_loads_bytes(raw: bytes) -> Any:
@@ -764,6 +800,18 @@ def _probe_repository_token(
     return False, _clip((completed.stderr or completed.stdout or "repository access denied").strip(), 160)
 
 
+def _clone_source_identity(url: str) -> str:
+    """Canonical HTTP source, excluding credentials but preserving mounted paths."""
+    parsed = urllib.parse.urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"
+    port = parsed.port
+    if port is not None and port != (443 if parsed.scheme.lower() == "https" else 80):
+        host += f":{port}"
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), host, parsed.path, parsed.query, ""))
+
+
 def _clone_project(
     project: dict[str, Any],
     host: str,
@@ -792,7 +840,9 @@ def _clone_project(
         )
 
     final_url = _clone_url_with_token(http_url, token)
-    dest_root = os.path.join(clone_dir, _safe_slug(f"{host}_{port}"))
+    source_identity = _clone_source_identity(http_url)
+    source_key = hashlib.sha256(source_identity.encode("utf-8")).hexdigest()[:16]
+    dest_root = os.path.join(clone_dir, _safe_slug(f"{host}_{port}"), source_key)
     dest_root_abs = os.path.abspath(dest_root)
     relative_repo_path = _safe_repo_relative_path(path_with_namespace)
     candidate_dest_path = os.path.abspath(os.path.normpath(os.path.join(dest_root_abs, relative_repo_path)))
@@ -804,12 +854,29 @@ def _clone_project(
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 
     if os.path.isdir(os.path.join(dest_path, ".git")):
+        matching_source = False
+        git_path = shutil.which("git")
+        if git_path:
+            try:
+                origin = subprocess.run(
+                    [git_path, "-C", dest_path, "config", "--local", "--get", "remote.origin.url"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=_GIT_CLONE_TIMEOUT_SECONDS,
+                    env=_git_subprocess_env(),
+                )
+                matching_source = (
+                    origin.returncode == 0 and _clone_source_identity(origin.stdout.strip()) == source_identity
+                )
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
         return {
             "project": path_with_namespace,
             "project_id": project_id,
-            "status": "exists",
+            "status": "exists" if matching_source else "failed",
             "dest": dest_path,
-            "error": None,
+            "error": None if matching_source else "existing repository source does not match requested clone source",
         }
     if os.path.exists(dest_path):
         return {
@@ -1407,11 +1474,11 @@ def _render_colored_gitlab_line(console: Console, line: str) -> bool:
             ("(login page:True)", "bright_green"),
             ("(login page:False)", "yellow"),
             ("(auth required:sso)", "bright_green"),
-            ("(repo:True)", "red"),
-            ("(issues:True)", "red"),
-            ("(members:True)", "red"),
+            ("(repo:True)", "true_red"),
+            ("(issues:True)", "true_red"),
+            ("(members:True)", "true_red"),
         ),
-        counts=(CountColorRule("projects", "red", unknown_color="orange", zero_color="bright_green"),),
+        counts=(CountColorRule("projects", "true_red", unknown_color="orange", zero_color="bright_green"),),
     ):
         return True
     if line.startswith("GITLAB") and "\t" in line:
@@ -1511,6 +1578,10 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 
 
 def detect_gitlab(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    return run_sync(_detect_gitlab_steps(ctx, options))
+
+
+def _detect_gitlab_steps(ctx: Any, options: dict[str, Any]) -> Any:
     if isinstance(ctx.lifecycle_state, GitLabLifecycleState):
         _activate_gitlab_transport(ctx.lifecycle_state)
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
@@ -1521,21 +1592,15 @@ def detect_gitlab(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     last_error: str | None = None
     for attempt in range(attempts):
         started = time.monotonic()
-        login_status, login_payload, login_headers, login_error = _http_request(
-            str(ctx.host),
-            int(ctx.port),
-            "GET",
-            "/users/sign_in",
-            float(getattr(ctx.args, "timeout", 5.0)),
-            use_https=use_https,
+        login_status, login_payload, login_headers, login_error = yield DetectCall(
+            _http_request,
+            (str(ctx.host), int(ctx.port), "GET", "/users/sign_in", float(getattr(ctx.args, "timeout", 5.0))),
+            {"use_https": use_https},
         )
-        version_status, version_payload, _version_headers, version_error = _http_request(
-            str(ctx.host),
-            int(ctx.port),
-            "GET",
-            "/api/v4/version",
-            float(getattr(ctx.args, "timeout", 5.0)),
-            use_https=use_https,
+        version_status, version_payload, _version_headers, version_error = yield DetectCall(
+            _http_request,
+            (str(ctx.host), int(ctx.port), "GET", "/api/v4/version", float(getattr(ctx.args, "timeout", 5.0))),
+            {"use_https": use_https},
         )
         if isinstance(ctx.lifecycle_state, GitLabLifecycleState) and ctx.lifecycle_state.scheme in {"http", "https"}:
             use_https = ctx.lifecycle_state.scheme == "https"
@@ -1599,7 +1664,7 @@ def detect_gitlab(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                 "error": None,
             }
         if attempt < attempts - 1:
-            time.sleep(_retry_delay(attempt))
+            (yield DetectDelay(_retry_delay(attempt)))
     return {
         "timestamp": utc_now_iso(),
         "host": str(ctx.host),
@@ -1687,7 +1752,7 @@ def authenticate_gitlab(ctx: Any, detect_record: Any, options: dict[str, Any]) -
             "token_projects_error": state.token_error if not state.token_valid else None,
         }
     )
-    if state.token_valid is True and bool(getattr(ctx.args, "enum_cve", False)) and not record.get("version"):
+    if state.token_valid is True and not record.get("version"):
         version_status, version_payload, _headers, version_error = _api_get_json(
             str(ctx.host),
             int(ctx.port),
@@ -1875,3 +1940,9 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
 
 # Typed runner boundary -----------------------------------------------------
 host_stage = _call_audit_gitlab_host_with_stage_debug
+
+
+_ASYNC_DETECT_STEPS: dict[Any, Any] = {
+    _http_request: _http_request_steps,
+    detect_gitlab: _detect_gitlab_steps,
+}

@@ -8,6 +8,7 @@ from typing import Any
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...console import Console
+from ...detection_io import with_async_io_detection
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCredentialRun,
@@ -63,7 +64,7 @@ def build_airflow_spec(args: Any) -> ModuleAuditSpec:
         prior = record.to_dict() if hasattr(record, "to_dict") else dict(record)
         return AuditRecord.from_mapping(actions.discover_record(ctx, prior), module="airflow", service="airflow")
 
-    return ModuleAuditSpec(
+    spec = ModuleAuditSpec(
         module="airflow",
         label="AIRFLOW",
         default_port=_DEFAULT_PORT,
@@ -90,6 +91,8 @@ def build_airflow_spec(args: Any) -> ModuleAuditSpec:
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
         credential_attempt_detail_fields=("credential_state",),
     )
+
+    return with_async_io_detection(spec, actions, root_name="detect_record", options=None, api_prefixes=())
 
 
 def run_airflow_stage(args: Any, logger: Any) -> int:

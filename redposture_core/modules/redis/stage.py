@@ -16,7 +16,7 @@ from ...stage_runtime import (
     run_basic_host_audit,
     sort_default_audit_credential_runs,
 )
-from . import actions, policy, render
+from . import actions, async_detect, policy, render
 
 _DEFAULT_PORT = 6379
 _DEFAULT_PORTS: tuple[int, ...] | None = (6379, 16379, 26379, 5540)
@@ -65,6 +65,8 @@ def build_redis_spec(args: Any) -> ModuleAuditSpec:
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
         detect=actions.redis_detect_hook if use_lifecycle_hooks else None,
+        detect_async=async_detect.detect if use_lifecycle_hooks else None,
+        async_detect_sync_hook=actions.redis_detect_hook if use_lifecycle_hooks else None,
         auth=actions.redis_auth_hook if use_lifecycle_hooks else None,
         data=actions.redis_data_hook if use_lifecycle_hooks else None,
         lifecycle_state_factory=actions.redis_lifecycle_state_factory if use_lifecycle_hooks else None,

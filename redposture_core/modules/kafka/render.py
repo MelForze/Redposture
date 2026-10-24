@@ -6,6 +6,7 @@ import re
 
 from ...console import Console
 from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line
+from ..execution_api import render as render_execution
 from . import actions
 from .http_surfaces import product_name
 
@@ -25,6 +26,8 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
         or "Brokers Enumeration" in line
         or "Topics Enumeration" in line
         or "Topics coverage:partial" in line
+        or "Brokers coverage:partial" in line
+        or "Clusters coverage:partial" in line
         or "Consumer groups coverage:partial" in line
         or "Consumer Groups Enumeration" in line
         or "Dump Topic" in line
@@ -43,15 +46,17 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
                 RegexColorRule(r"Dump completeness unverified:[^\n]+", "orange"),
                 RegexColorRule(r"\(reason:[^)]+\)", "orange"),
                 RegexColorRule(r"\(file:[^)]+\)", "orange"),
+                RegexColorRule(r"executed:True", "true_red"),
+                RegexColorRule(r"status:(?:partial|timeout|unverified)", "orange"),
             ),
             counts=tuple(
-                CountColorRule(name, "red", zero_color="bright_green")
+                CountColorRule(name, "true_red", zero_color="bright_green")
                 for name in ("clusters", "brokers", "topics", "groups", "messages")
             ),
             extra_spans=lambda marker, right: (
                 []
                 if marker in {"[+]", "[-]"} and right.endswith(" (UI)")
-                else [(0, len(right), "red")]
+                else [(0, len(right), "true_red")]
                 if marker == "[+]" and (":" in right or right.startswith("Anonymous READ"))
                 else []
             ),
@@ -209,6 +214,10 @@ def _format_ui_detail_records(record: dict, output_format: str) -> list[str]:
                             emitted_dumps.add(index)
     if record.get("ui_topics_partial"):
         lines.append(f"{prefix} [*] Topics coverage:partial (reason:page unavailable or repeated)")
+    if record.get("ui_clusters_partial"):
+        lines.append(f"{prefix} [*] Clusters coverage:partial (reason:page unavailable)")
+    if record.get("ui_brokers_partial"):
+        lines.append(f"{prefix} [*] Brokers coverage:partial (reason:page unavailable)")
     if record.get("ui_consumer_groups_partial"):
         lines.append(f"{prefix} [*] Consumer groups coverage:partial (reason:page unavailable or repeated)")
     if record.get("dump"):
@@ -231,6 +240,12 @@ def _format_ui_detail_records(record: dict, output_format: str) -> list[str]:
     return lines
 
 
+def _format_execution_records(record: dict, output_format: str) -> list[str]:
+    if output_format != "txt":
+        return []
+    return render_execution("kafka", record)
+
+
 __all__ = [
     "_nxc_prefix",
     "_format_detect_record",
@@ -238,5 +253,6 @@ __all__ = [
     "_format_credential_attempts_records",
     "_format_topics_detail_records",
     "_format_ui_detail_records",
+    "_format_execution_records",
     "_render_colored_kafka_line",
 ]

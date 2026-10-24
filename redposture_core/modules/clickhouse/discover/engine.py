@@ -189,6 +189,41 @@ def run_discovery(
         str(key): dict(value) for key, value in (state.get("coverage") or {}).items() if isinstance(value, dict)
     }
     inventory, inventory_errors = collect_inventory(query_rows)
+    # Completed chunk IDs are meaningful only for the scope/geometry that
+    # produced them. Legacy checkpoints cannot prove that identity.
+    scan_signature = {
+        "version": 1,
+        "chunk_rows": max(1, config.chunk_rows),
+        "exclusions": sorted(set(config.exclusions)),
+        "detectors": sorted(set(enabled)),
+        "redact": config.redact,
+        "tables": sorted(
+            (
+                {
+                    "database": table.database,
+                    "table": table.name,
+                    "total_rows": table.total_rows,
+                    "partitions": table.partitions,
+                    "columns": [[column.name, column.type_name] for column in table.columns],
+                }
+                for table in inventory
+                if table.database not in _SYSTEM_DATABASES
+                and not _excluded(config.exclusions, table.database, table.full_name)
+            ),
+            key=lambda item: (item["database"], item["table"]),
+        ),
+    }
+    if config.resume:
+        previous_signature = state.get("scan_signature")
+        has_progress = any(state.get(key) for key in ("chunks", "findings", "coverage", "inventory", "report"))
+        if previous_signature != scan_signature and (previous_signature is not None or has_progress):
+            reason = (
+                "scan scope or chunk configuration changed"
+                if previous_signature is not None
+                else "legacy scan scope is unknown"
+            )
+            raise ValueError(f"incompatible discovery checkpoint: {reason}; start without --resume")
+    store.update(scan_signature=scan_signature)
     inventory_payload = [table.to_dict() for table in inventory]
     scan_errors: list[dict[str, Any]] = []
     inspected_bytes = 0

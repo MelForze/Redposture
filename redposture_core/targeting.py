@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+from array import array
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
@@ -106,7 +107,7 @@ class TargetExclusions:
 
 @dataclass(frozen=True)
 class _ListTargetEntry:
-    specs: tuple[ScanTargetSpec, ...]
+    specs: tuple[ScanTargetSpec, ...] | list[ScanTargetSpec]
 
     @property
     def count(self) -> int:
@@ -114,6 +115,27 @@ class _ListTargetEntry:
 
     def iter_specs(self) -> Iterator[ScanTargetSpec]:
         yield from self.specs
+
+
+_TARGET_LIST_BATCH_SIZE = 1024
+
+
+@dataclass(frozen=True)
+class _IPv4LiteralTargetEntry:
+    """Compact consecutive bare IPv4 lines from one target file."""
+
+    source_file: str
+    addresses: array
+    line_numbers: array
+
+    @property
+    def count(self) -> int:
+        return len(self.addresses)
+
+    def iter_specs(self) -> Iterator[ScanTargetSpec]:
+        for address, line_number in zip(self.addresses, self.line_numbers, strict=True):
+            host = str(ipaddress.IPv4Address(address))
+            yield ScanTargetSpec(host=host, raw=host, source=f"{self.source_file}:{line_number}", normalized_key=host)
 
 
 @dataclass(frozen=True)
@@ -149,7 +171,7 @@ class StreamingTargetPlan:
     hosts, but constructing/counting it does not.
     """
 
-    _entries: tuple[_ListTargetEntry | _IPv4RangeTargetEntry, ...]
+    _entries: tuple[_ListTargetEntry | _IPv4LiteralTargetEntry | _IPv4RangeTargetEntry, ...]
     target_count: int
     no_port_count: int
     explicit_port_counts: dict[int, int] = field(default_factory=dict)
@@ -157,6 +179,7 @@ class StreamingTargetPlan:
     explicit_ports: tuple[int, ...] = ()
     schemes: tuple[str, ...] = ()
     include_matrix_ports_for_bare_explicit_targets: bool = False
+    bare_ipv4_hosts: set[int] = field(default_factory=set, compare=False, repr=False)
 
     def __bool__(self) -> bool:
         return self.target_count > 0
@@ -170,20 +193,40 @@ class StreamingTargetPlan:
             yield from entry.iter_specs()
 
     def iter_hosts(self) -> Iterator[str]:
-        for spec in self.iter_specs():
-            yield spec.host
+        for entry in self._entries:
+            if isinstance(entry, _IPv4LiteralTargetEntry):
+                for address in entry.addresses:
+                    yield str(ipaddress.IPv4Address(address))
+            elif isinstance(entry, _IPv4RangeTargetEntry):
+                for start, end in entry.ranges:
+                    for address in range(start, end + 1):
+                        yield str(ipaddress.IPv4Address(address))
+            else:
+                for spec in entry.specs:
+                    yield spec.host
 
     def unique_host_count(self) -> int:
         """Count distinct hosts without expanding potentially large IPv4 ranges."""
 
         literal_hosts: set[str] = set()
+        explicit_ipv4_hosts: set[int] = set()
         ranges: list[tuple[int, int]] = []
         for entry in self._entries:
             if isinstance(entry, _IPv4RangeTargetEntry):
                 ranges.extend(entry.ranges)
+            elif isinstance(entry, _IPv4LiteralTargetEntry):
+                continue
             else:
                 for spec in entry.specs:
-                    literal_hosts.add(spec.host)
+                    try:
+                        address = ipaddress.ip_address(spec.host)
+                    except ValueError:
+                        literal_hosts.add(spec.host)
+                    else:
+                        if isinstance(address, ipaddress.IPv4Address):
+                            explicit_ipv4_hosts.add(int(address))
+                        else:
+                            literal_hosts.add(spec.host)
         merged: list[tuple[int, int]] = []
         for start, end in sorted(ranges):
             if merged and start <= merged[-1][1] + 1:
@@ -191,13 +234,12 @@ class StreamingTargetPlan:
             else:
                 merged.append((start, end))
         count = sum(end - start + 1 for start, end in merged) + len(literal_hosts)
-        for host in literal_hosts:
-            try:
-                address = ipaddress.ip_address(host)
-            except ValueError:
-                continue
-            if isinstance(address, ipaddress.IPv4Address) and _range_contains(merged, int(address)):
-                count -= 1
+        count += len(self.bare_ipv4_hosts)
+        count += sum(address not in self.bare_ipv4_hosts for address in explicit_ipv4_hosts)
+        count -= sum(_range_contains(merged, address) for address in self.bare_ipv4_hosts)
+        count -= sum(
+            address not in self.bare_ipv4_hosts and _range_contains(merged, address) for address in explicit_ipv4_hosts
+        )
         return count
 
     def contains_host(self, host: str) -> bool:
@@ -214,10 +256,15 @@ class StreamingTargetPlan:
         except ValueError:
             pass
 
+        if ipv4_value is not None and ipv4_value in self.bare_ipv4_hosts:
+            return True
+
         for entry in self._entries:
             if isinstance(entry, _IPv4RangeTargetEntry):
                 if ipv4_value is not None and any(start <= ipv4_value <= end for start, end in entry.ranges):
                     return True
+                continue
+            if isinstance(entry, _IPv4LiteralTargetEntry):
                 continue
             if any(spec.host == value for spec in entry.specs):
                 return True
@@ -258,9 +305,13 @@ class StreamingTargetPlan:
         """
         matrix_port_set = {int(matrix_port) for matrix_port in matrix_ports}
         port_int = int(port)
-        if port_int not in matrix_port_set:
-            # Only explicit matches can use this port. Avoid N literals for
-            # every distinct port while preserving input order and bare dedup.
+        explicit_only = self.no_port_count == 0 and (
+            not self.include_matrix_ports_for_bare_explicit_targets or not self.bare_explicit_port_counts
+        )
+        if port_int not in matrix_port_set or explicit_only:
+            # With only explicit-port targets, the port index applies even to
+            # matrix ports. Avoid scanning every URL in a large input file
+            # once per module/exporter port while preserving per-port order.
             seen: set[str] = set()
             for spec in self._explicit_specs_by_port.get(port_int, ()):
                 if spec.scheme is None:
@@ -276,6 +327,15 @@ class StreamingTargetPlan:
             for spec in entry.specs
             if spec.scheme is None and self._spec_matches_port(spec, port_int, matrix_port_set)
         }
+        collision_hosts = {
+            spec.host
+            for entry in self._entries
+            if isinstance(entry, _ListTargetEntry)
+            for spec in entry.specs
+            if spec.scheme is None
+            and spec.explicit_port is not None
+            and self._spec_matches_port(spec, port_int, matrix_port_set)
+        }
         seen_bare_hosts: set[str] = set()
         for entry in self._entries:
             if isinstance(entry, _IPv4RangeTargetEntry):
@@ -287,10 +347,10 @@ class StreamingTargetPlan:
                     yield spec
                 continue
 
-            for spec in entry.specs:
+            for spec in entry.iter_specs():
                 if not self._spec_matches_port(spec, port_int, matrix_port_set):
                     continue
-                if spec.scheme is None:
+                if spec.scheme is None and spec.host in collision_hosts:
                     if spec.host in seen_bare_hosts:
                         continue
                     seen_bare_hosts.add(spec.host)
@@ -316,6 +376,8 @@ class StreamingTargetPlan:
         total = self.no_port_count * len(matrix_ports)
         for count in self.explicit_port_counts.values():
             total += count
+        if not self.explicit_port_counts:
+            return total
         if self.include_matrix_ports_for_bare_explicit_targets:
             for target_port, count in self.bare_explicit_port_counts.items():
                 total += count * sum(1 for port in matrix_ports if port != target_port)
@@ -347,15 +409,12 @@ class StreamingTargetPlan:
         def _host_has_matrix_target(host: str) -> bool:
             if host in bare_no_port_hosts:
                 return True
-            if not ipv4_ranges:
-                return False
             try:
                 ip_value = ipaddress.ip_address(host)
             except ValueError:
                 return False
-            return isinstance(ip_value, ipaddress.IPv4Address) and _range_contains(
-                ipv4_ranges,
-                int(ip_value),
+            return isinstance(ip_value, ipaddress.IPv4Address) and (
+                int(ip_value) in self.bare_ipv4_hosts or _range_contains(ipv4_ranges, int(ip_value))
             )
 
         matrix_port_set = set(matrix_ports)
@@ -409,7 +468,7 @@ class StreamingTargetPlan:
         if not normalized_defaults:
             return self
 
-        entries: list[_ListTargetEntry | _IPv4RangeTargetEntry] = []
+        entries: list[_ListTargetEntry | _IPv4LiteralTargetEntry | _IPv4RangeTargetEntry] = []
         seen_specs: set[str] = set()
         target_count = 0
         no_port_count = 0
@@ -419,7 +478,7 @@ class StreamingTargetPlan:
         schemes: list[str] = []
 
         for entry in self._entries:
-            if isinstance(entry, _IPv4RangeTargetEntry):
+            if isinstance(entry, (_IPv4RangeTargetEntry, _IPv4LiteralTargetEntry)):
                 entries.append(entry)
                 target_count += entry.count
                 no_port_count += entry.count
@@ -482,6 +541,7 @@ class StreamingTargetPlan:
             explicit_ports=tuple(explicit_ports),
             schemes=tuple(schemes),
             include_matrix_ports_for_bare_explicit_targets=(self.include_matrix_ports_for_bare_explicit_targets),
+            bare_ipv4_hosts=self.bare_ipv4_hosts,
         )
 
 
@@ -930,9 +990,10 @@ def stream_scan_target_specs(
 
     active_policy = policy or TargetParsePolicy()
     exclusions = parse_target_exclusions(exclude_targets)
-    entries: list[_ListTargetEntry | _IPv4RangeTargetEntry] = []
+    entries: list[_ListTargetEntry | _IPv4LiteralTargetEntry | _IPv4RangeTargetEntry] = []
     seen_specs: set[str] = set()
     seen_ipv4_ranges: list[tuple[int, int]] = []
+    seen_bare_ipv4: set[int] = set()
     processed_files: set[str] = set()
     target_count = 0
     no_port_count = 0
@@ -969,20 +1030,38 @@ def stream_scan_target_specs(
             query=spec.query,
             fragment=spec.fragment,
         )
+        bare_ipv4: int | None = None
         if spec.scheme is None and spec.explicit_port is None:
             try:
                 ip_value = ipaddress.ip_address(spec.host)
             except ValueError:
                 ip_value = None
             if isinstance(ip_value, ipaddress.IPv4Address):
-                ip_int = int(ip_value)
-                if _range_contains(seen_ipv4_ranges, ip_int):
+                bare_ipv4 = int(ip_value)
+                if bare_ipv4 in seen_bare_ipv4 or _range_contains(seen_ipv4_ranges, bare_ipv4):
                     return
-                seen_ipv4_ranges = _merge_ipv4_range(seen_ipv4_ranges, (ip_int, ip_int))
-        if key in seen_specs:
-            return
-        seen_specs.add(key)
-        entries.append(_ListTargetEntry((spec,)))
+                seen_bare_ipv4.add(bare_ipv4)
+        if bare_ipv4 is None:
+            if key in seen_specs:
+                return
+            seen_specs.add(key)
+        source_file, separator, line_text = (spec.source or "").rpartition(":")
+        if bare_ipv4 is not None and separator and line_text.isdecimal() and int(line_text) <= 0xFFFFFFFF:
+            line_number = int(line_text)
+            if entries and isinstance(entries[-1], _IPv4LiteralTargetEntry) and entries[-1].source_file == source_file:
+                entries[-1].addresses.append(bare_ipv4)
+                entries[-1].line_numbers.append(line_number)
+            else:
+                entries.append(
+                    _IPv4LiteralTargetEntry(source_file, array("I", (bare_ipv4,)), array("I", (line_number,)))
+                )
+        else:
+            previous = entries[-1] if entries else None
+            batch = previous.specs if isinstance(previous, _ListTargetEntry) else None
+            if isinstance(batch, list) and len(batch) < _TARGET_LIST_BATCH_SIZE:
+                batch.append(spec)
+            else:
+                entries.append(_ListTargetEntry([spec]))
         target_count += 1
         _remember_count(spec)
 
@@ -996,6 +1075,23 @@ def stream_scan_target_specs(
                 for base_segment in remaining
                 for segment in _subtract_ranges(base_segment, list(exclusions.ipv4_ranges))
             ]
+        if remaining and seen_bare_ipv4:
+            already_seen = sorted(value for value in seen_bare_ipv4 if host_range[0] <= value <= host_range[1])
+            if already_seen:
+                uncovered: list[tuple[int, int]] = []
+                for start, end in remaining:
+                    cursor = start
+                    for value in already_seen:
+                        if value < cursor:
+                            continue
+                        if value > end:
+                            break
+                        if cursor < value:
+                            uncovered.append((cursor, value - 1))
+                        cursor = value + 1
+                    if cursor <= end:
+                        uncovered.append((cursor, end))
+                remaining = uncovered
         if not remaining:
             return
         entry = _IPv4RangeTargetEntry(tuple(remaining), item, source or active_policy.source)
@@ -1045,13 +1141,16 @@ def stream_scan_target_specs(
         )
 
     return StreamingTargetPlan(
-        _entries=tuple(entries),
+        _entries=tuple(
+            _ListTargetEntry(tuple(entry.specs)) if isinstance(entry, _ListTargetEntry) else entry for entry in entries
+        ),
         target_count=target_count,
         no_port_count=no_port_count,
         explicit_port_counts=dict(explicit_port_counts),
         bare_explicit_port_counts=dict(bare_explicit_port_counts),
         explicit_ports=tuple(explicit_ports),
         schemes=tuple(schemes),
+        bare_ipv4_hosts=seen_bare_ipv4,
     )
 
 

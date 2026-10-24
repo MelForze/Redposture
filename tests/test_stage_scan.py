@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from redposture_core import stage_scan
+from redposture_core import stage_scan, targeting
 from redposture_core.exporters.output import format_scan_record
 from redposture_core.stage_scan import run_scan_stage
 from redposture_core.utils import ScanTargetSpec
@@ -56,7 +56,7 @@ def test_run_scan_stage_excludes_out_targets_before_scanning(
     assert "all targets were excluded by --out-target" in capsys.readouterr().err
 
 
-def test_run_scan_stage_large_cidr_uses_chunked_output_and_single_summary(
+def test_run_scan_stage_large_cidr_uses_streaming_output_and_single_summary(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     output_path = tmp_path / "scan.txt"
@@ -86,6 +86,7 @@ def test_run_scan_stage_large_cidr_uses_chunked_output_and_single_summary(
         output_mode="w",
         progress_owner=None,
         stats_sink=None,
+        work_items=None,
     ):
         _ = (
             timeout,
@@ -100,7 +101,7 @@ def test_run_scan_stage_large_cidr_uses_chunked_output_and_single_summary(
             progress_owner,
             stats_sink,
         )
-        host_list = list(hosts)
+        host_list = [host for host, _port, _scheme in work_items] if work_items is not None else list(hosts)
         calls.append((host_list, output_mode))
         lines = []
         for host in host_list:
@@ -532,3 +533,54 @@ def test_scan_returns_inconclusive_when_no_detection_has_operational_failures(
     captured = capsys.readouterr()
     assert "request failed err=timed out" in captured.out
     assert "scan inconclusive" in captured.err
+
+
+def test_large_bare_ipv4_scan_queues_every_host_without_building_specs(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "hosts.txt"
+    path.write_text("10.0.0.1\n10.0.0.2\n", encoding="utf-8")
+    monkeypatch.setattr(stage_scan, "DEFAULT_MAX_NETWORK_HOSTS", 1)
+    monkeypatch.setattr(
+        stage_scan,
+        "load_profiles",
+        lambda _path: {"discovery_exporters": [{"name": "node_exporter", "port": 9100}]},
+    )
+
+    def unexpected_specs(_self: object):
+        raise AssertionError("host-only exporter scan must not create ScanTargetSpec")
+
+    monkeypatch.setattr(targeting._IPv4LiteralTargetEntry, "iter_specs", unexpected_specs)
+    observed: list[tuple[str, int, str]] = []
+
+    def fake_scan(*_args: object, **kwargs: object):
+        observed.extend(kwargs["work_items"])
+        kwargs["stats_sink"]["errors"] = 0
+        return len(observed), 0, {}
+
+    monkeypatch.setattr(stage_scan, "scan_exporter_presence", fake_scan)
+    assert run_scan_stage(_args(targets=str(path))) == 0
+    assert observed == [("10.0.0.1", 9100, "http"), ("10.0.0.2", 9100, "http")]
+
+
+@pytest.mark.parametrize(("explicit", "expected_workers"), [(False, 128), (True, 4)])
+def test_scan_worker_profile_scales_only_automatic_large_input(
+    monkeypatch: pytest.MonkeyPatch, explicit: bool, expected_workers: int
+) -> None:
+    monkeypatch.setattr("redposture_core.exporters.workflows.EXPORTER_LARGE_TARGET_THRESHOLD", 2)
+    monkeypatch.setattr(
+        stage_scan,
+        "load_profiles",
+        lambda _path: {"discovery_exporters": [{"name": "node_exporter", "port": 9100}]},
+    )
+    observed: list[int] = []
+
+    def fake_scan(*_args: object, **kwargs: object):
+        observed.append(kwargs["workers"])
+        kwargs["stats_sink"]["errors"] = 0
+        return 2, 0, {}
+
+    monkeypatch.setattr(stage_scan, "scan_exporter_presence", fake_scan)
+    args = _args(targets="10.0.0.1,10.0.0.2", _workers_option_provided=explicit)
+    assert run_scan_stage(args) == 0
+    assert observed == [expected_workers]
