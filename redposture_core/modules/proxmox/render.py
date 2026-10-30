@@ -60,3 +60,37 @@ __all__ = [
     "_render_colored_proxmox_line",
     "_stream_proxmox_status",
 ]
+
+
+def _format_vms_detail_records(record: dict, output_format: str) -> list[str]:
+    if output_format != "txt" or not record.get("show_vms"):
+        return []
+    prefix = _nxc_prefix(record)
+    guests = record.get("vms") or []
+    count = len(guests) if "vms" in record else "unknown"
+    rows = [f"{prefix} [*] VMs Enumeration (Count:{count})"]
+    if "vms" not in record:
+        rows.append(f"{prefix} [*] VMs unavailable (reason:authenticated inventory was not obtained)")
+    if record.get("vms_error"):
+        rows.append(f"{prefix} [*] VMs unavailable (reason:{record['vms_error']})")
+    for guest in guests:
+        rows.append(
+            f"{prefix} [*] VM={guest.get('vmid')} Name={guest.get('name')} (execute:{guest.get('execute') is True}) (type:{guest.get('type')}) (node:{guest.get('node')}) (status:{guest.get('status')})"
+            + (f" (reason:{guest['execute_reason']})" if guest.get("execute_reason") else "")
+        )
+    return rows
+
+
+def _format_execution_detail_records(record: dict, output_format: str) -> list[str]:
+    from ..execution_api import render
+
+    if output_format != "txt":
+        return []
+    rows = render("proxmox", record)
+    execution = record.get("execution") or {}
+    if execution.get("signal"):
+        rows.append(f"{_nxc_prefix(record)} <error:command terminated by signal {execution['signal']}>")
+    return rows
+
+
+__all__ += ["_format_vms_detail_records", "_format_execution_detail_records"]

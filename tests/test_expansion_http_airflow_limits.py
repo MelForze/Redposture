@@ -57,7 +57,9 @@ def test_airflow_walk_stops_with_explicit_limit_reason(reason: str) -> None:
     elif reason == "max_findings":
         assert result["finding_count"] == result["logs_scanned"] == 1
     else:
-        assert result["bytes_scanned"] == 1
+        assert result["bytes_scanned"] == 0
+        assert result["logs_scanned"] == 0
+        assert len(client.paths) == 1
 
 
 @pytest.mark.parametrize("generation", ["v1", "v2"])

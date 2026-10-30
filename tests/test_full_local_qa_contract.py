@@ -22,6 +22,83 @@ def _load_postrun_verifier() -> object:
     return module
 
 
+def test_golden_normalizes_per_run_probe_ids_kafka_partitions_and_keeper_order() -> None:
+    verifier = _load_postrun_verifier()
+    elastic_a = {
+        "module": "elastic",
+        "attempted_credentials": [{"credential_probe_index": "redposture-access-probe-0123abcd"}],
+    }
+    elastic_b = {
+        "module": "elastic",
+        "attempted_credentials": [{"credential_probe_index": "redposture-access-probe-deadbeef"}],
+    }
+    assert verifier._normalize_for_golden(elastic_a) == verifier._normalize_for_golden(elastic_b)
+
+    kafka_a = {
+        "module": "kafka",
+        "content_discovery": {"findings": [{"object_path": "$.topic.orders.partition.1.offset.3.api_key"}]},
+    }
+    kafka_b = {
+        "module": "kafka",
+        "content_discovery": {"findings": [{"object_path": "$.topic.orders.partition.2.offset.4.api_key"}]},
+    }
+    assert verifier._normalize_for_golden(kafka_a) == verifier._normalize_for_golden(kafka_b)
+    kafka_b["content_discovery"]["findings"][0]["object_path"] = "$.topic.payments.partition.2.offset.4.api_key"
+    assert verifier._normalize_for_golden(kafka_a) != verifier._normalize_for_golden(kafka_b)
+
+    keeper_a = {
+        "module": "keeper",
+        "znodes": ["/redposture", "/clickhouse"],
+        "znode_values": ["/redposture:seed", "/clickhouse:cluster"],
+    }
+    keeper_b = {
+        "module": "keeper",
+        "znodes": ["/clickhouse", "/redposture"],
+        "znode_values": ["/clickhouse:cluster", "/redposture:seed"],
+    }
+    assert verifier._normalize_for_golden(keeper_a) == verifier._normalize_for_golden(keeper_b)
+
+
+def test_golden_normalizes_proxmox_guest_probe_marker_without_erasing_result() -> None:
+    verifier = _load_postrun_verifier()
+    first = {
+        "module": "proxmox",
+        "vms": [{"execute": False, "execute_probe": {"command": "echo redposture_" + "a" * 32}}],
+    }
+    second = {
+        "module": "proxmox",
+        "vms": [{"execute": False, "execute_probe": {"command": "echo redposture_" + "b" * 32}}],
+    }
+    changed = {
+        "module": "proxmox",
+        "vms": [{"execute": True, "execute_probe": {"command": "echo redposture_" + "b" * 32}}],
+    }
+    assert verifier._normalize_for_golden(first) == verifier._normalize_for_golden(second)
+    assert verifier._normalize_for_golden(first) != verifier._normalize_for_golden(changed)
+
+
+def test_golden_compares_clickhouse_chunk_completion_not_partition_count() -> None:
+    verifier = _load_postrun_verifier()
+
+    def payload(completed: int, total: int) -> dict[str, object]:
+        return {
+            "module": "clickhouse",
+            "discover_report": {
+                "coverage": {
+                    "qa.table.secret": {
+                        "completed_chunks": completed,
+                        "total_chunks": total,
+                        "total_partitions": total,
+                        "status": "complete" if completed == total else "partial",
+                    }
+                }
+            },
+        }
+
+    assert verifier._normalize_for_golden(payload(1, 1)) == verifier._normalize_for_golden(payload(2, 2))
+    assert verifier._normalize_for_golden(payload(1, 2)) != verifier._normalize_for_golden(payload(2, 2))
+
+
 def test_full_docker_matrix_is_reproducible_and_local_only() -> None:
     script_path = ROOT / "scripts" / "run_full_local_qa.sh"
     script = script_path.read_text(encoding="utf-8")
@@ -88,6 +165,42 @@ run_matrix_service mismatch run_dummy_cases
     assert "mismatch\tfailed\t1\t" in summary
     assert (tmp_path / "cleanup.txt").read_text(encoding="utf-8").splitlines() == ["broken"]
     assert (tmp_path / "cases.txt").read_text(encoding="utf-8").splitlines() == ["cases:healthy", "cases:mismatch"]
+
+
+def test_clickhouse_matrix_waits_for_both_seed_containers_to_finish(tmp_path: Path) -> None:
+    source = (ROOT / "scripts/run_lab_matrix_sequential.sh").read_text(encoding="utf-8")
+    helper = "wait_completed_seed() {" + source.split("wait_completed_seed() {", 1)[1].split("\n}\n", 1)[0] + "\n}"
+    start_service = source.split("start_service() {", 1)[1].split("\n}\n", 1)[0]
+    assert "wait_completed_seed clickhouse clickhouse-open-seed" in start_service
+    assert "wait_completed_seed clickhouse clickhouse-auth-seed" in start_service
+
+    harness = f"""
+set -euo pipefail
+ROOT={shlex.quote(str(tmp_path))}
+compose_service() {{ printf '%s\\n' "${{@: -1}}"; }}
+docker() {{
+  if [ "$1" = inspect ]; then
+    seed="$4"
+    count_file="$ROOT/$seed.count"
+    count=$(cat "$count_file" 2>/dev/null || printf 0)
+    count=$((count + 1))
+    printf '%s\\n' "$count" > "$count_file"
+    if [ "$seed" = clickhouse-auth-seed ]; then printf 'exited 1\\n'; return; fi
+    if [ "$count" -eq 1 ]; then printf 'running 0\\n'; else printf 'exited 0\\n'; fi
+    return
+  fi
+  if [ "$1" = logs ]; then return; fi
+  return 1
+}}
+sleep() {{ :; }}
+{helper}
+wait_completed_seed clickhouse clickhouse-open-seed 4
+if wait_completed_seed clickhouse clickhouse-auth-seed 4; then exit 91; fi
+"""
+    result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, check=False, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "clickhouse-open-seed.count").read_text(encoding="utf-8").strip() == "2"
+    assert (tmp_path / "clickhouse-auth-seed.count").read_text(encoding="utf-8").strip() == "1"
 
 
 def test_real_heavy_vendors_are_seeded_in_separate_matrix_blocks() -> None:
@@ -184,6 +297,135 @@ def test_nexus_postrun_expectation_matches_selected_asset(tmp_path: Path) -> Non
         verifier._validate_rich_lab_outputs([row])
 
 
+def test_redis_discover_postrun_checks_structured_stream_values(tmp_path: Path) -> None:
+    verifier = _load_postrun_verifier()
+    artifact = tmp_path / "redis_default.json"
+    payload = {
+        "keys": ["svc:grafana", "ratelimit:ip", "queue:payments:retry", "stream:alerts"],
+        "key_value_entries": [
+            {"key": "stream:alerts", "value": "1-0:severity=critical,service=postgres", "error": None},
+        ],
+        "content_discovery": {"status": "complete"},
+    }
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+    row = {
+        "label": "redis_default",
+        "exit_code": "0",
+        "log_path": str(tmp_path / "missing.log"),
+        "json_path": str(artifact),
+    }
+    verifier._validate_rich_lab_outputs([row])
+
+    payload["key_value_entries"] = []
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SystemExit, match="missing expected seeded lab data"):
+        verifier._validate_rich_lab_outputs([row])
+
+
+def test_redis_idempotency_postrun_accepts_compact_json(tmp_path: Path) -> None:
+    verifier = _load_postrun_verifier()
+    artifact = tmp_path / "redis_idempotency.json"
+    artifact.write_text('{"key_count":16}', encoding="utf-8")
+    row = {
+        "label": "redis_idempotency",
+        "exit_code": "0",
+        "log_path": str(tmp_path / "missing.log"),
+        "json_path": str(artifact),
+    }
+    verifier._validate_rich_lab_outputs([row])
+
+    artifact.write_text('{"key_count":15}', encoding="utf-8")
+    with pytest.raises(SystemExit, match="missing expected seeded lab data"):
+        verifier._validate_rich_lab_outputs([row])
+
+
+def test_zookeeper_postrun_allows_discovery_events_before_dump(tmp_path: Path) -> None:
+    verifier = _load_postrun_verifier()
+    artifact = tmp_path / "zookeeper_default.json"
+    records = [
+        {"port": 2181, "status": "open_no_auth", "znode_values": None},
+        {"port": 2181, "type": "znodes_list", "znodes": ["/redposture/app/api_key"]},
+        {"port": 2181, "type": "znodes_dump", "znode_values": ["/redposture/app/api_key:rp-zk-key-2026"]},
+    ]
+    artifact.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+    row = {
+        "module": "zookeeper",
+        "label": "zookeeper_default",
+        "exit_code": "0",
+        "log_path": str(tmp_path / "missing.log"),
+        "json_path": str(artifact),
+    }
+    verifier._validate_rich_lab_outputs([row])
+    verifier._validate_dump_not_empty([row])
+
+    artifact.write_text("\n".join(json.dumps(record) for record in records[:2]), encoding="utf-8")
+    with pytest.raises(SystemExit, match="missing expected seeded lab data|did not dump seeded znodes"):
+        verifier._validate_rich_lab_outputs([row])
+
+
+def test_registry_discover_findings_count_as_capability(tmp_path: Path) -> None:
+    verifier = _load_postrun_verifier()
+    artifact = tmp_path / "registry.json"
+    payload = {
+        "module": "docker-registry",
+        "host": "127.0.0.1",
+        "port": 15000,
+        "status": "open_no_auth",
+        "content_discovery": {"status": "complete", "bytes_inspected": 100, "findings": [{"value": "seeded"}]},
+    }
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+    row = {
+        "module": "docker-registry",
+        "label": "registry_extended_discover_budget",
+        "exit_code": "0",
+        "log_path": str(tmp_path / "missing.log"),
+        "json_path": str(artifact),
+    }
+    verifier._validate_capability_sanity([row])
+
+    payload["content_discovery"]["findings"] = []
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+    verifier._validate_capability_sanity([row])
+
+    payload["content_discovery"]["bytes_inspected"] = 0
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SystemExit, match="capability regression"):
+        verifier._validate_capability_sanity([row])
+
+
+def test_keeper_action_contract_reads_streamed_znode_dump(tmp_path: Path) -> None:
+    verifier = _load_postrun_verifier()
+    artifact = tmp_path / "keeper_cluster.json"
+    main = {
+        "host": "127.0.0.1",
+        "port": 19181,
+        "status": "open_no_auth",
+        "service": "keeper",
+        "protocol": "zookeeper",
+        "implementation": "clickhouse-keeper",
+        "implementation_confidence": "confirmed",
+        "vendor": "clickhouse",
+        "is_zookeeper": True,
+        "is_zookeeper_compatible": True,
+        "is_keeper": True,
+        "znode_values": None,
+    }
+    dump = {"port": 19181, "type": "znodes_dump", "znode_values": ["/redposture/app/api_key:seeded"]}
+    artifact.write_text("\n".join(json.dumps(item) for item in (main, dump)), encoding="utf-8")
+    row = {
+        "module": "keeper",
+        "label": "keeper_cluster",
+        "exit_code": "0",
+        "log_path": str(tmp_path / "missing.log"),
+        "json_path": str(artifact),
+    }
+    verifier._validate_action_contracts([row])
+
+    artifact.write_text(json.dumps(main), encoding="utf-8")
+    with pytest.raises(SystemExit, match="znode_values is empty"):
+        verifier._validate_action_contracts([row])
+
+
 def test_idempotency_cases_repeat_the_same_command_without_intervening_cases() -> None:
     script = (ROOT / "scripts/run_lab_matrix_sequential.sh").read_text(encoding="utf-8")
     lines = script.splitlines()
@@ -232,9 +474,9 @@ def test_split_lab_compose_files_only_reference_paths_inside_current_checkout() 
 
 def test_missing_target_fuzz_case_is_not_masked_by_unrelated_tls_file_errors() -> None:
     script = (ROOT / "scripts" / "run_lab_matrix_sequential.sh").read_text(encoding="utf-8")
-    line = next(value for value in script.splitlines() if "fuzz_exporters_scan_missing_targets" in value)
+    line = next(value for value in script.splitlines() if "fuzz_exporters_collect_missing_targets" in value)
 
-    assert "exporters scan -p 9100 -ot excluded.invalid" in line
+    assert "exporters collect -p 9100 -ot excluded.invalid" in line
     assert "--tls-ca" not in line
     assert "--tls-cert" not in line
     assert "--tls-key" not in line
@@ -399,13 +641,13 @@ def test_runtime_failures_keep_json_diagnostics_but_cli_validation_failures_do_n
     verifier = _load_postrun_verifier()
     log = tmp_path / "run.log"
     artifact = tmp_path / "run.json"
-    log.write_text("[!] scan inconclusive: no exporter confirmed\n", encoding="utf-8")
+    log.write_text("[!] collect inconclusive: no exporter confirmed\n", encoding="utf-8")
     artifact.write_text('{"detected":false,"error":"TLS mismatch"}\n', encoding="utf-8")
 
     verifier._validate_expected_failure_outputs(
         [
             {
-                "label": "exporters_scan_url_https_transport_fail",
+                "label": "exporters_collect_url_https_transport_fail",
                 "expected_exit": "1",
                 "log_path": str(log),
                 "json_path": str(artifact),
@@ -413,12 +655,12 @@ def test_runtime_failures_keep_json_diagnostics_but_cli_validation_failures_do_n
         ]
     )
 
-    log.write_text("[!] scan requires -t/--targets\n", encoding="utf-8")
+    log.write_text("[!] collect requires -t/--targets\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="produced a non-empty JSON artifact"):
         verifier._validate_expected_failure_outputs(
             [
                 {
-                    "label": "fuzz_exporters_scan_missing_targets",
+                    "label": "fuzz_exporters_collect_missing_targets",
                     "expected_exit": "2",
                     "log_path": str(log),
                     "json_path": str(artifact),

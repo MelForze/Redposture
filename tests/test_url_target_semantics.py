@@ -20,7 +20,6 @@ from redposture_core.stage_elastic import run_elastic_stage
 from redposture_core.stage_gitlab import build_gitlab_plan, run_gitlab_stage
 from redposture_core.stage_kubeapi import run_kubeapi_stage
 from redposture_core.stage_proxmox import run_proxmox_stage
-from redposture_core.stage_scan import run_scan_stage
 from redposture_core.stage_trigger import run_trigger_stage
 
 
@@ -50,11 +49,6 @@ class _HostStageCapture:
     ("argv", "runner", "patch_target"),
     [
         (
-            ["exporters", "scan", "-t", "https://127.0.0.1:19100/metrics"],
-            run_scan_stage,
-            "redposture_core.stage_scan.scan_exporter_presence",
-        ),
-        (
             ["exporters", "collect", "-t", "https://127.0.0.1:19100/debug/vars"],
             run_collect_stage,
             "redposture_core.stage_collect.scan_exporter_presence",
@@ -72,10 +66,7 @@ def test_exporter_stages_accept_and_preserve_https_targets(
 
     monkeypatch.setattr(patch_target, fake_scan)
     args = parse_args(argv)
-    if runner is run_scan_stage:
-        rc = runner(args)
-    else:
-        rc = runner(args, AttemptLogger())
+    rc = runner(args, AttemptLogger())
     assert rc == 0
     assert schemes == ["https"]
 
@@ -108,7 +99,7 @@ def test_trigger_accepts_and_preserves_https_targets(monkeypatch: pytest.MonkeyP
     assert schemes == ["https"]
 
 
-def test_scan_uses_explicit_url_port_over_ports_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_collect_uses_explicit_url_port_over_ports_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_custom_ports: list[list[int] | None] = []
 
     def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
@@ -120,51 +111,20 @@ def test_scan_uses_explicit_url_port_over_ports_flag(monkeypatch: pytest.MonkeyP
         return 1, 0, {"127.0.0.1": []}
 
     monkeypatch.setattr(
-        "redposture_core.stage_scan.load_profiles",
-        lambda *_args, **_kwargs: {"discovery_exporters": [{"name": "node_exporter", "port": 9100}]},
+        "redposture_core.stage_collect.load_profiles",
+        lambda *_args, **_kwargs: {
+            "discovery_exporters": [{"name": "node_exporter", "port": 9100}],
+            "collect_exporters": [],
+            "collect_debug_endpoints": [],
+        },
     )
-    monkeypatch.setattr("redposture_core.stage_scan.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
 
-    args = parse_args(["exporters", "scan", "-t", "http://127.0.0.1:19100/metrics", "-p", "9100"])
-    rc = run_scan_stage(args)
+    args = parse_args(["exporters", "collect", "-t", "http://127.0.0.1:19100/metrics", "-p", "9100"])
+    rc = run_collect_stage(args, AttemptLogger())
 
     assert rc == 0
     assert captured_custom_ports == [[19100]]
-
-
-@pytest.mark.parametrize(
-    ("port_flag", "custom_port", "expected_ports"),
-    [
-        ("-p", "9100", [9100, 19100]),
-        ("--port", "9100", [9100, 19100]),
-        ("--ports", "19100", [19100]),
-    ],
-)
-def test_scan_adds_custom_ports_to_bare_explicit_target_without_duplicates(
-    monkeypatch: pytest.MonkeyPatch,
-    port_flag: str,
-    custom_port: str,
-    expected_ports: list[int],
-) -> None:
-    scanned_pairs: list[tuple[str, int]] = []
-
-    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
-        hosts = [str(host) for host in kwargs.get("hosts") or []]
-        ports = [int(port) for port in kwargs.get("custom_ports") or []]
-        scanned_pairs.extend((host, port) for host in hosts for port in ports)
-        return len(hosts) * len(ports), 0, {host: [] for host in hosts}
-
-    monkeypatch.setattr(
-        "redposture_core.stage_scan.load_profiles",
-        lambda *_args, **_kwargs: {"discovery_exporters": [{"name": "node_exporter", "port": 9100}]},
-    )
-    monkeypatch.setattr("redposture_core.stage_scan.scan_exporter_presence", fake_scan)
-
-    args = parse_args(["exporters", "scan", "-t", "127.0.0.1:19100", port_flag, custom_port])
-    rc = run_scan_stage(args)
-
-    assert rc == 0
-    assert sorted(scanned_pairs) == [("127.0.0.1", port) for port in expected_ports]
 
 
 @pytest.mark.parametrize(
@@ -232,7 +192,6 @@ def test_collect_explicit_url_port_still_overrides_ports_flag(monkeypatch: pytes
     assert scanned_pairs == [("127.0.0.1", 19100)]
 
 
-@pytest.mark.parametrize("stage", ["scan", "collect"])
 @pytest.mark.parametrize(
     ("target", "extra", "expected"),
     [
@@ -243,7 +202,6 @@ def test_collect_explicit_url_port_still_overrides_ports_flag(monkeypatch: pytes
     ],
 )
 def test_exporter_url_without_port_uses_scheme_default(
-    stage: str,
     target: str,
     extra: list[str],
     expected: list[tuple[str, int, str]],
@@ -263,20 +221,17 @@ def test_exporter_url_without_port_uses_scheme_default(
         "collect_exporters": [],
         "collect_debug_endpoints": [],
     }
-    monkeypatch.setattr(f"redposture_core.stage_{stage}.load_profiles", lambda *_args, **_kwargs: profiles)
-    monkeypatch.setattr(f"redposture_core.stage_{stage}.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", lambda *_args, **_kwargs: profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
 
-    args = parse_args(["exporters", stage, "-t", target, *extra])
-    rc = run_scan_stage(args) if stage == "scan" else run_collect_stage(args, AttemptLogger())
+    args = parse_args(["exporters", "collect", "-t", target, *extra])
+    rc = run_collect_stage(args, AttemptLogger())
 
     assert rc == 0
     assert observed == expected
 
 
-@pytest.mark.parametrize("stage", ["scan", "collect"])
-def test_exporter_streamed_urls_without_ports_keep_distinct_schemes(
-    stage: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_exporter_streamed_urls_without_ports_keep_distinct_schemes(monkeypatch: pytest.MonkeyPatch) -> None:
     observed: list[tuple[str, int, str]] = []
 
     def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
@@ -296,21 +251,20 @@ def test_exporter_streamed_urls_without_ports_keep_distinct_schemes(
         "collect_exporters": [],
         "collect_debug_endpoints": [],
     }
-    monkeypatch.setattr(f"redposture_core.stage_{stage}.DEFAULT_MAX_NETWORK_HOSTS", 1)
-    monkeypatch.setattr(f"redposture_core.stage_{stage}.load_profiles", lambda *_args, **_kwargs: profiles)
-    monkeypatch.setattr(f"redposture_core.stage_{stage}.scan_exporter_presence", fake_scan)
-    if stage == "collect":
-        from tests.test_collect_streaming import scan_result
+    monkeypatch.setattr("redposture_core.stage_collect.DEFAULT_MAX_NETWORK_HOSTS", 1)
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", lambda *_args, **_kwargs: profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    from tests.test_collect_streaming import scan_result
 
-        def fake_probe(host: str, port: int, *_args: object, scheme: str = "http"):
-            observed.append((host, port, scheme))
-            record, _hit = scan_result(host, port, scheme=scheme)
-            record["detected"] = False
-            return record, None
+    def fake_probe(host: str, port: int, *_args: object, scheme: str = "http"):
+        observed.append((host, port, scheme))
+        record, _hit = scan_result(host, port, scheme=scheme)
+        record["detected"] = False
+        return record, None
 
-        monkeypatch.setattr("redposture_core.exporters.discover.scan_presence_port_task", fake_probe)
-    args = parse_args(["exporters", stage, "-t", "http://127.0.0.1,https://127.0.0.2"])
-    rc = run_scan_stage(args) if stage == "scan" else run_collect_stage(args, AttemptLogger())
+    monkeypatch.setattr("redposture_core.exporters.discover.scan_presence_port_task", fake_probe)
+    args = parse_args(["exporters", "collect", "-t", "http://127.0.0.1,https://127.0.0.2"])
+    rc = run_collect_stage(args, AttemptLogger())
 
     assert rc == 0
     assert sorted(observed) == [("127.0.0.1", 80, "http"), ("127.0.0.2", 443, "https")]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from typing import Any
 
 from ...auth_detection import auth_required_text
@@ -13,6 +14,10 @@ from ..execution_api import render as render_execution
 
 def _prefix(record: dict[str, Any]) -> str:
     return f"JENKINS\t{record.get('host') or '?'}\t{int(record.get('port') or 0)}\t"
+
+
+def _endpoint(record: dict[str, Any]) -> str:
+    return f" (endpoint:{record['api_endpoint']})" if record.get("api_endpoint") else ""
 
 
 def _display(value: Any) -> str:
@@ -27,12 +32,16 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     jobs_text = str(jobs) if isinstance(jobs, bool) else "unknown"
     return (
         f"{_prefix(record)} [*] Jenkins (auth required:{auth}) "
-        f"(jobs allowed anonymously:{jobs_text}) (version:{record.get('version') or '-'})"
+        f"(jobs allowed anonymously:{jobs_text}) (version:{record.get('version') or '-'}){_endpoint(record)}"
     )
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
-    if output_format != "txt" or record.get("credential_state") != "valid":
+    if (
+        output_format != "txt"
+        or record.get("credential_state") != "valid"
+        or isinstance(record.get("attempted_credentials"), list)
+    ):
         return ""
     results = record.get("credential_results")
     username = (
@@ -41,7 +50,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         or "?"
     )
     password = record.get("credential_password")
-    pair = f"{username} (API token)" if password == "API token" else f"{username}:{password}"
+    pair = f"{username}:{password}" + (" (type:API token)" if record.get("credential_source") == "api_token" else "")
     jobs_access = record.get("credential_jobs_access")
     jobs = (
         str(record["credential_jobs_count"])
@@ -50,7 +59,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         if jobs_access == "denied"
         else "Unknown"
     )
-    return f"{_prefix(record)} [+] {pair} (Jobs:{jobs})"
+    return f"{_prefix(record)} [+] {pair} (Jobs:{jobs}){_endpoint(record)}"
 
 
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -58,7 +67,7 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         return []
     attempts = record.get("attempted_credentials")
     if not isinstance(attempts, list):
-        if record.get("credential_state") != "invalid":
+        if record.get("credential_state") == "valid":
             return []
         results = record.get("credential_results")
         if not isinstance(results, list) or not results or not isinstance(results[0], dict):
@@ -67,38 +76,66 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             {
                 "username": results[0].get("username"),
                 "password": record.get("credential_password"),
-                "status": "invalid_credentials",
+                "source": record.get("credential_source") or "provided",
+                "status": record.get("status"),
+                "reason": record.get("credential_verification_reason") or record.get("error"),
             }
         ]
     lines: list[str] = []
-    selected = (record.get("credential_results") or [{}])[0]
-    selected_pair = (
-        (selected.get("username"), record.get("credential_password")) if isinstance(selected, dict) else None
-    )
-    selected_skipped = False
     for attempt in attempts:
         if not isinstance(attempt, dict):
             continue
         source = str(attempt.get("source") or "")
         name = str(attempt.get("username") or "?")
-        password = "API token" if source == "api_token" else attempt.get("password")
+        password = attempt.get("password")
         status = str(attempt.get("status") or "")
-        if status == "valid_credentials" and not selected_skipped and (name, password) == selected_pair:
-            selected_skipped = True
-            continue
-        pair = f"{name} (API token)" if source == "api_token" else f"{name}:{password}"
+        pair = f"{name}:{password}" + (" (type:API token)" if source == "api_token" else "")
         if status == "valid_credentials":
-            lines.append(f"{_prefix(record)} [+] {pair}")
+            selected = {
+                **attempt,
+                "host": record.get("host"),
+                "port": record.get("port"),
+                "credential_state": "valid",
+                "credential_results": [{"username": name}],
+                "credential_password": password,
+                "credential_source": source,
+                "api_endpoint": record.get("api_endpoint"),
+            }
+            lines.append(_format_record(selected, output_format))
         elif status == "invalid_credentials":
-            lines.append(f"{_prefix(record)} [-] {pair}")
+            lines.append(f"{_prefix(record)} [-] {pair}{_endpoint(record)}")
+        else:
+            verdict = "skipped" if status == "skipped" else "unverified"
+            reason = str(
+                attempt.get("reason")
+                or attempt.get("credential_verification_reason")
+                or attempt.get("error")
+                or status
+                or "identity unavailable"
+            )
+            lines.append(f"{_prefix(record)} [*] {pair} (status:{verdict}) reason={reason}{_endpoint(record)}")
+    if isinstance(record.get("credential_attempts_planned"), int):
+        stop = record.get("credential_stop_reason")
+        lines.append(
+            f"{_prefix(record)} [*] Credential checks "
+            f"(planned:{record['credential_attempts_planned']}) "
+            f"(performed:{record.get('credential_attempts_executed', 0)}) "
+            f"(unverified:{record.get('credential_attempts_unverified', 0)}) "
+            f"(skipped:{record.get('credential_attempts_skipped', 0)})"
+            + (f" (status:stopped) reason={stop}" if stop else "")
+            + _endpoint(record)
+        )
     return lines
 
 
 def _format_inventory_records(record: dict[str, Any], output_format: str) -> list[str]:
-    if output_format != "txt":
+    if output_format != "txt" or record.get("_jenkins_inventory_emitted"):
         return []
+    return list(_iter_inventory_records(record))
+
+
+def _iter_inventory_records(record: dict[str, Any]) -> Iterator[str]:
     prefix = _prefix(record)
-    lines: list[str] = []
     for title, field, count, kind, label in (
         ("Jobs Enumeration", "jobs", "jobs_count", "jobs", "Job Name"),
         ("Builds Enumeration", "builds", "builds_count", "builds", "Build"),
@@ -114,51 +151,48 @@ def _format_inventory_records(record: dict[str, Any], output_format: str) -> lis
             access = record.get(f"{field}_access")
             if access in {"denied", "unknown"}:
                 readable = "Access Denied" if access == "denied" else "Unknown"
-                lines.append(f"{prefix} [*] {title} (access:{readable})")
+                yield f"{prefix} [*] {title} (access:{readable})"
             continue
         total = record.get(count) if isinstance(record.get(count), int) else len(entries)
-        lines.append(f"{prefix} [*] {title} ({kind}:{total})")
+        yield f"{prefix} [*] {title} ({kind}:{total})"
         for item in entries:
             if not isinstance(item, dict):
                 continue
             if field == "jobs":
-                lines.append(
-                    f"{prefix} [+] {label}={_display(item.get('name'))} (state:{item.get('color') or 'unknown'})"
-                )
+                yield (f"{prefix} [+] {label}={_display(item.get('name'))} (state:{item.get('color') or 'unknown'})")
             elif field == "builds":
                 result = item.get("result") or ("RUNNING" if item.get("building") is True else "unknown")
-                lines.append(
+                yield (
                     f"{prefix} [+] Build Job={_display(item.get('job'))} Number={item.get('number')} (result:{result})"
                 )
             else:
                 if field == "plugins":
-                    lines.append(
+                    yield (
                         f"{prefix} [+] {label}={_display(item.get('short_name'))} Version={_display(item.get('version'))} (active:{item.get('active')})"
                     )
                 elif field == "nodes":
                     online = not item["offline"] if isinstance(item.get("offline"), bool) else "Unknown"
                     executors = item.get("executors") if isinstance(item.get("executors"), int) else "Unknown"
                     busy = item.get("busy") if isinstance(item.get("busy"), int) else "Unknown"
-                    lines.append(
+                    yield (
                         f"{prefix} [+] {label}={_display(item.get('name'))} (online:{online}) (executors:{executors}) (busy:{busy})"
                     )
                 elif field == "queue":
-                    lines.append(
+                    yield (
                         f"{prefix} [+] {label}={_display(item.get('task'))} (id:{item.get('id')}) (reason:{_display(item.get('why'))})"
                     )
                 elif field == "artifacts":
                     size = item.get("size_bytes") if isinstance(item.get("size_bytes"), int) else "Unknown"
-                    lines.append(
+                    yield (
                         f"{prefix} [+] {label}={_display(item.get('name'))} (job:{_display(item.get('job'))}) (build:{item.get('build')}) (size_bytes:{size})"
                     )
     if record.get("job_discovery_partial"):
         reason = json.dumps(record.get("discovery_errors") or ["incomplete discovery"], ensure_ascii=False)
-        lines.append(f"{prefix} [*] Discovery coverage (status:partial) reason={reason}")
+        yield f"{prefix} [*] Discovery coverage (status:partial) reason={reason}"
     for field in ("builds", "artifacts"):
         if record.get(field + "_partial"):
             reason = json.dumps(record.get(field + "_errors") or ["incomplete inventory"], ensure_ascii=False)
-            lines.append(f"{prefix} [*] {field.title()} coverage (status:partial) reason={reason}")
-    return lines
+            yield f"{prefix} [*] {field.title()} coverage (status:partial) reason={reason}"
 
 
 def _format_execution_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -193,6 +227,10 @@ def _render_colored_jenkins_line(console: Console, line: str) -> bool:
             RegexColorRule(r"\(access:Unknown\)", "orange"),
             RegexColorRule(r"\(version:-\)", "orange"),
             RegexColorRule(r"\(status:partial\)", "orange"),
+            RegexColorRule(r"\(status:(?:unverified|skipped|stopped)\)", "orange"),
+            RegexColorRule(r"\((?:planned|performed|unverified|skipped):0\)", "bright_green"),
+            RegexColorRule(r"\((?:planned|performed|unverified|skipped):[1-9]\d*\)", "true_red"),
+            RegexColorRule(r"\(endpoint:.*\)$", "orange"),
             RegexColorRule(r"reason=.*", "orange"),
         ),
         extra_spans=lambda marker, payload: (
@@ -203,8 +241,6 @@ def _render_colored_jenkins_line(console: Console, line: str) -> bool:
             else [(0, len(payload), "orange")]
             if marker == "[+]"
             and payload.startswith(("Job Name=", "Build Job=", "Plugin Name=", "Queue Task=", "Artifact Name="))
-            else [(0, payload.find(" (Jobs:"), "true_red")]
-            if marker == "[+]" and " (Jobs:" in payload
             else []
         ),
     ):

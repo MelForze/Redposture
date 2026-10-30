@@ -4,6 +4,9 @@ import argparse
 import base64
 import json
 import struct
+import time
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -45,6 +48,7 @@ from redposture_core.stage_postgres import (
     _scram_client_first,
 )
 from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun, AuditHookContext
+from redposture_core.storage_discovery import DiscoveryCollector
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
@@ -80,6 +84,219 @@ class _ProtocolSocket(_DummySocket):
 
     def gettimeout(self) -> float:
         return self._timeout
+
+
+def test_postgres_discover_rejects_oversize_data_row_before_reading_body() -> None:
+    data_row = b"D" + struct.pack(">i", 4 + 80) + b"x" * 80
+    sock = _ProtocolSocket(data_row)
+    with pytest.raises(ValueError, match="byte_budget"):
+        pg_actions._pg_read_message(sock, max_data_bytes=32)
+    assert sock.payload == b"x" * 80
+
+
+def test_postgres_discover_stops_query_before_next_row() -> None:
+    def message(value: str) -> bytes:
+        encoded = value.encode()
+        payload = struct.pack(">h", 1) + struct.pack(">i", len(encoded)) + encoded
+        return b"D" + struct.pack(">i", len(payload) + 4) + payload
+
+    second = message("second")
+    sock = _ProtocolSocket(message("first") + second + b"Z" + struct.pack(">i", 5) + b"I")
+    seen: list[str | None] = []
+    rows, error = pg_actions._pg_query_rows(
+        sock,
+        "SELECT value FROM qa",
+        on_row=lambda row: seen.append(row[0]) or False,
+    )
+    assert rows == [["first"]]
+    assert seen == ["first"]
+    assert error == "byte_budget"
+    assert sock.payload.startswith(second)
+
+
+def test_postgres_discover_preserves_time_budget_reason_from_row_callback() -> None:
+    payload = struct.pack(">h", 1) + struct.pack(">i", 5) + b"first"
+    sock = _ProtocolSocket(b"D" + struct.pack(">i", len(payload) + 4) + payload)
+    rows, error = pg_actions._pg_query_rows(sock, "SELECT value FROM qa", on_row=lambda _row: "time_budget")
+    assert rows == [["first"]]
+    assert error == "time_budget"
+
+
+def test_postgres_discover_deadline_limits_socket_read_and_restores_timeout() -> None:
+    class TimeoutSocket(_ProtocolSocket):
+        def settimeout(self, timeout: float) -> None:
+            self._timeout = timeout
+
+        def recv(self, _size: int) -> bytes:
+            time.sleep(0.03)
+            raise TimeoutError("timed out")
+
+    sock = TimeoutSocket()
+    rows, error = pg_actions._pg_query_rows(sock, "SELECT 1", deadline=time.monotonic() + 0.02)
+    assert rows == []
+    assert error == "time_budget"
+    assert sock.gettimeout() == 1.0
+
+
+def test_postgres_discover_emits_table_finding_before_next_row_is_read() -> None:
+    def message(value: str) -> bytes:
+        encoded = value.encode()
+        payload = struct.pack(">h", 1) + struct.pack(">i", len(encoded)) + encoded
+        return b"D" + struct.pack(">i", len(payload) + 4) + payload
+
+    second = message('{"id":2,"note":"ordinary"}')
+    sock = _ProtocolSocket(
+        message('{"id":1,"api_token":"glpat-abcdefghijklmnopqrstuv"}') + second + b"Z" + struct.pack(">i", 5) + b"I"
+    )
+    unread_when_emitted: list[bool] = []
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(discover_time=10, discover_max_bytes=4096),
+        host="127.0.0.1",
+        port=5432,
+        live_emit=lambda _lines: unread_when_emitted.append(sock.payload.startswith(second)),
+    )
+    collector = DiscoveryCollector("postgres", ctx, {"status": "valid_credentials"})
+    _, rows, error = pg_actions._pg_query_table_rows(
+        sock, "public.discovery_rows", discovery_collector=collector, database_name="qa"
+    )
+    assert error is None
+    assert rows is not None and len(rows) == 2
+    assert unread_when_emitted and all(unread_when_emitted)
+    assert any("api_token" in item["object_path"] for item in collector.result()["findings"])
+
+
+def test_postgres_discover_explicit_row_limit_does_not_claim_complete() -> None:
+    encoded = b'{"id":1}'
+    payload = struct.pack(">h", 1) + struct.pack(">i", len(encoded)) + encoded
+    sock = _ProtocolSocket(b"D" + struct.pack(">i", len(payload) + 4) + payload + b"Z" + struct.pack(">i", 5) + b"I")
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(discover_time=10, discover_max_bytes=4096),
+        host="127.0.0.1",
+        port=5432,
+        live_emit=lambda _lines: None,
+    )
+    collector = DiscoveryCollector("postgres", ctx, {"status": "valid_credentials"})
+    _, rows, error = pg_actions._pg_query_table_rows(
+        sock, "public.discovery_rows", max_rows=1, discovery_collector=collector, database_name="qa"
+    )
+    assert error is None and rows is not None and len(rows) == 1
+    assert collector.result()["status"] == "partial"
+    assert any(reason.endswith("row_limit_reached") for reason in collector.result()["partial_reasons"])
+
+
+def test_postgres_discover_emits_complete_credentials_before_findings(tmp_path) -> None:
+    emitted: list[str] = []
+    target_started_at: list[float] = []
+    args = SimpleNamespace(discover=True, enum_cve=False, defcreds=False, debug=False)
+
+    def detect(ctx: AuditHookContext) -> AuditRecord:
+        assert ctx.discovery_started_at is not None
+        target_started_at.append(ctx.discovery_started_at)
+        return AuditRecord.from_mapping(
+            {
+                "host": ctx.host,
+                "port": ctx.port,
+                "module": "postgres",
+                "service": "postgres",
+                "is_postgres": True,
+                "status": "auth_required",
+                "auth_required": True,
+                "server_version": "16.15",
+            },
+            module="postgres",
+            service="postgres",
+        )
+
+    def auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            {
+                **record.to_dict(),
+                "status": "valid_credentials",
+                "provided_credentials": True,
+                "provided_username": "qa",
+                "provided_password": "password",
+                "effective_username": "qa",
+                "credential_verified": True,
+            },
+            module="postgres",
+            service="postgres",
+        )
+
+    def data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        assert ctx.discovery_started_at == target_started_at[0]
+        assert not any("[+] qa:password" in line for line in emitted)
+        assert ctx.live_emit is None
+        return AuditRecord.from_mapping(
+            {
+                **record.to_dict(),
+                "superuser": True,
+                "can_execute_commands": True,
+                "can_read_tables": True,
+                "database_count": 1,
+                "content_discovery": {
+                    "status": "complete",
+                    "findings": [
+                        {"type": "Token", "value": "glpa...stuv", "object_path": "$.table.qa.t", "confidence": "high"}
+                    ],
+                    "partial_reasons": [],
+                },
+            },
+            module="postgres",
+            service="postgres",
+        )
+
+    spec = replace(postgres_module_stage.build_postgres_spec(args), detect=detect, auth=auth, data=data)
+    AuditCommandRunner(args=args, spec=spec, emit_line=emitted.append).run_plan(
+        AuditCommandPlan(
+            targets_by_port={5432: ("127.0.0.1",)},
+            output_format="txt",
+            output_path=str(tmp_path / "postgres-discover.txt"),
+            credential_runs=(AuditCredentialRun(username="qa", password="password"),),
+        )
+    )
+    credential_lines = [line for line in emitted if "[+] qa:password" in line]
+    assert len(credential_lines) == 1
+    assert "(superuser:True)" in credential_lines[0]
+    assert "(read:True)" in credential_lines[0]
+    assert emitted.index(credential_lines[0]) < next(i for i, line in enumerate(emitted) if "Token Value=" in line)
+
+
+def test_postgres_discover_stops_before_next_table_after_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(discover_time=10, discover_max_bytes=80),
+        host="127.0.0.1",
+        port=5432,
+        live_emit=lambda _lines: None,
+    )
+    collector = DiscoveryCollector("postgres", ctx, {"status": "valid_credentials"})
+    inspected: list[str] = []
+    monkeypatch.setattr(pg_actions, "_pg_query_readable_tables", lambda _sock: (["first", "second"], None))
+    monkeypatch.setattr(pg_actions, "_pg_query_table_columns", lambda _sock, table: (table, ["value"], None))
+
+    def table_rows(_sock: object, table: str, **kwargs: object) -> tuple[str, list[str], str | None]:
+        inspected.append(table)
+        assert kwargs["discovery_collector"] is collector
+        assert collector.add(f"table.qa.{table}", {"api_token": "glpat-abcdefghijklmnopqrstuv"})
+        collector.partial("budget", "byte_budget")
+        return table, [], "byte_budget"
+
+    monkeypatch.setattr(pg_actions, "_pg_query_table_rows", table_rows)
+    result = pg_actions._pg_collect_database_artifacts(
+        _ProtocolSocket(),
+        database_name="qa",
+        include_database_prefix=False,
+        show_tables=False,
+        show_row_counts=False,
+        show_columns=False,
+        table_targets=[],
+        table_columns=[],
+        dump_table_rows=True,
+        dump_row_limit=None,
+        discovery_collector=collector,
+    )
+    assert inspected == ["first"]
+    assert collector.result()["status"] == "partial"
+    assert result[3][0]["table"] == "first"
 
 
 def test_postgres_spray_capabilities_use_verified_connection_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -272,7 +489,7 @@ def test_postgres_open_no_auth_is_reported_only_on_detect_line_in_txt() -> None:
     }
 
     detect_line = postgres._format_detect_record(record, "txt")
-    assert "[*] Postgres Database (auth required:False)" in detect_line
+    assert "[*] PostgreSQL-compatible endpoint (auth required:False)" in detect_line
     assert postgres._format_record(record, "txt") == ""
     assert json.loads(postgres._format_record(record, "json"))["status"] == "open_no_auth"
 
@@ -430,8 +647,16 @@ def _install_postgres_lifecycle_spy(
                 sqlstate="28P01",
                 failure_phase="startup",
                 error_kind="authentication_failed",
+                password_sent=True,
+                credential_verified=False,
             )
-        return _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0")
+        return _PgSession(
+            auth_required=True,
+            auth_method="cleartext",
+            server_version="16.0",
+            password_sent=True,
+            credential_verified=True,
+        )
 
     def fake_privileges(_sock):
         events.append(("capabilities", None))
@@ -528,10 +753,13 @@ def test_postgres_lifecycle_anonymous_open_checks_defcreds_and_runs_data_once(
         "invalid_credentials_anonymous",
         "invalid_credentials_anonymous",
     ]
-    assert [attempt["credential_verified"] for attempt in attempted_credentials] == [False, False]
+    assert [attempt["credential_verified"] for attempt in attempted_credentials] == [None, None]
+    assert all(attempt["credential_verification"] == "unverified" for attempt in attempted_credentials)
+    assert all(attempt["password_sent"] is False for attempt in attempted_credentials)
     attempt_lines = postgres._format_credential_attempts_records(records[0], "txt")
     assert len(attempt_lines) == 2
-    assert all(" [-] " in line for line in attempt_lines)
+    assert all(" [*] unverified " in line for line in attempt_lines)
+    assert all(" [-] " not in line for line in attempt_lines)
 
 
 @pytest.mark.parametrize("source", ["file", "default"])
@@ -807,6 +1035,7 @@ def test_postgres_protocol_helpers_and_startup_auth_paths(monkeypatch: pytest.Mo
     messages = iter(
         [
             (b"R", struct.pack(">i", 3)),
+            (b"R", struct.pack(">i", 0)),
             (b"S", b"server_version\x0016.1\x00"),
             (b"Z", b"I"),
         ]
@@ -814,12 +1043,14 @@ def test_postgres_protocol_helpers_and_startup_auth_paths(monkeypatch: pytest.Mo
     monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(messages))
     session = postgres._pg_startup_and_auth(_ProtocolSocket(), "alice", "secret", "appdb")
     assert session == postgres._PgSession(auth_required=True, auth_method="cleartext", server_version="16.1")
+    assert session.password_sent is True and session.credential_verified is True
     assert ("password", "secret") in sends
 
-    ready_messages = iter([(b"Z", b"I")])
+    ready_messages = iter([(b"R", struct.pack(">i", 0)), (b"Z", b"I")])
     monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(ready_messages))
     trusted_session = postgres._pg_startup_and_auth(_ProtocolSocket(), "alice", None, "appdb")
     assert trusted_session.auth_required is False
+    assert trusted_session.password_sent is False and trusted_session.credential_verified is None
 
     md5_messages = iter([(b"R", struct.pack(">i", 5) + b"salt")])
     monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(md5_messages))
@@ -833,15 +1064,16 @@ def test_postgres_protocol_helpers_and_startup_auth_paths(monkeypatch: pytest.Mo
     with pytest.raises(_PgAuditError, match="unsupported SASL mechanisms"):
         postgres._pg_startup_and_auth(_ProtocolSocket(), "alice", "secret", "postgres")
 
-    error_messages = iter([(b"E", b"C28P01\x00Mpassword authentication failed\x00\x00")])
+    error_messages = iter([(b"E", b"SFATAL\x00C28P01\x00Mpassword authentication failed\x00\x00")])
     monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(error_messages))
     with pytest.raises(_PgAuditError, match="password authentication failed") as error_info:
         postgres._pg_startup_and_auth(_ProtocolSocket(), "alice", "secret", "postgres")
     assert error_info.value.sqlstate == "28P01"
     assert error_info.value.auth_required is True
     assert error_info.value.error_kind == "authentication_failed"
+    assert error_info.value.password_sent is False and error_info.value.credential_verified is None
 
-    pgbouncer_messages = iter([(b"E", b"C08P01\x00Mno authentication method is found\x00\x00")])
+    pgbouncer_messages = iter([(b"E", b"SFATAL\x00C08P01\x00Mno authentication method is found\x00\x00")])
     monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(pgbouncer_messages))
     with pytest.raises(_PgAuditError, match="no authentication method is found") as pgbouncer_error:
         postgres._pg_startup_and_auth(_ProtocolSocket(), "postgres", None, "postgres")
@@ -3072,7 +3304,7 @@ def test_audit_postgres_targets_emits_detect_status_and_all_detail_sections(monk
     )
 
     assert (total, open_no_auth, weak, valid, auth_required, failed) == (1, 0, 0, 1, 0, 0)
-    assert any("[*] Postgres Database" in line for line in lines)
+    assert any("[*] PostgreSQL-compatible endpoint" in line for line in lines)
     assert any("[*] Dump Databases" in line for line in lines)
     assert any("[*] Dump Tables" in line for line in lines)
     assert any("[*] Table Columns appdb.public.users" in line for line in lines)
@@ -3389,6 +3621,14 @@ def test_postgres_table_query_helpers_and_colored_renderer(monkeypatch: pytest.M
     )
     assert "<bright_green>records:0</bright_green>" in painter.lines[-1]
     assert "<orange>partial:True</orange>" in painter.lines[-1]
+    assert postgres._render_colored_postgres_line(
+        painter,
+        "POSTGRES\t127.0.0.1\t5432\t [+] qa:password (superuser:True) (execute:True) (read:True) (DBs:2)",
+    )
+    assert "<bright_green>[+]</bright_green>" in painter.lines[-1]
+    assert "<true_red>qa:password</true_red>" in painter.lines[-1]
+    assert "<true_red>superuser:True</true_red>" in painter.lines[-1]
+    assert "<true_red>DBs:2</true_red>" in painter.lines[-1]
 
 
 def test_postgres_acl_inventory_covers_object_classes_and_partial(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -159,9 +159,11 @@ def test_selected_credential_renders_once_after_capabilities() -> None:
     }
 
     assert actions._format_record({**record, "_credential_capabilities_pending": True}, "txt") == ""
-    assert actions._format_record(record, "txt").endswith("[+] observer:V13w-Only!2026")
+    assert actions._format_record(record, "txt").endswith(
+        "[+] observer:V13w-Only!2026 (Indices:Unknown) (Write:Unknown) (Delete:Unknown) "
+        "(Documents:Unknown) (Cluster:Unknown) (Nodes:Unknown) (Users:Unknown)"
+    )
     assert actions._format_credential_attempts_records(record, "txt") == []
-    assert "unknown" not in actions._format_record(record, "txt")
 
 
 def test_selected_credential_renders_verified_resource_access() -> None:
@@ -185,9 +187,395 @@ def test_selected_credential_renders_verified_resource_access() -> None:
     }
 
     assert actions._format_record(record, "txt").endswith(
-        "[+] observer:V13w-Only!2026 (Indices:7) (Documents:Read) "
-        "(Cluster:Access Denied) (Nodes:Access Denied) (Users:Access Denied)"
+        "[+] observer:V13w-Only!2026 (Indices:7) (Write:Unknown) (Delete:Unknown) "
+        "(Documents:Read) (Cluster:Access Denied) (Nodes:Access Denied) (Users:Access Denied)"
     )
+
+
+def test_every_accepted_elastic_pair_keeps_its_own_resource_evidence() -> None:
+    record = _record(
+        [
+            {
+                "username": "reader",
+                "password": "one",
+                "status": "valid_credentials",
+                "auth_probe_status": "verified",
+                "credential_resource_access_checked": True,
+                "credential_indices_access": "allowed",
+                "credential_indices_count": 2,
+                "credential_documents_access": "allowed",
+                "credential_cluster_access": "denied",
+                "credential_nodes_access": "allowed",
+                "credential_nodes_count": 1,
+                "credential_users_access": "denied",
+                "credential_write_access": "denied",
+                "credential_delete_access": "unknown",
+            },
+            {
+                "username": "writer",
+                "password": "two",
+                "status": "valid_credentials",
+                "auth_probe_status": "verified",
+                "credential_resource_access_checked": True,
+                "credential_indices_access": "allowed",
+                "credential_indices_count": 5,
+                "credential_documents_access": "allowed",
+                "credential_cluster_access": "allowed",
+                "credential_nodes_access": "allowed",
+                "credential_nodes_count": 3,
+                "credential_users_access": "denied",
+                "credential_write_access": "allowed",
+                "credential_delete_access": "allowed",
+            },
+        ]
+    )
+    record.update({"provided_username": "writer", "provided_password": "two"})
+
+    lines = actions._format_credential_attempts_records(record, "txt")
+
+    assert len(lines) == 1
+    assert "reader:one (Indices:2) (Write:Access Denied) (Delete:Unknown) (Documents:Read)" in lines[0]
+    assert "(Cluster:Access Denied)" in lines[0]
+    assert "Indices:5" not in lines[0]
+
+
+def test_defcreds_renders_capabilities_for_every_accepted_pair() -> None:
+    record = _record(
+        [
+            {
+                "username": "first",
+                "password": "one",
+                "status": "weak_default_creds",
+                "auth_probe_status": "verified",
+                "credential_indices_access": "allowed",
+                "credential_indices_count": 2,
+                "credential_write_access": "allowed",
+                "credential_delete_access": "allowed",
+            },
+            {
+                "username": "second",
+                "password": "two",
+                "status": "weak_default_creds",
+                "auth_probe_status": "verified",
+                "credential_indices_access": "denied",
+                "credential_write_access": "denied",
+                "credential_delete_access": "denied",
+            },
+        ]
+    )
+
+    lines = actions._format_credential_attempts_records(record, "txt")
+
+    assert len(lines) == 2
+    assert "[+] first:one (Indices:2) (Write:Allowed) (Delete:Allowed)" in lines[0]
+    assert "[+] second:two (Indices:Access Denied) (Write:Access Denied) (Delete:Access Denied)" in lines[1]
+
+
+def test_elastic_selected_pair_is_matched_by_both_username_and_password() -> None:
+    record = _record(
+        [
+            {"username": "admin", "password": "first", "status": "valid_credentials", "auth_probe_status": "verified"},
+            {"username": "admin", "password": "second", "status": "valid_credentials", "auth_probe_status": "verified"},
+        ]
+    )
+    record.update({"provided_username": "admin", "provided_password": "second"})
+
+    lines = actions._format_credential_attempts_records(record, "txt")
+
+    assert len(lines) == 1
+    assert "[+] admin:first" in lines[0]
+
+
+def test_active_write_delete_probe_cleans_only_its_unique_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[tuple[str, str]] = []
+
+    def fake_request(_host: str, _port: int, path: str, _timeout: float, *, method: str = "GET", **_kw: Any):
+        requests.append((method, path))
+        if method == "PUT" and path.count("/") == 1:
+            assert _kw["headers"]["Content-Type"] == "application/json"
+            return 200, b'{"acknowledged":true}', {}, None
+        if method == "PUT" and "/_doc/" in path:
+            return 201, b'{"result":"created"}', {}, None
+        if method == "DELETE" and "/_doc/" in path:
+            return 200, b'{"result":"deleted"}', {}, None
+        if method == "DELETE" and path.count("/") == 1:
+            return 200, b'{"acknowledged":true}', {}, None
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(actions, "_elastic_request", fake_request)
+    result = actions._probe_credential_write_delete_access(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="http",
+        insecure=False,
+        ca_file=None,
+        auth_headers={"Authorization": "Basic redacted"},
+    )
+
+    assert result["credential_write_access"] == "allowed"
+    assert result["credential_delete_access"] == "allowed"
+    assert result["credential_probe_cleanup"] == "complete"
+    assert [method for method, _ in requests] == ["PUT", "PUT", "DELETE", "DELETE"]
+    index_path = requests[0][1]
+    assert index_path.startswith("/redposture-access-probe-")
+    assert requests[-1][1] == index_path
+    assert all(path.startswith(index_path) for _, path in requests)
+
+
+def test_active_probe_never_claims_document_write_when_index_create_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str]] = []
+
+    def fake_request(_host: str, _port: int, path: str, _timeout: float, *, method: str = "GET", **_kw: Any):
+        requests.append((method, path))
+        return 403, b'{"error":"forbidden"}', {}, None
+
+    monkeypatch.setattr(actions, "_elastic_request", fake_request)
+    result = actions._probe_credential_write_delete_access(
+        "127.0.0.1", 9200, 1.0, scheme="http", insecure=False, ca_file=None, auth_headers={}
+    )
+
+    assert result["credential_write_access"] == "unknown"
+    assert result["credential_delete_access"] == "unknown"
+    assert result["credential_probe_cleanup"] == "not_needed"
+    assert len(requests) == 1
+
+
+def test_active_probe_checks_opensearch_own_index_after_generic_index_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str]] = []
+
+    def fake_request(_host: str, _port: int, path: str, _timeout: float, *, method: str = "GET", **_kw: Any):
+        requests.append((method, path))
+        if method == "PUT" and path.startswith("/redposture-access-probe-"):
+            return 403, b'{"error":"forbidden"}', {}, None
+        if method == "GET" and path == "/_plugins/_security/authinfo":
+            return 200, b'{"user_name":"logstash","roles":["logstash","own_index"]}', {}, None
+        if method == "HEAD" and path == "/logstash":
+            return 404, b"", {}, None
+        if method == "PUT" and path == "/logstash":
+            return 200, b'{"acknowledged":true}', {}, None
+        if method == "PUT" and path.startswith("/logstash/_doc/"):
+            return 201, b'{"result":"created"}', {}, None
+        if method == "DELETE" and path.startswith("/logstash/_doc/"):
+            return 200, b'{"result":"deleted"}', {}, None
+        if method == "DELETE" and path == "/logstash":
+            return 200, b'{"acknowledged":true}', {}, None
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(actions, "_elastic_request", fake_request)
+    result = actions._probe_credential_write_delete_access(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="https",
+        insecure=True,
+        ca_file=None,
+        auth_headers={"Authorization": "Basic redacted"},
+    )
+
+    assert result["credential_write_access"] == "allowed"
+    assert result["credential_delete_access"] == "allowed"
+    assert result["credential_probe_cleanup"] == "complete"
+    assert ("PUT", "/logstash") in requests
+    assert requests[-1] == ("DELETE", "/logstash")
+
+
+def test_active_probe_cleans_existing_own_index_after_ambiguous_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str]] = []
+    document_deletes = 0
+
+    def fake_request(_host: str, _port: int, path: str, _timeout: float, *, method: str = "GET", **_kw: Any):
+        nonlocal document_deletes
+        requests.append((method, path))
+        if method == "PUT" and path.startswith("/redposture-access-probe-"):
+            return 403, b'{"error":"forbidden"}', {}, None
+        if method == "GET" and path == "/_plugins/_security/authinfo":
+            return 200, b'{"user_name":"logstash","roles":["own_index"]}', {}, None
+        if method == "HEAD" and path == "/logstash":
+            return 200, b"", {}, None
+        if method == "DELETE" and path.startswith("/logstash/_doc/"):
+            document_deletes += 1
+            if document_deletes == 1:
+                return 404, b'{"result":"not_found"}', {}, None
+            return 200, b'{"result":"deleted"}', {}, None
+        if method == "PUT" and path.startswith("/logstash/_doc/"):
+            return 0, b"", {}, "connection reset after write"
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(actions, "_elastic_request", fake_request)
+    result = actions._probe_credential_write_delete_access(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="https",
+        insecure=True,
+        ca_file=None,
+        auth_headers={"Authorization": "Basic redacted"},
+    )
+
+    assert result["credential_write_access"] == "unknown"
+    assert result["credential_probe_cleanup"] == "complete"
+    assert document_deletes == 2
+    assert ("DELETE", "/logstash") not in requests
+
+
+def test_active_probe_ignores_malformed_own_index_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[tuple[str, str]] = []
+
+    def fake_request(_host: str, _port: int, path: str, _timeout: float, *, method: str = "GET", **_kw: Any):
+        requests.append((method, path))
+        if method == "PUT" and path.startswith("/redposture-access-probe-"):
+            return 403, b'{"error":"forbidden"}', {}, None
+        if method == "GET" and path == "/_plugins/_security/authinfo":
+            return 200, b'{"user_name":"logstash","roles":null}', {}, None
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(actions, "_elastic_request", fake_request)
+    result = actions._probe_credential_write_delete_access(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="https",
+        insecure=True,
+        ca_file=None,
+        auth_headers={"Authorization": "Basic redacted"},
+    )
+
+    assert result["credential_write_access"] == "unknown"
+    assert result["credential_probe_cleanup"] == "not_needed"
+    assert [method for method, _path in requests] == ["PUT", "GET"]
+
+
+def test_active_probe_authinfo_transport_failure_does_not_claim_failed_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str]] = []
+
+    def fake_request(_host: str, _port: int, path: str, _timeout: float, *, method: str = "GET", **_kw: Any):
+        requests.append((method, path))
+        if method == "PUT" and path.startswith("/redposture-access-probe-"):
+            return 403, b'{"error":"forbidden"}', {}, None
+        if method == "GET" and path == "/_plugins/_security/authinfo":
+            raise TimeoutError("identity endpoint timed out")
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(actions, "_elastic_request", fake_request)
+    result = actions._probe_credential_write_delete_access(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="https",
+        insecure=True,
+        ca_file=None,
+        auth_headers={"Authorization": "Basic redacted"},
+    )
+
+    assert result["credential_write_access"] == "unknown"
+    assert result["credential_probe_cleanup"] == "not_needed"
+    assert [method for method, _path in requests] == ["PUT", "GET"]
+
+
+def test_active_probe_cleans_own_index_after_ambiguous_creation(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[tuple[str, str]] = []
+
+    def fake_request(_host: str, _port: int, path: str, _timeout: float, *, method: str = "GET", **_kw: Any):
+        requests.append((method, path))
+        if method == "PUT" and path.startswith("/redposture-access-probe-"):
+            return 403, b'{"error":"forbidden"}', {}, None
+        if method == "GET" and path == "/_plugins/_security/authinfo":
+            return 200, b'{"user_name":"logstash","roles":["own_index"]}', {}, None
+        if method == "HEAD" and path == "/logstash":
+            return 404, b"", {}, None
+        if method == "PUT" and path == "/logstash":
+            raise TimeoutError("index created but response lost")
+        if method == "DELETE" and path == "/logstash":
+            return 200, b'{"acknowledged":true}', {}, None
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(actions, "_elastic_request", fake_request)
+    result = actions._probe_credential_write_delete_access(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="https",
+        insecure=True,
+        ca_file=None,
+        auth_headers={"Authorization": "Basic redacted"},
+    )
+
+    assert result["credential_write_access"] == "unknown"
+    assert result["credential_probe_cleanup"] == "complete"
+    assert requests[-1] == ("DELETE", "/logstash")
+
+
+def test_active_probe_reports_failed_cleanup_without_overstating_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_request(_host: str, _port: int, path: str, _timeout: float, *, method: str = "GET", **_kw: Any):
+        if method == "PUT" and "/_doc/" not in path:
+            return 200, b'{"acknowledged":true}', {}, None
+        if method == "PUT":
+            return 201, b'{"result":"created"}', {}, None
+        return 403, b'{"error":"forbidden"}', {}, None
+
+    monkeypatch.setattr(actions, "_elastic_request", fake_request)
+    result = actions._probe_credential_write_delete_access(
+        "127.0.0.1", 9200, 1.0, scheme="http", insecure=False, ca_file=None, auth_headers={}
+    )
+
+    assert result["credential_write_access"] == "allowed"
+    assert result["credential_delete_access"] == "denied"
+    assert result["credential_probe_cleanup"] == "failed"
+    assert result["credential_probe_index"].startswith("redposture-access-probe-")
+    assert "Cleanup:Failed; index:" in actions._credential_resource_suffix(result)
+
+
+def test_auth_phase_attaches_separate_resource_probes_to_each_accepted_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auths = [
+        actions._elastic_headers(username="elastic", password=password, api_token=None)["Authorization"]
+        for password in ("one", "two")
+    ]
+
+    monkeypatch.setattr(
+        actions,
+        "_probe_authenticate",
+        lambda *_args, **_kw: actions.ElasticAuthProbeResult(
+            valid=True, error=None, username="elastic", status=200, endpoint="/_security/_authenticate"
+        ),
+    )
+
+    def resource_probe(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        authorization = kwargs["auth_headers"]["Authorization"]
+        return {
+            "credential_resource_access_checked": True,
+            "credential_indices_access": "allowed",
+            "credential_indices_count": 1 if authorization == auths[0] else 2,
+        }
+
+    def write_probe(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "credential_write_access": "denied" if kwargs["auth_headers"]["Authorization"] == auths[0] else "allowed"
+        }
+
+    monkeypatch.setattr(actions, "_probe_credential_resource_access", resource_probe)
+    monkeypatch.setattr(actions, "_probe_credential_write_delete_access", write_probe)
+    state = actions.ElasticLifecycleState()
+
+    one = actions.authenticate_elastic(_ctx(state, "one"), _detected_record(), {})
+    two = actions.authenticate_elastic(_ctx(state, "two"), _detected_record(), {})
+
+    assert one["credential_indices_count"] == 1
+    assert one["credential_write_access"] == "denied"
+    assert two["credential_indices_count"] == 2
+    assert two["credential_write_access"] == "allowed"
 
 
 def test_opensearch_resource_access_uses_only_read_only_probes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -423,6 +811,8 @@ def test_supported_endpoint_allows_late_success_without_credential_only_privileg
         )
 
     monkeypatch.setattr(actions, "_elastic_request", fake_request)
+    monkeypatch.setattr(actions, "_probe_credential_resource_access", lambda *_args, **_kw: {})
+    monkeypatch.setattr(actions, "_probe_credential_write_delete_access", lambda *_args, **_kw: {})
     monkeypatch.setattr(
         actions,
         "_check_privileges",
@@ -817,8 +1207,10 @@ def test_lifecycle_reuses_one_direct_session_for_auth_candidates_and_data(
             *,
             headers: dict[str, str],
             data: bytes | None,
+            response_size_cap: int | None = None,
         ) -> HttpResponse:
             _ = (headers, data)
+            assert response_size_cap is None or 0 < response_size_cap <= 10 * 1024 * 1024
             self.paths.append(path)
             if path == "/_security/_authenticate":
                 return HttpResponse(

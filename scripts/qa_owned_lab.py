@@ -11,6 +11,31 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from scripts.qa_owned_volumes import VolumeLedger
+
+_ENGINE_OWNED_NETWORKS = {"bridge": "bridge", "host": "host", "none": "null"}
+
+
+def compare_network_snapshots(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> dict[str, Any]:
+    """Keep strict IDs for user networks while tolerating Engine-owned recreation."""
+    after_ids = {str(network.get("ID")): network for network in after}
+    after_names = {str(network.get("Name")): network for network in after}
+    missing: dict[str, str] = {}
+    recreated_builtin: dict[str, dict[str, str]] = {}
+    for original in before:
+        network_id = str(original.get("ID"))
+        name = str(original.get("Name"))
+        driver = str(original.get("Driver"))
+        if network_id in after_ids:
+            continue
+        replacement = after_names.get(name)
+        if _ENGINE_OWNED_NETWORKS.get(name) == driver and replacement is not None:
+            if str(replacement.get("Driver")) == driver:
+                recreated_builtin[name] = {"before": network_id, "after": str(replacement.get("ID"))}
+                continue
+        missing[network_id] = name
+    return {"preserved": not missing, "missing": missing, "recreated_builtin": recreated_builtin}
+
 
 class OwnedLab:
     def __init__(self, out: Path) -> None:
@@ -21,6 +46,8 @@ class OwnedLab:
         self.commands: list[dict[str, Any]] = []
         self.before = self.snapshot()
         self.mounts: set[str] = set()
+        self.volume_ledger = VolumeLedger(self.out / "volumes.json", "io.redposture.qa.owner", self.owner, self.docker)
+        self.volume_ledger.begin()
         self.names: list[str] = []
 
     def run(self, *args: str, input: str | None = None, timeout: float = 30, check: bool = True) -> str:
@@ -126,6 +153,7 @@ class OwnedLab:
         return container
 
     def collect_mounts(self) -> None:
+        self.volume_ledger.capture()
         ids = self.docker("ps", "-aq", "--filter", "label=" + self.label).split()
         if ids:
             for container in json.loads(self.docker("inspect", *ids)):
@@ -155,22 +183,19 @@ class OwnedLab:
         ids = self.docker("ps", "-aq", "--filter", "label=" + self.label).split()
         for container in ids:
             self.docker("logs", "--tail", "100", container, check=False)
-            self.docker("rm", "-f", "-v", container)
-        for volume in sorted(self.mounts - set(self.before["volumes"])):
-            if volume in self.docker("volume", "ls", "-q").split():
-                assert not self.docker("ps", "-aq", "--filter", "volume=" + volume).strip()
-                self.docker("volume", "rm", volume)
+            self.docker("rm", "-f", container)
+        self.volume_ledger.cleanup()
         networks = self.docker("network", "ls", "-q", "--filter", "label=" + self.label).split()
         for network in networks:
             self.docker("network", "rm", network)
         after = self.snapshot()
-        before_networks = {n["ID"]: n["Name"] for n in self.before["networks"]}
-        after_networks = {n["ID"]: n["Name"] for n in after["networks"]}
+        networks = compare_network_snapshots(self.before["networks"], after["networks"])
         preservation = {
             "containers": all(after["containers"].get(k) == v for k, v in self.before["containers"].items()),
             "volumes": set(self.before["volumes"]) <= set(after["volumes"]),
-            "networks": set(before_networks) <= set(after_networks),
-            "missing_networks": {k: v for k, v in before_networks.items() if k not in after_networks},
+            "networks": networks["preserved"],
+            "missing_networks": networks["missing"],
+            "recreated_builtin_networks": networks["recreated_builtin"],
             "new_containers": sorted(set(after["containers"]) - set(self.before["containers"])),
             "new_volumes": sorted(set(after["volumes"]) - set(self.before["volumes"])),
             "owned_remaining": self.docker("ps", "-aq", "--filter", "label=" + self.label).split(),

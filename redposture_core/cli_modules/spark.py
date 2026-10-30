@@ -52,7 +52,7 @@ def configure_spark_parser(
         action="store_true",
         help="List active applications exposed by the Master UI (up to 5000 applications).",
     )
-    add_discovery_budget_flags(inventory, default_time=300.0, default_bytes=50 * 1024 * 1024)
+    add_discovery_budget_flags(inventory)
     probe.add_argument(
         "--probe-submit",
         action="store_true",

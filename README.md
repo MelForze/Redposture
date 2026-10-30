@@ -26,7 +26,9 @@ For the current repository code, use `python -m venv .venv`, `source .venv/bin/a
 
 Run `redposture MODULE -t TARGET`; `TARGET` can be a host, `host:port`, URL, CIDR/range, comma-separated list, or file. Use `redposture MODULE -h` for flags. `-o FILE` saves output; `-f json` selects JSON instead of TXT. `--debug` shows diagnostics. TXT contains confirmed services; unconfirmed detections remain in debug/JSON. Saved files contain no ANSI colors. `-ot, --out-target` removes matching hosts before ports are expanded; for example, `--out-target exclusions.txt`.
 
-All 32 modules, their UI probes, `spray` discovery and exporters `scan/collect/trigger` support native async detection for batches of at least 32 endpoints. Authentication, inventory, discovery and execution keep synchronous workers and the same checks. Exporters collect continuously without waiting for a whole batch to finish.
+HTTP modules, their UI probes, `spray`, and exporters `collect`/`trigger` accept repeatable `-H 'Name: value'` (or `--header`). The header is sent during detection and subsequent HTTP requests; a supplied `Authorization` or `Cookie` takes priority over module defaults. For example: `redposture elastic -t https://example.test:9200 -H 'X-Tenant: audit' -H 'Authorization: Bearer TOKEN'`.
+
+All 32 modules, their UI probes, `spray` discovery and exporters `collect/trigger` support native async detection for batches of at least 32 endpoints. Authentication, inventory, discovery and execution keep synchronous workers and the same checks. Exporters collect continuously without waiting for a whole batch to finish.
 
 | Endpoints after port expansion | Async detection limit |
 | --- | ---: |
@@ -167,7 +169,7 @@ Spray checkpoints preserve cooldowns and stopped origins on resume. Older checkp
 | `nexus` | Accessible repositories/assets, image configs and files in OCI layers | `--repository`, `--image`, `--tag`, `--asset` |
 | `docker-registry` | Accessible images, configs and files in OCI layers | `--repository`, `--image`, `--tag` |
 
-With no selector, these modules traverse accessible sources within `--discover-max-bytes` and `--discover-time` (50 MiB / 300 seconds by default). Downloads and archive expansion are bounded. Denied, truncated or unreadable sources are reported as `partial` or `unavailable`; hidden values and Swarm secret metadata are not treated as recovered secrets. Panel access and registry access are checked separately.
+With no selector, these modules traverse accessible sources until the target deadline. `--discover-time` caps the whole target (default 900 seconds); the CLI has no byte limit. Findings include the full value in TXT and JSON. Network reads and archive expansion use bounded internal portions. A source that cannot be fully streamed, a denied source or a malformed response is reported as `partial` or `unavailable`, never as complete. Hidden values and Swarm secret metadata are not treated as recovered secrets. Panel access and registry access are checked separately.
 
 ```bash
 redposture gitlab -t https://gitlab.example --token-file token.txt --project team/app --discover -o gitlab_discover_result.txt
@@ -176,12 +178,13 @@ redposture nexus -t https://nexus.example -u auditor -p 'password' --repository 
 
 ## Command execution
 
-The newer `--execute COMMAND` paths run only when explicitly requested:
+The newer `--execute COMMAND` paths run the supplied command only when explicitly requested:
 
 | Module | Execution surface / requirements |
 | --- | --- |
 | `kafka` | Provectus Kafka UI Groovy filters; runs in the UI container, requires a readable topic. Broker and Kafbat execution are unsupported. |
 | `portainer` | Docker exec inside an existing container selected by `--endpoint` and `--container`. |
+| `proxmox` | Selected `--vm` QEMU guest via QGA, or LXC via a user-ticket console; no guest startup or configuration changes. |
 | `jenkins` | Controller Script Console; requires its administrative permission. |
 | `consul` | Temporary agent script check; script checks must be enabled. |
 | `nexus` | Temporary Groovy script; requires enabled scripting and Script API permissions. |
@@ -200,7 +203,7 @@ redposture kafka -t http://kafka-ui.example:8080 --execute 'id'
 
 ## Module examples
 
-Replace example targets and credentials. Add `--defcreds` or `--enum-cve` where supported. Modules with `--discover-max-bytes` default to 50 MiB per target and mark incomplete runs `partial`.
+Replace example targets and credentials. Add `--defcreds` or `--enum-cve` where supported. Modules with `--discover` have no cumulative byte limit and use 15 minutes per target by default; incomplete runs are marked `partial`.
 
 ### Airflow
 
@@ -212,7 +215,7 @@ redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --sh
 redposture airflow -t https://airflow.example:8080 -u auditor -p 'password' --dagsource FILE_TOKEN --dump
 ```
 
-`--dump` reads DAG source, Variables and Connections; without selectors it reads all three. The default budget is 50 MiB and five minutes per target.
+`--dump` reads DAG source, Variables and Connections; without selectors it reads all three. For `--discover`, the default deadline is 15 minutes per target.
 
 `--show-dagsources` lists source IDs, paths and associated DAGs; add `--dump` for all source code. `--dagsource` selects one or more sources: use `file_token` on Airflow 2 or `dag_id` on Airflow 3.
 
@@ -274,6 +277,8 @@ to the scheduler's ZooKeeper configuration store.
 ```bash
 redposture elastic -t https://search.example:9200 -u auditor -p 'password' --show-cluster --show-user --discover
 ```
+
+For each verified credential, Elastic shows resource access and tests document write/delete in a unique temporary index, then removes the index. `Unknown` means the probe could not prove that permission; a cleanup failure names the temporary index.
 
 ### etcd
 
@@ -403,8 +408,11 @@ PostgreSQL and ClickHouse `--os-shell` separate stdout/stderr and preview binary
 ### Proxmox
 
 ```bash
-redposture proxmox -t https://pve.example:8006 -u auditor@pve -p 'password' --nodes --discover
+redposture proxmox -t https://pve.example:8006 -u auditor@pve -p 'password' --show-nodes --show-users --show-vms
+redposture proxmox -t https://pve.example:8006 -u auditor@pve -p 'password' --vm 101 --execute 'id'
 ```
+
+`--show-vms` lists QEMU VMs and LXC containers and runs a harmless marker to confirm `(execute:True)`. `False` means execution was not confirmed; the reason is shown. `--node` restricts guest selection. QEMU uses Guest Agent; LXC uses its shell console or a root@pam node console with `pct exec`. LXC consoles require a user ticket, not an API token. Guests are never started and their configuration is not changed. `--nodes` and `--users` remain aliases.
 
 ### Qdrant
 
@@ -456,8 +464,9 @@ redposture zookeeper -t zk.example -u auditor -p 'password' --show-znodes 20 --d
 
 ### Exporters
 
+`collect` and `trigger` discover exporters automatically.
+
 ```bash
-redposture exporters scan -t targets.txt
 redposture exporters collect -t targets.txt --deep
 redposture exporters trigger -t targets.txt --callback-dns callback.example
 redposture exporters trigger -t targets.txt -e mysql --callback-dns callback.example --export-hashcat mysql.hashes

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
+import urllib.error
 from types import SimpleNamespace
 
 import pytest
@@ -351,6 +353,109 @@ def test_audit_etcd_host_open_v2_collects_keys_and_query(monkeypatch) -> None:
     assert record["keys"] == ["/a", "/b"]
     assert record["key_values"] == ["/a:1", "/b:2"]
     assert record["query_key_value"] == "/a:1"
+
+
+def test_discover_v2_recursive_probe_streams_after_buffered_limit(monkeypatch) -> None:
+    requested_paths: list[str] = []
+
+    def fake_request(
+        _host: str, _port: int, _method: str, path: str, _timeout: float, **kwargs: object
+    ) -> tuple[int, str]:
+        if path == "/version":
+            return 200, '{"etcdserver":"2.3.8"}'
+        assert path == "/v2/keys?recursive=true"
+        requested_paths.append(path)
+        raise urllib.error.URLError("HTTP response exceeds limit")
+
+    monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", fake_request)
+    monkeypatch.setattr(
+        "redposture_core.stage_etcd._stream_v2_tree",
+        lambda *_args, **_kwargs: (
+            200,
+            {"node": {"dir": True, "nodes": [{"key": "/qa/password", "value": "qa-secret"}]}},
+            None,
+            20_000_000,
+        ),
+    )
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=True,
+        dump_keys=True,
+        query_key=None,
+        discover=True,
+        discover_time=5,
+        discover_ctx=SimpleNamespace(
+            args=SimpleNamespace(discover_time=5),
+            discovery_started_at=time.monotonic(),
+            host="127.0.0.1",
+            port=2379,
+            live_emit=lambda *_args: None,
+        ),
+    )
+    assert requested_paths == ["/v2/keys?recursive=true"]
+    assert record["is_etcd"] is True
+    assert record["dump_error"] is None
+    assert record["content_discovery"]["status"] == "complete"
+    assert [item["value"] for item in record["content_discovery"]["findings"]] == ["qa-secret"]
+
+
+def test_discover_v2_authenticated_replay_streams_large_tree(monkeypatch) -> None:
+    calls: list[bool] = []
+
+    def fake_request(
+        _host: str, _port: int, _method: str, path: str, _timeout: float, **kwargs: object
+    ) -> tuple[int, str]:
+        if path == "/version":
+            return 200, '{"etcdserver":"2.3.8"}'
+        assert path == "/v2/keys?recursive=true"
+        calls.append(bool(kwargs.get("basic_auth")))
+        if not kwargs.get("basic_auth"):
+            return 401, "authentication required"
+        raise urllib.error.URLError("HTTP response exceeds limit")
+
+    monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", fake_request)
+    monkeypatch.setattr("redposture_core.stage_etcd._etcd_v2_authenticate", lambda *_a: (True, None))
+    monkeypatch.setattr(
+        "redposture_core.stage_etcd._stream_v2_tree",
+        lambda *_args, **kwargs: (
+            (
+                200,
+                {"node": {"dir": True, "nodes": [{"key": "/qa/password", "value": "qa-secret"}]}},
+                None,
+                20_000_000,
+            )
+            if kwargs.get("basic_auth") == ("reader", "password")
+            else (401, None, None, 0)
+        ),
+    )
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=True,
+        dump_keys=True,
+        query_key=None,
+        username="reader",
+        password="password",
+        discover=True,
+        discover_time=5,
+        discover_ctx=SimpleNamespace(
+            args=SimpleNamespace(discover_time=5),
+            discovery_started_at=time.monotonic(),
+            host="127.0.0.1",
+            port=2379,
+            live_emit=lambda *_args: None,
+        ),
+    )
+    assert calls == [False, True]
+    assert record["status"] == "valid_credentials"
+    assert record["dump_error"] is None
+    assert record["content_discovery"]["status"] == "complete"
+    assert [item["value"] for item in record["content_discovery"]["findings"]] == ["qa-secret"]
 
 
 def test_audit_etcd_host_v3_auth_required_and_unknown_auth(monkeypatch) -> None:
@@ -1288,6 +1393,42 @@ def test_stream_dump_v3_all_respects_total_limit(monkeypatch) -> None:
     assert err is None
     assert [entry["key"] for entry in entries] == ["/k0", "/k1", "/k2"]
     assert calls["n"] == 1  # stops once the cap is reached, no extra page
+
+
+def test_discover_stream_stops_on_repeated_page_and_keeps_first_page(monkeypatch) -> None:
+    b64 = etcd._b64_encode_text
+    page = json.dumps({"kvs": [{"key": b64("/api_token"), "value": b64("glpat-abcdefghijklmnopqrst")}], "more": True})
+    calls: list[int] = []
+
+    def fake_request(_host, _port, _method, _path, _timeout, *, payload=None, response_size_cap=None):
+        assert payload is not None
+        calls.append(response_size_cap)
+        return 200, page
+
+    monkeypatch.setattr(etcd, "_http_json_request", fake_request)
+    budget = etcd._EtcdDiscoveryBudget(deadline=time.monotonic() + 5, remaining_bytes=len(page))
+    entries, error = etcd._stream_dump_v3_all("h", 2379, 1.0, batch=2, delay_ms=0, discovery_budget=budget)
+    assert error == "pagination_stalled"
+    assert len(entries) == 1 and entries[0]["key"] == "/api_token"
+    assert calls == [len(page), len(page)]
+
+
+def test_discover_stream_stops_before_page_after_deadline(monkeypatch) -> None:
+    calls = 0
+
+    def fake_request(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return 200, json.dumps(
+            {"kvs": [{"key": etcd._b64_encode_text("/first"), "value": etcd._b64_encode_text("ok")}], "more": True}
+        )
+
+    monkeypatch.setattr(etcd, "_http_json_request", fake_request)
+    budget = etcd._EtcdDiscoveryBudget(deadline=time.monotonic() - 1, remaining_bytes=1024)
+    entries, error = etcd._stream_dump_v3_all("h", 2379, 1.0, batch=2, delay_ms=0, discovery_budget=budget)
+    assert entries == []
+    assert error == "time_budget"
+    assert calls == 0
 
 
 def test_stream_dump_v3_all_zero_delay_does_not_sleep(monkeypatch) -> None:

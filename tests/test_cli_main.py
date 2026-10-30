@@ -28,7 +28,6 @@ from redposture_core.cli_args import (
     COMMAND_PROXMOX,
     COMMAND_QDRANT,
     COMMAND_REDIS,
-    COMMAND_SCAN,
     COMMAND_SELFCERT,
     COMMAND_TRIGGER,
     COMMAND_ZOOKEEPER,
@@ -67,10 +66,8 @@ def test_tee_console_output_mirrors_stdout_and_stderr(tmp_path, capsys) -> None:
 @pytest.mark.parametrize(
     ("args", "patch_target"),
     [
-        (SimpleNamespace(command=COMMAND_EXPORTERS, exporters_action=COMMAND_SCAN), "run_scan_stage"),
         (SimpleNamespace(command=COMMAND_EXPORTERS, exporters_action=COMMAND_TRIGGER), "run_trigger_stage"),
         (SimpleNamespace(command=COMMAND_EXPORTERS, exporters_action=COMMAND_COLLECT), "run_collect_stage"),
-        (SimpleNamespace(command=COMMAND_SCAN), "run_scan_stage"),
         (SimpleNamespace(command=COMMAND_TRIGGER), "run_trigger_stage"),
         (SimpleNamespace(command=COMMAND_COLLECT), "run_collect_stage"),
         (SimpleNamespace(command=COMMAND_REDIS), "run_redis_stage"),

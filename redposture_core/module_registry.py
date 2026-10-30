@@ -14,7 +14,7 @@ from .cli_modules.consul import configure_consul_parser
 from .cli_modules.datastores import configure_etcd_parser, configure_kafka_parser, configure_redis_parser
 from .cli_modules.docker_engine import configure_docker_parser
 from .cli_modules.elastic import configure_elastic_parser
-from .cli_modules.exporters import configure_collect_parser, configure_scan_parser, configure_trigger_parser
+from .cli_modules.exporters import configure_collect_parser, configure_trigger_parser
 from .cli_modules.gitlab import configure_gitlab_parser
 from .cli_modules.grafana import configure_grafana_parser
 from .cli_modules.grpc import configure_grpc_parser
@@ -44,7 +44,6 @@ from .cli_modules.yarn import configure_yarn_parser
 from .cli_modules.zookeeper import configure_zookeeper_parser
 
 COMMAND_LISTEN = "listen"
-COMMAND_SCAN = "scan"
 COMMAND_TRIGGER = "trigger"
 COMMAND_COLLECT = "collect"
 COMMAND_REDIS = "redis"
@@ -126,7 +125,6 @@ RuntimeCommandSpec = CommandSpec | ExportersActionSpec
 
 
 _STAGE_RUNNER_MODULES: dict[str, str] = {
-    COMMAND_SCAN: "redposture_core.stage_scan",
     COMMAND_TRIGGER: "redposture_core.stage_trigger",
     COMMAND_COLLECT: "redposture_core.stage_collect",
     COMMAND_REDIS: "redposture_core.modules.redis.stage",
@@ -235,15 +233,6 @@ def _make_configurator(
 
 
 EXPORTERS_ACTION_SPECS: tuple[ExportersActionSpec, ...] = (
-    ExportersActionSpec(
-        name=COMMAND_SCAN,
-        help="Discover observability endpoints and write scan report.",
-        runner_attr="run_scan_stage",
-        configure_parser=_make_configurator(
-            configure_scan_parser,
-            ("add_output_flags", "add_log_flag", "add_scan_host_flags", "add_save_flag"),
-        ),
-    ),
     ExportersActionSpec(
         name=COMMAND_COLLECT,
         help="Collect debug/runtime endpoints from a target service list.",
@@ -530,7 +519,6 @@ COMMAND_SPECS_BY_NAME: dict[str, CommandSpec] = {spec.name: spec for spec in COM
 EXPORTERS_ACTION_SPECS_BY_NAME: dict[str, ExportersActionSpec] = {spec.name: spec for spec in EXPORTERS_ACTION_SPECS}
 
 DIRECT_RUNTIME_SPECS_BY_NAME: dict[str, ExportersActionSpec] = {
-    COMMAND_SCAN: EXPORTERS_ACTION_SPECS_BY_NAME[COMMAND_SCAN],
     COMMAND_COLLECT: EXPORTERS_ACTION_SPECS_BY_NAME[COMMAND_COLLECT],
     COMMAND_TRIGGER: EXPORTERS_ACTION_SPECS_BY_NAME[COMMAND_TRIGGER],
     COMMAND_SELFCERT: ExportersActionSpec(
@@ -555,7 +543,7 @@ def configure_cli_subcommands(
 ) -> None:
     exporters_parser = subparsers.add_parser(
         COMMAND_EXPORTERS,
-        help="Unified exporter workflows: scan/collect/trigger.",
+        help="Unified exporter workflows: collect/trigger.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     exporters_subparsers = exporters_parser.add_subparsers(
@@ -618,7 +606,6 @@ __all__ = [
     "COMMAND_DOCKER_REGISTRY",
     "COMMAND_HARBOR",
     "COMMAND_NEXUS",
-    "COMMAND_SCAN",
     "COMMAND_SELFCERT",
     "COMMAND_TRIGGER",
     "COMMAND_ZOOKEEPER",

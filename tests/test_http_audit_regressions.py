@@ -296,7 +296,14 @@ def test_h08_grafana_baselines_identity_and_scoped_capability(
     monkeypatch: pytest.MonkeyPatch, kind: str, baseline: str
 ) -> None:
     def request(_h: str, _p: int, path: str, _t: float, **kwargs: Any) -> Any:
-        auth = bool((kwargs.get("headers") or {}).get("Authorization"))
+        authorization = (kwargs.get("headers") or {}).get("Authorization")
+        auth = bool(authorization)
+        if (
+            authorization
+            and authorization.startswith("Basic ")
+            and authorization != grafana._auth_header("alias", "secret")
+        ):
+            return 401, "{}", {}
         if not auth and baseline == "denied":
             return 401, "{}", {}
         if kind == "scoped-token" and path == "/api/user":

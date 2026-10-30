@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
-import select
+import selectors
 import shutil
 import socket
 import socketserver
@@ -113,18 +114,55 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
 
 def _relay(left: socket.socket, right: socket.socket) -> None:
     peers = {left: right, right: left}
-    while peers:
-        readable, _, _ = select.select(list(peers), [], [], 1.0)
-        if not readable:
-            continue
-        for source in readable:
-            try:
-                payload = source.recv(64 * 1024)
-            except OSError:
-                payload = b""
-            if not payload:
-                return
-            peers[source].sendall(payload)
+    with selectors.DefaultSelector() as readiness:
+        for source in peers:
+            readiness.register(source, selectors.EVENT_READ)
+        while peers:
+            for event, _mask in readiness.select(1.0):
+                source = cast(socket.socket, event.fileobj)
+                try:
+                    payload = source.recv(64 * 1024)
+                except OSError:
+                    payload = b""
+                if not payload:
+                    return
+                peers[source].sendall(payload)
+
+
+def test_proxy_relay_accepts_descriptor_above_select_limit() -> None:
+    import resource
+
+    soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    minimum_fd = 2048 if soft_limit == resource.RLIM_INFINITY else min(2048, soft_limit - 1)
+    if minimum_fd < 1024:
+        pytest.skip("open-file limit cannot allocate a descriptor above select's 1024-FD boundary")
+    source, sender = socket.socketpair()
+    upstream, receiver = socket.socketpair()
+    high_source = socket.socket(fileno=fcntl.fcntl(source.fileno(), fcntl.F_DUPFD, minimum_fd))
+    source.close()
+    errors: list[Exception] = []
+
+    def run() -> None:
+        try:
+            _relay(high_source, upstream)
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        receiver.settimeout(2)
+        sender.sendall(b"relay-proof")
+        assert receiver.recv(11) == b"relay-proof"
+    finally:
+        sender.shutdown(socket.SHUT_RDWR)
+        sender.close()
+        receiver.close()
+        thread.join(timeout=2)
+        high_source.close()
+        upstream.close()
+    assert not errors
+    assert not thread.is_alive()
 
 
 class _TunnelHandler(socketserver.BaseRequestHandler):
@@ -210,6 +248,41 @@ def test_proxy_resolves_dns_and_follows_http_to_verified_https_redirect(
     assert response.body == b"proxy-tls-ok"
     assert source.calls == ["/start"]
     assert destination.calls == ["/final?via=proxy"]
+    assert proxy.requested_hosts == [
+        ("service.test", source.server_port),
+        ("secure.service.test", destination.server_port),
+    ]
+
+
+@pytest.mark.parametrize("proxy_scheme", ["socks5h", "http"])
+def test_streaming_pool_follows_proxy_redirect_without_buffering_body(
+    mtls_material: dict[str, Path], proxy_scheme: str
+) -> None:
+    destination = _HttpServer(_DestinationHandler)
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_context.load_cert_chain(mtls_material["server_cert"], mtls_material["server_key"])
+    destination.socket = tls_context.wrap_socket(destination.socket, server_side=True)
+    source = _HttpServer(_SourceHandler)
+    source.redirect_url = f"https://secure.service.test:{destination.server_port}/final?via=stream"
+    proxy = _TunnelProxy(proxy_scheme)
+    config = ProxyConfig(
+        scheme=proxy_scheme,
+        host="127.0.0.1",
+        port=proxy.server_address[1],
+        username=None,
+        password=None,
+        raw_url=f"{proxy_scheme}://127.0.0.1:{proxy.server_address[1]}",
+    )
+    chunks: list[bytes] = []
+    with _running(destination), _running(source), _running(proxy):
+        with closing(HttpSessionPool(timeout=1, ca_file=str(mtls_material["ca_cert"]), proxy=config)) as pool:
+            response = pool.request_stream(
+                "GET", f"http://service.test:{source.server_port}/start", on_chunk=chunks.append, chunk_size=4
+            )
+    assert response.status == 200 and response.error is None
+    assert response.body == b"" and b"".join(chunks) == b"proxy-tls-ok"
+    assert max(map(len, chunks)) <= 4
+    assert source.calls == ["/start"] and destination.calls == ["/final?via=stream"]
     assert proxy.requested_hosts == [
         ("service.test", source.server_port),
         ("secure.service.test", destination.server_port),

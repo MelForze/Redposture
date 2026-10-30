@@ -11,6 +11,7 @@ import html
 import json
 import re
 import secrets
+import tempfile
 import time
 from collections.abc import Mapping
 from contextlib import closing
@@ -21,6 +22,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 from .clients.http_api import HttpResponse, infer_http_base_path
 from .clients.http_session import HttpSessionPool
 from .detection_steps import run_requests
+from .discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME
 from .rendering import CountColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
 
 UI_PORTS: dict[str, tuple[int, ...]] = {
@@ -1141,12 +1143,19 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
         auth_headers["X-API-Key"] = str(ui["session_api_key"])
     results: dict[str, Any] = {}
     portainer_discover = product == "portainer" and bool(getattr(ctx.args, "discover", False))
-    portainer_deadline = time.monotonic() + (
-        float(getattr(ctx.args, "discover_time", None) or _DUMP_SECONDS) if portainer_discover else _DUMP_SECONDS
+    portainer_deadline = (
+        (getattr(ctx, "discovery_started_at", None) or time.monotonic()) if portainer_discover else time.monotonic()
+    ) + (
+        float(getattr(ctx.args, "discover_time", None) or DEFAULT_DISCOVER_TIME)
+        if portainer_discover
+        else _DUMP_SECONDS
     )
     portainer_remaining = (
-        int(getattr(ctx.args, "discover_max_bytes", None) or _DUMP_BYTES) if portainer_discover else _DUMP_BYTES
+        int(getattr(ctx.args, "discover_max_bytes", None) or DEFAULT_DISCOVER_MAX_BYTES)
+        if portainer_discover
+        else _DUMP_BYTES
     )
+    portainer_bytes_read = 0
     with closing(
         HttpSessionPool(
             timeout=max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0)),
@@ -1157,9 +1166,9 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
     ) as pool:
 
         def get(path: str, *, response_size_cap: int = 128 * 1024) -> HttpResponse:
-            nonlocal portainer_remaining
+            nonlocal portainer_bytes_read, portainer_remaining
             if product == "portainer":
-                if time.monotonic() >= portainer_deadline or portainer_remaining <= 0:
+                if time.monotonic() >= portainer_deadline or (not portainer_discover and portainer_remaining <= 0):
                     return HttpResponse(status=0, body=b"", headers={}, error="Portainer inventory budget exhausted")
                 response_size_cap = min(response_size_cap, portainer_remaining)
             if product == "portainer":
@@ -1177,7 +1186,11 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
             else:
                 response = _get(pool, base, path, headers=auth_headers, response_size_cap=response_size_cap)
             if product == "portainer":
-                portainer_remaining -= len(response.body or b"")
+                portainer_bytes_read += len(response.body or b"")
+                if not portainer_discover:
+                    portainer_remaining -= len(response.body or b"")
+                if len(response.body or b"") > response_size_cap:
+                    return HttpResponse(status=0, body=b"", headers={}, error="Portainer inventory portion exceeded")
             return response
 
         if product == "portainer":
@@ -1206,9 +1219,7 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                         return {
                             **record,
                             "ui": ui,
-                            "_portainer_inventory_bytes_read": (
-                                int(getattr(ctx.args, "discover_max_bytes", None) or _DUMP_BYTES) - portainer_remaining
-                            ),
+                            "_portainer_inventory_bytes_read": portainer_bytes_read,
                         }
                     new_ids = 0
                     for item in page_items:
@@ -1249,9 +1260,7 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                         return {
                             **record,
                             "ui": ui,
-                            "_portainer_inventory_bytes_read": (
-                                int(getattr(ctx.args, "discover_max_bytes", None) or _DUMP_BYTES) - portainer_remaining
-                            ),
+                            "_portainer_inventory_bytes_read": portainer_bytes_read,
                         }
                 results["environments"] = {
                     "count": len(endpoints),
@@ -1555,14 +1564,64 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                     results[flag] = _response_status(response)
             if "discover" in flags:
                 from .modules.elastic.discover import DiscoverOptions, DiscoverResponse, run_discovery
+                from .modules.elastic.search_stream import StreamedSearchPage
+
+                discover_seconds = float(
+                    DEFAULT_DISCOVER_TIME
+                    if getattr(ctx.args, "discover_time", None) is None
+                    else ctx.args.discover_time
+                )
+                discover_deadline = time.monotonic() + discover_seconds
 
                 def discover_request(request):
                     headers = {**auth_headers, **request.headers}
                     headers["kbn-xsrf" if product == "kibana" else "osd-xsrf"] = "redposture"
+                    proxy_path = "/api/console/proxy?" + urlencode({"path": request.path, "method": request.method})
+                    stream_search = request.stream_search
+                    if request.method == "POST" and "_search" in request.path and request.body:
+                        try:
+                            stream_search = stream_search or json.loads(request.body).get("size") == 1
+                        except (ValueError, AttributeError):
+                            pass
+                    if stream_search and hasattr(pool, "request_stream"):
+                        file = tempfile.TemporaryFile(mode="w+b", prefix="redposture-elastic-ui-search-")
+                        keep_file = False
+                        try:
+                            response = pool.request_stream(
+                                "POST",
+                                base + proxy_path,
+                                body=request.body or b"",
+                                headers=headers,
+                                deadline=discover_deadline,
+                                allow_cross_origin_redirects=False,
+                                on_chunk=file.write,
+                            )
+                            if response.status == 200:
+                                keep_file = True
+                                return DiscoverResponse(
+                                    status=200,
+                                    payload=b"",
+                                    headers=response.headers,
+                                    error=response.error,
+                                    truncated=response.truncated,
+                                    streamed_search=StreamedSearchPage(
+                                        file, incomplete=bool(response.error or response.truncated)
+                                    ),
+                                )
+                            return DiscoverResponse(
+                                response.status,
+                                b"",
+                                response.headers,
+                                response.error,
+                                response.truncated,
+                            )
+                        finally:
+                            if not keep_file:
+                                file.close()
                     response = _post(
                         pool,
                         base,
-                        "/api/console/proxy?" + urlencode({"path": request.path, "method": request.method}),
+                        proxy_path,
                         request.body or b"",
                         headers,
                         response_size_cap=10 * 1024 * 1024,
@@ -1575,10 +1634,8 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                     discover_request,
                     vendor="elasticsearch" if product == "kibana" else "opensearch",
                     options=DiscoverOptions(
-                        max_seconds=float(
-                            300.0 if getattr(ctx.args, "discover_time", None) is None else ctx.args.discover_time
-                        ),
-                        max_source_bytes=int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024)),
+                        max_seconds=discover_seconds,
+                        max_source_bytes=getattr(ctx.args, "discover_max_bytes", None),
                     ),
                     nested_scheduler=getattr(ctx, "nested_scheduler", None),
                     scheduler_key=("ui-elastic-discover", base),
@@ -2078,8 +2135,13 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
 
                 discover_started = time.monotonic()
                 discover_budget = Budget(
-                    time_budget=getattr(ctx.args, "discover_time", None),
-                    max_total_bytes=getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024),
+                    time_budget=(
+                        DEFAULT_DISCOVER_TIME
+                        if getattr(ctx.args, "discover_time", None) is None
+                        else ctx.args.discover_time
+                    ),
+                    max_total_bytes=getattr(ctx.args, "discover_max_bytes", DEFAULT_DISCOVER_MAX_BYTES),
+                    _started=getattr(ctx, "discovery_started_at", None) or discover_started,
                 )
                 object_ref = getattr(ctx.args, "object", None)
                 response = get(
@@ -2117,11 +2179,11 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                         if selected_bucket and not selected and object_ref:
                             selected = [{"name": selected_bucket}]
                         walk_limit = _DUMP_COLLECTIONS
-                        deadline = time.monotonic() + _DUMP_SECONDS
-                        if "discover" in flags and not flags & {"dump", "download", "show_objects"}:
-                            seconds = getattr(ctx.args, "discover_time", None)
-                            if seconds is not None:
-                                deadline = min(deadline, discover_started + float(seconds))
+                        deadline = (
+                            discover_budget._started + float(discover_budget.time_budget)
+                            if "discover" in flags and discover_budget.time_budget is not None
+                            else time.monotonic() + _DUMP_SECONDS
+                        )
                         for bucket in selected[:walk_limit]:
                             if time.monotonic() >= deadline or len(objects) >= _DUMP_ITEMS:
                                 failed = True
@@ -2339,7 +2401,7 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                                     "count": len(scan.findings),
                                     "records": scan.findings,
                                     "items": [
-                                        f"{entry['bucket']}/{entry['key']} {entry['type']} {entry['masked_value']}"
+                                        f"{entry['bucket']}/{entry['key']} {entry['type']} {entry['value']}"
                                         for entry in scan.findings
                                     ],
                                     "bytes_read": scan.bytes_read,
@@ -2356,9 +2418,7 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
     payload = dict(record)
     payload["ui"] = ui
     if product == "portainer" and portainer_discover:
-        payload["_portainer_inventory_bytes_read"] = (
-            int(getattr(ctx.args, "discover_max_bytes", None) or _DUMP_BYTES) - portainer_remaining
-        )
+        payload["_portainer_inventory_bytes_read"] = portainer_bytes_read
     return payload
 
 

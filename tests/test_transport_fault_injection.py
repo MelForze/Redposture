@@ -14,6 +14,7 @@ from typing import cast
 import pytest
 
 from redposture_core.clients import kafka
+from redposture_core.clients.http_api import HttpApiClient, HttpClientConfig
 from redposture_core.clients.http_session import HttpSessionPool
 from redposture_core.modules.elastic.actions import _load_json_dict_loose
 
@@ -53,6 +54,16 @@ class _FaultHandler(socketserver.BaseRequestHandler):
         if server.mode == "stalled":
             conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nx")
             time.sleep(1.0)
+            return
+        if server.mode in {"dribble", "dribble_denied"}:
+            status = b"403 Forbidden" if server.mode == "dribble_denied" else b"200 OK"
+            conn.sendall(b"HTTP/1.1 " + status + b"\r\nContent-Length: 10\r\nConnection: close\r\n\r\n")
+            for _ in range(10):
+                try:
+                    conn.sendall(b"x")
+                except OSError:
+                    return
+                time.sleep(0.03)
             return
         if server.mode == "chunked":
             conn.sendall(
@@ -105,6 +116,57 @@ def test_http_pool_enforces_body_read_timeout() -> None:
     assert response.status == 0
     assert "timed out" in str(response.error).casefold()
     assert elapsed < 0.8
+
+
+def test_http_pool_explicit_budget_stops_dribbling_body_without_losing_prefix() -> None:
+    with _serve_fault("dribble") as server:
+        with closing(HttpSessionPool(timeout=1)) as pool:
+            started = time.monotonic()
+            response = pool.request(
+                "GET",
+                f"http://127.0.0.1:{server.server_address[1]}/",
+                timeout=0.05,
+                retries=0,
+                preserve_partial_body=True,
+            )
+            elapsed = time.monotonic() - started
+    assert response.status == 200
+    assert response.body.startswith(b"x")
+    assert len(response.body) < 10
+    assert response.error and "timeout" in response.error.lower()
+    assert elapsed < 0.2
+
+
+def test_http_api_explicit_budget_stops_dribbling_body_without_losing_prefix() -> None:
+    with _serve_fault("dribble") as server:
+        client = HttpApiClient(HttpClientConfig(timeout=1, response_size_cap=100))
+        started = time.monotonic()
+        response = client.get(f"http://127.0.0.1:{server.server_address[1]}/", timeout=0.05)
+        elapsed = time.monotonic() - started
+    assert response.status == 200
+    assert response.body.startswith(b"x")
+    assert len(response.body) < 10
+    assert response.error and "timeout" in response.error.lower()
+    assert elapsed < 0.2
+
+
+def test_http_api_default_socket_timeout_keeps_responsive_long_body() -> None:
+    with _serve_fault("dribble") as server:
+        client = HttpApiClient(HttpClientConfig(timeout=0.05, response_size_cap=100))
+        response = client.get(f"http://127.0.0.1:{server.server_address[1]}/")
+    assert response.status == 200
+    assert response.body == b"x" * 10
+    assert response.error is None
+
+
+def test_http_api_explicit_budget_stops_dribbling_error_body() -> None:
+    with _serve_fault("dribble_denied") as server:
+        client = HttpApiClient(HttpClientConfig(timeout=1, response_size_cap=100))
+        started = time.monotonic()
+        response = client.get(f"http://127.0.0.1:{server.server_address[1]}/", timeout=0.05)
+        elapsed = time.monotonic() - started
+    assert elapsed < 0.2
+    assert response.error or response.truncated
 
 
 def test_http_pool_close_interrupts_active_body_read() -> None:

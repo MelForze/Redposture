@@ -15,9 +15,16 @@
     "configmaps_partial": true,
     "content_discovery": {
       "bytes_inspected": 0,
+      "bytes_read": 533,
+      "emitted_fingerprints": [],
       "findings": [],
+      "live_emitted": false,
+      "partial_reasons": [
+        "secrets: access_denied: secrets is forbidden: User \"system:anonymous\" cannot list resource \"secrets\" in API group \"\" at the cluster scope",
+        "configmaps: access_denied: configmaps is forbidden: User \"system:anonymous\" cannot list resource \"configmaps\" in API group \"\" at the cluster scope"
+      ],
       "source": "anonymous",
-      "status": "partial"
+      "status": "unavailable"
     },
     "detection_signals": [
       "kubeapi.probe",

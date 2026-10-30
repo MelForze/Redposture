@@ -531,8 +531,7 @@ def test_cli_prefix_inventory_cve_and_no_ansi(tmp_path: Any, capsys: Any) -> Non
             == 0
         )
         token_text = token_output.read_text()
-        assert "admin (API token)" in token_text
-        assert "admin:pass" not in token_text
+        assert "admin:pass (type:API token)" in token_text
         json_output = tmp_path / "jenkins.jsonl"
         assert (
             cli.main(
@@ -559,8 +558,7 @@ def test_cli_prefix_inventory_cve_and_no_ansi(tmp_path: Any, capsys: Any) -> Non
         parsed = [json.loads(line) for line in json_text.splitlines()]
         assert parsed[0]["detection_status"] == "confirmed"
         assert any(item["id"] == "CVE-2024-23897" for item in parsed[0]["cve_enumeration"]["findings"])
-        assert '"password": "pass"' not in json_text
-        assert '"credential_password": "pass"' not in json_text
+        assert parsed[0]["credential_password"] == "pass"
     finally:
         server.shutdown()
         thread.join(timeout=3)

@@ -34,7 +34,7 @@ def test_audit_help_has_no_tls_verification_bypass_switch(command: str) -> None:
     assert options.isdisjoint(_REMOVED_TLS_FLAGS)
 
 
-@pytest.mark.parametrize("workflow", ("scan", "collect", "trigger"))
+@pytest.mark.parametrize("workflow", ("collect", "trigger"))
 def test_exporter_help_has_no_tls_verification_bypass_switch(workflow: str) -> None:
     parser = build_parser()
     subcommands = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
@@ -141,7 +141,7 @@ def test_proxmox_uses_unverified_https_without_a_toggle() -> None:
     state.close()
 
 
-@pytest.mark.parametrize("workflow", ("scan", "collect", "trigger"))
+@pytest.mark.parametrize("workflow", ("collect", "trigger"))
 def test_exporter_workflows_trust_target_tls_without_a_toggle(workflow: str) -> None:
     args = parse_args(["exporters", workflow, "-t", "127.0.0.1"])
     assert args.insecure is True

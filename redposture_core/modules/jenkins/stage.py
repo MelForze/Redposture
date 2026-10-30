@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from itertools import islice
 from typing import Any
 
 from ...audit_config import AuditConfig
@@ -24,6 +25,22 @@ from ...stage_runtime import (
 from . import actions, execution, policy, render
 
 _DEFAULT_PORTS = (8080, 8443, 18080)
+
+
+def _emit_discovery_inventory(ctx: Any, payload: dict[str, Any]) -> None:
+    emit = getattr(ctx, "live_emit", None)
+    if (
+        not getattr(ctx.args, "discover", False)
+        or getattr(ctx.args, "output_format", "txt") != "txt"
+        or not callable(emit)
+    ):
+        return
+    lines = iter(render._iter_inventory_records(payload))
+    while batch := list(islice(lines, 256)):
+        emit(batch)
+    payload["_jenkins_inventory_emitted"] = True
+
+
 _DEFAULT_CREDENTIALS = (
     ("admin", "admin"),
     ("admin", "changeme"),
@@ -46,11 +63,57 @@ _DEFAULT_CREDENTIALS = (
 )
 
 
+def _normalize_target_aliases(plan: Any) -> Any:
+    """Normalize equivalent URL prefixes without expanding streamed IP ranges."""
+    entries: list[Any] = []
+    seen: set[tuple[Any, ...]] = set()
+    removed = 0
+    no_port_count = plan.no_port_count
+    explicit_counts = dict(plan.explicit_port_counts)
+    bare_counts = dict(plan.bare_explicit_port_counts)
+    for entry in plan._entries:
+        if not hasattr(entry, "specs"):
+            entries.append(entry)
+            continue
+        specs = []
+        for original in entry.specs:
+            spec = (
+                replace(original, path=original.path.rstrip("/"), fragment="", normalized_key=None)
+                if original.scheme
+                else original
+            )
+            key = (spec.host, spec.scheme, spec.explicit_port, spec.path, spec.query, spec.fragment)
+            if key in seen:
+                removed += 1
+                if spec.explicit_port is None:
+                    no_port_count -= 1
+                else:
+                    explicit_counts[spec.explicit_port] -= 1
+                    if spec.scheme is None:
+                        bare_counts[spec.explicit_port] -= 1
+                continue
+            seen.add(key)
+            specs.append(spec)
+        if specs:
+            entries.append(replace(entry, specs=tuple(specs)))
+    return replace(
+        plan,
+        _entries=tuple(entries),
+        target_count=plan.target_count - removed,
+        no_port_count=no_port_count,
+        explicit_port_counts={port: count for port, count in explicit_counts.items() if count},
+        bare_explicit_port_counts={port: count for port, count in bare_counts.items() if count},
+        explicit_ports=tuple(port for port in plan.explicit_ports if explicit_counts.get(port)),
+    )
+
+
 def build_jenkins_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=8080, default_ports=_DEFAULT_PORTS)
     explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
     if not explicit_port and plan.target_plan is not None:
         plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
+    if plan.target_plan is not None:
+        plan = replace(plan, target_plan=_normalize_target_aliases(plan.target_plan))
     token = getattr(args, "_jenkins_api_token", None)
     provided = (
         (AuditCredentialRun(username=args.username, password=token, source="api_token"),)
@@ -106,7 +169,12 @@ def build_jenkins_spec(args: Any) -> ModuleAuditSpec:
             )
         ):
             return AuditRecord.from_mapping(payload, module="jenkins", service="jenkins")
-        return _phase(ctx, actions.data_record, AuditRecord.from_mapping(payload, module="jenkins", service="jenkins"))
+        record = _phase(
+            ctx, actions.data_record, AuditRecord.from_mapping(payload, module="jenkins", service="jenkins")
+        )
+        payload = record.to_dict()
+        _emit_discovery_inventory(ctx, payload)
+        return AuditRecord.from_mapping(payload, module="jenkins", service="jenkins")
 
     spec = ModuleAuditSpec(
         module="jenkins",
@@ -126,7 +194,25 @@ def build_jenkins_spec(args: Any) -> ModuleAuditSpec:
             if record.extra.get("provided_credentials_ok") is True
             else "identity not verified",
         ),
-        structured_output_redact_fields=("attempted_credentials", "credential_results"),
+        record_skipped_credential_attempts=bool(getattr(args, "defcreds", False)),
+        credential_attempt_detail_fields=(
+            "credential_state",
+            "credential_verification_reason",
+            "auth_http_status",
+            "auth_error_detail",
+            "auth_response_body",
+            "auth_retry_after",
+            "credential_stop_reason",
+            "credential_jobs_access",
+            "credential_jobs_count",
+            "credential_source",
+        ),
+        logical_target_key=lambda record: str(record.extra.get("api_endpoint") or "").rstrip("/") or None,
+        phase_output_key=lambda record, line: (
+            "jenkins-detection:" + str(record.extra.get("api_endpoint") or f"{record.host}:{record.port}")
+            if " [*] Jenkins (auth required:" in line
+            else line
+        ),
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
         defer_detect_output_until_auth=True,

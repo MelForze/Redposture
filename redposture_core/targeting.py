@@ -1241,8 +1241,8 @@ def collect_scan_target_specs(
 
 
 def chunked_hosts(hosts: Iterable[Any], size: int = DEFAULT_STREAM_TARGET_WINDOW_SIZE) -> Iterator[list[str]]:
-    """Yield host strings in fixed-size batches. Shared helper used by stage_scan,
-    stage_collect, and any future stage that needs to chunk a streaming host iterator."""
+    """Yield host strings in fixed-size batches. Shared helper used by stage_collect,
+    exporters, and any future stage that needs to chunk a streaming host iterator."""
     chunk: list[str] = []
     for host in hosts:
         chunk.append(str(host))

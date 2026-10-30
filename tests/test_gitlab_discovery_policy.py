@@ -10,19 +10,19 @@ from redposture_core.cli_args import parse_args
 from redposture_core.modules.gitlab import policy
 
 
-@pytest.mark.parametrize("seconds,bytes_limit", [(0, 64), (float("nan"), 64), (1, 0), (1, -1)])
-def test_invalid_budget_stops_before_basic_target_validation(monkeypatch, seconds, bytes_limit):
+@pytest.mark.parametrize("seconds", [0, float("nan")])
+def test_invalid_budget_stops_before_basic_target_validation(monkeypatch, seconds):
     errors = []
     monkeypatch.setattr(
         policy, "validate_basic_module_args", lambda *a, **k: pytest.fail("invalid budget reached targets")
     )
-    args = SimpleNamespace(discover=True, discover_time=seconds, discover_max_bytes=bytes_limit)
+    args = SimpleNamespace(discover=True, discover_time=seconds)
     assert policy.validate_args(args, SimpleNamespace(error=errors.append)) == 2
     assert len(errors) == 1 and errors[0].startswith("--discover-")
 
 
 def test_valid_discovery_budget_preserves_target_validation():
-    args = parse_args(["gitlab", "-t", "127.0.0.1", "--discover", "--discover-time", "1", "--discover-max-bytes", "64"])
+    args = parse_args(["gitlab", "-t", "127.0.0.1", "--discover", "--discover-time", "1"])
     errors = []
     assert policy.validate_args(args, SimpleNamespace(error=errors.append)) is None
     assert not errors

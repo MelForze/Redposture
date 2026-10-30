@@ -108,6 +108,8 @@ def main() -> int:
             "redis",
             "-t",
             f"127.0.0.1:{port}",
+            "--timeout",
+            "1",
             *extra,
             "--enum-cve",
         ]

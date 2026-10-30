@@ -21,13 +21,15 @@ from hashlib import sha256
 from typing import Any
 from urllib.parse import urlsplit
 
+from .discovery_values import DiskBackedText
+
 
 @dataclass(frozen=True)
 class SecretMatch:
     detector: str
     confidence: str
-    object_path: str
-    value: str
+    object_path: str | DiskBackedText
+    value: str | DiskBackedText
 
 
 _PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
@@ -93,13 +95,14 @@ _SECRET_KEY_RE = re.compile(
     r"(?i)(?:^|[_\-.])(password|passwd|pwd|passphrase|pass|credential|credentials|cred|creds|secret|apisecret|token|api[_-]?key|access[_-]?key|client[_-]?secret|session|cookie|private[_-]?key)(?:$|[_\-.])"
 )
 _NON_SECRET_FIELD_RE = re.compile(
-    r"(?i)(?:^|_)(?:public_key|api_key_id|access_key_id|secret_key_id|token_id|checksum|hash)(?:$|_)"
+    r"(?i)(?:(?:^|_)(?:public_key|api_key_id|access_key_id|secret_key_id|token_id|checksum|hash)(?:$|_)|"
+    r"(?:^|_)(?:token_name|nmspcuri)$)"
 )
 _ASSIGNMENT_RE = re.compile(
     r"(?i)(?<![\w.])(?:--)?((?:[A-Za-z][A-Za-z0-9]{0,32}[._-])*"
     r"(?:password|passwd|pwd|passphrase|pass|credential|credentials|cred|creds|"
     r"client[_-]?secret|api[_-]?secret|apisecret|api[_-]?token|"
-    r"auth[_-]?token|refresh[_-]?token|secret[_-]?key|apikey))"
+    r"auth[_-]?token|refresh[_-]?token|secret[_-]?key|apikey|secret|token))"
     r"[\"']?\s*(?:=>|[:=])\s*(?:[\"']([^\"'\s,;<>]+)[\"']|([^\s,;&<>]+))"
 )
 _SQL_PASSWORD_RE = re.compile(r"(?i)\b(?:WITH\s+)?PASSWORD\s+['\"]([^'\"\s;]{4,})['\"]")
@@ -108,6 +111,7 @@ _XML_TAG_RE = re.compile(r"<([A-Za-z][\w:.-]{0,79})\b([^<>]{0,2048})>", re.IGNOR
 _XML_ATTR_RE = re.compile(r"([A-Za-z][\w:.-]{0,79})\s*=\s*([\"'])(.*?)\2", re.DOTALL)
 _MAX_DECODED_BYTES = 64 * 1024
 _WORD_RE = re.compile(r"[A-Za-z0-9_+/=-]{20,256}")
+_PEM_BLOCK_RE = re.compile(r"-----BEGIN ([A-Z0-9 ]+)-----[\s\S]+?-----END \1-----")
 _SECRET_SENTINELS = frozenset(
     {
         "disabled",
@@ -132,18 +136,11 @@ def detector_names() -> tuple[str, ...]:
     return tuple(dict.fromkeys([item[0] for item in _PATTERNS] + ["url_credentials", "generic_secret", "high_entropy"]))
 
 
-def fingerprint(value: str) -> str:
+def fingerprint(value: str | DiskBackedText) -> str:
+    if isinstance(value, DiskBackedText):
+        value._readable()
+        return value.digest
     return sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest()
-
-
-def mask_secret(value: str) -> str:
-    if "PRIVATE KEY-----" in value:
-        return "<private-key:redacted>"
-    if "CERTIFICATE-----" in value:
-        return "<certificate:redacted>"
-    if len(value) <= 8:
-        return "*" * max(4, len(value))
-    return f"{value[:4]}...{value[-4:]}"
 
 
 def _entropy(value: str) -> float:
@@ -165,6 +162,15 @@ def _url_credential(text: str) -> Iterable[str]:
             continue
         if parsed.username is not None and parsed.password is not None:
             yield candidate
+
+
+def _looks_like_resource_route(candidate: str) -> bool:
+    """Reject unlabelled URL/path fragments from the entropy fallback."""
+    if candidate.count("/") < 2:
+        return False
+    if "-" in candidate:
+        return True
+    return sum(bool(re.fullmatch(r"[A-Za-z]{3,}", part)) for part in candidate.split("/")) >= 2
 
 
 def _is_secret_sentinel(value: Any) -> bool:
@@ -222,11 +228,33 @@ def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
         found.extend(SecretMatch("url_credentials", "high", path, value) for value in _url_credential(text))
     path_field = _normalize_secret_key(path.rsplit(".", 1)[-1])
     if "high_entropy" in enabled and not _NON_SECRET_FIELD_RE.search(path_field):
-        explicit_values = {match.value for match in found}
+        explicit_values = {match.value for match in found if isinstance(match.value, str)}
+        pem_spans = [match.span() for match in _PEM_BLOCK_RE.finditer(text)]
         # Candidate length is bounded at256. Substring membership therefore
         # depends on that bound, not on the number of earlier findings.
         value_lengths = sorted({len(value) for value in explicit_values if len(value) <= 256})
-        for candidate in _WORD_RE.findall(text):
+        for token_match in _WORD_RE.finditer(text):
+            candidate = token_match.group(0)
+            if "=" in candidate:
+                key, assigned = candidate.split("=", 1)
+                if assigned and assigned[0].isalnum() and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", key):
+                    # Entropy belongs to the assigned value, not to the
+                    # long environment variable name or its '=' separator.
+                    candidate = assigned
+            if len(candidate) < 20:
+                continue
+            if any(start <= token_match.start() and token_match.end() <= end for start, end in pem_spans):
+                # The PEM body is already classified as one explicit object;
+                # its encoded lines are not separate credentials.
+                continue
+            if candidate.startswith("/") and token_match.start() > 0 and text[token_match.start() - 1] == "<":
+                # XML closing tag names are structure, even when camel case
+                # makes them look like high-entropy tokens.
+                continue
+            if _looks_like_resource_route(candidate):
+                # Random project IDs can make ordinary API/UI paths look like
+                # tokens. Explicit token/assignment detectors already ran.
+                continue
             if candidate in explicit_values:
                 continue
             if "=" in candidate and any(
@@ -259,6 +287,12 @@ def _normalize_secret_key(key: str) -> str:
     separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
     separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
     return re.sub(r"[\s.\-]+", "_", separated).lower()
+
+
+def is_secret_field_name(key: str) -> bool:
+    """Whether a mapping key can identify a secret without inspecting its value."""
+    normalized = _normalize_secret_key(key)
+    return bool(_SECRET_KEY_RE.search(normalized)) and not bool(_NON_SECRET_FIELD_RE.search(normalized))
 
 
 def _key_detector(key: str) -> str:
@@ -325,6 +359,70 @@ def _decode_structured_blob(value: str) -> str | None:
             return decoded
         compact = decoded.strip()
     return None
+
+
+def scan_disk_atomic_token(value: DiskBackedText, *, object_path: str) -> list[SecretMatch]:
+    """Classify supported complete atomic tokens with bounded regex inputs.
+
+    Validation covers every character, not just a recognizable prefix. Unknown
+    grammars are left to the caller's other readers rather than guessed by size.
+    """
+    first = next(value.iter_text_chunks(max_chars=1024), "")
+    pem = re.match(r"-----BEGIN ((?:[A-Z0-9 ]+ )?PRIVATE KEY|CERTIFICATE)-----", first)
+    if pem is not None:
+        end = f"-----END {pem.group(1)}-----"
+        tail = suffix = ""
+        count = length = 0
+        for chunk in value.iter_text_chunks():
+            length += len(chunk)
+            part = tail + chunk
+            count += part.count(end)
+            tail = part[-(len(end) - 1) :]
+            suffix = (suffix + chunk)[-len(end) :]
+        # The shorter overlap cannot itself contain an entire END marker.
+        if count == 1 and suffix == end and length > len(pem.group()) + len(end):
+            kind = "certificate" if pem.group(1) == "CERTIFICATE" else "private_key"
+            return [SecretMatch(kind, "medium" if kind == "certificate" else "high", object_path, value)]
+        return []
+    if first.startswith("eyJ"):
+        lengths = [0]
+        last = ""
+        for chunk in value.iter_text_chunks():
+            if re.fullmatch(r"[A-Za-z0-9_.-]*", chunk) is None:
+                return []
+            parts = chunk.split(".")
+            lengths[-1] += len(parts[0])
+            lengths.extend(map(len, parts[1:]))
+            if len(lengths) > 3:
+                return []
+            if chunk:
+                last = chunk[-1]
+        if len(lengths) == 3 and lengths[0] >= 8 and min(lengths[1:]) >= 2 and last != "-":
+            return [SecretMatch("jwt", "high", object_path, value)]
+        return []
+    rules = (
+        ("grafana_token", "glsa_", r"[A-Za-z0-9_-]+"),
+        ("api_token", "sk-", r"[A-Za-z0-9_-]+"),
+        ("digitalocean_token", "dop_v1_", r"[A-Za-z0-9]+"),
+        ("shopify_token", "shpat_", r"[A-Za-z0-9]+"),
+        ("docker_token", "dckr_pat_", r"[A-Za-z0-9_-]+"),
+        ("pypi_token", "pypi-AgEI", r"[A-Za-z0-9_-]+"),
+    )
+    for detector, prefix, alphabet in rules:
+        if not first.startswith(prefix):
+            continue
+        pattern = next(pattern for name, _confidence, pattern in _PATTERNS if name == detector)
+        if pattern.fullmatch(first) is None:
+            return []
+        remaining_prefix = len(prefix)
+        for chunk in value.iter_text_chunks():
+            offset = min(remaining_prefix, len(chunk))
+            remaining_prefix -= offset
+            body = chunk[offset:]
+            if body and re.fullmatch(alphabet, body) is None:
+                return []
+        return [SecretMatch(detector, "high", object_path, value)]
+    return []
 
 
 def scan_value(
@@ -431,6 +529,6 @@ __all__ = [
     "decode_basic_identity",
     "detector_names",
     "fingerprint",
-    "mask_secret",
+    "is_secret_field_name",
     "scan_value",
 ]

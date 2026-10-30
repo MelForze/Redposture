@@ -1,5 +1,6 @@
 [
   {
+    "_clickhouse_disk_live_emitted": false,
     "_discover_findings_streamed": false,
     "action_statuses": {
       "columns": "not_requested",
@@ -112,6 +113,7 @@
     "table_targets": []
   },
   {
+    "_clickhouse_disk_live_emitted": false,
     "_discover_findings_streamed": false,
     "action_statuses": {
       "columns": "not_requested",
@@ -224,6 +226,7 @@
     "table_targets": []
   },
   {
+    "_clickhouse_disk_live_emitted": false,
     "_discover_findings_streamed": false,
     "action_statuses": {
       "columns": "not_requested",
@@ -336,6 +339,7 @@
     "table_targets": []
   },
   {
+    "_clickhouse_disk_live_emitted": false,
     "_discover_findings_streamed": false,
     "action_statuses": {
       "columns": "not_requested",
@@ -448,6 +452,7 @@
     "table_targets": []
   },
   {
+    "_clickhouse_disk_live_emitted": false,
     "_discover_findings_streamed": false,
     "action_statuses": {
       "columns": "not_requested",

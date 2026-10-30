@@ -7,6 +7,7 @@ from typing import Any
 
 from ...clients.http_api import http_response_requires_https
 from ...detection_steps import DetectionRequests, run_requests
+from ...storage_discovery import DiscoveryCollector
 from ..token_api import ReadBudget, access, bases, json_value, request
 from .types import DetectionStatus
 
@@ -16,8 +17,8 @@ _APP_ID = re.compile(r"application_[0-9]{1,20}_[0-9]{1,20}\Z")
 _VERSION = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:[-+][A-Za-z0-9._-]+)?\Z")
 
 
-def _get(ctx: Any, base: str, path: str, *, method: str = "GET") -> Any:
-    return request(ctx, base, path, header="", method=method)
+def _get(ctx: Any, base: str, path: str, *, method: str = "GET", budget: ReadBudget | None = None) -> Any:
+    return request(ctx, base, path, header="", method=method, budget=budget)
 
 
 def _info(data: Any) -> dict[str, Any] | None:
@@ -162,8 +163,9 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     if prior.get("is_yarn") is not True:
         return result
     base = prior["api_endpoint"]
-    budget = ReadBudget(ctx.args)
+    budget = ReadBudget(ctx.args, started_at=getattr(ctx, "discovery_started_at", None))
     discover = bool(getattr(ctx.args, "discover", False))
+    collector = DiscoveryCollector("yarn", ctx, prior) if discover else None
     requested: list[str] = []
     states: list[str] = []
     for name, path in (
@@ -171,16 +173,50 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         ("nodes", "/ws/v1/cluster/nodes"),
         ("metrics", "/ws/v1/cluster/metrics"),
     ):
+        if name == "apps" and discover:
+            path = "/ws/v1/cluster/apps"
         if not getattr(ctx.args, "show_" + name, False) and not (name == "apps" and discover):
             continue
         if getattr(ctx.args, "show_" + name, False):
             requested.append(name)
         state, error, partial = "unknown", None, False
+        streamed_apps = False
         if not budget.allowed():
             error, partial = "discovery budget reached", True
         else:
-            response = _get(ctx, base, path)
-            if not budget.consume(response):
+            response = _get(ctx, base, path, budget=budget)
+            pool = getattr(getattr(ctx, "lifecycle_state", None), "http", None)
+            if (
+                name == "apps"
+                and collector is not None
+                and response.status == 200
+                and response.truncated
+                and not response.error
+                and callable(getattr(pool, "request_stream", None))
+            ):
+                streamed_apps = True
+                complete_stream = collector.stream_json_scalars(
+                    pool,
+                    base + path,
+                    "app_specs",
+                    headers={"Accept": "application/json"},
+                    timeout=budget.timeout(),
+                    root_kind="object",
+                    exclude=lambda item: item[:2] != ("apps", "app"),
+                    required_containers={("apps",): "object", ("apps", "app"): "array"},
+                    row_validators={
+                        ("apps", "app"): (
+                            frozenset({"id"}),
+                            lambda row: isinstance(row.get("id"), str) and bool(_APP_ID.fullmatch(row["id"])),
+                        )
+                    },
+                )
+                state = "allowed" if complete_stream else "unknown"
+                error, partial = (
+                    "streamed response; inventory snapshot unavailable" if complete_stream else "incomplete stream",
+                    True,
+                )
+            elif not budget.consume(response):
                 error, partial = "response or byte limit", True
             else:
                 data = json_value(response)
@@ -200,25 +236,45 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                         result[name] = list(unique.values())[:_LIMIT]
                         if len(unique) != len(rows):
                             error, partial = "duplicate resource IDs", True
-                        if len(rows) >= _LIMIT:
+                        if len(rows) >= _LIMIT and (not discover or len(unique) > _LIMIT):
                             error, partial = "bounded snapshot item limit; collection coverage unverified", True
+                        if name == "apps" and collector is not None:
+                            collector.mark_accessible_source()
+                            for row in unique.values():
+                                if not collector.add("app_specs." + row["id"], row):
+                                    collector.partial("yarn/apps", "discover_time")
+                                    break
                 if state != "allowed":
                     error, partial = "invalid collection" if response.status == 200 else f"HTTP {response.status}", True
         result[name + "_access"] = state
         result[name + "_partial"] = partial
         if error:
             result[name + "_error"] = error
-        budget.partial |= partial
+        budget.partial |= partial and not (
+            name == "apps"
+            and discover
+            and (streamed_apps or error == "bounded snapshot item limit; collection coverage unverified")
+        )
         states.append(state)
     if discover:
         # The list endpoint already returns complete AppInfo models, validated
         # by _rows. Reuse this bounded snapshot instead of refreshing every app.
         result["app_specs"] = [{"app": row["id"], "spec": row} for row in result.get("apps", [])]
         result["app_discovery_partial"] = budget.partial
+        if collector is not None:
+            if result["app_discovery_partial"]:
+                collector.partial("yarn/apps", budget.reason or "incomplete")
+            result["content_discovery"] = collector.result()
+            result["app_discovery_partial"] |= result["content_discovery"]["status"] != "complete"
+        if budget.reason is not None:
+            result["discovery_budget_reason"] = budget.reason
     result["inventory_requested"] = requested
     result["inventory_status"] = (
         "complete"
-        if states and all(s == "allowed" for s in states) and not budget.partial
+        if states
+        and all(s == "allowed" for s in states)
+        and not budget.partial
+        and not any(result.get(name + "_partial") for name in requested)
         else "partial"
         if "allowed" in states
         else "unavailable"

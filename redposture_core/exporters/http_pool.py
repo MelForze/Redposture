@@ -12,6 +12,7 @@ from typing import Any
 from ..clients.http_api import HttpResponse, check_http_body_complete
 from ..clients.http_redirects import follow_redirects
 from ..clients.tls_cache import shared_client_ssl_context
+from ..http_headers import merge_custom_http_headers
 
 HTTP_POOL_MAX_IDLE_TOTAL = 512
 HTTP_POOL_MAX_IDLE_PER_HOST = 4
@@ -146,12 +147,13 @@ class HTTPConnectionPool:
                 url,
                 timeout,
                 max_bytes=max_bytes,
+                headers=headers,
             )
             return HttpResponse(
                 status or 0, raw, response_headers, error=str(failure) if failure else None, truncated=truncated
             )
 
-        response = follow_redirects(send, "GET", url)
+        response = follow_redirects(send, "GET", url, headers=merge_custom_http_headers({}))
         if response.error:
             return None, b"", None, failure or ValueError(response.error), response.truncated
         content_type = next((v for k, v in response.headers.items() if k.lower() == "content-type"), None)
@@ -163,6 +165,7 @@ class HTTPConnectionPool:
         timeout: float,
         *,
         max_bytes: int | None = None,
+        headers: dict[str, str] | None = None,
     ) -> tuple[int | None, bytes, str | None, BaseException | None, bool, dict[str, str]]:
         scheme, host, port, path = self._target_from_url(url)
         conn = self._acquire(scheme, host, port, timeout)
@@ -171,10 +174,13 @@ class HTTPConnectionPool:
             conn.request(
                 "GET",
                 path,
-                headers={
-                    "User-Agent": "RedPosture/1.0",
-                    "Connection": "keep-alive",
-                },
+                headers=merge_custom_http_headers(
+                    {
+                        "User-Agent": "RedPosture/1.0",
+                        "Connection": "keep-alive",
+                        **(headers or {}),
+                    }
+                ),
             )
             response = conn.getresponse()
             truncated = False

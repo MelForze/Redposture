@@ -1,5 +1,6 @@
 [
   {
+    "_zookeeper_discovery_streamed": true,
     "anonymous_auth_probe_results": {
       "/": "ok"
     },
@@ -14,7 +15,9 @@
     "can_delete_znode": null,
     "connect_error": null,
     "content_discovery": {
-      "bytes_inspected": 487,
+      "bytes_inspected": 432,
+      "bytes_read": 254,
+      "emitted_fingerprints": [],
       "findings": [
         {
           "confidence": "high",
@@ -22,9 +25,11 @@
           "object_path": "$.znode./redposture/app/api_key.api_key",
           "source": "anonymous",
           "type": "api_key",
-          "value": "rp-k...2026"
+          "value": "rp-keeper-key-2026"
         }
       ],
+      "live_emitted": false,
+      "partial_reasons": [],
       "source": "anonymous",
       "status": "complete"
     },
@@ -55,7 +60,7 @@
     "is_zookeeper": true,
     "is_zookeeper_compatible": true,
     "keeper_virtual_probe": null,
-    "max_znodes": 20,
+    "max_znodes": null,
     "module": "keeper",
     "port": 19181,
     "probe_write_requested": false,
@@ -111,161 +116,14 @@
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
-    "znode_details": [
-      {
-        "bytes": 18,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 10,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 8,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 32,
-        "children": 2,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 83,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 15,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 17,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 0,
-        "children": 2,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 1,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 1,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 29,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 22,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 18,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      }
-    ],
-    "znode_dump_items": [
-      {
-        "value": "cluster=keeper-lab"
-      },
-      {
-        "value": "replicas=3"
-      },
-      {
-        "value": "shard=01"
-      },
-      {
-        "value": "database=redposture,table=events"
-      },
-      {
-        "value": "CREATE TABLE redposture.events (id UInt64, event String) ENGINE=ReplicatedMergeTree"
-      },
-      {
-        "value": "replica_count=1"
-      },
-      {
-        "value": "host=keeper-lab-1"
-      },
-      {
-        "value": "<empty>"
-      },
-      {
-        "value": "2"
-      },
-      {
-        "value": "<base64:wA==>"
-      },
-      {
-        "value": "env=keeper-lab,owner=platform"
-      },
-      {
-        "value": "service=redposture-api"
-      },
-      {
-        "value": "rp-keeper-key-2026"
-      }
-    ],
+    "znode_details": null,
     "znode_truncated_reason": null,
-    "znode_values": [
-      "/clickhouse:cluster=keeper-lab",
-      "/clickhouse/tables:replicas=3",
-      "/clickhouse/tables/01:shard=01",
-      "/clickhouse/tables/01/redposture.events:database=redposture,table=events",
-      "/clickhouse/tables/01/redposture.events/metadata:CREATE TABLE redposture.events (id UInt64, event String) ENGINE=ReplicatedMergeTree",
-      "/clickhouse/tables/01/redposture.events/replicas:replica_count=1",
-      "/clickhouse/tables/01/redposture.events/replicas/replica-1:host=keeper-lab-1",
-      "/keeper:<empty>",
-      "/keeper/api_version:2",
-      "/keeper/feature_flags:<base64:wA==>",
-      "/redposture:env=keeper-lab,owner=platform",
-      "/redposture/app:service=redposture-api",
-      "/redposture/app/api_key:rp-keeper-key-2026"
-    ],
-    "znodes": [
-      "/clickhouse",
-      "/clickhouse/tables",
-      "/clickhouse/tables/01",
-      "/clickhouse/tables/01/redposture.events",
-      "/clickhouse/tables/01/redposture.events/metadata",
-      "/clickhouse/tables/01/redposture.events/replicas",
-      "/clickhouse/tables/01/redposture.events/replicas/replica-1",
-      "/keeper",
-      "/keeper/api_version",
-      "/keeper/feature_flags",
-      "/redposture",
-      "/redposture/app",
-      "/redposture/app/api_key"
-    ],
+    "znode_values": null,
+    "znodes": null,
     "znodes_truncated": false
   },
   {
+    "_zookeeper_discovery_streamed": true,
     "anonymous_auth_probe_results": {
       "/": "ok"
     },
@@ -280,7 +138,9 @@
     "can_delete_znode": null,
     "connect_error": null,
     "content_discovery": {
-      "bytes_inspected": 487,
+      "bytes_inspected": 432,
+      "bytes_read": 254,
+      "emitted_fingerprints": [],
       "findings": [
         {
           "confidence": "high",
@@ -288,9 +148,11 @@
           "object_path": "$.znode./redposture/app/api_key.api_key",
           "source": "anonymous",
           "type": "api_key",
-          "value": "rp-k...2026"
+          "value": "rp-keeper-key-2026"
         }
       ],
+      "live_emitted": false,
+      "partial_reasons": [],
       "source": "anonymous",
       "status": "complete"
     },
@@ -321,7 +183,7 @@
     "is_zookeeper": true,
     "is_zookeeper_compatible": true,
     "keeper_virtual_probe": null,
-    "max_znodes": 20,
+    "max_znodes": null,
     "module": "keeper",
     "port": 29181,
     "probe_write_requested": false,
@@ -377,158 +239,100 @@
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
-    "znode_details": [
-      {
-        "bytes": 18,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 10,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 8,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 32,
-        "children": 2,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 83,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 15,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 17,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 0,
-        "children": 2,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 1,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 1,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 29,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 22,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 18,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      }
-    ],
-    "znode_dump_items": [
-      {
-        "value": "cluster=keeper-lab"
-      },
-      {
-        "value": "replicas=3"
-      },
-      {
-        "value": "shard=01"
-      },
-      {
-        "value": "database=redposture,table=events"
-      },
-      {
-        "value": "CREATE TABLE redposture.events (id UInt64, event String) ENGINE=ReplicatedMergeTree"
-      },
-      {
-        "value": "replica_count=1"
-      },
-      {
-        "value": "host=keeper-lab-1"
-      },
-      {
-        "value": "<empty>"
-      },
-      {
-        "value": "2"
-      },
-      {
-        "value": "<base64:wA==>"
-      },
-      {
-        "value": "env=keeper-lab,owner=platform"
-      },
-      {
-        "value": "service=redposture-api"
-      },
-      {
-        "value": "rp-keeper-key-2026"
-      }
-    ],
+    "znode_details": null,
     "znode_truncated_reason": null,
+    "znode_values": null,
+    "znodes": null,
+    "znodes_truncated": false
+  },
+  {
+    "host": "127.0.0.1",
+    "port": 19181,
+    "service": "keeper",
+    "type": "znodes_dump",
+    "znode_count": 13,
     "znode_values": [
+      "/:<empty>",
       "/clickhouse:cluster=keeper-lab",
-      "/clickhouse/tables:replicas=3",
-      "/clickhouse/tables/01:shard=01",
-      "/clickhouse/tables/01/redposture.events:database=redposture,table=events",
-      "/clickhouse/tables/01/redposture.events/metadata:CREATE TABLE redposture.events (id UInt64, event String) ENGINE=ReplicatedMergeTree",
-      "/clickhouse/tables/01/redposture.events/replicas:replica_count=1",
-      "/clickhouse/tables/01/redposture.events/replicas/replica-1:host=keeper-lab-1",
       "/keeper:<empty>",
+      "/redposture:env=keeper-lab,owner=platform",
+      "/clickhouse/tables:replicas=3",
       "/keeper/api_version:2",
       "/keeper/feature_flags:<base64:wA==>",
-      "/redposture:env=keeper-lab,owner=platform",
       "/redposture/app:service=redposture-api",
-      "/redposture/app/api_key:rp-keeper-key-2026"
-    ],
+      "/clickhouse/tables/01:shard=01",
+      "/redposture/app/api_key:rp-keeper-key-2026",
+      "/clickhouse/tables/01/redposture.events:database=redposture,table=events",
+      "/clickhouse/tables/01/redposture.events/replicas:replica_count=1",
+      "/clickhouse/tables/01/redposture.events/metadata:CREATE TABLE redposture.events (id UInt64, event String) ENGINE=ReplicatedMergeTree",
+      "/clickhouse/tables/01/redposture.events/replicas/replica-1:host=keeper-lab-1"
+    ]
+  },
+  {
+    "host": "127.0.0.1",
+    "port": 19181,
+    "service": "keeper",
+    "type": "znodes_list",
+    "znode_count": 13,
     "znodes": [
       "/clickhouse",
-      "/clickhouse/tables",
-      "/clickhouse/tables/01",
-      "/clickhouse/tables/01/redposture.events",
-      "/clickhouse/tables/01/redposture.events/metadata",
-      "/clickhouse/tables/01/redposture.events/replicas",
-      "/clickhouse/tables/01/redposture.events/replicas/replica-1",
       "/keeper",
+      "/redposture",
+      "/clickhouse/tables",
       "/keeper/api_version",
       "/keeper/feature_flags",
-      "/redposture",
       "/redposture/app",
-      "/redposture/app/api_key"
-    ],
-    "znodes_truncated": false
+      "/clickhouse/tables/01",
+      "/redposture/app/api_key",
+      "/clickhouse/tables/01/redposture.events",
+      "/clickhouse/tables/01/redposture.events/replicas",
+      "/clickhouse/tables/01/redposture.events/metadata",
+      "/clickhouse/tables/01/redposture.events/replicas/replica-1"
+    ]
+  },
+  {
+    "host": "127.0.0.1",
+    "port": 29181,
+    "service": "keeper",
+    "type": "znodes_dump",
+    "znode_count": 13,
+    "znode_values": [
+      "/:<empty>",
+      "/clickhouse:cluster=keeper-lab",
+      "/keeper:<empty>",
+      "/redposture:env=keeper-lab,owner=platform",
+      "/clickhouse/tables:replicas=3",
+      "/keeper/feature_flags:<base64:wA==>",
+      "/keeper/api_version:2",
+      "/redposture/app:service=redposture-api",
+      "/clickhouse/tables/01:shard=01",
+      "/redposture/app/api_key:rp-keeper-key-2026",
+      "/clickhouse/tables/01/redposture.events:database=redposture,table=events",
+      "/clickhouse/tables/01/redposture.events/replicas:replica_count=1",
+      "/clickhouse/tables/01/redposture.events/metadata:CREATE TABLE redposture.events (id UInt64, event String) ENGINE=ReplicatedMergeTree",
+      "/clickhouse/tables/01/redposture.events/replicas/replica-1:host=keeper-lab-1"
+    ]
+  },
+  {
+    "host": "127.0.0.1",
+    "port": 29181,
+    "service": "keeper",
+    "type": "znodes_list",
+    "znode_count": 13,
+    "znodes": [
+      "/clickhouse",
+      "/keeper",
+      "/redposture",
+      "/clickhouse/tables",
+      "/keeper/feature_flags",
+      "/keeper/api_version",
+      "/redposture/app",
+      "/clickhouse/tables/01",
+      "/redposture/app/api_key",
+      "/clickhouse/tables/01/redposture.events",
+      "/clickhouse/tables/01/redposture.events/replicas",
+      "/clickhouse/tables/01/redposture.events/metadata",
+      "/clickhouse/tables/01/redposture.events/replicas/replica-1"
+    ]
   }
 ]

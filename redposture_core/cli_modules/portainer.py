@@ -57,7 +57,7 @@ def configure_portainer_parser(
         inventory.add_argument(
             "--show-" + name, dest=name, action="store_true", help="Read visible environment " + name + "."
         )
-    add_discovery_budget_flags(inventory, default_time=300.0, default_bytes=50 * 1024 * 1024)
+    add_discovery_budget_flags(inventory)
     execution = parser.add_argument_group("Execution")
     add_execution_flags(execution)
     append_selected_defaults(parser, "timeout", "workers", "retries", "port", "output_format")

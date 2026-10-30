@@ -16,6 +16,7 @@ from typing import Any
 
 from ..clients.http_api import open_following_http_request
 from ..clients.tls_cache import shared_client_ssl_context
+from ..http_headers import merge_custom_http_headers
 from .http_pool import get_active_http_pool, pool_get_compat
 
 
@@ -145,7 +146,7 @@ def http_get_text(
             sleep_fn(retry_delay(attempt))
         raise RuntimeError("unreachable")
 
-    req = urllib.request.Request(url, headers={"User-Agent": "RedPosture/1.0"})
+    req = urllib.request.Request(url, headers=merge_custom_http_headers({"User-Agent": "RedPosture/1.0"}))
     opener = urlopen_fn or _default_urlopen
     attempts = max(1, retries + 1)
     for attempt in range(attempts):
@@ -218,7 +219,7 @@ def http_get_details(
             )
         raise RuntimeError("unreachable")
 
-    req = urllib.request.Request(url, headers={"User-Agent": "RedPosture/1.0"})
+    req = urllib.request.Request(url, headers=merge_custom_http_headers({"User-Agent": "RedPosture/1.0"}))
     opener = urlopen_fn or _default_urlopen
     attempts = max(1, retries + 1)
     for attempt in range(attempts):

@@ -117,7 +117,7 @@ def configure_airflow_parser(
             "With --show-dagsources, dump source code only unless other selectors are given."
         ),
     )
-    add_discovery_budget_flags(discover, default_time=None, default_bytes=50 * 1024 * 1024)
+    add_discovery_budget_flags(discover)
     # Transport is automatic (scheme probed per target; TLS certificates always
     # accepted) — no --https/--insecure/--ca-file flags.
 

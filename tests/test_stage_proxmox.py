@@ -66,7 +66,39 @@ def test_discovery_keeps_findings_beyond_previous_200_item_cap() -> None:
     payload = json.dumps({"data": [{"password": f"LongSecretValue{index:04d}"} for index in range(220)]}).encode()
     proxmox_actions._scan_endpoint_payload("/nodes/pve/config", payload, findings, set())
     assert len(findings) >= 220
-    assert any("LongSecretValue0219" in finding["sample"] for finding in findings)
+    assert any(finding["path"] == "$[219].password" for finding in findings)
+    assert all("LongSecretValue" in finding["sample"] for finding in findings)
+
+
+def test_discovery_deduplicates_json_text_and_token_detector_for_one_value() -> None:
+    findings: list[dict[str, str]] = []
+    token = "glpat-abcdefghijklmnopqrst"
+    payload = json.dumps({"data": {"description": f"api_token={token}"}}).encode()
+    proxmox_actions._scan_endpoint_payload("/nodes/pve/qemu/900/config", payload, findings, set())
+    assert len(findings) == 1
+    assert findings[0]["path"] == "$.description"
+    assert token in findings[0]["sample"]
+
+
+@pytest.mark.parametrize(
+    "payload,reason",
+    [
+        (lambda secret: f"api_token={secret}", "text_api_token"),
+        (lambda secret: f"<api_token>{secret}</api_token>", "xml_api_token"),
+        (lambda secret: f"postgresql://reporter:{secret}@db.internal:5432/app", "uri_with_auth"),
+    ],
+)
+def test_discovery_text_findings_keep_full_long_value(payload, reason: str) -> None:
+    secret = "LongToken-" + "A" * 6_000 + "-Tail"
+    findings: list[dict[str, str]] = []
+    proxmox_actions._scan_endpoint_payload("/nodes/pve/syslog", payload(secret).encode(), findings, set())
+    selected = [item for item in findings if item["reason"] == reason]
+    assert selected, findings
+    assert secret in selected[0]["sample"]
+    if reason == "uri_with_auth":
+        assert selected[0]["sample"] == payload(secret)
+    else:
+        assert selected[0]["sample"].endswith("-Tail")
 
 
 @pytest.mark.parametrize("kind", ["qemu", "lxc"])
@@ -82,6 +114,8 @@ def test_discovery_ignores_pve_config_digest_without_losing_secrets(kind: str) -
     proxmox_actions._scan_endpoint_payload(endpoint, payload, findings, set())
 
     assert not any(digest in item["sample"] for item in findings)
+    assert any(item["path"] == "$.description" for item in findings)
+    assert any(item["path"] == "$.password" for item in findings)
     assert any(token in item["sample"] for item in findings)
     assert any("RealSecret12345" in item["sample"] for item in findings)
 
@@ -93,6 +127,7 @@ def test_discovery_does_not_globally_suppress_opaque_config_values() -> None:
 
     proxmox_actions._scan_endpoint_payload("/nodes/pve/qemu/101/config", payload, findings, set())
 
+    assert findings
     assert any(token in item["sample"] for item in findings)
 
 
@@ -1317,7 +1352,7 @@ def test_audit_proxmox_skips_credential_discovery_by_default(monkeypatch) -> Non
     assert int(record.get("credential_hits") or 0) == 0
 
 
-def test_audit_proxmox_skips_discovery_crawl_when_caps_are_false(monkeypatch) -> None:
+def test_audit_proxmox_crawls_nested_acl_when_root_caps_are_false(monkeypatch) -> None:
     requested_paths: list[str] = []
 
     def fake_request(
@@ -1343,7 +1378,13 @@ def test_audit_proxmox_skips_discovery_crawl_when_caps_are_false(monkeypatch) ->
                 {},
                 None,
             )
-        raise AssertionError(f"unexpected endpoint when all caps are false: {path}")
+        if path == "/nodes":
+            return 200, _json_payload([{"node": "pve-lab"}]), {}, None
+        if path == "/nodes/pve-lab/qemu":
+            return 200, _json_payload([{"vmid": 900}]), {}, None
+        if path == "/nodes/pve-lab/qemu/900/config":
+            return 200, _json_payload({"description": "api_token=glpat-abcdefghijklmnopqrst"}), {}, None
+        return 403, _json_payload({"message": "permission denied"}), {}, None
 
     monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
 
@@ -1363,12 +1404,13 @@ def test_audit_proxmox_skips_discovery_crawl_when_caps_are_false(monkeypatch) ->
     )
 
     assert record["status"] == "token_ok"
-    assert requested_paths == ["/access", "/access/permissions?path=/"]
-    assert int(record.get("checked_endpoints") or 0) == 2
-    assert int(record.get("credential_hits") or 0) == 0
+    assert "/nodes" in requested_paths
+    assert "/nodes/pve-lab/qemu/900/config" in requested_paths
+    assert int(record.get("credential_hits") or 0) == 1
+    assert record["partial"] is True
 
 
-def test_discover_global_byte_budget_marks_proxmox_partial(monkeypatch) -> None:
+def test_discover_portion_limit_does_not_stop_after_first_response(monkeypatch) -> None:
     access_payload = _json_payload({"clustername": "lab"})
     permissions_payload = _json_payload({"permissions": {"/": {"Sys.Audit": 0}}})
 
@@ -1377,10 +1419,10 @@ def test_discover_global_byte_budget_marks_proxmox_partial(monkeypatch) -> None:
             return 200, access_payload, {}, None
         if path == "/access/permissions?path=/":
             return 200, permissions_payload, {}, None
-        raise AssertionError(path)
+        return 200, _json_payload([]), {}, None
 
     monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
-    cap = len(access_payload) + 5
+    cap = max(len(access_payload), len(permissions_payload)) + 5
     record = _audit_proxmox_host(
         host="127.0.0.1",
         port=8006,
@@ -1394,10 +1436,95 @@ def test_discover_global_byte_budget_marks_proxmox_partial(monkeypatch) -> None:
         _discover_max_bytes=cap,
     )
     assert record["is_proxmox"] is True
-    assert record["discover_bytes_scanned"] == cap
-    assert record["partial"] is True
-    assert record["partial_error"] == "discover_max_bytes"
-    assert "partial results err=discover_max_bytes" in _format_partial_detail_records(record, "txt")[0]
+    assert record["discover_bytes_scanned"] >= len(access_payload) + len(permissions_payload)
+    assert record["partial_error"] != "discover_max_bytes"
+
+
+def test_discover_proxmox_passes_same_portion_cap_to_next_http_source(monkeypatch) -> None:
+    access_payload = _json_payload({"clustername": "lab"})
+    permissions_payload = _json_payload({"permissions": {"/": {"Sys.Audit": 0}}})
+    caps: list[int | None] = []
+
+    def fake_request(_host, _port, path, _timeout, _retries, *, response_size_cap=None, **_kwargs):
+        caps.append(response_size_cap)
+        if path == "/access":
+            return 200, access_payload, {}, None
+        if path == "/access/permissions?path=/":
+            return 200, permissions_payload, {}, None
+        return 200, _json_payload([]), {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+    cap = max(len(access_payload), len(permissions_payload)) + 5
+    _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+        _discover_max_bytes=cap,
+    )
+    assert caps[:2] == [cap, cap]
+
+
+def test_proxmox_http_source_caps_body_during_transport_read(monkeypatch) -> None:
+    from redposture_core.clients.http_api import HttpResponse
+
+    observed: list[int] = []
+
+    class _Client:
+        def __init__(self, config) -> None:
+            observed.append(config.response_size_cap)
+
+        def request(self, *_args, **_kwargs) -> HttpResponse:
+            return HttpResponse(status=200, body=b"{" * 7, headers={}, truncated=True)
+
+    monkeypatch.setattr(proxmox_actions, "HttpApiClient", _Client)
+    monkeypatch.delattr(proxmox_actions._THREAD_LOCAL_HTTP, "pool", raising=False)
+    status, body, headers, error = proxmox_actions._proxmox_request_once(
+        "127.0.0.1",
+        8006,
+        "/nodes",
+        1,
+        pve_api_token="qa@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        response_size_cap=7,
+    )
+    assert observed == [7]
+    assert (status, body, error) == (200, b"{" * 7, None)
+    assert headers["x-redposture-truncated"] == "true"
+
+
+def test_discover_proxmox_stops_network_after_truncated_catalog(monkeypatch) -> None:
+    paths: list[str] = []
+
+    def fake_request(_host, _port, path, _timeout, _retries, **_kwargs):
+        paths.append(path)
+        if path == "/access":
+            return 200, b"x" * 100, {"x-redposture-truncated": "true"}, None
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+    result = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="qa@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+        _discover_max_bytes=100,
+    )
+    assert paths == ["/access"]
+    assert result["partial"] is True
+    assert result["partial_error"] == "discover_max_bytes"
 
 
 def test_discover_time_budget_marks_proxmox_partial(monkeypatch) -> None:
@@ -1425,6 +1552,62 @@ def test_discover_time_budget_marks_proxmox_partial(monkeypatch) -> None:
     assert record["partial"] is True
     assert record["partial_error"] == "discover_time"
     assert record["discover_bytes_scanned"] == 0
+
+
+def test_proxmox_discover_does_not_round_short_request_timeout_to_100ms(monkeypatch) -> None:
+    timeouts: list[float] = []
+
+    def fake_request(_host, _port, path, timeout, _retries, **_kwargs):
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        timeouts.append(timeout)
+        return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 0}}}), {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+    _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+        _discover_time=0.01,
+    )
+    assert timeouts
+    assert all(0 < value <= 0.01 for value in timeouts)
+
+
+def test_proxmox_discover_deadline_includes_prior_target_stages(monkeypatch) -> None:
+    requested: list[str] = []
+
+    def fake_request(_host, _port, path, _timeout, _retries, **_kwargs):
+        requested.append(path)
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 0}}}), {}, None
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+        _discover_time=0.01,
+        _discovery_started_at=time.monotonic() - 1,
+    )
+    assert record["partial_error"] == "discover_time"
+    assert record["discover_bytes_scanned"] == 0
+    assert all(path in {"/access", "/access/permissions?path=/"} for path in requested)
 
 
 def test_audit_proxmox_stream_callbacks_receive_urls_and_findings(monkeypatch) -> None:
@@ -1493,6 +1676,41 @@ def test_audit_proxmox_stream_callbacks_receive_urls_and_findings(monkeypatch) -
     assert any("password" in str(item.get("reason") or "").lower() for item in streamed_findings)
 
 
+def test_proxmox_discover_marks_report_server_failure_partial(monkeypatch) -> None:
+    def fake_request(_host, _port, path, _timeout, _retries, **_kwargs):
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 1}}}), {}, None
+        if path == "/nodes":
+            return 200, _json_payload([{"node": "pve1"}]), {}, None
+        if path == "/nodes/pve1/report":
+            return 596, b"", {}, None
+        if path == "/sdn":
+            return 501, b"", {}, None
+        if path.endswith(("/qemu", "/lxc", "/storage", "/tasks")):
+            return 200, _json_payload([]), {}, None
+        return 200, _json_payload({}), {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+    )
+    assert record["partial"] is True
+    assert record["partial_error"] == "1 discovery endpoint(s) denied or unreadable"
+
+
 def test_audit_proxmox_discovery_limits_parallel_gets_to_eight(monkeypatch) -> None:
     active = 0
     peak = 0
@@ -1544,6 +1762,41 @@ def test_audit_proxmox_discovery_limits_parallel_gets_to_eight(monkeypatch) -> N
         for node in ("pve1", "pve2")
         for suffix in ("syslog", "report", "tasks", "qemu", "lxc", "storage")
     ]
+
+
+def test_proxmox_byte_budget_serializes_nested_response_accounting(monkeypatch) -> None:
+    class Scheduler:
+        max_workers = 8
+        cancelled = False
+
+        def iter_completed(self, *_args, **_kwargs):
+            raise AssertionError("bounded responses cannot be read concurrently against one byte budget")
+
+    def fake_request(_host, _port, path, _timeout, _retries, **_kwargs):
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 1}}}), {}, None
+        if path == "/nodes":
+            return 200, _json_payload([{"node": "pve1"}]), {}, None
+        return 200, _json_payload([]), {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="qa@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+        _discover_max_bytes=1000,
+        _nested_scheduler=Scheduler(),
+    )
+    assert record["partial"] is False
+    assert record["discover_bytes_scanned"] <= 1000
 
 
 def test_audit_proxmox_denylist_ignores_csrfpreventiontoken(monkeypatch) -> None:
@@ -2505,7 +2758,7 @@ def test_discover_text_xml_secret_requires_sensitive_tag() -> None:
     from redposture_core.modules.proxmox import actions
 
     findings: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     actions._collect_text_findings(
         "<password>SecretXmlValue12345</password><description>ordinary text</description>",
         "/nodes/pve/qemu/100/config",
@@ -2514,5 +2767,6 @@ def test_discover_text_xml_secret_requires_sensitive_tag() -> None:
         path="$.description",
         limit=20,
     )
-    assert any(item["reason"] == "xml_password" and "SecretXmlValue12345" in item["sample"] for item in findings)
+    assert any(item["reason"] == "xml_password" for item in findings)
+    assert any("SecretXmlValue12345" in item["sample"] for item in findings)
     assert not any(item["reason"] == "xml_description" for item in findings)

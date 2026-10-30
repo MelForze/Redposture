@@ -11,9 +11,10 @@ import time
 import urllib.parse
 import zlib
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
+from ..http_headers import merge_custom_http_headers
 from ..network_proxy import ProxyConfig, open_connection_via_proxy
 from . import transport
 from .http_api import HttpResponse, decode_http_content, normalize_http_error, pin_http_redirect_path
@@ -32,6 +33,23 @@ def _origin(url: str) -> tuple[str, str, int]:
 def _request_path(url: str) -> str:
     parsed = urllib.parse.urlsplit(url)
     return urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+
+
+def _response_headers(values: list[tuple[str, str]]) -> dict[str, str]:
+    """Keep Set-Cookie fields separate; commas also occur inside Expires."""
+    result: dict[str, str] = {}
+    cookie_name: str | None = None
+    for name, value in values:
+        name, value = str(name), str(value)
+        if name.lower() == "set-cookie":
+            if cookie_name is None:
+                cookie_name = name
+                result[name] = value
+            else:
+                result[cookie_name] += "\n" + value
+        else:
+            result[name] = value
+    return result
 
 
 class _LayeredTlsRaw(io.RawIOBase):
@@ -243,6 +261,7 @@ class HttpSessionPool:
         timeout: float,
         response_size_cap: int,
         preserve_partial_body: bool = False,
+        deadline: float | None = None,
     ) -> tuple[HttpResponse, BaseException | None, bool]:
         key = _origin(url)
         connection: http.client.HTTPConnection | None = None
@@ -253,10 +272,22 @@ class HttpSessionPool:
         received = bytearray()
         try:
             connection, reused = self._acquire(key, timeout)
+
+            def apply_deadline() -> None:
+                if deadline is None:
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("HTTP request timeout budget exhausted while reading response")
+                connection.timeout = remaining
+                if connection.sock is not None:
+                    connection.sock.settimeout(remaining)
+
             request_headers = {str(name): str(value) for name, value in headers.items()}
             lowered = {name.lower() for name in request_headers}
             if "connection" not in lowered:
                 request_headers["Connection"] = "keep-alive"
+            apply_deadline()
             connection.request(method, _request_path(url), body=body, headers=request_headers)
             active_sock = getattr(connection, "sock", None)
             if active_sock is not None:
@@ -266,10 +297,12 @@ class HttpSessionPool:
                         self._active_sockets.add(active_sock)
                 if closed:
                     active_sock.shutdown(socket.SHUT_RDWR)
+            apply_deadline()
             response = connection.getresponse()
             cap = max(0, int(response_size_cap))
-            if preserve_partial_body:
+            if preserve_partial_body or deadline is not None:
                 while len(received) <= cap:
+                    apply_deadline()
                     chunk = response.read1(min(64 * 1024, cap + 1 - len(received)))
                     if not chunk:
                         break
@@ -294,7 +327,7 @@ class HttpSessionPool:
                     HttpResponse(
                         status=int(response.status),
                         body=payload,
-                        headers={str(name): str(value) for name, value in response.getheaders()},
+                        headers=_response_headers(response.getheaders()),
                         error=None,
                         truncated=truncated,
                         request_url=url,
@@ -319,7 +352,7 @@ class HttpSessionPool:
                     HttpResponse(
                         status=int(response.status),
                         body=prefix,
-                        headers={str(name): str(value) for name, value in response.getheaders()},
+                        headers=_response_headers(response.getheaders()),
                         error=normalize_http_error(exc),
                         truncated=True,
                         request_url=url,
@@ -359,15 +392,40 @@ class HttpSessionPool:
     ) -> HttpResponse:
         if self._closed:
             raise RuntimeError("HTTP session pool is closed")
-        timeout_value = self.timeout if timeout is None else max(0.1, float(timeout))
+        timeout_value = self.timeout if timeout is None else max(0.001, float(timeout))
+        deadline = time.monotonic() + timeout_value if timeout is not None else None
         safe = str(method or "GET").upper() in {"GET", "HEAD"} if replay_safe is None else bool(replay_safe)
+        request_count = 0
 
         def send(
             method_value: str, current_url: str, headers_value: dict[str, str], body_value: bytes | None
         ) -> HttpResponse:
+            nonlocal request_count
+            headers_value = merge_custom_http_headers(headers_value)
+            if not preserve_authorization_on_cross_origin and _origin(current_url) != _origin(url):
+                headers_value = {key: value for key, value in headers_value.items() if key.lower() != "authorization"}
             attempts = max(1, int(self.default_retries if retries is None else retries) + 1)
+            last_response: HttpResponse | None = None
             for attempt in range(attempts):
-                attempt_timeout = transport.escalating_timeout(timeout_value, attempt)
+                attempt_timeout = (
+                    timeout_value
+                    if deadline is not None or attempts == 1
+                    else transport.escalating_timeout(timeout_value, attempt)
+                )
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        if last_response is not None:
+                            return last_response
+                        raise TimeoutError("HTTP request timeout budget exhausted before redirect")
+                    if request_count or attempt:
+                        attempt_timeout = min(attempt_timeout, remaining)
+                request_count += 1
+                optional_kwargs: dict[str, Any] = {}
+                if deadline is not None:
+                    optional_kwargs["deadline"] = deadline
+                if preserve_partial_body:
+                    optional_kwargs["preserve_partial_body"] = True
                 response, request_error, _reused = self._request_once(
                     method_value,
                     current_url,
@@ -375,8 +433,9 @@ class HttpSessionPool:
                     body=body_value,
                     timeout=attempt_timeout,
                     response_size_cap=response_size_cap,
-                    **({"preserve_partial_body": True} if preserve_partial_body else {}),
+                    **optional_kwargs,
                 )
+                last_response = response
                 # Closing the pool is a cancellation, not a transient network
                 # failure. Retrying would delay shutdown or race _acquire().
                 if (
@@ -394,16 +453,21 @@ class HttpSessionPool:
                 )
                 if not (transport.is_escalating_reason(reason) or stale_protocol):
                     return response
+                if deadline is not None and deadline <= time.monotonic():
+                    return response
                 with self._lock:
                     self._stats["retries"] += 1
-                time.sleep(min(1.5, 0.2 * (2**attempt)))
+                delay = min(1.5, 0.2 * (2**attempt))
+                if deadline is not None:
+                    delay = min(delay, max(0.0, deadline - time.monotonic()))
+                time.sleep(delay)
             raise AssertionError("unreachable")
 
         response = follow_redirects(
             send,
             method,
             url,
-            headers=headers,
+            headers=merge_custom_http_headers(headers),
             body=body,
             allow_cross_origin=allow_cross_origin_redirects,
             preserve_authorization=preserve_authorization_on_cross_origin,
@@ -411,6 +475,115 @@ class HttpSessionPool:
         )
         pin_http_redirect_path(response, method=method)
         return response
+
+    def request_stream(
+        self,
+        method: str,
+        url: str,
+        *,
+        on_chunk: Callable[[bytes], Any],
+        body: bytes | None = None,
+        on_response: Callable[[int, Mapping[str, str]], Any] | None = None,
+        chunk_size: int = 64 * 1024,
+        headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        deadline: float | None = None,
+        allow_cross_origin_redirects: bool = True,
+        preserve_authorization_on_cross_origin: bool = False,
+    ) -> HttpResponse:
+        """Read one HTTP response without buffering it; never replay body chunks."""
+        if self._closed:
+            raise RuntimeError("HTTP session pool is closed")
+        if str(method).upper() not in {"GET", "HEAD", "POST"}:
+            raise ValueError("streaming is supported only for GET/HEAD/POST")
+        read_size = max(1, int(chunk_size))
+        idle_timeout = self.timeout if timeout is None else max(0.001, float(timeout))
+
+        def send(
+            method_value: str, current_url: str, headers_value: dict[str, str], body_value: bytes | None
+        ) -> HttpResponse:
+            key = _origin(current_url)
+            connection: http.client.HTTPConnection | None = None
+            response: http.client.HTTPResponse | None = None
+            active_sock: Any | None = None
+            reusable = False
+            received = 0
+            status = 0
+            response_headers: dict[str, str] = {}
+            try:
+                connection, _reused = self._acquire(key, idle_timeout)
+
+                def apply_deadline() -> None:
+                    assert connection is not None
+                    remaining = deadline - time.monotonic() if deadline is not None else idle_timeout
+                    if remaining <= 0:
+                        raise TimeoutError("HTTP stream deadline exceeded")
+                    connection.timeout = min(idle_timeout, remaining)
+                    if connection.sock is not None:
+                        connection.sock.settimeout(connection.timeout)
+
+                apply_deadline()
+                connection.request(method_value, _request_path(current_url), body=body_value, headers=headers_value)
+                active_sock = connection.sock
+                if active_sock is not None:
+                    with self._lock:
+                        closed = self._closed
+                        if not closed:
+                            self._active_sockets.add(active_sock)
+                    if closed:
+                        active_sock.shutdown(socket.SHUT_RDWR)
+                apply_deadline()
+                response = connection.getresponse()
+                status = int(response.status)
+                response_headers = {str(name): str(value) for name, value in response.getheaders()}
+                with self._lock:
+                    self._stats["requests"] += 1
+                if on_response is not None:
+                    on_response(status, response_headers)
+                redirect = status in {301, 302, 303, 307, 308}
+                encoding = str(response.getheader("Content-Encoding") or "").strip().lower()
+                if 200 <= status < 300 and not redirect:
+                    if encoding not in {"", "identity"}:
+                        return HttpResponse(status, b"", response_headers, error="unsupported_content_encoding")
+                    while True:
+                        apply_deadline()
+                        chunk = response.read1(read_size)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        on_chunk(chunk)
+                    remaining_length = getattr(response, "length", None)
+                    if isinstance(remaining_length, int) and remaining_length > 0:
+                        raise ConnectionError("unexpected EOF: incomplete HTTP stream")
+                    reusable = not response.will_close
+                return HttpResponse(status, b"", response_headers)
+            except Exception as exc:
+                return HttpResponse(
+                    status, b"", response_headers, error=normalize_http_error(exc), truncated=received > 0
+                )
+            finally:
+                if active_sock is not None:
+                    with self._lock:
+                        self._active_sockets.discard(active_sock)
+                if response is not None:
+                    try:
+                        response.close()
+                    except OSError:
+                        reusable = False
+                if connection is not None:
+                    self._release(key, connection, reusable)
+
+        result = follow_redirects(
+            send,
+            method,
+            url,
+            headers=merge_custom_http_headers({"Accept-Encoding": "identity", **dict(headers or {})}),
+            body=body,
+            allow_cross_origin=allow_cross_origin_redirects,
+            preserve_authorization=preserve_authorization_on_cross_origin,
+        )
+        pin_http_redirect_path(result, method=method)
+        return result
 
     def request_once(
         self,
@@ -425,13 +598,18 @@ class HttpSessionPool:
         """Send one request without following redirects (for CSRF/session login flows)."""
         if self._closed:
             raise RuntimeError("HTTP session pool is closed")
+        timeout_value = self.timeout if timeout is None else max(0.001, float(timeout))
+        optional_kwargs: dict[str, Any] = {}
+        if timeout is not None:
+            optional_kwargs["deadline"] = time.monotonic() + timeout_value
         response, _error, _reused = self._request_once(
             str(method).upper(),
             str(url),
-            headers=headers or {},
+            headers=merge_custom_http_headers(headers),
             body=body,
-            timeout=self.timeout if timeout is None else max(0.1, float(timeout)),
+            timeout=timeout_value,
             response_size_cap=response_size_cap,
+            **optional_kwargs,
         )
         return response
 

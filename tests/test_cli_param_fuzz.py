@@ -494,8 +494,6 @@ def _stage_case(stage: str, expected_error: str, *argv: str) -> StageCase:
 
 
 _STAGE_CASES = (
-    _stage_case("scan", "scan requires -t/--targets", "exporters", "scan", "-p", "9100"),
-    _stage_case("scan", "failed to parse --ports", "exporters", "scan", "-t", "127.0.0.1", "-p", "bad"),
     _stage_case("collect", "collect requires -t/--targets", "exporters", "collect"),
     _stage_case("collect", "failed to parse --ports", "exporters", "collect", "-t", "127.0.0.1", "-p", "bad"),
     _stage_case(
@@ -614,11 +612,6 @@ def _run_policy_case(case: PolicyCase) -> tuple[int | None, str]:
 
 def _run_stage_case(case: StageCase) -> int:
     args = parse_args(list(case.argv))
-    if case.stage == "scan":
-        from redposture_core.stage_scan import run_scan_stage
-
-        return int(run_scan_stage(args))
-
     logger = AttemptLogger()
     try:
         if case.stage == "collect":
@@ -636,7 +629,7 @@ def _run_stage_case(case: StageCase) -> int:
 
 def test_cli_param_fuzz_case_generation_is_large_and_current() -> None:
     surface_names = {surface.name for surface in _SURFACES}
-    assert {"exporters_scan", "exporters_collect", "exporters_trigger"}.issubset(surface_names)
+    assert {"exporters_collect", "exporters_trigger"}.issubset(surface_names)
     assert set(AUDIT_MODULE_NAMES).issubset(surface_names)
     assert len(_ARGPARSE_FUZZ_CASES) >= 1_400
     assert len(_POLICY_CASES) >= 100

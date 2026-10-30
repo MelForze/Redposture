@@ -51,6 +51,5 @@ jobs:
           for command in spark yarn portainer vault nomad jupyter airflow clickhouse consul docker docker-registry elastic etcd gitlab grafana grpc harbor jenkins kafka keeper keycloak kubeapi minio mongodb nexus oracle postgres proxmox qdrant rabbitmq redis zookeeper; do
             redposture "$command" -h > /dev/null
           done
-          redposture exporters scan -h > /dev/null
           redposture exporters collect -h > /dev/null
           redposture exporters trigger -h > /dev/null

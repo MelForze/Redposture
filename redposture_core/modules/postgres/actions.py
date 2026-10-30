@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import hashlib
 import hmac
 import json
@@ -14,12 +15,14 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ...clients import transport
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
+from ...discovery_spool import SpoolingValues
+from ...discovery_values import DiskBackedText
 from ...rendering import (
     BooleanColorRule,
     CountColorRule,
@@ -43,6 +46,7 @@ from ...stage_runtime import (
     StageTelemetryBuilder,
     merge_stage_records,
 )
+from ...storage_discovery import DiscoveryCollector
 from ...utils import (
     utc_now_iso,
 )
@@ -95,6 +99,11 @@ class _PgAuditError(Exception):
         sqlstate: str | None = None,
         failure_phase: str | None = None,
         error_kind: str | None = None,
+        server_version: str | None = None,
+        password_sent: bool = False,
+        credential_verified: bool | None = None,
+        startup_username: str | None = None,
+        startup_database: str | None = None,
     ) -> None:
         super().__init__(message)
         self.detected = detected
@@ -103,6 +112,11 @@ class _PgAuditError(Exception):
         self.sqlstate = sqlstate
         self.failure_phase = failure_phase
         self.error_kind = error_kind
+        self.server_version = server_version
+        self.password_sent = password_sent
+        self.credential_verified = credential_verified
+        self.startup_username = startup_username
+        self.startup_database = startup_database
 
 
 @dataclass(frozen=True)
@@ -196,6 +210,220 @@ class _PgSession:
     auth_required: bool | None
     auth_method: str | None
     server_version: str | None
+    password_sent: bool = field(default=False, compare=False)
+    credential_verified: bool | None = field(default=None, compare=False)
+    startup_username: str | None = field(default=None, compare=False)
+    startup_database: str | None = field(default=None, compare=False)
+
+
+def _pg_startup_error_fields(payload: bytes) -> tuple[str, str]:
+    """Validate startup errors without tightening the legacy query parser."""
+    fields: dict[bytes, bytes] = {}
+    offset = 0
+    while offset < len(payload):
+        key = payload[offset : offset + 1]
+        offset += 1
+        if key == b"\x00":
+            if offset != len(payload):
+                break
+            if fields.get(b"S") and fields.get(b"M") and re.fullmatch(rb"[A-Z0-9]{5}", fields.get(b"C", b"")):
+                return fields[b"C"].decode("ascii"), fields[b"M"].decode("utf-8", errors="replace")
+            break
+        end = payload.find(b"\x00", offset)
+        if end < 0 or (key in {b"S", b"C", b"M"} and key in fields):
+            break
+        if key in {b"S", b"C", b"M"}:
+            fields[key] = payload[offset:end]
+        offset = end + 1
+    raise _PgAuditError(
+        "invalid PostgreSQL startup error payload", error_kind="protocol_error", failure_phase="startup"
+    )
+
+
+def _pg_startup_error_kind(sqlstate: str, message: str) -> str:
+    normalized = message.casefold()
+    if (
+        "no such user" in normalized
+        or "unknown user" in normalized
+        or re.search(r"\b(?:role|user)\b.*\b(?:does not exist|not found)\b", normalized)
+    ):
+        return "unknown_user"
+    if (
+        sqlstate == "3D000"
+        or "no such database" in normalized
+        or re.search(r"\bdatabase\b.*\b(?:does not exist|not found|not configured|disabled)\b", normalized)
+    ):
+        return "database_unavailable"
+    if any(
+        marker in normalized
+        for marker in (
+            "no authentication method",
+            "auth_query",
+            "auth query",
+            "auth_file",
+            "auth_user",
+            "auth_type",
+            "bouncer config error",
+            "authentication configuration",
+        )
+    ):
+        return "auth_configuration_error"
+    if sqlstate == "28P01" or any(
+        marker in normalized
+        for marker in ("password authentication failed", "password mismatch", "sasl authentication failed")
+    ):
+        return "authentication_failed"
+    if sqlstate == "28000" or any(
+        marker in normalized for marker in ("pg_hba.conf", "not permitted to log in", "not allowed to log in")
+    ):
+        return "auth_policy_denied"
+    return "startup_rejected"
+
+
+@dataclass
+class _PgStartupEvidence:
+    username: str
+    database: str
+    detected: bool = False
+    auth_required: bool | None = None
+    auth_method: str | None = None
+    server_version: str | None = None
+    password_sent: bool = False
+    credential_verified: bool | None = None
+    authentication_ok: bool = False
+
+    def error(self, message: str, *, error_kind: str, sqlstate: str | None = None) -> _PgAuditError:
+        return _PgAuditError(
+            message,
+            detected=self.detected,
+            auth_required=self.auth_required,
+            auth_method=self.auth_method,
+            sqlstate=sqlstate,
+            failure_phase="startup",
+            error_kind=error_kind,
+            server_version=self.server_version,
+            password_sent=self.password_sent,
+            credential_verified=self.credential_verified,
+            startup_username=self.username,
+            startup_database=self.database,
+        )
+
+    def enrich(self, error: _PgAuditError) -> _PgAuditError:
+        error.detected = self.detected
+        error.auth_required = self.auth_required
+        error.auth_method = self.auth_method
+        error.server_version = self.server_version
+        error.password_sent = self.password_sent
+        error.credential_verified = self.credential_verified
+        error.startup_username = self.username
+        error.startup_database = self.database
+        error.failure_phase = error.failure_phase or "startup"
+        error.error_kind = error.error_kind or "authentication_unavailable"
+        return error
+
+    def observe(self, kind: bytes, payload: bytes) -> None:
+        """Only structurally valid backend messages establish wire evidence."""
+        if kind == b"R":
+            if len(payload) < 4:
+                raise self.error("invalid authentication payload", error_kind="protocol_error")
+            code = int.from_bytes(payload[:4], "big")
+            exact_lengths = {0: 4, 2: 4, 3: 4, 4: 6, 5: 8, 6: 4, 7: 4, 9: 4}
+            valid = len(payload) == exact_lengths[code] if code in exact_lengths else code in {8, 10, 11, 12}
+            if code == 10:
+                mechanisms = payload[4:]
+                valid = mechanisms.endswith(b"\x00\x00") and all(
+                    re.fullmatch(rb"[A-Z0-9_-]+", value) for value in mechanisms[:-2].split(b"\x00")
+                )
+            elif code in {11, 12}:
+                valid = len(payload) > 4 and b"\x00" not in payload[4:]
+            if not valid:
+                label = "invalid MD5 authentication payload" if code == 5 else "invalid authentication payload"
+                raise self.error(label, error_kind="protocol_error")
+            self.detected = True
+            if code == 0:
+                self.authentication_ok = True
+                if self.auth_required is None:
+                    self.auth_required = False
+                if self.password_sent:
+                    self.credential_verified = True
+            else:
+                self.auth_required = True
+                self.auth_method = {
+                    3: "cleartext",
+                    5: "md5",
+                    10: "scram-sha-256",
+                    11: "scram-sha-256",
+                    12: "scram-sha-256",
+                }.get(code)
+            return
+        if kind == b"S":
+            parts = payload.split(b"\x00")
+            if len(parts) != 3 or not parts[0] or parts[-1]:
+                raise self.error("invalid parameter status payload", error_kind="protocol_error")
+            self.detected = True
+            if parts[0] == b"server_version":
+                self.server_version = parts[1].decode("utf-8", errors="replace") or None
+            return
+        if kind == b"K":
+            if len(payload) != 8:
+                raise self.error("invalid backend key payload", error_kind="protocol_error")
+            self.detected = True
+            return
+        if kind in {b"E", b"N"}:
+            try:
+                sqlstate, message = _pg_startup_error_fields(payload)
+            except _PgAuditError as exc:
+                self.enrich(exc)
+                raise
+            self.detected = True
+            if kind == b"E":
+                error_kind = _pg_startup_error_kind(sqlstate, message)
+                if error_kind == "authentication_failed":
+                    self.auth_required = True
+                    if self.password_sent and self.credential_verified is not True:
+                        self.credential_verified = False
+                raise self.error(message, error_kind=error_kind, sqlstate=sqlstate)
+            return
+        if kind == b"Z":
+            if payload not in {b"I", b"T", b"E"} or not self.authentication_ok:
+                raise self.error("unexpected or invalid ready-for-query payload", error_kind="protocol_error")
+            return
+        raise self.error(f"unexpected handshake message: {kind!r}", error_kind="protocol_error")
+
+    def session(self) -> _PgSession:
+        return _PgSession(
+            auth_required=self.auth_required,
+            auth_method=self.auth_method,
+            server_version=self.server_version,
+            password_sent=self.password_sent,
+            credential_verified=self.credential_verified,
+            startup_username=self.username,
+            startup_database=self.database,
+        )
+
+
+def _pg_startup_record_fields(
+    evidence: _PgSession | _PgAuditError, *, username: str | None = None, database: str | None = None
+) -> dict[str, Any]:
+    detected = isinstance(evidence, _PgSession) or evidence.detected
+    return {
+        "server_version": evidence.server_version,
+        "password_sent": evidence.password_sent,
+        "credential_verified": evidence.credential_verified,
+        "startup_username": evidence.startup_username or username,
+        "startup_database": evidence.startup_database or database,
+        "protocol_evidence": "postgresql_wire" if detected else None,
+        "service_identity": "postgresql_compatible" if detected else None,
+        "startup_complete": isinstance(evidence, _PgSession),
+    }
+
+
+def _pg_credential_verification(verified: bool | None, error_kind: str | None = None) -> str:
+    if verified is True:
+        return "verified"
+    if verified is False:
+        return "rejected"
+    return "error" if error_kind in {"transport_error", "connection_error"} else "unavailable"
 
 
 @dataclass
@@ -248,12 +476,14 @@ def _pg_send_message(sock: socket.socket, message_type: bytes, payload: bytes) -
     sock.sendall(message_type + (len(payload) + 4).to_bytes(4, "big") + payload)
 
 
-def _pg_read_message(sock: socket.socket) -> tuple[bytes, bytes]:
+def _pg_read_message(sock: socket.socket, *, max_data_bytes: int | None = None) -> tuple[bytes, bytes]:
     header = _recv_exact(sock, 5)
     message_type = header[:1]
     length = int.from_bytes(header[1:5], "big")
     if length < 4 or length > _PG_MAX_MESSAGE_SIZE:
         raise ValueError(f"invalid postgres message length: {length}")
+    if message_type == b"D" and max_data_bytes is not None and length - 4 > max_data_bytes:
+        raise ValueError("byte_budget")
     payload = _recv_exact(sock, length - 4)
     return message_type, payload
 
@@ -350,16 +580,131 @@ def _pg_parse_data_row(payload: bytes) -> list[str | None]:
     return row
 
 
-def _pg_query_rows(sock: socket.socket, query: str) -> tuple[list[list[str | None]], str | None]:
-    rows: list[list[str | None]] = []
-    error: str | None = None
+def _pg_read_discovery_message(
+    sock: socket.socket,
+    *,
+    deadline: float | None = None,
+    on_data_field: Callable[[int, Iterator[bytes]], None] | None = None,
+) -> tuple[bytes, Any]:
+    """Read DataRow values to disk while keeping ordinary control frames capped."""
 
+    def read(size: int) -> bytes:
+        parts = bytearray()
+        while len(parts) < size:
+            if deadline is not None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError("time_budget")
+                current = sock.gettimeout()
+                sock.settimeout(min(current, left) if current is not None else left)
+            block = sock.recv(min(size - len(parts), 65_536))
+            if not block:
+                raise ConnectionError("unexpected EOF in PostgreSQL message")
+            parts.extend(block)
+        return bytes(parts)
+
+    header = read(5)
+    kind = header[:1]
+    length = int.from_bytes(header[1:], "big", signed=True)
+    if length < 4 or (kind != b"D" and length > _PG_MAX_MESSAGE_SIZE):
+        raise ValueError(f"invalid postgres message length: {length}")
+    if kind != b"D":
+        return kind, read(length - 4)
+    remaining = length - 4
+    if remaining < 2:
+        raise ValueError("invalid DataRow payload")
+    columns = int.from_bytes(read(2), "big")
+    remaining -= 2
+    row: list[Any] = []
+    unfinished: DiskBackedText | None = None
+
+    def field_chunks(size: int, value: DiskBackedText) -> Iterator[bytes]:
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        while size:
+            block = read(min(size, 65_536))
+            value.append_text(decoder.decode(block))
+            size -= len(block)
+            yield block
+        value.append_text(decoder.decode(b"", final=True))
+
+    try:
+        for column in range(columns):
+            if remaining < 4:
+                raise ValueError("truncated DataRow payload")
+            size = int.from_bytes(read(4), "big", signed=True)
+            remaining -= 4
+            if size == -1:
+                row.append(None)
+                continue
+            if size < 0 or size > remaining:
+                raise ValueError("invalid DataRow value length")
+            remaining -= size
+            if size <= 65_536:
+                row.append(read(size).decode("utf-8"))
+                continue
+            unfinished = DiskBackedText()
+            chunks = field_chunks(size, unfinished)
+            if on_data_field is not None:
+                on_data_field(column, chunks)
+            for _block in chunks:
+                pass
+            unfinished.finish()
+            row.append(unfinished)
+            unfinished = None
+        if remaining:
+            raise ValueError("unexpected bytes after DataRow values")
+        return kind, row
+    except BaseException:
+        if unfinished is not None:
+            unfinished.close()
+        for value in row:
+            if isinstance(value, DiskBackedText):
+                value.close()
+        raise
+
+
+def _pg_query_rows(
+    sock: socket.socket,
+    query: str,
+    *,
+    on_row: Callable[[list[Any]], bool | str] | None = None,
+    max_data_bytes: Callable[[], int] | None = None,
+    retain_rows: bool = True,
+    deadline: float | None = None,
+    stream_data_rows: bool = False,
+    on_data_field: Callable[[int, Iterator[bytes]], None] | None = None,
+) -> tuple[list[list[Any]], str | None]:
+    rows: list[list[Any]] = SpoolingValues() if stream_data_rows and retain_rows else []
+    error: str | None = None
+    received_rows = 0
+
+    original_timeout = sock.gettimeout() if deadline is not None else None
     _pg_send_query(sock, query)
     try:
         while True:
-            message_type, payload = _pg_read_message(sock)
+            if deadline is not None:
+                remaining_time = deadline - time.monotonic()
+                if remaining_time <= 0:
+                    return rows, "time_budget"
+                sock.settimeout(min(original_timeout, remaining_time) if original_timeout else remaining_time)
+            message_type, payload = (
+                _pg_read_discovery_message(sock, deadline=deadline, on_data_field=on_data_field)
+                if stream_data_rows
+                else (
+                    _pg_read_message(sock, max_data_bytes=max_data_bytes())
+                    if max_data_bytes is not None
+                    else _pg_read_message(sock)
+                )
+            )
             if message_type == b"D":
-                rows.append(_pg_parse_data_row(payload))
+                row = payload if isinstance(payload, list) else _pg_parse_data_row(payload)
+                received_rows += 1
+                if retain_rows:
+                    rows.append(row)
+                if on_row is not None:
+                    disposition = on_row(row)
+                    if disposition is not True:
+                        return rows, disposition if isinstance(disposition, str) else "byte_budget"
                 continue
             if message_type == b"E":
                 _, error = _pg_parse_error(payload)
@@ -367,10 +712,17 @@ def _pg_query_rows(sock: socket.socket, query: str) -> tuple[list[list[str | Non
             if message_type == b"Z":
                 return rows, error
     except (OSError, ValueError) as exc:
-        if not rows:
+        if str(exc) == "byte_budget":
+            return rows, "byte_budget"
+        if deadline is not None and isinstance(exc, TimeoutError) and time.monotonic() >= deadline:
+            return rows, "time_budget"
+        if not received_rows:
             raise
         detail = str(exc) or type(exc).__name__
         return rows, f"{error}; {detail}" if error else detail
+    finally:
+        if deadline is not None:
+            sock.settimeout(original_timeout)
 
 
 def _parse_bool(value: str | None) -> bool | None:
@@ -539,165 +891,87 @@ def _parse_sasl_mechanisms(payload: bytes) -> list[str]:
 
 
 def _pg_startup_and_auth(sock: socket.socket, username: str, password: str | None, database: str) -> _PgSession:
+    evidence = _PgStartupEvidence(username, database)
+    try:
+        return _pg_startup_exchange(sock, username, password, database, evidence)
+    except _PgAuditError as exc:
+        evidence.enrich(exc)
+        raise
+    except (OSError, ConnectionError) as exc:
+        if not evidence.detected:
+            raise
+        raise evidence.error(str(exc), error_kind="transport_error") from exc
+    except ValueError as exc:
+        raise evidence.error(str(exc), error_kind="protocol_error") from exc
+
+
+def _pg_startup_exchange(
+    sock: socket.socket, username: str, password: str | None, database: str, evidence: _PgStartupEvidence
+) -> _PgSession:
     _pg_send_startup(sock, username=username, database=database)
 
-    detected = False
-    authenticated = False
-    auth_required: bool | None = None
-    auth_method: str | None = None
-    server_version: str | None = None
     scram_state: _ScramState | None = None
 
     while True:
         message_type, payload = _pg_read_message(sock)
-        if not detected and message_type not in _PG_HANDSHAKE_TYPES:
-            raise _PgAuditError(f"unexpected response prefix: {message_type!r}", detected=False)
-
+        evidence.observe(message_type, payload)
         if message_type == b"R":
-            detected = True
-            if len(payload) < 4:
-                raise _PgAuditError("invalid authentication payload", detected=True)
             auth_code = int.from_bytes(payload[0:4], "big")
 
             if auth_code == 0:
-                authenticated = True
-                if auth_required is None:
-                    auth_required = False
                 continue
 
             if auth_code == 3:
-                auth_required = True
-                auth_method = "cleartext"
                 if password is None:
-                    raise _PgAuditError(
-                        "password authentication required",
-                        detected=True,
-                        auth_required=True,
-                        auth_method=auth_method,
-                    )
+                    raise evidence.error("password authentication required", error_kind="authentication_unavailable")
                 _pg_send_password(sock, password)
+                evidence.password_sent = True
                 continue
 
             if auth_code == 5:
-                auth_required = True
-                auth_method = "md5"
-                if len(payload) < 8:
-                    raise _PgAuditError(
-                        "invalid MD5 authentication payload",
-                        detected=True,
-                        auth_required=True,
-                        auth_method=auth_method,
-                    )
                 if password is None:
-                    raise _PgAuditError(
-                        "md5 authentication required",
-                        detected=True,
-                        auth_required=True,
-                        auth_method=auth_method,
-                    )
+                    raise evidence.error("md5 authentication required", error_kind="authentication_unavailable")
                 _pg_send_password(sock, _pg_md5_password(username, password, payload[4:8]))
+                evidence.password_sent = True
                 continue
 
             if auth_code == 10:
-                auth_required = True
-                auth_method = "scram-sha-256"
                 if password is None:
-                    raise _PgAuditError(
-                        "SCRAM authentication required",
-                        detected=True,
-                        auth_required=True,
-                        auth_method=auth_method,
-                    )
+                    raise evidence.error("SCRAM authentication required", error_kind="authentication_unavailable")
                 mechanisms = _parse_sasl_mechanisms(payload[4:])
                 if "SCRAM-SHA-256" not in mechanisms:
-                    raise _PgAuditError(
+                    raise evidence.error(
                         f"unsupported SASL mechanisms: {','.join(mechanisms) or '-'}",
-                        detected=True,
-                        auth_required=True,
-                        auth_method=auth_method,
+                        error_kind="authentication_unavailable",
                     )
                 scram_state, client_first = _scram_client_first(username)
                 _pg_send_sasl_initial(sock, "SCRAM-SHA-256", client_first)
                 continue
 
             if auth_code == 11:
-                auth_required = True
-                auth_method = "scram-sha-256"
                 if scram_state is None:
-                    raise _PgAuditError(
-                        "unexpected SCRAM continue",
-                        detected=True,
-                        auth_required=True,
-                        auth_method=auth_method,
-                    )
+                    raise evidence.error("unexpected SCRAM continue", error_kind="authentication_unavailable")
                 server_first = payload[4:].decode("utf-8", errors="replace")
                 final_message, expected_signature = _scram_client_final(scram_state, password or "", server_first)
                 scram_state.expected_server_signature = expected_signature
                 _pg_send_sasl_response(sock, final_message)
+                evidence.password_sent = True
                 continue
 
             if auth_code == 12:
-                auth_required = True
-                auth_method = "scram-sha-256"
                 if scram_state is None:
-                    raise _PgAuditError(
-                        "unexpected SCRAM final",
-                        detected=True,
-                        auth_required=True,
-                        auth_method=auth_method,
-                    )
+                    raise evidence.error("unexpected SCRAM final", error_kind="authentication_unavailable")
                 server_final = payload[4:].decode("utf-8", errors="replace")
                 _scram_verify_server_final(scram_state, server_final)
                 continue
 
-            raise _PgAuditError(
+            raise evidence.error(
                 f"unsupported auth method: {auth_code}",
-                detected=True,
-                auth_required=True,
-            )
-
-        if message_type == b"S":
-            detected = True
-            key, value = _pg_parse_parameter_status(payload)
-            if key == "server_version":
-                server_version = value
-            continue
-
-        if message_type in {b"K", b"N"}:
-            detected = True
-            continue
-
-        if message_type == b"E":
-            detected = True
-            sqlstate, message = _pg_parse_error(payload)
-            normalized_message = message.lower()
-            is_auth_failure = sqlstate in {"28P01", "28000"} or "password authentication failed" in normalized_message
-            auth_hint = True if is_auth_failure else None
-            if is_auth_failure:
-                error_kind = "authentication_failed"
-            elif "no authentication method is found" in normalized_message:
-                error_kind = "auth_configuration_error"
-            else:
-                error_kind = "startup_rejected"
-            raise _PgAuditError(
-                message,
-                detected=True,
-                auth_required=auth_hint,
-                auth_method=auth_method,
-                sqlstate=sqlstate,
-                failure_phase="startup",
-                error_kind=error_kind,
+                error_kind="authentication_unavailable",
             )
 
         if message_type == b"Z":
-            detected = True
-            if not authenticated:
-                authenticated = True
-            if auth_required is None:
-                auth_required = False
-            return _PgSession(auth_required=auth_required, auth_method=auth_method, server_version=server_version)
-
-        raise _PgAuditError(f"unexpected handshake message: {message_type!r}", detected=detected)
+            return evidence.session()
 
 
 def _collect_postgres_privileges(
@@ -1766,6 +2040,9 @@ def _pg_query_table_rows(
     *,
     columns: list[str] | None = None,
     max_rows: int | None = None,
+    discovery_collector: DiscoveryCollector | None = None,
+    database_name: str | None = None,
+    retain_rows: bool = True,
 ) -> tuple[str, list[str] | None, str | None]:
     sql_ident, display_name, normalize_error = _pg_normalize_table_name(table_name)
     if normalize_error or sql_ident is None or display_name is None:
@@ -1778,18 +2055,72 @@ def _pg_query_table_rows(
     limit_clause = ""
     if max_rows is not None:
         limit_clause = f" LIMIT {max(1, int(max_rows))}"
-    rows, error = _pg_query_rows(
-        sock,
-        f"SELECT row_to_json(t)::text FROM (SELECT {select_list} FROM {sql_ident}{limit_clause}) AS t",
-    )
+    query_kwargs: dict[str, Any] = {}
+    if discovery_collector is not None:
+        path = f"table.{database_name or '?'}.{display_name}"
+        streamed_row = False
+
+        def inspect_field(column: int, chunks: Iterator[bytes]) -> None:
+            nonlocal streamed_row
+            if column == 0:
+                streamed_row = True
+                discovery_collector.scan_json_chunks(path, chunks)
+
+        def inspect_row(row: list[str | None]) -> bool | str:
+            nonlocal streamed_row
+            if streamed_row:
+                streamed_row = False
+                return True if discovery_collector.allowed() else "time_budget"
+            if not row:
+                return True
+            if isinstance(row[0], DiskBackedText):
+                if discovery_collector.scan_disk_text(path, row[0]):
+                    return True
+                return "time_budget" if time.monotonic() >= discovery_collector.deadline else True
+            raw = _pg_text(row[0])
+            try:
+                value = json.loads(raw)
+            except ValueError:
+                value = raw
+            if discovery_collector.add(path, value):
+                return True
+            return "time_budget" if time.monotonic() >= discovery_collector.deadline else "byte_budget"
+
+        query_kwargs = {
+            "on_row": inspect_row,
+            "max_data_bytes": lambda: discovery_collector.remaining if discovery_collector.allowed() else 0,
+            "retain_rows": retain_rows,
+            "deadline": discovery_collector.deadline,
+            "stream_data_rows": True,
+            "on_data_field": inspect_field,
+        }
+    try:
+        rows, error = _pg_query_rows(
+            sock,
+            f"SELECT row_to_json(t)::text FROM (SELECT {select_list} FROM {sql_ident}{limit_clause}) AS t",
+            **query_kwargs,
+        )
+    except (OSError, ValueError) as exc:
+        if discovery_collector is None:
+            raise
+        detail = str(exc) or type(exc).__name__
+        discovery_collector.partial(f"table.{database_name or '?'}.{display_name}", detail)
+        return display_name, None, detail
+    if discovery_collector is not None and max_rows is not None and len(rows) >= max_rows:
+        discovery_collector.partial(f"table.{database_name or '?'}.{display_name}", "row_limit_reached")
+    if discovery_collector is not None and error:
+        reason = "access_denied: " + error if "permission denied" in error.lower() else error
+        discovery_collector.partial(f"table.{database_name or '?'}.{display_name}", reason)
     if error and not rows:
         return display_name, None, error
 
-    values: list[str] = []
+    values: list[Any] = SpoolingValues() if discovery_collector is not None and retain_rows else []
     for row in rows:
         if not row:
             continue
-        values.append(_pg_text(row[0]))
+        values.append(row[0] if isinstance(row[0], DiskBackedText) else _pg_text(row[0]))
+    if isinstance(values, SpoolingValues):
+        values.finish()
     return display_name, values, error
 
 
@@ -1878,6 +2209,8 @@ def _pg_collect_database_artifacts(
     table_columns: list[str],
     dump_table_rows: bool,
     dump_row_limit: int | None,
+    discovery_collector: DiscoveryCollector | None = None,
+    retain_dump_rows: bool = True,
 ) -> tuple[list[str] | None, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int | None, str | None]:
     query_error: str | None = None
     raw_table_names: list[str] | None = None
@@ -1886,6 +2219,11 @@ def _pg_collect_database_artifacts(
     if show_tables or (show_row_counts and not table_targets) or (dump_table_rows and not table_targets):
         raw_table_names, table_error = _pg_query_readable_tables(sock)
         query_error = _merge_query_error(query_error, table_error)
+        if discovery_collector is not None:
+            if isinstance(raw_table_names, list):
+                discovery_collector.mark_accessible_source()
+            elif table_error:
+                discovery_collector.partial(f"database.{database_name}", table_error)
         if show_tables and isinstance(raw_table_names, list):
             if include_database_prefix:
                 table_names = [_pg_display_table_name(database_name, table_name) for table_name in raw_table_names]
@@ -1945,8 +2283,10 @@ def _pg_collect_database_artifacts(
     if dump_table_rows:
         selected_dump_columns = [str(column) for column in table_columns] if table_columns else None
         for table_name in dump_targets:
+            if discovery_collector is not None and not discovery_collector.allowed():
+                break
             dump_columns = selected_dump_columns
-            if not dump_columns:
+            if not dump_columns and discovery_collector is None:
                 cached_columns = table_columns_map.get(table_name)
                 if cached_columns:
                     dump_columns = list(cached_columns)
@@ -1958,11 +2298,19 @@ def _pg_collect_database_artifacts(
                         dump_columns = [str(column) for column in columns_rows]
                         table_columns_map[table_name] = list(dump_columns)
                         table_columns_map[str(columns_table)] = list(dump_columns)
+            discovery_kwargs: dict[str, Any] = {}
+            if discovery_collector is not None:
+                discovery_kwargs = {
+                    "discovery_collector": discovery_collector,
+                    "database_name": database_name,
+                    "retain_rows": retain_dump_rows,
+                }
             dump_table, dump_rows, dump_error = _pg_query_table_rows(
                 sock,
                 table_name,
                 columns=table_columns if table_columns else None,
                 max_rows=dump_row_limit,
+                **discovery_kwargs,
             )
             table_dumps.append(
                 {
@@ -1977,6 +2325,9 @@ def _pg_collect_database_artifacts(
                     "error": dump_error,
                 }
             )
+            if discovery_collector is not None and dump_error in {"byte_budget", "time_budget"}:
+                discovery_collector.partial("budget", dump_error)
+                break
 
     return table_names, table_columns_info, table_row_counts, table_dumps, readable_tables, query_error
 
@@ -1999,6 +2350,8 @@ def _pg_collect_database_artifacts_remote(
     dump_table_rows: bool,
     dump_row_limit: int | None,
     tls_config: _PgTlsConfig | None = None,
+    discovery_collector: DiscoveryCollector | None = None,
+    retain_dump_rows: bool = True,
 ) -> tuple[list[str] | None, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int | None, str | None]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -2019,6 +2372,8 @@ def _pg_collect_database_artifacts_remote(
                     table_columns=table_columns,
                     dump_table_rows=dump_table_rows,
                     dump_row_limit=dump_row_limit,
+                    discovery_collector=discovery_collector,
+                    retain_dump_rows=retain_dump_rows,
                 )
                 try:
                     _pg_send_terminate(sock)
@@ -2071,6 +2426,8 @@ def _audit_postgres_host(
     ssl_cert: str | None = None,
     ssl_key: str | None = None,
     ssl_server_name: str | None = None,
+    discover_ctx: Any | None = None,
+    discover_implicit_dump: bool = False,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -2107,6 +2464,21 @@ def _audit_postgres_host(
                     username=effective_username,
                     password=effective_password,
                     database=startup_database,
+                )
+                discovery_collector = (
+                    DiscoveryCollector(
+                        "postgres",
+                        discover_ctx,
+                        {
+                            "status": "open_no_auth"
+                            if session.auth_required is False
+                            else "valid_credentials"
+                            if provided_credentials
+                            else "weak_default_creds",
+                        },
+                    )
+                    if discover_ctx is not None
+                    else None
                 )
 
                 superuser, can_execute_commands, can_read_tables, readable_tables, query_error = (
@@ -2187,6 +2559,8 @@ def _audit_postgres_host(
                             table_columns=table_columns,
                             dump_table_rows=dump_table_rows,
                             dump_row_limit=dump_row_limit,
+                            discovery_collector=discovery_collector,
+                            retain_dump_rows=not discover_implicit_dump,
                         )
                         used_current_session = True
                     else:
@@ -2214,6 +2588,8 @@ def _audit_postgres_host(
                             dump_table_rows=dump_table_rows,
                             dump_row_limit=dump_row_limit,
                             tls_config=tls_config,
+                            discovery_collector=discovery_collector,
+                            retain_dump_rows=not discover_implicit_dump,
                         )
 
                     query_error = _merge_query_error(query_error, database_query_error)
@@ -2230,6 +2606,14 @@ def _audit_postgres_host(
                     if isinstance(database_readable_tables, int):
                         aggregated_readable_tables += database_readable_tables
                         aggregated_readable_known = True
+                    if discovery_collector is not None:
+                        if database_query_error and database_query_error not in {"byte_budget", "time_budget"}:
+                            discovery_collector.partial(f"database.{inspection_database}", database_query_error)
+                        if any(
+                            reason in {"byte_budget", "time_budget", "discover_max_bytes", "discover_time"}
+                            for reason in discovery_collector.partial_reasons
+                        ):
+                            break
 
                 if aggregated_readable_known:
                     readable_tables = aggregated_readable_tables
@@ -2335,6 +2719,7 @@ def _audit_postgres_host(
                     "dump_row_limit": dump_row_limit,
                     "table_columns_info": table_columns_info,
                     "table_dumps": table_dumps,
+                    **({"content_discovery": discovery_collector.result()} if discovery_collector is not None else {}),
                     "execute_command": execute_command,
                     "execute_attempted": execute_attempted,
                     "execute_ok": execute_ok,
@@ -2378,6 +2763,12 @@ def _audit_postgres_host(
                     "privesc_summary": privesc_summary,
                     "acl_inventory": acl_inventory,
                     "server_version": session.server_version,
+                    **_pg_startup_record_fields(session, username=effective_username, database=startup_database),
+                    "credential_verification": (
+                        "unverified"
+                        if session.auth_required is False
+                        else _pg_credential_verification(session.credential_verified)
+                    ),
                     "sslmode": tls_config.sslmode,
                     "tls_used": isinstance(sock, ssl.SSLSocket),
                     "superuser": superuser,
@@ -2406,7 +2797,9 @@ def _audit_postgres_host(
                 "auth_database": startup_database,
                 "is_postgres": bool(exc.detected),
                 "status": status,
-                "auth_required": True if status == "auth_required" else None,
+                "auth_required": exc.auth_required,
+                **_pg_startup_record_fields(exc, username=effective_username, database=startup_database),
+                "credential_verification": _pg_credential_verification(exc.credential_verified, exc.error_kind),
                 "auth_method": exc.auth_method,
                 "sqlstate": exc.sqlstate,
                 "failure_phase": exc.failure_phase or ("startup" if exc.detected else "connect"),
@@ -2444,7 +2837,7 @@ def _audit_postgres_host(
                 "privesc_check": privesc_check,
                 "privesc_checks": [],
                 "privesc_summary": {},
-                "server_version": None,
+                "server_version": exc.server_version,
                 "superuser": None,
                 "can_execute_commands": None,
                 "can_read_tables": None,
@@ -2512,6 +2905,13 @@ def _audit_postgres_host(
         "readable_tables": None,
         "elapsed_ms": None,
         "error": last_error or "connection failed",
+        "failure_phase": "connect",
+        "error_kind": "transport_error",
+        "password_sent": False,
+        "credential_verified": None,
+        "credential_verification": "error",
+        "startup_username": effective_username,
+        "startup_database": str(database or "").strip() or "postgres",
     }
 
 
@@ -2564,7 +2964,7 @@ def _caps_suffix(record: dict[str, Any]) -> str:
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth_required = record.get("auth_required")
     auth_required_text = "True" if auth_required is True else "False" if auth_required is False else "unknown"
-    version = str(record.get("server_version") or "").strip() or "unknown"
+    version = _pg_startup_text(str(record.get("server_version") or "").strip()) or "unknown"
 
     if output_format == "json":
         return json.dumps(
@@ -2578,11 +2978,18 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "auth_required": auth_required,
                 "auth_method": record.get("auth_method"),
                 "version": record.get("server_version"),
+                "service_identity": record.get("service_identity"),
+                "protocol_evidence": record.get("protocol_evidence"),
+                "startup_username": record.get("startup_username"),
+                "startup_database": record.get("startup_database"),
             },
             ensure_ascii=False,
         )
 
-    return f"{_nxc_prefix(record)} [*] Postgres Database (auth required:{auth_required_text}) (version:{version})"
+    return (
+        f"{_nxc_prefix(record)} [*] PostgreSQL-compatible endpoint "
+        f"(auth required:{auth_required_text}) (version:{version})"
+    )
 
 
 def _format_tables_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -3099,7 +3506,38 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     status = str(record.get("status") or "fail")
     prefix = _nxc_prefix(record)
-    err = _clip(str(record.get("error") or "-"), 72)
+    err = _clip(_pg_startup_text(record.get("error") or "-"), 72)
+    attempts = record.get("attempted_credentials")
+    verification = str(record.get("credential_verification") or "")
+    if record.get("credential_verified") is True and record.get("startup_complete") is False:
+        if isinstance(attempts, list) and len(attempts) > 1:
+            return ""
+        attempt = attempts[0] if isinstance(attempts, list) and attempts else None
+        if not isinstance(attempt, dict):
+            attempt = {
+                **record,
+                "username": record.get("effective_username"),
+                "password": record.get("provided_password"),
+            }
+        username = _pg_startup_text(attempt.get("username") or "postgres")
+        password = attempt.get("password")
+        password_text = (
+            "<no-password>" if password is None else "<empty>" if password == "" else _pg_startup_text(password)
+        )
+        return f"{prefix} [+] {username}:{password_text}{_pg_failed_startup_suffix(attempt)}"
+    if verification in {"unavailable", "error", "unverified"} and (
+        record.get("provided_credentials") or record.get("defcreds_enabled")
+    ):
+        if isinstance(attempts, list) and len(attempts) > 1:
+            return ""
+        attempt = attempts[0] if isinstance(attempts, list) and attempts else None
+        if not isinstance(attempt, dict):
+            attempt = {
+                **record,
+                "username": record.get("effective_username"),
+                "password": record.get("provided_password"),
+            }
+        return _pg_unverified_credential_line(record, attempt)
 
     if status == "open_no_auth":
         return ""
@@ -3113,7 +3551,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             (password for user, password in _POSTGRES_DEFAULT_CREDENTIALS if user == username),
             "postgres",
         )
-        return f"{prefix} [+] {username}:{default_password} {_caps_suffix(record)}"
+        suffix = f" {_caps_suffix(record)}"
+        return f"{prefix} [+] {username}:{default_password}{suffix}"
 
     if status == "valid_credentials":
         attempts = record.get("attempted_credentials")
@@ -3128,7 +3567,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             if provided_password is not None
             else "<none>"
         )
-        return f"{prefix} [+] {username}:{password_text} {_caps_suffix(record)}"
+        suffix = f" {_caps_suffix(record)}"
+        return f"{prefix} [+] {username}:{password_text}{suffix}"
 
     if status == "auth_required":
         attempts = record.get("attempted_credentials")
@@ -3174,6 +3614,37 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     return f"{fail_line} err={err}" if err != "-" else fail_line
 
 
+def _pg_startup_text(value: Any) -> str:
+    return re.sub(r"[\x00-\x1f\x7f]", lambda match: f"\\u{ord(match.group()):04x}", str(value))
+
+
+def _pg_unverified_credential_line(record: dict[str, Any], attempt: dict[str, Any]) -> str:
+    username = _pg_startup_text(attempt.get("username") or "postgres")
+    password = attempt.get("password")
+    password_text = "<no-password>" if password is None else "<empty>" if password == "" else _pg_startup_text(password)
+    verification = str(attempt.get("credential_verification") or "unavailable")
+    label = "credential error" if verification == "error" else "unverified"
+    reason = _pg_startup_text(attempt.get("error_kind") or verification)
+    details = f" (reason:{reason})"
+    for key, label_text in (
+        ("sqlstate", "sqlstate"),
+        ("startup_username", "startup user"),
+        ("startup_database", "database"),
+    ):
+        if attempt.get(key) is not None:
+            details += f" ({label_text}:{_pg_startup_text(attempt[key])})"
+    error = _pg_startup_text(attempt.get("error") or "")
+    if error:
+        details += f" err={error}"
+    return f"{_nxc_prefix(record)} [*] {label} {username}:{password_text}{details}"
+
+
+def _pg_failed_startup_suffix(attempt: dict[str, Any]) -> str:
+    reason = _pg_startup_text(attempt.get("error_kind") or "startup_rejected")
+    error = _pg_startup_text(attempt.get("error") or "")
+    return f" (startup:failed) (reason:{reason})" + (f" err={error}" if error else "")
+
+
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
     """Render every credential checked by an exhaustive runtime sweep."""
     attempts = record.get("attempted_credentials")
@@ -3201,23 +3672,37 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             password_text = str(password)
         status = str(attempt.get("status") or "")
         verification = str(attempt.get("credential_verification") or "")
-        ok = status in {"open_no_auth", "valid_credentials", "weak_default_creds"}
+        ok = attempt.get("credential_verified") is True or (
+            verification not in {"unavailable", "error", "unverified"}
+            and status in {"valid_credentials", "weak_default_creds"}
+        )
         if ok:
             suffix = ""
             if not selected_success_rendered:
                 suffix = f" {_caps_suffix(record)}"
                 selected_success_rendered = True
+            if attempt.get("startup_complete") is False:
+                suffix += _pg_failed_startup_suffix(attempt)
             lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
-        elif verification in {"unavailable", "error"}:
-            continue
+        elif verification in {"unavailable", "error", "unverified"} or status in {
+            "unknown_auth",
+            "fail",
+            "open_no_auth",
+        }:
+            lines.append(_pg_unverified_credential_line(record, attempt))
         else:
             lines.append(f"{prefix} [-] {username}:{password_text}")
     return lines
 
 
 def _postgres_extra_color_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
+    if payload.startswith(("unverified ", "credential error ", "startup rejected", "authentication unavailable")):
+        return [(0, len(payload), "orange")]
     if payload.startswith(("CRITICAL - ", "HIGH - ", "MEDIUM - ")):
         return [(0, len(payload), "orange")]
+    failed_startup = payload.find(" (startup:failed)")
+    if failed_startup >= 0:
+        return [(failed_startup, len(payload), "orange")]
     return []
 
 
@@ -3283,6 +3768,8 @@ def _call_audit_postgres_host_with_stage_debug(
     run_deep_checks: bool,
     debug: bool,
     debug_emit: Callable[[str], None] | None,
+    discover_ctx: Any | None = None,
+    discover_implicit_dump: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
     record = _audit_postgres_host(
@@ -3315,6 +3802,8 @@ def _call_audit_postgres_host_with_stage_debug(
         ssl_cert=ssl_cert,
         ssl_key=ssl_key,
         ssl_server_name=ssl_server_name,
+        discover_ctx=discover_ctx if run_deep_checks else None,
+        discover_implicit_dump=discover_implicit_dump,
     )
 
     result: dict[str, Any] = dict(record)

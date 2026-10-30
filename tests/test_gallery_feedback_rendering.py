@@ -212,7 +212,7 @@ def test_nomad_only_shows_job_inventory_with_explicit_flag(show_jobs, discover):
 
     ctx = context(
         {
-            "/v1/jobs?namespace=default": (200, [{"ID": "qa-job"}]),
+            "/v1/jobs?namespace=default&per_page=100": (200, [{"ID": "qa-job"}]),
             "/v1/job/qa-job?namespace=default": (200, {"ID": "qa-job", "Env": {"password": "qa-secret"}}),
         },
         show_jobs=show_jobs,

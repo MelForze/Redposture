@@ -80,6 +80,7 @@ def test_collect_scales_detect_only_and_respects_explicit_inflight(monkeypatch, 
     import threading
     import time
 
+    from redposture_core import async_detection
     from redposture_core.constants import DISCOVERY_EXPORTERS
     from redposture_core.exporters import async_detect
     from redposture_core.exporters.collect import collect_exporter_debug_data
@@ -117,6 +118,7 @@ def test_collect_scales_detect_only_and_respects_explicit_inflight(monkeypatch, 
                 deep_active -= 1
 
     monkeypatch.setattr(async_detect, "prefetch_metrics", prefetch)
+    monkeypatch.setattr(async_detection, "async_detection_allowed", lambda _args: True)
     exporters = [e for e in DISCOVERY_EXPORTERS if e["name"] == "node_exporter"]
     stats = {}
     output = tmp_path / "collect.jsonl"

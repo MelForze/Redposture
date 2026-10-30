@@ -145,6 +145,8 @@ def test_verified_identity_survives_authenticated_version_resolution_failure(
         }[node_fault]
 
     monkeypatch.setattr(actions, "_elastic_request", request)
+    monkeypatch.setattr(actions, "_probe_credential_resource_access", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(actions, "_probe_credential_write_delete_access", lambda *_args, **_kwargs: {})
     result = actions.authenticate_elastic(context(), detected(), {})
     assert result["auth_valid"] is True and result["identity_verified"] is True
     assert result["status"] == "valid_credentials" and result["error"] is None
@@ -181,6 +183,8 @@ def test_authenticated_root_metadata_failure_stops_version_probe_without_rejecti
         return (0, b"", {}, "root timeout") if root_fault == "transport" else http({}, 503)
 
     monkeypatch.setattr(actions, "_elastic_request", request)
+    monkeypatch.setattr(actions, "_probe_credential_resource_access", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(actions, "_probe_credential_write_delete_access", lambda *_args, **_kwargs: {})
     result = actions.authenticate_elastic(context(), detected(), {})
     assert result["credential_accepted"] is True and result["error"] is None
     assert result["server_version_error"] == ("root timeout" if root_fault == "transport" else "status=503")

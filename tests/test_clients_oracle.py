@@ -72,6 +72,136 @@ def test_build_oracle_dsn_for_service_sid_and_plain_host() -> None:
     assert "PROTOCOL=tcps" in build_oracle_dsn("db.local", 2484, service="ORCL", protocol="tcps")
 
 
+def test_streaming_oracle_cursor_closes_after_early_stop() -> None:
+    class Cursor:
+        description = [("TOKEN_VALUE",)]
+
+        def __init__(self) -> None:
+            self.rows = iter([("first",), ("second",)])
+            self.closed = False
+            self.arraysize = 100
+            self.prefetchrows = 2
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+            self.params = params or {}
+
+        def fetchone(self):
+            return next(self.rows, None)
+
+        def close(self):
+            self.closed = True
+
+    cursor = Cursor()
+
+    class Connection:
+        def cursor(self):
+            return cursor
+
+    stream = OracleAuditClient(Connection()).iter_table_rows("QA", "TOKENS")
+    assert next(stream) == {"token_value": "first"}
+    stream.close()
+    assert cursor.closed is True
+    assert cursor.arraysize == 16
+    assert cursor.prefetchrows == 2
+    assert cursor.sql == "select * from QA.TOKENS"
+
+
+@pytest.mark.parametrize("payload", ["password=clob-secret", b"password=blob-secret"])
+def test_streaming_oracle_cursor_reads_lob_content_in_bounded_chunks(payload) -> None:
+    reads = []
+
+    class Lob:
+        def size(self):
+            return len(payload)
+
+        def read(self, offset=1, amount=None):
+            reads.append((offset, amount))
+            return payload[offset - 1 : offset - 1 + amount] if amount is not None else payload[offset - 1 :]
+
+        def __str__(self):
+            return self.read()
+
+    class Cursor(_Cursor):
+        def __init__(self):
+            super().__init__([(Lob(),)], ["PAYLOAD"])
+
+        def fetchone(self):
+            return self.rows.pop(0) if self.rows else None
+
+    cursor = Cursor()
+
+    class Connection:
+        def cursor(self):
+            return cursor
+
+    rows = list(OracleAuditClient(Connection()).iter_table_rows("QA", "DOCS"))
+    assert rows == [{"payload": payload.decode() if isinstance(payload, bytes) else payload}]
+    assert reads and all(amount is not None and 0 < amount <= 65536 for _offset, amount in reads)
+    assert cursor.closed
+
+
+def test_streaming_oracle_cursor_rejects_oversized_lob_before_payload_read() -> None:
+    reads = []
+
+    class Lob:
+        def size(self):
+            return 1024 * 1024
+
+        def read(self, offset=1, amount=None):
+            reads.append((offset, amount))
+            return "x" * (amount or self.size())
+
+    class Cursor(_Cursor):
+        def __init__(self):
+            super().__init__([(Lob(),)], ["PAYLOAD"])
+
+        def fetchone(self):
+            return self.rows.pop(0) if self.rows else None
+
+    cursor = Cursor()
+
+    class Connection:
+        def cursor(self):
+            return cursor
+
+    with pytest.raises(OracleClientError, match="discover_max_bytes"):
+        list(OracleAuditClient(Connection()).iter_table_rows("QA", "DOCS", remaining_bytes=lambda: 64))
+    assert reads == []
+    assert cursor.closed
+
+
+def test_streaming_oracle_clob_preserves_supplementary_character_at_chunk_boundary() -> None:
+    payload = "x" * 65535 + "😀" + "password=unicode-tail-secret"
+    encoded = payload.encode("utf-16-le")
+
+    class Lob:
+        def size(self):
+            return len(encoded) // 2
+
+        def read(self, offset=1, amount=None):
+            return encoded[(offset - 1) * 2 : (offset - 1 + amount) * 2].decode("utf-16-le")
+
+    class Cursor(_Cursor):
+        def __init__(self):
+            super().__init__([(Lob(),)], ["PAYLOAD"])
+
+        def fetchone(self):
+            return self.rows.pop(0) if self.rows else None
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    rows = list(OracleAuditClient(Connection()).iter_table_rows("QA", "DOCS", remaining_bytes=lambda: 100000))
+    from redposture_core.discovery_values import DiskBackedText
+
+    value = rows[0]["payload"]
+    assert isinstance(value, DiskBackedText)
+    assert "".join(value.iter_text_chunks()) == payload
+    value.close()
+
+
 def test_normalize_and_classify_oracle_errors() -> None:
     assert normalize_oracle_error(RuntimeError("ORA-01017: invalid username/password")) == "invalid credentials"
     assert classify_oracle_error("ORA-28000: the account is locked") == "account_locked"

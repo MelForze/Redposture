@@ -60,7 +60,7 @@ def configure_jupyter_parser(
     inventory.add_argument(
         "--path", default="", metavar="path", help="Limit content listing and discovery to this relative path."
     )
-    add_discovery_budget_flags(inventory, default_time=300.0, default_bytes=50 * 1024 * 1024)
+    add_discovery_budget_flags(inventory)
     add_flags(execution)
     execution.add_argument(
         "--execute-via",

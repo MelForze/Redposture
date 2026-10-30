@@ -813,7 +813,7 @@ def test_minio_discovery_adapter_forwards_range_and_preserves_partial_listing(
         assert second.transport_error == "Console ignored object range"
         assert (second.http_status, second.body) == (200, b"content")
         return discover.DiscoverResult(
-            findings=[{"bucket": "qa", "key": "secret.env", "type": "password", "masked_value": "se***"}],
+            findings=[{"bucket": "qa", "key": "secret.env", "type": "password", "value": "secret123"}],
             objects_scanned=1,
             bytes_read=7,
         )
@@ -825,7 +825,7 @@ def test_minio_discovery_adapter_forwards_range_and_preserves_partial_listing(
         {"ui_product": "minio_console", "ui": {"endpoint": "http://panel", "session_cookie": "sid=1"}},
     )["ui"]["inventory"]["discover"]
     assert result["count"] == 1
-    assert result["items"] == ["qa/secret.env password se***"]
+    assert result["items"] == ["qa/secret.env password secret123"]
     assert (result["bytes_read"], result["objects_scanned"], result["partial"]) == (7, 1, listing_failed)
     assert result["partial_reasons"] == (["listing_incomplete"] if listing_failed else [])
     assert requests[-2][1] == {"headers": {"Cookie": "sid=1", "Range": "bytes=0-3"}, "response_size_cap": 4}

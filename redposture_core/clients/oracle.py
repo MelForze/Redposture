@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import codecs
 import re
 import shlex
 import socket
@@ -10,9 +10,16 @@ import ssl
 import struct
 import time
 import uuid
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from ..discovery_containers import DiskContainer
+from ..discovery_mapping import DiskObjectStore
+from ..discovery_spool import SpoolingValues
+from ..discovery_text import _Value
+from ..discovery_values import DiskBackedText
+from .oracle_stream import LongFetch, LongStreamError, StreamedLongValue, connect_tracked, connection_state
 from .tls_cache import shared_client_ssl_context
 
 
@@ -22,6 +29,10 @@ class OracleDependencyError(RuntimeError):
 
 class OracleClientError(RuntimeError):
     """Base normalized Oracle client error."""
+
+
+class OracleReadBudgetError(OracleClientError):
+    """A streaming discovery query exhausted its content or time budget."""
 
 
 class OracleAuthError(OracleClientError):
@@ -584,7 +595,7 @@ def connect_oracle(
     if mode and str(mode).lower() == "sysdba":
         kwargs["mode"] = getattr(oracledb, "AUTH_MODE_SYSDBA", None)
     try:
-        return oracledb.connect(user=username, password=password, dsn=dsn, **kwargs)
+        return connect_tracked(oracledb, user=username, password=password, dsn=dsn, **kwargs)
     except Exception as exc:
         kind = classify_oracle_error(exc)
         message = normalize_oracle_error(exc)
@@ -599,16 +610,50 @@ def connect_oracle(
         raise OracleClientError(message) from exc
 
 
-def json_safe(value: Any) -> Any:
-    try:
-        json.dumps(value)
+def json_safe(value: Any, *, bounded: bool = False, deadline: float | None = None) -> Any:
+    if isinstance(value, (DiskBackedText, DiskContainer, SpoolingValues)):
         return value
-    except TypeError:
-        if isinstance(value, dict):
-            return {str(key): json_safe(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [json_safe(item) for item in value]
-        return str(value)
+    if bounded and isinstance(value, (Mapping, list, tuple)):
+
+        def check() -> None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise OracleReadBudgetError("discover_time")
+
+        store = DiskObjectStore(check=check)
+        try:
+            return store.import_value(value, scalar=_json_safe_scalar)
+        finally:
+            store.detach()
+    if isinstance(value, dict):
+        converted: dict[Any, Any] | None = None
+        for key, item in value.items():
+            safe_key = key if key is None or isinstance(key, (str, int, float, bool, DiskBackedText)) else str(key)
+            safe_item = json_safe(item)
+            if safe_key is key and safe_item is item:
+                continue
+            if converted is None:
+                converted = dict(value)
+            if safe_key is not key:
+                del converted[key]
+            converted[safe_key] = safe_item
+        return value if converted is None else converted
+    if isinstance(value, Mapping):
+        return {key if isinstance(key, DiskBackedText) else str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        converted_items: list[Any] | None = None
+        for index, item in enumerate(value):
+            safe_item = json_safe(item)
+            if safe_item is item:
+                continue
+            if converted_items is None:
+                converted_items = list(value)
+            converted_items[index] = safe_item
+        return value if converted_items is None else converted_items
+    return _json_safe_scalar(value)
+
+
+def _json_safe_scalar(value: Any) -> Any:
+    return value if value is None or isinstance(value, (str, int, float, bool)) else str(value)
 
 
 def _rows_to_dicts(cursor: Any, rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
@@ -620,6 +665,20 @@ def _rows_to_dicts(cursor: Any, rows: list[tuple[Any, ...]]) -> list[dict[str, A
         else:
             result.append({str(idx): json_safe(value) for idx, value in enumerate(row)})
     return result
+
+
+def oracle_connection_usable(connection: Any) -> bool:
+    """Avoid native timeout access after a round-trip invalidated transport."""
+    state = connection_state(connection)
+    if state is not None and state.broken:
+        return False
+    check = getattr(connection, "is_healthy", None)
+    if not callable(check):
+        return True
+    try:
+        return bool(check())
+    except Exception:
+        return False
 
 
 class OracleAuditClient:
@@ -646,6 +705,289 @@ class OracleAuditClient:
             close = getattr(cursor, "close", None)
             if callable(close):
                 close()
+
+    def _iter_query(
+        self,
+        sql: str,
+        params: dict[str, Any] | None = None,
+        *,
+        remaining_bytes: Callable[[], int] | None = None,
+        deadline: float | None = None,
+        table_source: str | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        cursor = self.connection.cursor()
+        long_fetch: LongFetch | None = None
+        state = connection_state(self.connection)
+
+        def invoke(call: Callable[..., Any], *args: Any) -> Any:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise OracleReadBudgetError("discover_time")
+            previous = (
+                getattr(self.connection, "call_timeout", None) if oracle_connection_usable(self.connection) else None
+            )
+            if deadline is not None and previous is not None:
+                timeout_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                self.connection.call_timeout = min(previous, timeout_ms) if previous > 0 else timeout_ms
+            try:
+                result = call(*args)
+            except Exception as exc:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise OracleReadBudgetError("discover_time") from exc
+                raise
+            finally:
+                if deadline is not None and previous is not None and oracle_connection_usable(self.connection):
+                    self.connection.call_timeout = previous
+            if deadline is not None and time.monotonic() >= deadline:
+                raise OracleReadBudgetError("discover_time")
+            return result
+
+        def read_lob(value: Any, available: int | None) -> str | DiskBackedText:
+            size = int(invoke(value.size))
+            if available is not None and size > available:
+                raise OracleReadBudgetError("discover_max_bytes")
+            scalar = _Value(65536)
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            offset = 1
+            content_bytes = 0
+            try:
+                while offset <= size:
+                    amount = min(65536, size - offset + 1)
+                    try:
+                        piece = invoke(value.read, offset, amount)
+                    except UnicodeDecodeError as exc:
+                        # LOB offsets count UCS-2 units. Complete a split
+                        # surrogate instead of losing a supplementary character.
+                        if not exc.encoding.lower().startswith("utf-16") or offset + amount > size:
+                            raise
+                        piece = invoke(value.read, offset, amount + 1)
+                    if not isinstance(piece, (str, bytes)) or not piece:
+                        raise OracleClientError("incomplete LOB read")
+                    content_bytes += len(piece) if isinstance(piece, bytes) else len(piece.encode("utf-8"))
+                    if available is not None and content_bytes > available:
+                        raise OracleReadBudgetError("discover_max_bytes")
+                    scalar.append(decoder.decode(piece) if isinstance(piece, bytes) else piece)
+                    offset += len(piece) if isinstance(piece, bytes) else len(piece.encode("utf-16-le")) // 2
+                scalar.append(decoder.decode(b"", final=True))
+                return scalar.finish()
+            finally:
+                scalar.close()
+
+        try:
+            # Bound the driver's read-ahead while --discover scans large tables.
+            streaming = remaining_bytes is not None or deadline is not None
+            cursor.arraysize = 1 if streaming else 16
+            cursor.prefetchrows = 0 if streaming else 2
+            json_type = None
+            long_types: tuple[Any, ...] = ()
+            long_raw_type = None
+            scalar_types: tuple[Any, ...] = ()
+            if callable(getattr(cursor, "var", None)):
+                driver = _load_oracledb()
+                json_type = getattr(driver, "DB_TYPE_JSON", None)
+                long_raw_type = getattr(driver, "DB_TYPE_LONG_RAW", None)
+                long_types = tuple(
+                    code
+                    for name in ("DB_TYPE_LONG", "DB_TYPE_LONG_RAW")
+                    if (code := getattr(driver, name, None)) is not None
+                )
+                scalar_types = tuple(
+                    code
+                    for name in (
+                        "DB_TYPE_NUMBER",
+                        "DB_TYPE_VARCHAR",
+                        "DB_TYPE_NVARCHAR",
+                        "DB_TYPE_CHAR",
+                        "DB_TYPE_NCHAR",
+                        "DB_TYPE_RAW",
+                        "DB_TYPE_DATE",
+                        "DB_TYPE_TIMESTAMP",
+                        "DB_TYPE_TIMESTAMP_TZ",
+                        "DB_TYPE_TIMESTAMP_LTZ",
+                        "DB_TYPE_BINARY_FLOAT",
+                        "DB_TYPE_BINARY_DOUBLE",
+                        "DB_TYPE_BINARY_INTEGER",
+                        "DB_TYPE_BOOLEAN",
+                        "DB_TYPE_INTERVAL_DS",
+                        "DB_TYPE_INTERVAL_YM",
+                    )
+                    if (code := getattr(driver, name, None)) is not None
+                )
+                lob_types = tuple(
+                    code
+                    for name in ("DB_TYPE_CLOB", "DB_TYPE_BLOB", "DB_TYPE_NCLOB")
+                    if (code := getattr(driver, name, None)) is not None
+                )
+
+                def lob_locator(fetch_cursor: Any, metadata: Any) -> Any:
+                    if streaming and metadata.type_code in long_types:
+
+                        def convert(marker: Any) -> StreamedLongValue | None:
+                            if long_fetch is None:
+                                raise OracleClientError("untracked Oracle LONG stream")
+                            return long_fetch.convert(marker)
+
+                        return fetch_cursor.var(
+                            metadata.type_code, arraysize=fetch_cursor.arraysize, outconverter=convert
+                        )
+                    if metadata.type_code in lob_types:
+                        return fetch_cursor.var(metadata.type_code, arraysize=fetch_cursor.arraysize)
+                    return None
+
+                # Override eager/global LOB handlers only for this reader.
+                cursor.outputtypehandler = lob_locator
+            invoke(cursor.execute, sql, params or {})
+            original_columns = list(cursor.description or ())
+            order = list(range(len(original_columns)))
+            kinds = [item[1] if len(item) > 1 else None for item in original_columns]
+            native_json = {
+                index for index, kind in enumerate(kinds) if streaming and json_type is not None and kind == json_type
+            }
+            if native_json and table_source is None:
+                aliases = [item[0] for item in original_columns]
+                if any(not isinstance(name, str) or not name for name in aliases) or len(
+                    {name.lower() for name in aliases}
+                ) != len(aliases):
+                    raise OracleClientError("ambiguous Oracle native JSON query aliases")
+            long_columns = [index for index, kind in enumerate(kinds) if kind in long_types]
+            if streaming and long_columns:
+                if len(long_columns) != 1:
+                    raise OracleClientError("unsupported multiple LONG query layout")
+                if state is None or state.transport is None:
+                    raise OracleClientError("untracked Oracle LONG transport; bounded stream unavailable")
+                if table_source is not None or native_json:
+                    order = long_columns + [index for index in order if index not in long_columns]
+                elif any(kind not in scalar_types for kind in kinds[: long_columns[0]]):
+                    raise OracleClientError("unsupported complex column layout before Oracle LONG")
+            json_columns: set[int] = set()
+            if streaming and table_source is not None:
+                json_columns = {index for index, original in enumerate(order) if original in native_json}
+                if native_json or order != list(range(len(original_columns))):
+                    projection = []
+                    for index in order:
+                        item = original_columns[index]
+                        quoted = '"' + str(item[0]).replace('"', '""') + '"'
+                        projection.append(
+                            f"json_serialize({quoted} returning CLOB) as {quoted}" if index in native_json else quoted
+                        )
+                    invoke(cursor.execute, f"select {', '.join(projection)} from {table_source}", {})
+            elif native_json:
+                json_columns = {index for index, original in enumerate(order) if original in native_json}
+                projection = []
+                for index in order:
+                    quoted = '"' + str(original_columns[index][0]).replace('"', '""') + '"'
+                    expression = f"rp_ordered.{quoted}"
+                    projection.append(
+                        f"json_serialize({expression} returning CLOB) as {quoted}"
+                        if index in native_json
+                        else f"{expression} as {quoted}"
+                    )
+                # ROWNUM prevents merging the original ordered/limited result
+                # into the projection. The outer order restores that exact
+                # sequence while returning only the original named columns.
+                ordinal = "RP_ORDER_" + uuid.uuid4().hex[:12]
+                used = {str(item[0]).lower() for item in original_columns}
+                while ordinal.lower() in used:
+                    ordinal = "RP_ORDER_" + uuid.uuid4().hex[:12]
+                projected_sql = (
+                    f'select {", ".join(projection)} from (select rp_source.*, rownum as "{ordinal}" '
+                    f'from (\n{sql}\n) rp_source) rp_ordered order by rp_ordered."{ordinal}"'
+                )
+                invoke(cursor.execute, projected_sql, params or {})
+            if streaming and long_columns:
+                long_fetch = LongFetch(
+                    deadline=deadline,
+                    scalar_prefix=order.index(long_columns[0]),
+                    column_count=len(original_columns),
+                    sdu=int(getattr(self.connection, "sdu", 8192)),
+                )
+            while True:
+                if long_fetch is not None:
+                    assert state is not None
+                    with state.reading(long_fetch):
+                        row = invoke(cursor.fetchone)
+                else:
+                    row = invoke(cursor.fetchone)
+                if row is None:
+                    break
+                available = remaining_bytes() if remaining_bytes is not None else None
+                converted = []
+                for index, value in enumerate(row):
+                    if isinstance(value, StreamedLongValue):
+                        if available is not None and value.byte_length > available:
+                            raise OracleReadBudgetError("discover_max_bytes")
+                        value = value.text(binary=kinds[order[index]] == long_raw_type, deadline=deadline)
+                    elif callable(getattr(value, "read", None)) and callable(getattr(value, "size", None)):
+                        value = read_lob(value, available)
+                    else:
+                        value = json_safe(value, bounded=streaming, deadline=deadline)
+                    if index in json_columns and isinstance(value, (str, DiskBackedText)):
+                        from ..discovery_json import DiskJSONDocument
+
+                        document = DiskJSONDocument(deadline=deadline)
+                        try:
+                            parts = value.iter_text_chunks() if isinstance(value, DiskBackedText) else (value,)
+                            for part in parts:
+                                if deadline is not None and time.monotonic() >= deadline:
+                                    raise OracleReadBudgetError("discover_time")
+                                document.feed(part.encode("utf-8"))
+                            value = document.finish()
+                        finally:
+                            document.close()
+                    if available is not None:
+                        available -= (
+                            value.byte_length
+                            if isinstance(value, (DiskBackedText, DiskContainer))
+                            else len(str(value).encode("utf-8"))
+                        )
+                        if available < 0:
+                            raise OracleReadBudgetError("discover_max_bytes")
+                    converted.append(value)
+                if order != list(range(len(original_columns))):
+                    restored = dict(zip(order, converted, strict=False))
+                    yield {
+                        str(item[0]).lower(): json_safe(restored[index])
+                        for index, item in enumerate(original_columns)
+                        if index in restored
+                    }
+                else:
+                    yield _rows_to_dicts(cursor, [tuple(converted)])[0]
+        except TimeoutError as exc:
+            if str(exc) == "discover_time":
+                raise OracleReadBudgetError("discover_time") from exc
+            raise
+        except LongStreamError as exc:
+            raise OracleClientError(str(exc)) from exc
+        finally:
+            if long_fetch is not None:
+                long_fetch.close()
+            close = getattr(cursor, "close", None)
+            if callable(close):
+                previous = (
+                    getattr(self.connection, "call_timeout", None)
+                    if oracle_connection_usable(self.connection)
+                    else None
+                )
+                if deadline is not None and previous is not None:
+                    remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                    self.connection.call_timeout = min(previous, remaining_ms) if previous > 0 else remaining_ms
+                try:
+                    close()
+                finally:
+                    if deadline is not None and previous is not None and oracle_connection_usable(self.connection):
+                        self.connection.call_timeout = previous
+
+    def iter_query_rows(
+        self,
+        sql: str,
+        params: dict[str, Any] | None = None,
+        *,
+        remaining_bytes: Callable[[], int] | None = None,
+        deadline: float | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Read discovery SQL through EOF without changing its SQL or row order."""
+        yield from self._iter_query(
+            sql, params, remaining_bytes=remaining_bytes or (lambda: 2**63 - 1), deadline=deadline
+        )
 
     def execute(self, sql: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         cursor = self.connection.cursor()
@@ -767,6 +1109,18 @@ class OracleAuditClient:
             )
         return self.query("select owner, table_name, num_rows from all_tables order by owner, table_name", limit=1000)
 
+    def iter_tables(self, schema: str | None = None, *, deadline: float | None = None) -> Iterator[dict[str, Any]]:
+        if schema:
+            yield from self._iter_query(
+                "select owner, table_name, num_rows from all_tables where owner = upper(:owner) order by owner, table_name",
+                {"owner": schema},
+                deadline=deadline,
+            )
+        else:
+            yield from self._iter_query(
+                "select owner, table_name, num_rows from all_tables order by owner, table_name", deadline=deadline
+            )
+
     def list_directories(self) -> list[dict[str, Any]]:
         for sql in (
             "select directory_name, directory_path from all_directories order by directory_name",
@@ -821,6 +1175,25 @@ class OracleAuditClient:
         if not owner or not table_name:
             raise OracleClientError("invalid schema/table name")
         return self.query(f"select * from {owner}.{table_name} fetch first {int(limit)} rows only", limit=limit)
+
+    def iter_table_rows(
+        self,
+        schema: str,
+        table: str,
+        *,
+        remaining_bytes: Callable[[], int] | None = None,
+        deadline: float | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        owner = _oracle_sql_identifier(schema)
+        table_name = _oracle_sql_identifier(table)
+        if not owner or not table_name:
+            raise OracleClientError("invalid schema/table name")
+        yield from self._iter_query(
+            f"select * from {owner}.{table_name}",
+            remaining_bytes=remaining_bytes,
+            deadline=deadline,
+            table_source=f"{owner}.{table_name}",
+        )
 
     def check_privesc(self) -> list[dict[str, Any]]:
         checks = [
@@ -1355,6 +1728,7 @@ __all__ = [
     "OracleConnectConfig",
     "OracleDependencyError",
     "OracleNotOracleError",
+    "OracleReadBudgetError",
     "OracleServiceError",
     "OracleTnsError",
     "build_oracle_dsn",

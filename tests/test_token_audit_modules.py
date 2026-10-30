@@ -30,11 +30,13 @@ class Pool:
     def __init__(self, replies: dict[str, Any]) -> None:
         self.replies = replies
         self.calls: list[tuple[str, str, dict[str, str]]] = []
+        self.request_options: list[tuple[str, dict[str, Any]]] = []
 
     def request(self, method: str, url: str, **kwargs: Any) -> HttpResponse:
         parsed = urlsplit(url)
         path = parsed.path + ("?" + parsed.query if parsed.query else "")
         self.calls.append((method, path, dict(kwargs.get("headers") or {})))
+        self.request_options.append((path, kwargs))
         reply = self.replies.get(path, (404, {}))
         if isinstance(reply, HttpResponse):
             return reply
@@ -214,7 +216,7 @@ def test_nomad_acl_off_is_not_claimed_from_readable_jobs_alone() -> None:
 def test_nomad_discovery_reads_job_details_in_namespace() -> None:
     ctx = context(
         {
-            "/v1/jobs?namespace=payments": (200, [{"ID": "billing", "Namespace": "payments"}]),
+            "/v1/jobs?namespace=payments&per_page=100": (200, [{"ID": "billing", "Namespace": "payments"}]),
             "/v1/job/billing?namespace=payments": (
                 200,
                 {"ID": "billing", "TaskGroups": [{"Tasks": [{"Env": {"PASSWORD": "database-secret"}}]}]},
@@ -227,6 +229,172 @@ def test_nomad_discovery_reads_job_details_in_namespace() -> None:
     assert len(record["job_specs"]) == 1
     assert inspect_record("nomad", record)["findings"]
     assert all(method == "GET" for method, _, _ in ctx.lifecycle_state.http.calls)
+
+
+def test_nomad_discover_reads_jobs_after_inventory_snapshot_limit() -> None:
+    first_page = [{"ID": f"job-{index}", "Namespace": "default"} for index in range(5000)]
+    replies: dict[str, Any] = {
+        "/v1/jobs?namespace=default&per_page=100": HttpResponse(
+            200,
+            json.dumps(first_page).encode(),
+            {"X-Nomad-NextToken": "after-first"},
+        ),
+        "/v1/jobs?namespace=default&per_page=100&next_token=after-first": (
+            200,
+            [{"ID": "last-job", "Namespace": "default"}],
+        ),
+    }
+    for row in first_page:
+        replies[f"/v1/job/{row['ID']}?namespace=default"] = (200, {"ID": row["ID"]})
+    replies["/v1/job/last-job?namespace=default"] = (
+        200,
+        {"ID": "last-job", "TaskGroups": [{"Tasks": [{"Env": {"TOKEN": "glpat-abcdefghijklmnopqrst"}}]}]},
+    )
+    ctx = context(replies, discover=True, namespace="default", discover_time=60)
+    result = actions("nomad").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["job_discovery_partial"] is False
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+    assert result["content_discovery"]["status"] == "complete"
+    assert len(result["jobs"]) <= 5000
+    assert len(result["job_specs"]) <= 5000
+
+
+def test_nomad_discover_repeated_next_token_is_partial() -> None:
+    page = HttpResponse(
+        200,
+        json.dumps([{"ID": "one", "Namespace": "default"}]).encode(),
+        {"X-Nomad-NextToken": "again"},
+    )
+    ctx = context(
+        {
+            "/v1/jobs?namespace=default&per_page=100": page,
+            "/v1/jobs?namespace=default&per_page=100&next_token=again": page,
+            "/v1/job/one?namespace=default": (200, {"ID": "one"}),
+        },
+        discover=True,
+    )
+    result = actions("nomad").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["job_discovery_partial"] is True
+    assert result["content_discovery"]["status"] == "partial"
+    assert result["jobs_error"] == "pagination repeated a token"
+    assert len(result["job_specs"]) == 1
+
+
+def test_nomad_discover_retries_large_job_page_with_smaller_page_size() -> None:
+    ctx = context(
+        {
+            "/v1/jobs?namespace=default&per_page=100": HttpResponse(200, b"[", {}, truncated=True),
+            "/v1/jobs?namespace=default&per_page=50": (200, [{"ID": "found", "Namespace": "default"}]),
+            "/v1/job/found?namespace=default": (
+                200,
+                {"ID": "found", "TaskGroups": [{"Tasks": [{"Env": {"TOKEN": "glpat-abcdefghijklmnopqrst"}}]}]},
+            ),
+        },
+        discover=True,
+        discover_time=60,
+    )
+    result = actions("nomad").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["content_discovery"]["status"] == "complete"
+    assert result["job_discovery_partial"] is False
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+
+
+def test_nomad_discover_page_retry_preserves_next_token() -> None:
+    ctx = context(
+        {
+            "/v1/jobs?namespace=default&per_page=100": HttpResponse(
+                200,
+                b'[{"ID":"first","Namespace":"default"}]',
+                {"X-Nomad-NextToken": "after-first"},
+            ),
+            "/v1/jobs?namespace=default&per_page=100&next_token=after-first": HttpResponse(
+                200, b"[", {}, truncated=True
+            ),
+            "/v1/jobs?namespace=default&per_page=50&next_token=after-first": (
+                200,
+                [{"ID": "last", "Namespace": "default"}],
+            ),
+            "/v1/job/first?namespace=default": (200, {"ID": "first"}),
+            "/v1/job/last?namespace=default": (
+                200,
+                {"ID": "last", "TaskGroups": [{"Tasks": [{"Env": {"TOKEN": "glpat-abcdefghijklmnopqrst"}}]}]},
+            ),
+        },
+        discover=True,
+        discover_time=60,
+    )
+    result = actions("nomad").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+
+
+def test_nomad_discover_single_oversized_job_summary_remains_partial() -> None:
+    replies = {
+        f"/v1/jobs?namespace=default&per_page={size}": HttpResponse(200, b"[", {}, truncated=True)
+        for size in (100, 50, 25, 12, 6, 3, 1)
+    }
+    ctx = context(replies, discover=True, discover_time=60)
+    result = actions("nomad").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["job_discovery_partial"] is True
+    assert result["content_discovery"]["status"] == "partial"
+
+
+def test_nomad_discover_streams_one_job_spec_beyond_response_cap() -> None:
+    payload = json.dumps(
+        {
+            "ID": "big-job",
+            "Description": " " * 8000,
+            "TaskGroups": [{"Tasks": [{"Env": {"TOKEN": "glpat-abcdefghijklmnopqrst"}}]}],
+        }
+    ).encode()
+    ctx = context(
+        {
+            "/v1/jobs?namespace=default&per_page=100": (200, [{"ID": "big-job", "Namespace": "default"}]),
+            "/v1/job/big-job?namespace=default": HttpResponse(200, b"{}", {}, truncated=True),
+        },
+        discover=True,
+        discover_max_bytes=4096,
+        discover_time=60,
+    )
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        for offset in range(0, len(payload), 257):
+            on_chunk(payload[offset : offset + 257])
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    result = actions("nomad").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["job_specs"] == []
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+
+
+@pytest.mark.parametrize("identity", ["different-job", "x" * 8192 + "big-job"], ids=["mismatch", "oversized-suffix"])
+def test_nomad_streamed_job_with_wrong_identity_is_partial(identity: str) -> None:
+    payload = json.dumps(
+        {"ID": identity, "TaskGroups": [{"Tasks": [{"Env": {"TOKEN": "glpat-abcdefghijklmnopqrst"}}]}]}
+    ).encode()
+    ctx = context(
+        {
+            "/v1/jobs?namespace=default&per_page=100": (200, [{"ID": "big-job", "Namespace": "default"}]),
+            "/v1/job/big-job?namespace=default": HttpResponse(200, b"{}", {}, truncated=True),
+        },
+        discover=True,
+        discover_max_bytes=4096,
+        discover_time=60,
+    )
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        for offset in range(0, len(payload), 257):
+            on_chunk(payload[offset : offset + 257])
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    result = actions("nomad").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["content_discovery"]["status"] == "partial"
+    assert result["job_discovery_partial"] is True
 
 
 def test_jupyter_discovery_recurses_notebooks_without_starting_kernels() -> None:
@@ -255,9 +423,163 @@ def test_jupyter_discovery_recurses_notebooks_without_starting_kernels() -> None
         discover=True,
     )
     record = actions("jupyter").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
-    assert len(record["notebook_contents"]) == 1 and record["content_discovery_partial"]
-    assert inspect_record("jupyter", record)["findings"]
+    assert "notebook_contents" not in record and record["content_discovery_partial"]
+    assert record["content_discovery"]["findings"]
     assert all(method == "GET" for method, _, _ in ctx.lifecycle_state.http.calls)
+
+
+def test_jupyter_discover_streams_notebook_after_response_cap() -> None:
+    notebook = {
+        "name": "report.ipynb",
+        "path": "report.ipynb",
+        "type": "notebook",
+        "content": {"cells": [{"source": ["API_TOKEN=glpat-abcdefghijklmnopqrst"]}]},
+    }
+    root = {
+        "name": "",
+        "path": "",
+        "type": "directory",
+        "content": [{"name": "report.ipynb", "path": "report.ipynb", "type": "notebook"}],
+    }
+
+    class StreamPool(Pool):
+        def request_stream(self, _method, _url, *, on_chunk, on_response, **_kwargs):
+            on_response(200, {"Content-Type": "application/json"})
+            payload = json.dumps(notebook).encode()
+            for position in range(0, len(payload), 23):
+                on_chunk(payload[position : position + 23])
+            return HttpResponse(200, b"", {})
+
+    pool = StreamPool(
+        {
+            "/api/contents?content=1": (200, root),
+            "/api/contents/report.ipynb?content=1": HttpResponse(
+                200, b'{"name":"report.ipynb"', {"Content-Type": "application/json"}, truncated=True
+            ),
+            "/api/contents/report.ipynb?content=0": (
+                200,
+                {"name": "report.ipynb", "path": "report.ipynb", "type": "notebook"},
+            ),
+        }
+    )
+    ctx = context({}, discover=True, discover_time=30, path="")
+    ctx.lifecycle_state.http = pool
+    result = actions("jupyter").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+    assert "notebook_contents" not in result
+
+
+def test_jupyter_direct_notebook_selector_streams_large_response() -> None:
+    notebook = {
+        "name": "report.ipynb",
+        "path": "report.ipynb",
+        "type": "notebook",
+        "content": {"cells": [{"source": ["API_TOKEN=glpat-abcdefghijklmnopqrst"]}]},
+    }
+
+    class StreamPool(Pool):
+        def request_stream(self, _method, _url, *, on_chunk, on_response, **_kwargs):
+            on_response(200, {"Content-Type": "application/json"})
+            payload = json.dumps(notebook).encode()
+            for position in range(0, len(payload), 23):
+                on_chunk(payload[position : position + 23])
+            return HttpResponse(200, b"", {})
+
+    pool = StreamPool(
+        {
+            "/api/contents/report.ipynb?content=1": HttpResponse(
+                200, b'{"name":"report.ipynb"', {"Content-Type": "application/json"}, truncated=True
+            ),
+            "/api/contents/report.ipynb?content=0": (
+                200,
+                {"name": "report.ipynb", "path": "report.ipynb", "type": "notebook"},
+            ),
+        }
+    )
+    ctx = context({}, discover=True, discover_time=30, path="report.ipynb")
+    ctx.lifecycle_state.http = pool
+    result = actions("jupyter").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+
+
+def test_jupyter_discover_reads_after_inventory_snapshot_limit() -> None:
+    children = [
+        {"name": f"entry-{index}.ipynb", "path": f"entry-{index}.ipynb", "type": "notebook"} for index in range(5001)
+    ]
+    root = {"name": "", "path": "", "type": "directory", "content": children}
+    replies: dict[str, Any] = {"/api/contents?content=1": (200, root)}
+    for child in children:
+        source = "API_TOKEN=glpat-abcdefghijklmnopqrst" if child is children[-1] else "ordinary notebook text"
+        replies[f"/api/contents/{child['path']}?content=1"] = (
+            200,
+            {**child, "content": {"cells": [{"source": source}]}},
+        )
+    ctx = context(replies, discover=True, discover_time=30)
+    result = actions("jupyter").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+    assert "/api/contents/entry-5000.ipynb?content=1" in [path for _, path, _ in ctx.lifecycle_state.http.calls]
+
+
+def test_jupyter_discover_streams_oversized_directory_listing() -> None:
+    root = {
+        "name": "",
+        "path": "",
+        "type": "directory",
+        "content": [{"name": "report.ipynb", "path": "report.ipynb", "type": "notebook"}],
+        "padding": "a" * (4 * 1024 * 1024),
+    }
+
+    class StreamPool(Pool):
+        def request_stream(self, _method, _url, *, on_chunk, on_response, **_kwargs):
+            on_response(200, {"Content-Type": "application/json"})
+            payload = json.dumps(root).encode()
+            for position in range(0, len(payload), 65536):
+                on_chunk(payload[position : position + 65536])
+            return HttpResponse(200, b"", {})
+
+    pool = StreamPool(
+        {
+            "/api/contents?content=1": HttpResponse(200, b'{"name":""', {}, truncated=True),
+            "/api/contents?content=0": (200, {"name": "", "path": "", "type": "directory"}),
+            "/api/contents/report.ipynb?content=1": (
+                200,
+                {
+                    "name": "report.ipynb",
+                    "path": "report.ipynb",
+                    "type": "notebook",
+                    "content": {"cells": [{"source": "API_TOKEN=glpat-abcdefghijklmnopqrst"}]},
+                },
+            ),
+        }
+    )
+    ctx = context({}, discover=True, discover_time=30)
+    ctx.lifecycle_state.http = pool
+    result = actions("jupyter").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+
+
+def test_jupyter_malformed_streamed_directory_is_partial() -> None:
+    class StreamPool(Pool):
+        def request_stream(self, _method, _url, *, on_chunk, on_response, **_kwargs):
+            on_response(200, {"Content-Type": "application/json"})
+            on_chunk(b'{"name":"","path":"","type":"directory","content":["bad"]}')
+            return HttpResponse(200, b"", {})
+
+    pool = StreamPool(
+        {
+            "/api/contents?content=1": HttpResponse(200, b'{"name":""', {}, truncated=True),
+            "/api/contents?content=0": (200, {"name": "", "path": "", "type": "directory"}),
+        }
+    )
+    ctx = context({}, discover=True, discover_time=30)
+    ctx.lifecycle_state.http = pool
+    result = actions("jupyter").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["content_discovery"]["status"] == "partial"
+    assert not result["content_discovery"]["findings"]
 
 
 def test_vault_identity_must_match_candidate() -> None:
@@ -280,6 +602,216 @@ def test_vault_discovery_rejects_parent_paths_and_obeys_byte_budget() -> None:
     result = actions("vault").data_record(ctx, {"api_endpoint": "http://127.0.0.1", "status": "open_no_auth"})
     assert not result["kv_dump_items"] and result["kv_discovery_partial"]
     assert not any(".." in path for _, path, _ in ctx.lifecycle_state.http.calls)
+
+
+def test_vault_discover_continues_after_5000_keys_without_retaining_all_values() -> None:
+    keys = [f"entry-{index}" for index in range(5001)]
+    replies: dict[str, Any] = {
+        "/v1/sys/mounts": (200, {"data": {"secret/": {"type": "kv"}}}),
+        "/v1/secret/": (200, {"data": {"keys": keys}}),
+    }
+    for key in keys:
+        value = "API_TOKEN=glpat-abcdefghijklmnopqrst" if key == keys[-1] else "ordinary text"
+        replies["/v1/secret/" + key] = (200, {"data": {"value": value}})
+    ctx = context(replies, discover=True, discover_time=60)
+    result = actions("vault").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["kv_secrets_read"] == 5001
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+    assert len(result["kv_dump_items"]) <= 5000
+
+
+def test_vault_discover_streams_large_single_kv_value() -> None:
+    secret = {"data": {"padding": "ordinary " * 500_000, "api_token": "glpat-abcdefghijklmnopqrst"}}
+
+    class StreamPool(Pool):
+        def request_stream(self, _method, _url, *, on_chunk, on_response, **_kwargs):
+            on_response(200, {"Content-Type": "application/json"})
+            payload = json.dumps(secret).encode()
+            for offset in range(0, len(payload), 65536):
+                on_chunk(payload[offset : offset + 65536])
+            return HttpResponse(200, b"", {})
+
+    pool = StreamPool(
+        {
+            "/v1/sys/mounts": (200, {"data": {"secret/": {"type": "kv"}}}),
+            "/v1/secret/": (200, {"data": {"keys": ["large"]}}),
+            "/v1/secret/large": HttpResponse(200, b'{"data":{', {}, truncated=True),
+        }
+    )
+    ctx = context({}, discover=True, discover_time=60)
+    ctx.lifecycle_state.http = pool
+    result = actions("vault").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["kv_secrets_read"] == 1
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+
+
+def test_vault_discover_streams_large_key_listing_without_dropping_last_key() -> None:
+    keys = [f"entry-{index}" for index in range(100)]
+
+    class StreamPool(Pool):
+        def request_stream(self, _method, _url, *, on_chunk, on_response, **_kwargs):
+            on_response(200, {"Content-Type": "application/json"})
+            payload = json.dumps({"data": {"keys": keys}}).encode()
+            for offset in range(0, len(payload), 53):
+                on_chunk(payload[offset : offset + 53])
+            return HttpResponse(200, b"", {})
+
+    pool = StreamPool(
+        {
+            "/v1/sys/mounts": (200, {"data": {"secret/": {"type": "kv"}}}),
+            "/v1/secret/": HttpResponse(200, b'{"data":{"keys":[', {}, truncated=True),
+            **{
+                "/v1/secret/" + key: (
+                    200,
+                    {"data": {"value": "glpat-abcdefghijklmnopqrst" if key == keys[-1] else "ordinary"}},
+                )
+                for key in keys
+            },
+        }
+    )
+    ctx = context({}, discover=True, discover_time=60)
+    ctx.lifecycle_state.http = pool
+    result = actions("vault").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["kv_secrets_read"] == len(keys)
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+
+
+@pytest.mark.parametrize("show_mounts", [False, True])
+def test_vault_discover_streams_oversized_mount_catalog_before_kv_walk(show_mounts: bool) -> None:
+    catalog = {
+        # Vault can include the same mounts both at the root and under data.
+        # The data catalog takes precedence, including the KV version.
+        "secret/": {"type": "kv", "options": {"version": "1"}},
+        "data": {
+            "system/": {"type": "system"},
+            "secret/": {"type": "kv", "options": {"version": "2"}, "description": "ordinary " * 500_000},
+        },
+    }
+
+    class StreamPool(Pool):
+        def request_stream(self, _method, url, *, on_chunk, on_response, **_kwargs):
+            assert url.endswith("/v1/sys/mounts")
+            on_response(200, {"Content-Type": "application/json"})
+            payload = json.dumps(catalog).encode()
+            for offset in range(0, len(payload), 65_536):
+                on_chunk(payload[offset : offset + 65_536])
+            return HttpResponse(200, b"", {})
+
+    pool = StreamPool(
+        {
+            "/v1/sys/mounts": HttpResponse(200, b'{"data":{', {}, truncated=True),
+            "/v1/secret/metadata/": (200, {"data": {"keys": ["app"]}}),
+            "/v1/secret/data/app": (200, {"data": {"data": {"api_token": "glpat-abcdefghijklmnopqrst"}}}),
+        }
+    )
+    ctx = context({}, discover=True, show_mounts=show_mounts, discover_time=60)
+    ctx.lifecycle_state.http = pool
+    result = actions("vault").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["mounts_access"] == "allowed"
+    assert result["mounts_count"] == 2
+    assert result["inventory_status"] == ("partial" if show_mounts else "complete")
+    assert result.get("mounts_snapshot_partial") is (True if show_mounts else None)
+    assert result["kv_secrets_read"] == 1
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+
+
+def test_vault_broken_streamed_mount_catalog_remains_partial() -> None:
+    class BrokenPool(Pool):
+        def request_stream(self, _method, _url, *, on_chunk, on_response, **_kwargs):
+            on_response(200, {"Content-Type": "application/json"})
+            on_chunk(b'{"data":{"secret/":{"type":"kv"}')
+            return HttpResponse(200, b"", {})
+
+    ctx = context({}, discover=True, discover_time=60)
+    ctx.lifecycle_state.http = BrokenPool({"/v1/sys/mounts": HttpResponse(200, b'{"data":{', {}, truncated=True)})
+    result = actions("vault").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["mounts_access"] == "unknown"
+    assert result["kv_discovery_partial"] is True
+    assert inspect_record("vault", result)["status"] == "partial"
+
+
+def test_vault_discover_marks_broken_streamed_key_listing_partial() -> None:
+    class BrokenPool(Pool):
+        def request_stream(self, _method, _url, *, on_chunk, on_response, **_kwargs):
+            on_response(200, {"Content-Type": "application/json"})
+            on_chunk(b'{"data":{"keys":["first",')
+            return HttpResponse(200, b"", {})
+
+    pool = BrokenPool(
+        {
+            "/v1/sys/mounts": (200, {"data": {"secret/": {"type": "kv"}}}),
+            "/v1/secret/": HttpResponse(200, b'{"data":{"keys":[', {}, truncated=True),
+        }
+    )
+    ctx = context({}, discover=True, discover_time=60)
+    ctx.lifecycle_state.http = pool
+    result = actions("vault").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["kv_discovery_partial"] is True
+    assert result["content_discovery"]["status"] == "partial"
+    assert "incomplete KV key listing" in result["kv_discovery_reasons"]
+
+
+@pytest.mark.parametrize(
+    "module,prior,source_path",
+    [
+        ("vault", {"status": "open_no_auth"}, "/v1/sys/mounts"),
+        ("nomad", {"status": "open_no_auth"}, "/v1/jobs?namespace=default&per_page=100"),
+        ("jupyter", {"status": "open_no_auth"}, "/api/contents?content=1"),
+        ("spark", {"is_spark": True, "surface": "master_ui"}, "/json/"),
+        ("yarn", {"is_yarn": True}, "/ws/v1/cluster/apps"),
+    ],
+)
+def test_token_api_discovery_caps_source_read_to_remaining_budget(
+    module: str, prior: dict[str, Any], source_path: str
+) -> None:
+    ctx = context({}, discover=True, discover_max_bytes=128, discover_time=4)
+    record = {"api_endpoint": "http://127.0.0.1:8200", **prior}
+    actions(module).data_record(ctx, record)
+    source_calls = [options for path, options in ctx.lifecycle_state.http.request_options if path == source_path]
+    assert source_calls
+    assert source_calls[0]["response_size_cap"] == 128
+    assert 0 < source_calls[0]["timeout"] <= 4
+
+
+def test_spark_discover_scans_apps_after_5000_snapshot_entries() -> None:
+    apps = [
+        {
+            "id": f"app-{index}",
+            "name": "glpat-abcdefghijklmnopqrst" if index == 5000 else "ordinary",
+            "user": "qa",
+            "state": "RUNNING",
+            "cores": 1,
+        }
+        for index in range(5001)
+    ]
+    ctx = context(
+        {"/json/": (200, {"url": "spark://127.0.0.1:7077", "cores": 1, "workers": [], "activeapps": apps})},
+        discover=True,
+        discover_time=60,
+    )
+    result = actions("spark").data_record(
+        ctx,
+        {"api_endpoint": "http://127.0.0.1:8200", "is_spark": True, "surface": "master_ui", "status": "open_no_auth"},
+    )
+    assert len(result["spark_metadata"]["apps"]) <= 5000
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+
+
+def test_vault_truncated_mount_response_is_partial_not_unavailable() -> None:
+    ctx = context(
+        {"/v1/sys/mounts": HttpResponse(200, b"{" * 128, {}, truncated=True)},
+        discover=True,
+        discover_max_bytes=128,
+    )
+    record = actions("vault").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    discovery = inspect_record("vault", record)
+    assert discovery["status"] == "partial"
+    assert "byte_budget" in discovery["partial_reasons"]
 
 
 @pytest.mark.parametrize("module", MODULES)
@@ -486,9 +1018,30 @@ def test_discovery_request_budgets_bound_empty_directory_trees() -> None:
 
     budget = ReadBudget(SimpleNamespace())
     budget.calls = 10000
-    assert not budget.allowed() and budget.partial
+    assert budget.allowed() and not budget.partial
     budget = ReadBudget(SimpleNamespace(discover_max_bytes=2))
     assert not budget.consume(HttpResponse(200, b"123", {})) and budget.partial
+
+
+def test_token_api_budget_includes_detect_and_auth_elapsed_time(monkeypatch) -> None:
+    from redposture_core.modules import token_api
+
+    monkeypatch.setattr(token_api.time, "monotonic", lambda: 105.0)
+    budget = token_api.ReadBudget(SimpleNamespace(discover_time=4), started_at=100.0)
+    assert budget.allowed() is False
+    assert budget.partial is True
+
+
+def test_token_api_timeout_during_source_read_stays_partial(monkeypatch) -> None:
+    from redposture_core.modules import token_api
+
+    clock = {"now": 100.0}
+    monkeypatch.setattr(token_api.time, "monotonic", lambda: clock["now"])
+    budget = token_api.ReadBudget(SimpleNamespace(discover_time=1), started_at=100.0)
+    assert budget.allowed()
+    clock["now"] = 102.0
+    assert not budget.consume(HttpResponse(0, b"", {}, error="timed out"))
+    assert budget.reason == "time_budget"
 
 
 # Generated malformed and type-confused response trees exercise parser edges,
@@ -540,7 +1093,7 @@ def test_generated_response_trees_do_not_crash_or_invent_token_identity(module: 
 def test_nomad_wildcard_discovery_uses_each_jobs_namespace() -> None:
     ctx = context(
         {
-            "/v1/jobs?namespace=%2A": (200, [{"ID": "billing", "Namespace": "payments"}]),
+            "/v1/jobs?namespace=%2A&per_page=100": (200, [{"ID": "billing", "Namespace": "payments"}]),
             "/v1/job/billing?namespace=payments": (200, {"ID": "billing", "Namespace": "payments", "TaskGroups": []}),
         },
         namespace="*",
@@ -568,7 +1121,7 @@ def test_vault_default_token_is_one_candidate_and_does_not_prove_dev_mode() -> N
     assert plan.credential_runs[0].source == "default"
 
 
-def test_vault_oversized_directory_keys_are_skipped_as_partial() -> None:
+def test_vault_long_directory_is_requested_and_missing_response_is_partial() -> None:
     ctx = context(
         {
             "/v1/sys/mounts": (200, {"data": {"secret/": {"type": "kv"}}}),
@@ -578,7 +1131,8 @@ def test_vault_oversized_directory_keys_are_skipped_as_partial() -> None:
     )
     result = actions("vault").data_record(ctx, {"api_endpoint": "http://127.0.0.1", "status": "open_no_auth"})
     assert result["kv_discovery_partial"]
-    assert len(ctx.lifecycle_state.http.calls) == 2
+    assert len(ctx.lifecycle_state.http.calls) == 3
+    assert ctx.lifecycle_state.http.calls[-1][1] == "/v1/secret/" + "x" * 5000 + "/"
 
 
 def test_vault_duplicate_listed_keys_are_read_once() -> None:
@@ -625,7 +1179,8 @@ def test_jupyter_trailing_slash_selector_does_not_skip_notebooks() -> None:
         discover=True,
     )
     result = actions("jupyter").data_record(ctx, {"api_endpoint": "http://127.0.0.1", "status": "open_no_auth"})
-    assert len(result["notebook_contents"]) == 1 and not result["content_discovery_partial"]
+    assert "notebook_contents" not in result and not result["content_discovery_partial"]
+    assert result["content_discovery"]["status"] == "complete"
 
 
 def test_malformed_unicode_paths_are_rejected_without_crashing() -> None:
@@ -643,3 +1198,53 @@ def test_jupyter_status_rate_limit_does_not_try_identity() -> None:
     )
     assert result["status"] == "rate_limited"
     assert result["provided_credentials_ok"] is None
+
+
+def test_nomad_streams_oversized_summary_and_preserves_next_header() -> None:
+    replies: dict[str, Any] = {
+        f"/v1/jobs?namespace=default&per_page={size}": HttpResponse(200, b"[", {}, truncated=True)
+        for size in (100, 50, 25, 12, 6, 3, 1)
+    }
+    replies.update(
+        {
+            "/v1/jobs?namespace=default&per_page=1&next_token=last": (200, [{"ID": "tail", "Namespace": "default"}]),
+            "/v1/job/big?namespace=default": (200, {"ID": "big", "Env": {"password": "qa-first-secret"}}),
+            "/v1/job/tail?namespace=default": (200, {"ID": "tail", "Env": {"password": "qa-last-secret"}}),
+        }
+    )
+    ctx = context(replies, discover=True, discover_time=30, discover_max_bytes=4096)
+    payload = json.dumps([{"ID": "big", "Namespace": "default", "Meta": {"note": "x" * 20000}}]).encode()
+
+    def stream(_method, url, *, on_response, on_chunk, **kwargs):
+        assert "per_page=1" in url
+        headers = {"Content-Type": "application/json", "X-Nomad-NextToken": "last"}
+        on_response(200, headers)
+        for offset in range(0, len(payload), 257):
+            on_chunk(payload[offset : offset + 257])
+        return HttpResponse(200, b"", headers)
+
+    ctx.lifecycle_state.http.request_stream = stream
+    result = actions("nomad").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    report = result["content_discovery"]
+    assert report["status"] == "complete", report["partial_reasons"]
+    assert [item["value"] for item in report["findings"]] == ["qa-first-secret", "qa-last-secret"]
+    assert [item["ID"] for item in result["jobs"]] == ["big", "tail"]
+
+
+def test_nomad_discover_does_not_retain_large_job_summaries_in_memory() -> None:
+    rows = [{"ID": f"job-{index}", "Namespace": "default", "Meta": {"notes": "n" * 400000}} for index in range(4)]
+    replies: dict[str, Any] = {"/v1/jobs?namespace=default&per_page=100": (200, rows)}
+    replies.update(
+        {
+            f"/v1/job/job-{index}?namespace=default": (
+                200,
+                {"ID": f"job-{index}", "Env": {"password": f"qa-password-{index}"}},
+            )
+            for index in range(4)
+        }
+    )
+    ctx = context(replies, discover=True, discover_time=30)
+    result = actions("nomad").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
+    assert result["content_discovery"]["status"] == "complete"
+    assert len(result["content_discovery"]["findings"]) == 4
+    assert len(json.dumps(result["jobs"]).encode()) < 1_050_000

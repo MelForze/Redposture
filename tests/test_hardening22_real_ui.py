@@ -6,23 +6,21 @@ and login requests reach the genuine products; no host Docker socket is used.
 
 from __future__ import annotations
 
-import http.server
 import json
 import os
 import ssl
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from scripts.bootstrap_ui_lab import onboard_redisinsight
 from scripts.qa_owned_lab import OwnedLab
+from scripts.qa_tls_prefix_proxy import proxy
 
 pytestmark = pytest.mark.skipif(os.environ.get("REDPOSTURE_REAL_QA") != "1", reason="explicit serial real-panel QA")
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,78 +49,26 @@ def api(
         return raw.decode(errors="replace")
 
 
-def ready(base: str, path: str, *, seconds: float = 120) -> None:
+def ready(base: str, path: str, *, seconds: float = 120, allow_auth: bool = True, evidence: Path | None = None) -> None:
+    statuses: list[int | str] = []
     deadline = time.monotonic() + seconds
     while True:
         try:
             api(base, path)
+            statuses.append(200)
+            if evidence:
+                evidence.write_text(json.dumps(statuses))
             return
         except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
+            statuses.append(exc.code)
+            if allow_auth and exc.code in (401, 403):
                 return
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            statuses.append(str(exc))
+        if evidence:
+            evidence.write_text(json.dumps(statuses))
         assert time.monotonic() < deadline, base + path + " readiness timeout"
         time.sleep(0.5)
-
-
-@contextmanager
-def proxy(upstream: str, material: dict[str, Path] | None) -> Iterator[str]:
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def handle_request(self) -> None:
-            if not self.path.startswith("/qa/"):
-                self.send_error(404)
-                return
-            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            headers = {
-                k: v for k, v in self.headers.items() if k.lower() not in {"host", "connection", "content-length"}
-            }
-            request = urllib.request.Request(
-                upstream + self.path[3:], data=body if body else None, headers=headers, method=self.command
-            )
-            opener = urllib.request.build_opener(
-                NoRedirect(), urllib.request.HTTPSHandler(context=ssl._create_unverified_context())
-            )
-            try:
-                response = opener.open(request, timeout=10)
-            except urllib.error.HTTPError as exc:
-                response = exc
-            with response:
-                raw = response.read()
-                self.send_response(response.status)
-                for k, v in response.headers.items():
-                    if k.lower() not in {"transfer-encoding", "content-length", "connection"}:
-                        if k.lower() == "location" and v.startswith("/"):
-                            v = "/qa" + v
-                        self.send_header(k, v)
-                self.send_header("Content-Length", str(len(raw)))
-                self.end_headers()
-                self.wfile.write(raw)
-
-        do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = handle_request
-
-        def log_message(self, *_args: Any) -> None:
-            pass
-
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
-            return None
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    server.daemon_threads = True
-    if material:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(material["server_cert"], material["server_key"])
-        server.socket = context.wrap_socket(server.socket, server_side=True)
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
-    thread.start()
-    try:
-        yield f"{'https' if material else 'http'}://127.0.0.1:{server.server_port}/qa"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(3)
-        assert not thread.is_alive()
 
 
 def audit(lab: OwnedLab, module: str, target: str, *flags: str, label: str = "audit") -> dict[str, Any]:
@@ -221,7 +167,7 @@ def test_real_panel_seeded_dump_tls_and_prefix(tmp_path: Path, mtls_material: di
             # Generic Basic hides all product signals: pairs must not be sent.
             # Separately verify the genuine public panel with its real backend.
             lab.collect_mounts()
-            lab.docker("rm", "-f", "-v", lab.owner + "-ui")
+            lab.docker("rm", "-f", lab.owner + "-ui")
             lab.start(
                 "ui",
                 "mongo-express:1.0.2-20",
@@ -248,21 +194,7 @@ def test_real_panel_seeded_dump_tls_and_prefix(tmp_path: Path, mtls_material: di
             )
             upstream = f"http://127.0.0.1:{lab.port('ui', 5540)}"
             ready(upstream, "/api/info")
-            spec = api(upstream, "/api/settings/agreements/spec")
-            agreements = {k: k == "eula" for k in spec["agreements"]}
-            api(upstream, "/api/settings", {"agreements": agreements}, method="PATCH")
-            api(
-                upstream,
-                "/api/databases",
-                {
-                    "name": "qa",
-                    "host": "redis",
-                    "port": 6379,
-                    "username": "default",
-                    "password": "reader-pass-22",
-                    "db": 0,
-                },
-            )
+            onboard_redisinsight(upstream)
             module, seed, flags = "redis", "seeded-redis-content", ("--show-keys", "--dump")
         else:
             lab.start(
@@ -405,7 +337,7 @@ def test_real_dashboard_devtools_seed(tmp_path: Path, mtls_material: dict[str, P
         )
         lab.start("ui", image, env={**env, "NODE_OPTIONS": "--max-old-space-size=384"}, ports=(5601,), memory="768m")
         upstream = f"http://127.0.0.1:{lab.port('ui', 5601)}"
-        ready(upstream, "/api/status", seconds=180)
+        ready(upstream, "/api/status", seconds=240, allow_auth=False, evidence=lab.out / "api-status-readiness.json")
         # UI --cluster includes the read-only Dev Tools route; full documents via discover.
         with proxy(upstream, mtls_material) as base:
             value = audit(lab, "elastic", base, "--cluster", "--discover", label=product)
@@ -413,6 +345,11 @@ def test_real_dashboard_devtools_seed(tmp_path: Path, mtls_material: dict[str, P
             assert value.get("ui_product") == ("opensearch_dashboards" if opensearch else "kibana"), value
             assert value.get("ui", {}).get("inventory"), value
             assert "qa-dashboard-secret-22" in json.dumps(value), value
+            discovery = value["ui"]["inventory"]["discover"]
+            if opensearch:
+                pipeline = discovery["discover_coverage"]["surfaces"]["ingest_pipelines"]
+                assert pipeline["status"] == "unsupported" and pipeline["error_detail"]["status"] == 404
+                assert discovery["partial"] is True  # A missing UI endpoint is not full coverage.
             (lab.out / "scenario.json").write_text(
                 json.dumps({"real_product": product, "tls_prefix_ui_confirmed": True, "record": value}, default=str)
             )

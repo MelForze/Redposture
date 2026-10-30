@@ -86,7 +86,8 @@ def test_jupyter_discover_reads_notebooks_without_implicitly_printing_inventory(
         ctx, {"host": "qa", "port": 8888, "api_endpoint": "http://qa:8888", "status": "open_no_auth"}
     )
     if discover:
-        assert result["notebook_contents"][0]["notebook"]["cells"][0]["source"] == ['password = "qa-secret"']
+        assert "notebook_contents" not in result
+        assert result["content_discovery"]["findings"]
     assert (
         any("Contents Enumeration" in line for line in render._format_inventory_records(result, "txt")) is show_contents
     )

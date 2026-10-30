@@ -159,7 +159,7 @@ def configure_clickhouse_parser(
         action="store_true",
         help="Exhaustively inventory readable tables and scan every content-capable column for secrets.",
     )
-    add_discovery_budget_flags(discover, default_time=None, default_bytes=50 * 1024 * 1024)
+    add_discovery_budget_flags(discover)
     discover.add_argument(
         "--resume",
         action="store_true",

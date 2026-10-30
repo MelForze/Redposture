@@ -7,9 +7,15 @@ import json
 import os
 import sqlite3
 import time
+import uuid
 from contextlib import closing
 from pathlib import Path
 from typing import Any
+
+from .discovery_spool import contains_spooled
+from .discovery_values import contains_disk_backed, iter_json_chunks
+
+_PAYLOAD_FILE = "\x00redposture_payload_file"
 
 
 class UIExport:
@@ -90,10 +96,25 @@ class UIExport:
 
     def add(self, key: str, collection: str, value: Any) -> bool:
         item = {"target": self.target, "ui_product": self.product, "collection": collection, "value": value}
-        cursor = self.connection.execute(
-            "INSERT OR IGNORE INTO records(key,payload) VALUES (?,?)",
-            (key, json.dumps(item, ensure_ascii=False, separators=(",", ":"), default=str)),
-        )
+        if self.has(key):
+            return False
+        payload_file: Path | None = None
+        if contains_spooled(item) or contains_disk_backed(item):
+            directory = self.database.with_suffix(".parts")
+            directory.mkdir(mode=0o700, exist_ok=True)
+            payload_file = directory / f"{uuid.uuid4().hex}.json"
+            descriptor = os.open(payload_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+                    for chunk in iter_json_chunks(item):
+                        stream.write(chunk)
+            except BaseException:
+                payload_file.unlink(missing_ok=True)
+                raise
+            serialized = json.dumps({_PAYLOAD_FILE: payload_file.name})
+        else:
+            serialized = json.dumps(item, ensure_ascii=False, separators=(",", ":"), default=str)
+        cursor = self.connection.execute("INSERT OR IGNORE INTO records(key,payload) VALUES (?,?)", (key, serialized))
         if not cursor.rowcount:
             return False
         self.new_count += 1
@@ -111,7 +132,17 @@ class UIExport:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             os.fchmod(stream.fileno(), 0o600)
             for (payload,) in self.connection.execute("SELECT payload FROM records ORDER BY sequence"):
-                stream.write(payload + "\n")
+                reference = json.loads(payload) if "\\u0000redposture_payload_file" in payload else None
+                if isinstance(reference, dict) and _PAYLOAD_FILE in reference:
+                    name = reference[_PAYLOAD_FILE]
+                    if not isinstance(name, str) or Path(name).name != name:
+                        raise ValueError("invalid UI export payload reference")
+                    with (self.database.with_suffix(".parts") / name).open("r", encoding="utf-8", newline="") as source:
+                        while chunk := source.read(65536):
+                            stream.write(chunk)
+                    stream.write("\n")
+                else:
+                    stream.write(payload + "\n")
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, self.output)

@@ -245,11 +245,18 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
             return AuditRecord.from_mapping(
                 ui.collect_ui(ctx, record.to_dict(), ctx.lifecycle_state, options), module="kafka", service="kafka"
             )
-        return AuditRecord.from_mapping(
-            actions.collect_kafka_data(ctx, record, options),
-            module="kafka",
-            service="kafka",
-        )
+        result = actions.collect_kafka_data(ctx, record, options)
+        if (
+            isinstance(result, dict)
+            and bool(getattr(args, "discover", False))
+            and not getattr(args, "_discover_implicit_dump", False)
+            and str(getattr(args, "output_format", "txt")) == "txt"
+            and result.get("dump")
+            and result.get("dump_results")
+        ):
+            result["_stream_lines_file"] = actions._spool_kafka_dump_details(result)
+            result["_kafka_dump_streamed"] = True
+        return AuditRecord.from_mapping(result, module="kafka", service="kafka")
 
     spec = ModuleAuditSpec(
         module="kafka",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Mapping
@@ -48,6 +49,8 @@ from ...clients.kafka import (
 from ...console import Console
 from ...detection_io import DetectCall as _DetectCall
 from ...detection_io import run_sync as _run_detect_sync
+from ...discovery_options import DEFAULT_DISCOVER_TIME
+from ...discovery_values import DiskBackedText
 from ...rendering import (
     CountColorRule,
     LiteralColorRule,
@@ -64,6 +67,7 @@ from ...stage_runtime import (
     StageTelemetryBuilder,
     merge_stage_records,
 )
+from ...storage_discovery import DiscoveryCollector
 from ...utils import (
     format_credential_attempts_suffix,
     utc_now_iso,
@@ -326,6 +330,9 @@ def _read_dump_topics(
     sasl_first: bool = False,
     existing_session: KafkaSession | None = None,
     leader_pool: KafkaLeaderPool | None = None,
+    deadline: float | None = None,
+    max_bytes: int | None = None,
+    on_message: Callable[[str, int, int, Any], None] | None = None,
 ):
     kwargs: dict[str, Any] = {
         "host": host,
@@ -351,6 +358,12 @@ def _read_dump_topics(
         kwargs["existing_session"] = existing_session
     if leader_pool is not None and "leader_pool" in parameters:
         kwargs["leader_pool"] = leader_pool
+    if deadline is not None and "deadline" in parameters:
+        kwargs["deadline"] = deadline
+    if max_bytes is not None and "max_bytes" in parameters:
+        kwargs["max_bytes"] = max_bytes
+    if on_message is not None and "on_message" in parameters:
+        kwargs["on_message"] = on_message
     return _with_kafka_client_overrides(
         callback,
         **kwargs,
@@ -1499,6 +1512,65 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
     return payload
 
 
+def _spool_kafka_dump_details(record: Mapping[str, Any]) -> str:
+    """Write explicit broker message output without building a giant line list."""
+    stream = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="", prefix="redposture-kafka-dump-", suffix=".txt", delete=False
+    )
+    try:
+        prefix = _nxc_prefix(dict(record))
+        results = record.get("dump_results")
+        errors = record.get("dump_errors")
+        coverage = record.get("dump_coverage")
+        entries = coverage.get("topics") if isinstance(coverage, Mapping) else None
+        statuses = (
+            {str(item.get("topic")): str(item.get("status")) for item in entries if isinstance(item, Mapping)}
+            if isinstance(entries, list)
+            else {}
+        )
+        for topic in record.get("dump_topics") or ():
+            status = statuses.get(str(topic))
+            stream.write(f"{prefix} [*] Topic {topic}" + (f" (coverage:{status})" if status else "") + "\n")
+            messages = results.get(topic) if isinstance(results, Mapping) else None
+            count = 0
+            if isinstance(messages, list):
+                for message in messages:
+                    stream.write(f"{prefix} ")
+                    if isinstance(message, DiskBackedText):
+                        for chunk in message.iter_text_chunks():
+                            stream.write(chunk)
+                    else:
+                        stream.write(str(message))
+                    stream.write("\n")
+                    count += 1
+            error = errors.get(topic) if isinstance(errors, Mapping) else None
+            if error:
+                stream.write(f"{prefix} {'[!]' if count else '[-]'} {error}\n")
+            elif not count:
+                stream.write(f"{prefix} <no messages>\n")
+        stream.flush()
+        return stream.name
+    except BaseException:
+        import os
+
+        os.unlink(stream.name)
+        raise
+    finally:
+        stream.close()
+
+
+def _scan_broker_message(collector: DiscoveryCollector, topic: str, partition: int, offset: int, value: Any) -> None:
+    """Scan the broker value without the human-readable pN@offset prefix."""
+    source = f"topic.{topic}.partition.{partition}.offset.{offset}"
+    if isinstance(value, DiskBackedText):
+        collector.scan_disk_text(source, value)
+    elif isinstance(value, str):
+        if value.lstrip().startswith(("{", "[")):
+            collector.scan_json_chunks(source, (value.encode("utf-8"),))
+        else:
+            collector.add(source, value, charge=False)
+
+
 def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
     """Execute requested Kafka inventory/actions once for the selected identity."""
 
@@ -1518,7 +1590,15 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
     query_topic_name = str(options.get("query_topic") or "").strip()
     show_topics = bool(options["show_topics"])
     dump = bool(options["dump"])
+    target_started = getattr(ctx, "discovery_started_at", None)
+    discover_deadline = (
+        (target_started if target_started is not None else time.monotonic())
+        + float(getattr(ctx.args, "discover_time", None) or DEFAULT_DISCOVER_TIME)
+        if bool(getattr(ctx.args, "discover", False))
+        else None
+    )
     max_messages = int(options["max_messages"]) if options["max_messages"] is not None else None
+    collector = DiscoveryCollector("kafka", ctx, payload) if discover_deadline is not None and dump else None
     show_topics_limit = options.get("show_topics_limit")
     probe_write = bool(options["probe_write"])
     write_payload = options.get("write_payload")
@@ -1559,6 +1639,14 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
         else:
             dump_topics = topic_names
         if dump_topics:
+            discovery_kwargs: dict[str, Any] = {}
+            if discover_deadline is not None:
+                discovery_kwargs["deadline"] = discover_deadline
+                discovery_kwargs["max_bytes"] = 2**63 - 1
+                if collector is not None:
+                    discovery_kwargs["on_message"] = lambda topic, part, offset, value: _scan_broker_message(
+                        collector, topic, part, offset, value
+                    )
             dump_results, dump_errors = _read_dump_topics(
                 host=str(ctx.host),
                 port=int(ctx.port),
@@ -1574,6 +1662,7 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
                 sasl_first=state.sasl_first,
                 existing_session=selected_session,
                 leader_pool=state.leader_pool,
+                **discovery_kwargs,
             )
 
     topic_messages: list[str] | None = None
@@ -1581,6 +1670,16 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
     if dump and query_topic_name:
         topic_messages = dump_results.get(query_topic_name)
         topic_read_error = dump_errors.get(query_topic_name) or dump_error
+    if collector is not None:
+        for topic in dump_topics:
+            if topic not in dump_errors and topic in dump_results:
+                collector.mark_accessible_source()
+        for topic, read_error in dump_errors.items():
+            reason = "access_denied" if "AUTHORIZATION_FAILED" in read_error.upper() else read_error
+            collector.partial(f"topic.{topic}", reason)
+        if dump_error:
+            collector.partial("broker", dump_error)
+        payload["content_discovery"] = collector.result()
     dump_coverage = _build_dump_coverage(dump_topics, dump_results, dump_errors, dump_error) if dump else None
     dump_partial = bool(dump_coverage and not dump_coverage["complete"])
 
@@ -1630,9 +1729,17 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
             write_result = {"status": "unavailable", "reason": "authenticated access not verified"}
 
     errors: list[str] = []
-    for item in (payload.get("error"), dump_error, *dump_errors.values()):
+    for item in (payload.get("error"),):
         clean = str(item or "").strip()
         if clean and clean not in errors:
+            errors.append(clean)
+    for item in (dump_error, *dump_errors.values()):
+        clean = str(item or "").strip()
+        budget_parts = clean.removeprefix("partial partition failures: ").split("; ")
+        expected_budget_stop = bool(clean) and all(
+            re.fullmatch(r"(?:p\d+: )?(?:discover_time|byte_budget)", part) for part in budget_parts
+        )
+        if clean and clean not in errors and not (discover_deadline is not None and expected_budget_stop):
             errors.append(clean)
     payload.update(
         {
@@ -1872,11 +1979,13 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
     probe_write = bool(record.get("probe_write"))
     query_topic = str(record.get("query_topic") or "").strip()
     query_topic_value = record.get("query_topic_value")
-    dump = bool(record.get("dump"))
+    dump = bool(record.get("dump")) and not record.get("_kafka_dump_streamed")
     max_messages = int(record.get("max_messages") or 0)
     topic_messages_raw = record.get("topic_messages")
     topic_messages: list[str] = (
-        [str(item) for item in topic_messages_raw] if isinstance(topic_messages_raw, list) else []
+        [str(item) for item in topic_messages_raw]
+        if isinstance(topic_messages_raw, list) and not record.get("_kafka_dump_streamed")
+        else []
     )
     topic_read_error = str(record.get("topic_read_error") or "").strip()
     write_result = record.get("write_result")
@@ -1902,7 +2011,7 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
             key = str(topic_name).strip()
             if not key:
                 continue
-            if isinstance(values, list):
+            if isinstance(values, list) and not record.get("_kafka_dump_streamed"):
                 dump_results[key] = [str(item) for item in values]
             else:
                 dump_results[key] = []

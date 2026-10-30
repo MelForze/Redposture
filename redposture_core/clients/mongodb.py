@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import socket
 import ssl
 import struct
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from typing import Any
 from urllib.parse import quote
+
+from ..discovery_spool import SpoolingRecords
+from ..discovery_values import DiskBackedText
 
 _DEFAULT_SERVER_SELECTION_MS = 1000
 _SYSTEM_DATABASES = {"admin", "config", "local"}
@@ -29,6 +35,10 @@ class MongoPartialReadError(MongoClientError):
     def __init__(self, documents: list[dict[str, Any]], cause: Exception) -> None:
         super().__init__(normalize_mongodb_error(cause))
         self.documents = documents
+
+
+class MongoBudgetStop(MongoPartialReadError):
+    """Discovery stopped by its requested budget after preserving documents."""
 
 
 class MongoAuthError(MongoClientError):
@@ -284,6 +294,73 @@ def json_safe(value: Any) -> Any:
         return str(value)
 
 
+def _discovery_document(value: Any, deadline: float | None) -> Any:
+    """Relaxed Extended JSON without serializing a whole BSON document twice.
+
+    PyMongo still decodes one server-bounded BSON document. Large scalar
+    values move to disk before the next document or result spool is read.
+    """
+    json_util = _load_bson_json_util()
+
+    def text(value: str) -> str | DiskBackedText:
+        if len(value) <= 65_536:
+            return value
+        result = DiskBackedText()
+        try:
+            for offset in range(0, len(value), 65_536):
+                check()
+                result.append_text(value[offset : offset + 65_536])
+            result.finish()
+            return result
+        except BaseException:
+            result.close()
+            raise
+
+    def check() -> None:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("discover_time")
+
+    def convert(item: Any) -> Any:
+        check()
+        if type(item) is str:
+            return text(item)
+        if item is None or type(item) in (bool, int):
+            return item
+        if isinstance(item, dict):
+            return {str(key): convert(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [convert(child) for child in item]
+        if isinstance(item, bytes):
+            # BSON Binary is a bytes subclass; its public subtype must survive
+            # just as it does in json_util's relaxed Extended JSON.
+            subtype = getattr(item, "subtype", 0)
+            if len(item) <= 49_152:
+                encoded: str | DiskBackedText = base64.b64encode(item).decode("ascii")
+            else:
+                encoded = DiskBackedText()
+                try:
+                    for offset in range(0, len(item), 49_152):
+                        check()
+                        encoded.append_text(base64.b64encode(item[offset : offset + 49_152]).decode("ascii"))
+                    encoded.finish()
+                except BaseException:
+                    encoded.close()
+                    raise
+            return {"$binary": {"base64": encoded, "subType": f"{subtype:02x}"}}
+        if json_util is not None:
+            try:
+                converted = json_util.default(item, json_options=json_util.RELAXED_JSON_OPTIONS)
+            except TypeError:
+                pass
+            else:
+                return converted if converted is item else convert(converted)
+        if isinstance(item, float):
+            return item
+        return text(str(item))
+
+    return convert(value)
+
+
 def _command(client: Any, database: str, command: str | dict[str, Any]) -> Any:
     db = client[database]
     return db.command(command)
@@ -412,21 +489,54 @@ class MongoAuditClient:
         query: dict[str, Any] | None = None,
         projection: dict[str, Any] | None = None,
         limit: int | None = None,
+        on_document: Callable[[dict[str, Any]], bool] | None = None,
+        deadline: float | None = None,
+        batch_size: int | None = None,
     ) -> list[dict[str, Any]]:
-        cursor = self.client[database][collection].find(query or {}, projection)
-        documents: list[dict[str, Any]] = []
+        documents: list[dict[str, Any]] = SpoolingRecords() if on_document is not None else []
+        cursor: Any = None
         try:
-            if limit is not None:
-                cursor = cursor.limit(int(limit))
-            for item in cursor:
-                documents.append(json_safe(item))
+            if deadline is not None:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("discover_time")
+                import pymongo
+
+                scope = pymongo.timeout(max(0.001, deadline - time.monotonic()))
+            else:
+                scope = nullcontext()
+            with scope:
+                cursor = self.client[database][collection].find(query or {}, projection)
+                if limit is not None:
+                    cursor = cursor.limit(int(limit))
+                effective_batch = batch_size if batch_size is not None else 1 if on_document is not None else None
+                if effective_batch is not None:
+                    cursor = cursor.batch_size(int(effective_batch))
+                for item in cursor:
+                    document = _discovery_document(item, deadline) if on_document is not None else json_safe(item)
+                    # PyMongo has already popped this decoded BSON from its
+                    # batch. Do not keep it alive while fetching/decoding the
+                    # next one: a single wide Unicode character can widen the
+                    # entire native Python string to four bytes per character.
+                    del item
+                    if on_document is not None and not on_document(document):
+                        raise MongoBudgetStop(documents, TimeoutError("discover budget reached"))
+                    documents.append(document)
             return documents
+        except MongoPartialReadError:
+            raise
         except Exception as exc:
             if documents:
                 raise MongoPartialReadError(documents, exc) from exc
             raise
         finally:
-            close_quietly(cursor)
+            if cursor is not None:
+                if deadline is not None:
+                    # killCursors is a network operation too. Do not restore
+                    # the client's much longer socket timeout during cleanup.
+                    with pymongo.timeout(max(0.001, deadline - time.monotonic())):
+                        close_quietly(cursor)
+                else:
+                    close_quietly(cursor)
 
 
 def close_quietly(client: Any) -> None:

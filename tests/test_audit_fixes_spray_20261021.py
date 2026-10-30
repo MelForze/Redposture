@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import json
-import threading
 import tracemalloc
 from argparse import Namespace
 from types import SimpleNamespace
 
 import pytest
 
-from redposture_core import stage_scan, stage_spray
+from redposture_core import stage_spray
 from redposture_core.cli_args import parse_args
 from redposture_core.console import Console
-from redposture_core.exporters import collect, discover
+from redposture_core.exporters import collect
 from redposture_core.targeting import ScanTargetSpec
 
 
@@ -108,71 +107,6 @@ def test_collect_json_does_not_retain_emitted_bodies():
     assert peak_at_emit[-1] - peak_at_emit[0] < 2 * 1024 * 1024
 
 
-def test_large_scan_feeds_next_window_while_first_endpoint_is_slow(monkeypatch, tmp_path):
-    release = threading.Event()
-    passed_window = threading.Event()
-    first_started = threading.Event()
-    results = []
-
-    def task(host, port, exporters, timeout, retries, **kwargs):
-        number = int(host[1:])
-        if number == 0:
-            first_started.set()
-            assert release.wait(15)
-        if number == 4096:
-            passed_window.set()
-        return dict(
-            timestamp="now",
-            host=host,
-            port=port,
-            detected=False,
-            exporter="unknown",
-            method="none",
-            status=404,
-            error=None,
-            url=f"http://{host}:{port}/metrics",
-        ), None
-
-    monkeypatch.setattr(discover, "scan_presence_port_task", task)
-    from redposture_core.targeting import stream_scan_target_specs
-
-    targets = tmp_path / "targets.txt"
-    targets.write_text("".join(f"h{i}\n" for i in range(65537)))
-    plan = stream_scan_target_specs(str(targets))
-    output = tmp_path / "scan.jsonl"
-    args = Namespace(timeout=1, output=str(output), output_format="json", debug=False, workers=8, retries=0)
-    thread = threading.Thread(
-        target=lambda: results.append(
-            stage_scan._run_large_scan_stage(
-                args,
-                None,
-                Console(no_color=True),
-                target_plan=plan,
-                custom_ports=[9100],
-                profiles={"discovery_exporters": [dict(name="node", port=9100)]},
-                emit_line=None,
-                stream_to_stdout=False,
-                tls_context=None,
-            )
-        )
-    )
-    thread.start()
-    try:
-        assert first_started.wait(5)
-        assert passed_window.wait(5), "4096-window barrier left seven workers idle behind endpoint h0"
-    finally:
-        release.set()
-        thread.join(30)
-    assert not thread.is_alive()
-    assert results == [0]
-    lines = output.read_text().splitlines()
-    assert len(lines) == 65538
-    summary = json.loads(lines[-1])
-    assert summary["checks"] == 65537
-    assert sum(json.loads(line).get("type") == "summary" for line in lines) == 1
-    assert "\x1b" not in output.read_text()
-
-
 def test_legacy_resume_starts_conservative_cooldown_and_restores_stop(tmp_path, monkeypatch):
     import sqlite3
 
@@ -221,48 +155,6 @@ def test_completed_replay_is_not_duplicated_if_job_finish_was_interrupted(tmp_pa
         sink.close()
         journal.close()
     assert len(output.read_text().splitlines()) == 2
-
-
-def test_large_scan_keeps_mixed_scheme_deduplication(monkeypatch, tmp_path):
-    from redposture_core.targeting import stream_scan_target_specs
-
-    targets = tmp_path / "targets.txt"
-    targets.write_text("h:9100\nhttp://h:9100/a\nhttp://h:9100/b\nhttps://h:9100/a\n")
-    plan = stream_scan_target_specs(str(targets))
-    output = tmp_path / "mixed.jsonl"
-
-    def task(host, port, exporters, timeout, retries, *, scheme="http"):
-        return dict(
-            timestamp="now",
-            host=host,
-            port=port,
-            detected=False,
-            exporter="unknown",
-            method="none",
-            status=404,
-            error=None,
-            url=f"{scheme}://{host}:{port}/metrics",
-        ), None
-
-    monkeypatch.setattr(discover, "scan_presence_port_task", task)
-    args = Namespace(timeout=1, output=str(output), output_format="json", debug=False, workers=2, retries=0)
-    assert (
-        stage_scan._run_large_scan_stage(
-            args,
-            None,
-            Console(no_color=True),
-            target_plan=plan,
-            custom_ports=[9100],
-            profiles={"discovery_exporters": [dict(name="node", port=9100)]},
-            emit_line=None,
-            stream_to_stdout=False,
-            tls_context=None,
-        )
-        == 0
-    )
-    records = [json.loads(line) for line in output.read_text().splitlines()]
-    assert sorted(record["url"] for record in records[:-1]) == ["http://h:9100/metrics", "https://h:9100/metrics"]
-    assert records[-1]["checks"] == 2
 
 
 def test_late_claim_cannot_erase_durable_origin_stop(tmp_path):

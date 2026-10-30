@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import struct
+import time
 
 import pytest
 
@@ -32,6 +33,46 @@ class _FrameSocket:
 
     def settimeout(self, timeout: float) -> None:
         self._timeout = timeout
+
+
+def test_discover_frame_budget_rejects_oversize_before_reading_body() -> None:
+    sock = _FrameSocket(b"x" * 100)
+    budget = kafka.KafkaDiscoveryReadBudget(remaining=12, deadline=time.monotonic() + 1)
+
+    with pytest.raises(kafka.KafkaDiscoveryBudgetExceeded, match="byte_budget"):
+        kafka._recv_kafka_frame(sock, budget=budget)
+
+    assert len(sock._payload) == 100
+    assert budget.remaining == 8
+
+
+def test_discover_frame_budget_resets_between_responses() -> None:
+    sock = _FrameSocket([b"first", b"second"])
+    budget = kafka.KafkaDiscoveryReadBudget(remaining=15, deadline=time.monotonic() + 1)
+
+    assert kafka._recv_kafka_frame(sock, budget=budget) == b"first"
+    assert kafka._recv_kafka_frame(sock, budget=budget) == b"second"
+    assert budget.remaining == 5
+
+
+def test_discover_request_deadline_bounds_send_and_restores_socket_timeout() -> None:
+    class _TrackingSocket(_FrameSocket):
+        timeout_at_send: float | None = None
+
+        def sendall(self, data: bytes) -> None:
+            self.timeout_at_send = self.gettimeout()
+            super().sendall(data)
+
+    sock = _TrackingSocket(b"ok")
+    budget = kafka.KafkaDiscoveryReadBudget(remaining=32, deadline=time.monotonic() + 0.2)
+    assert (
+        kafka._send_kafka_request(
+            sock, api_key=kafka.KAFKA_FETCH, api_version=0, correlation_id=1, client_id="qa", budget=budget
+        )
+        == b"ok"
+    )
+    assert sock.timeout_at_send is not None and 0 < sock.timeout_at_send <= 0.2
+    assert sock.gettimeout() == 1.0
 
 
 def _message_set(offset: int, value: str, *, magic: int = 0) -> bytes:
@@ -1315,3 +1356,124 @@ def test_kafka_post_sasl_metadata_probe_failure_keeps_auth_success(monkeypatch: 
     ok, _correlation, error = kafka._authenticate_or_probe(object(), 1, "user", "secret", sasl_first=True)
     assert ok is True
     assert error == "metadata probe timed out"
+
+
+def test_dump_topics_stops_after_target_discovery_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    read_topics: list[str] = []
+
+    def read(**kwargs):
+        read_topics.append(kwargs["topic"])
+        return ["p0@0 harmless"], None, "plaintext"
+
+    monkeypatch.setattr(kafka, "_read_topic_messages", read)
+    results, errors = kafka._read_dump_topics(
+        host="127.0.0.1",
+        port=9092,
+        timeout=1,
+        topics=["first", "second"],
+        max_messages=None,
+        username=None,
+        password=None,
+        deadline=time.monotonic() - 1,
+    )
+    assert read_topics == []
+    assert results == {}
+    assert errors == {"first": "discover_time", "second": "discover_time"}
+
+
+def test_dump_topics_forwards_live_deadline_into_topic_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    deadlines: list[float | None] = []
+
+    def read(**kwargs):
+        deadlines.append(kwargs.get("deadline"))
+        return ["p0@0 harmless"], None, "plaintext"
+
+    monkeypatch.setattr(kafka, "_read_topic_messages", read)
+    deadline = time.monotonic() + 10
+    results, errors = kafka._read_dump_topics(
+        host="127.0.0.1",
+        port=9092,
+        timeout=1,
+        topics=["first"],
+        max_messages=None,
+        username=None,
+        password=None,
+        deadline=deadline,
+    )
+    assert results == {"first": ["p0@0 harmless"]}
+    assert errors == {}
+    assert deadlines == [deadline]
+
+
+def test_dump_topics_reads_multiple_frames_with_per_frame_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    read_topics: list[str] = []
+
+    def read(**kwargs):
+        read_topics.append(kwargs["topic"])
+        kwargs["budget"].begin_frame()
+        kwargs["budget"].take(10)
+        return ["p0@0 first-message"], None, "plaintext"
+
+    monkeypatch.setattr(kafka, "_read_topic_messages", read)
+    results, errors = kafka._read_dump_topics(
+        host="127.0.0.1",
+        port=9092,
+        timeout=1,
+        topics=["first", "second"],
+        max_messages=None,
+        username=None,
+        password=None,
+        max_bytes=10,
+    )
+    assert read_topics == ["first", "second"]
+    assert results == {"first": ["p0@0 first-message"], "second": ["p0@0 first-message"]}
+    assert errors == {}
+
+
+def test_topic_reader_stops_after_budget_rejects_frame_on_reused_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Socket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    read_partitions: list[int] = []
+
+    def read_partition(_sock, correlation, _topic, partition, _remaining, **_kwargs):
+        read_partitions.append(partition)
+        return [], correlation + 1, "byte_budget"
+
+    monkeypatch.setattr(kafka, "_open_kafka_socket_configured", lambda *_a, **_k: (_Socket(), "plaintext"))
+    monkeypatch.setattr(kafka, "_authenticate_or_probe", lambda *_a, **_k: (True, 2, None))
+    monkeypatch.setattr(kafka, "_read_partition_messages_on_leader", read_partition)
+    result, error, _transport = kafka._read_topic_messages(
+        "127.0.0.1",
+        9092,
+        1.0,
+        "orders",
+        None,
+        bootstrap_metadata={"topic_map": {"orders": 2}},
+        budget=kafka.KafkaDiscoveryReadBudget(remaining=100),
+    )
+    assert result is None
+    assert error == "partial partition failures: p0: byte_budget"
+    assert read_partitions == [0]
+
+
+def test_topic_reader_skips_socket_when_discovery_deadline_expired(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kafka, "_open_kafka_socket_configured", lambda *_a, **_k: pytest.fail("socket opened"))
+    items, error, transport = kafka._read_topic_messages(
+        "127.0.0.1", 9092, 1, "first", None, deadline=time.monotonic() - 1
+    )
+    assert (items, error, transport) == (None, "discover_time", "plaintext")
+
+
+def test_partition_reader_skips_list_offsets_when_discovery_deadline_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(kafka, "_send_kafka_request", lambda *_a, **_k: pytest.fail("request sent"))
+    items, correlation, error = kafka._read_partition_messages_on_leader(
+        None, 7, "first", 0, None, deadline=time.monotonic() - 1
+    )
+    assert (items, correlation, error) == ([], 7, "discover_time")

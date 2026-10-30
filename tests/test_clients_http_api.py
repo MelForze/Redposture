@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ssl
+import time
 import urllib.error
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -188,6 +190,30 @@ def test_http_api_client_transport_error_is_normalized(monkeypatch) -> None:
     assert response.status == 0
     assert "Connection refused" in str(response.error)
     assert normalize_http_error(urllib.error.URLError("timed out"))
+
+
+def test_explicit_deadline_shrinks_socket_timeout_before_each_body_read(monkeypatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("redposture_core.clients.http_api.time.monotonic", lambda: clock[0])
+    sock = MagicMock()
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.status = 200
+    response.headers = {}
+    response.length = 2
+    response.fp = SimpleNamespace(raw=SimpleNamespace(_sock=sock))
+    response.geturl.return_value = "http://127.0.0.1/data"
+
+    def read1(_size: int) -> bytes:
+        clock[0] += 0.4
+        return b"x"
+
+    response.read1.side_effect = read1
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", lambda *args, **kwargs: response)
+    result = HttpApiClient(HttpClientConfig(response_size_cap=10)).get("http://127.0.0.1/data", timeout=1.0)
+    assert result.body == b"xxx" and result.truncated is True
+    assert sock.settimeout.call_count == 3
+    assert [call.args[0] for call in sock.settimeout.call_args_list] == pytest.approx([1.0, 0.6, 0.2])
 
 
 def test_http_api_client_https_target_via_https_proxy_uses_manual_tunnel(monkeypatch) -> None:
@@ -668,6 +694,40 @@ def test_send_escalates_timeout_on_timeout(monkeypatch):
     client = HttpApiClient(HttpClientConfig(timeout=3.0, retries=2))
     client.send(HttpRequest(method="GET", url="http://127.0.0.1/"))
     assert seen == [3.0, 5.0, 7.0]
+
+
+def test_explicit_http_api_timeout_stops_redirect_after_deadline(monkeypatch):
+    seen = []
+
+    def fake_send_once(self, request, *, timeout=None, deadline=None):
+        assert deadline is not None
+        seen.append(timeout)
+        time.sleep(0.02)
+        return HttpResponse(302, b"", {"Location": "/next"})
+
+    monkeypatch.setattr(HttpApiClient, "_send_once", fake_send_once)
+    client = HttpApiClient(HttpClientConfig(timeout=1.0))
+    response = client.get("http://127.0.0.1/", timeout=0.005)
+    assert len(seen) == 1
+    assert 0 < seen[0] <= 0.005
+    assert response.error and "timeout" in response.error.lower()
+
+
+def test_explicit_http_api_timeout_stops_retry_after_deadline(monkeypatch):
+    seen = []
+
+    def fake_send_once(self, request, *, timeout=None, deadline=None):
+        assert deadline is not None
+        seen.append(timeout)
+        time.sleep(0.02)
+        return HttpResponse(0, b"", {}, error="connection timeout")
+
+    monkeypatch.setattr(HttpApiClient, "_send_once", fake_send_once)
+    client = HttpApiClient(HttpClientConfig(timeout=1.0, retries=2))
+    response = client.get("http://127.0.0.1/", timeout=0.005)
+    assert len(seen) == 1
+    assert 0 < seen[0] <= 0.005
+    assert response.error == "connection timeout"
 
 
 def test_send_stops_on_refused(monkeypatch):

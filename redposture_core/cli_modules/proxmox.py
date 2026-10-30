@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Callable
 
 from ..discovery_options import add_discovery_budget_flags
+from ..modules.execution_api import add_flags as add_execution_flags
 
 
 def configure_proxmox_parser(
@@ -75,9 +76,21 @@ def configure_proxmox_parser(
         action="store_true",
         help="Enable extended endpoint crawl and credential discovery in API responses.",
     )
-    add_discovery_budget_flags(actions, default_time=None, default_bytes=50 * 1024 * 1024)
-    actions.add_argument("--nodes", action="store_true", help="Show discovered Proxmox node names.")
-    actions.add_argument("--users", action="store_true", help="Show users returned by /access/users.")
+    add_discovery_budget_flags(actions)
+    actions.add_argument(
+        "--show-nodes", "--nodes", dest="nodes", action="store_true", help="Show discovered Proxmox node names."
+    )
+    actions.add_argument(
+        "--show-users", "--users", dest="users", action="store_true", help="Show users returned by /access/users."
+    )
+    actions.add_argument(
+        "--show-vms",
+        action="store_true",
+        help="List QEMU VMs and LXC containers; actively confirm execute access with a harmless marker. False means execution was not confirmed; see reason.",
+    )
+    actions.add_argument("--vm", type=int, metavar="ID", help="Select one QEMU VM or LXC container by ID.")
+    actions.add_argument("--node", metavar="name", help="Restrict guest selection to this Proxmox node.")
+    add_execution_flags(actions)
     actions.add_argument(
         "-add-user",
         "--add-user",

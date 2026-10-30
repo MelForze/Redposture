@@ -12,6 +12,9 @@ from ...clients.http_api import http_target_context
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...detection_io import DetectCall, run_sync
+from ...discovery_options import DEFAULT_DISCOVER_TIME
+from ...discovery_paths import concat_discovery_text
+from ...discovery_values import DiskBackedText
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCredentialRun,
@@ -23,7 +26,7 @@ from ...stage_runtime import (
     run_basic_host_audit,
     sort_default_audit_credential_runs,
 )
-from . import actions, policy, render
+from . import actions, execution, policy, render
 
 _DEFAULT_PORT = 8006
 _DEFAULT_PORTS: tuple[int, ...] | None = (8006, 18006, 28006)
@@ -137,6 +140,7 @@ def _proxmox_requested_action_fields(args: Any) -> dict[str, Any]:
     return {
         "discover_creds": bool(getattr(args, "discover", getattr(args, "discover_creds", False))),
         "show_nodes": bool(getattr(args, "nodes", False) or getattr(args, "show_nodes", False)),
+        "show_vms": bool(getattr(args, "show_vms", False)),
         "show_users": bool(getattr(args, "users", False) or getattr(args, "show_users", False)),
         "add_user": str(getattr(args, "add_user", "") or "").strip() or None,
         "grant_role": str(getattr(args, "grant_role", "") or "").strip() or None,
@@ -556,7 +560,22 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         if finding_callback is not None:
             finding_callback(finding)
         if live_emit is not None:
-            live_emit([actions._format_single_finding_detail_line({"host": ctx.host, "port": ctx.port}, finding)])
+            value = finding.get("sample")
+            if isinstance(value, DiskBackedText):
+                from .discovery import finding_type
+
+                disk_emit = getattr(ctx, "live_discovery_value", None)
+                if callable(disk_emit):
+                    disk_emit(
+                        "PROXMOX",
+                        ctx.host,
+                        ctx.port,
+                        finding_type=finding_type(str(finding.get("reason") or "")),
+                        value=value,
+                        place=concat_discovery_text(str(finding.get("endpoint") or ""), finding.get("path") or ""),
+                    )
+            else:
+                live_emit([actions._format_single_finding_detail_line({"host": ctx.host, "port": ctx.port}, finding)])
 
     if actions._audit_proxmox_host is not _PROXMOX_AUDIT_HOST_IMPL:
         raw_record = _resolved_proxmox_host_stage()(
@@ -619,11 +638,19 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         _transport_pool=state.http,
         _origin_state=state,
         _debug_emit=ctx.debug_emit,
-        _discover_time=getattr(ctx.args, "discover_time", None),
-        _discover_max_bytes=getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024),
+        _discover_time=(getattr(ctx.args, "discover_time", None) or DEFAULT_DISCOVER_TIME)
+        if options["discover_creds"]
+        else None,
+        _discover_max_bytes=None,
+        _discovery_started_at=getattr(ctx, "discovery_started_at", None),
     )
     if live_emit is not None:
         raw_record["_discover_findings_streamed"] = True
+    if options["discover_creds"] and cfg.output_format == "txt":
+        from .discovery import write_proxmox_views
+
+        raw_record["_stream_lines_file"] = write_proxmox_views(raw_record)
+        raw_record["_proxmox_views_streamed"] = True
     version = _proxmox_version_for_context(ctx, state)
     if version:
         raw_record["version"] = version
@@ -642,6 +669,14 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         ),
         ctx.credential,
     )
+
+
+def _proxmox_guest_data(ctx: Any, record: AuditRecord) -> AuditRecord:
+    state = ctx.lifecycle_state
+    if state is None or state.resolved_auth is None:
+        return record
+    with http_target_context(ctx.target, route_state=state, api_prefixes=("/api2/json",)):
+        return _proxmox_record(execution.collect(ctx, record.to_dict(), state))
 
 
 def _prepare_proxmox_credential_runs(args: Any) -> None:
@@ -667,7 +702,7 @@ def _build_proxmox_host_stage_options(args: Any) -> dict[str, Any]:
             raise ValueError(f"{name} must be callable")
         callbacks[name] = callback
     return {
-        **_proxmox_requested_action_fields(args),
+        **{key: value for key, value in _proxmox_requested_action_fields(args).items() if key != "show_vms"},
         **callbacks,
     }
 
@@ -701,7 +736,7 @@ def build_proxmox_spec(args: Any) -> ModuleAuditSpec:
         host_stage_options=_build_proxmox_host_stage_options(args),
         detect=_detect_with_target,
         auth=_auth_with_target,
-        data=_data_with_target,
+        data=lambda ctx, record: _proxmox_guest_data(ctx, _data_with_target(ctx, record)),
         lifecycle_state_factory=_proxmox_lifecycle_state_factory,
         lifecycle_state_close=lambda state: state.close(),
         record_all_credential_attempts=full_credential_sweep,

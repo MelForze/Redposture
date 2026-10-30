@@ -6,14 +6,18 @@ import inspect
 import io
 import json
 import ssl
+import time
 import urllib.error
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from redposture_core import stage_consul as consul
+from redposture_core.clients.http_api import HttpResponse
 from redposture_core.modules.consul import render as consul_render
 from redposture_core.stage_runtime import build_render_plan, render_with_plan
+from redposture_core.storage_discovery import DiscoveryCollector
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
@@ -3092,3 +3096,225 @@ def test_consul_https_default_ports_are_probed_with_https_first(
 
     assert detected[0] is True
     assert attempts == [True, True]
+
+
+def test_discover_kv_transport_caps_body_before_json_parse() -> None:
+    caps: list[int] = []
+
+    class FakePool:
+        def request(self, _method: str, _url: str, **kwargs: Any) -> HttpResponse:
+            caps.append(int(kwargs["response_size_cap"]))
+            return HttpResponse(status=200, body=b'[{"Value":"glpat-abcdefghijklmnopqrst"', headers={}, truncated=True)
+
+    ctx = SimpleNamespace(args=SimpleNamespace(discover_time=5, discover_max_bytes=16), host="h", port=8500)
+    state = consul.ConsulLifecycleState(host="h", port=8500, http=FakePool())
+    state.discovery_collector = DiscoveryCollector("consul", ctx, {"status": "open_no_auth"})
+    with consul._ConsulLifecycleReplay(state):
+        status, body, _headers, error = consul._http_request(
+            "h", 8500, "GET", "/v1/kv/?recurse", 1.0, use_https=False, insecure=False
+        )
+    assert status == 0 and body == b""
+    assert error == "byte_budget"
+    assert caps == [16]
+
+
+def test_consul_discover_budget_is_bound_to_data_phase_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = consul.ConsulLifecycleState()
+    seen: list[DiscoveryCollector | None] = []
+
+    def fake_collect(_ctx: Any, _options: dict[str, Any], *, run_deep_checks: bool) -> dict[str, Any]:
+        assert run_deep_checks
+        seen.append(state.discovery_collector)
+        return {"kv_dump_items": []}
+
+    monkeypatch.setattr(consul, "_consul_lifecycle_call", fake_collect)
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(discover=True, discover_time=7, discover_max_bytes=64), lifecycle_state=state
+    )
+    result = consul.collect_consul_data(ctx, None, {"dump_requested": True})
+    assert result["kv_dump_items"] == []
+    assert result["content_discovery"]["status"] == "unavailable"
+    assert seen[0] is not None and seen[0].remaining == 64
+    assert 0 < seen[0].deadline - time.monotonic() <= 7
+
+
+def test_consul_discover_reads_kv_one_by_one_and_emits_first_finding_early(monkeypatch: pytest.MonkeyPatch) -> None:
+    emitted: list[str] = []
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(discover_time=10, discover_max_bytes=4096),
+        host="h",
+        port=8500,
+        live_emit=lambda lines: emitted.extend(lines),
+    )
+    collector = DiscoveryCollector("consul", ctx, {"status": "open_no_auth"})
+    state = consul.ConsulLifecycleState(discovery_collector=collector)
+    monkeypatch.setattr(consul, "_consul_kv_keys_list", lambda *_a, **_kw: (["app/api_token", "app/label"], None))
+    seen_paths: list[str] = []
+
+    def fake_get(_host: str, _port: int, path: str, _timeout: float, **_kwargs: Any):
+        if path.endswith("/app/label"):
+            assert emitted, "the first finding must be shown before fetching the second key"
+        seen_paths.append(path)
+        key = path.removeprefix("/v1/kv/")
+        value = "glpat-abcdefghijklmnopqrst" if key.endswith("api_token") else "ordinary-label"
+        return 200, [{"Key": key, "Value": base64.b64encode(value.encode()).decode()}], None, False, False
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", fake_get)
+    with consul._ConsulLifecycleReplay(state):
+        items, error = consul._consul_kv_dump("h", 8500, 1.0, scheme="http", insecure=False)
+    assert error is None
+    assert len(items or ()) == 2
+    assert seen_paths == ["/v1/kv/app/api_token", "/v1/kv/app/label"]
+    result = collector.result()
+    assert result["status"] == "complete"
+    assert result["live_emitted"] is True
+    assert len(result["findings"]) >= 1
+    assert all("ordinary-label" not in str(item) for item in result["findings"])
+
+
+def test_consul_discover_streams_kv_key_catalog_beyond_one_response_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(discover_time=10, discover_max_bytes=64, _discover_implicit_dump=True),
+        host="h",
+        port=8500,
+    )
+    collector = DiscoveryCollector("consul", ctx, {"status": "open_no_auth"})
+    payload = b'["app/label",' + b" " * 200 + b'"app/api_token"]'
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, **_kwargs: Any) -> HttpResponse:
+        for offset in range(0, len(payload), 5):
+            on_chunk(payload[offset : offset + 5])
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    state = consul.ConsulLifecycleState(discovery_collector=collector, http=SimpleNamespace(request_stream=stream))
+
+    def get(_host: str, _port: int, path: str, _timeout: float, **_kwargs: Any):
+        if path.endswith("?keys&recurse"):
+            return 0, None, "byte_budget", False, False
+        key = path.removeprefix("/v1/kv/")
+        value = "glpat-abcdefghijklmnopqrst" if key == "app/api_token" else "ordinary-label"
+        return 200, [{"Key": key, "Value": base64.b64encode(value.encode()).decode()}], None, False, False
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", get)
+    with consul._ConsulLifecycleReplay(state):
+        items, error = consul._consul_kv_dump("h", 8500, 1.0, scheme="http", insecure=False)
+    assert error is None
+    assert items == []  # Implicit discovery does not retain the raw KV dump.
+    result = collector.result()
+    assert result["status"] == "complete"
+    assert any("api_token" in item["object_path"] for item in result["findings"])
+
+
+def test_consul_discover_does_not_fetch_truncated_catalog_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = SimpleNamespace(args=SimpleNamespace(discover_time=10, discover_max_bytes=64), host="h", port=8500)
+    collector = DiscoveryCollector("consul", ctx, {"status": "open_no_auth"})
+    payload = json.dumps(["x" * 9000 + "/api_token"]).encode()
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, **_kwargs: Any) -> HttpResponse:
+        for offset in range(0, len(payload), 32):
+            on_chunk(payload[offset : offset + 32])
+        return HttpResponse(200, b"", {})
+
+    state = consul.ConsulLifecycleState(discovery_collector=collector, http=SimpleNamespace(request_stream=stream))
+    fetched: list[str] = []
+
+    def get(_host: str, _port: int, path: str, _timeout: float, **_kwargs: Any):
+        fetched.append(path)
+        return (
+            200,
+            [{"Key": path, "Value": base64.b64encode(b"glpat-abcdefghijklmnopqrst").decode()}],
+            None,
+            False,
+            False,
+        )
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", get)
+    with consul._ConsulLifecycleReplay(state):
+        _items, error = consul._consul_kv_dump("h", 8500, 1.0, scheme="http", insecure=False)
+    assert error == "invalid kv keys response"
+    assert fetched == []
+    assert collector.result()["status"] == "partial"
+
+
+def test_consul_discover_failed_stream_keeps_anonymous_fallback_available() -> None:
+    ctx = SimpleNamespace(args=SimpleNamespace(discover_time=10, discover_max_bytes=64), host="h", port=8500)
+    collector = DiscoveryCollector("consul", ctx, {"status": "open_no_auth"})
+    state = consul.ConsulLifecycleState(
+        discovery_collector=collector,
+        http=SimpleNamespace(request_stream=lambda *_a, **_k: HttpResponse(503, b"", {})),
+    )
+    with consul._ConsulLifecycleReplay(state):
+        items, error = consul._consul_kv_dump("h", 8500, 1.0, scheme="http", insecure=False)
+    assert items is None
+    assert error == "status=503"
+    assert collector.result()["status"] == "partial"
+
+
+def test_consul_empty_kv_listing_is_a_complete_readable_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = SimpleNamespace(args=SimpleNamespace(discover_time=5, discover_max_bytes=512), host="h", port=8500)
+    collector = DiscoveryCollector("consul", ctx, {"status": "open_no_auth"})
+    state = consul.ConsulLifecycleState(discovery_collector=collector)
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_kw: (404, None, None, False, False))
+    with consul._ConsulLifecycleReplay(state):
+        items, error = consul._consul_kv_dump("h", 8500, 1.0, scheme="http", insecure=False)
+    assert items == [] and error is None
+    assert collector.result()["status"] == "complete"
+
+
+def test_consul_discover_keeps_first_value_when_later_key_is_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = SimpleNamespace(args=SimpleNamespace(discover_time=5, discover_max_bytes=4096), host="h", port=8500)
+    collector = DiscoveryCollector("consul", ctx, {"status": "open_no_auth"})
+    state = consul.ConsulLifecycleState(discovery_collector=collector)
+    monkeypatch.setattr(
+        consul, "_consul_kv_keys_list", lambda *_a, **_kw: (["app/api_token", "private/password"], None)
+    )
+
+    def fake_get(_host: str, _port: int, path: str, _timeout: float, **_kwargs: Any):
+        if path.endswith("/private/password"):
+            return 403, {"message": "glpat-should-not-be-scanned"}, None, False, False
+        return (
+            200,
+            [{"Key": "app/api_token", "Value": base64.b64encode(b"glpat-abcdefghijklmnopqrst").decode()}],
+            None,
+            False,
+            False,
+        )
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", fake_get)
+    with consul._ConsulLifecycleReplay(state):
+        items, error = consul._consul_kv_dump("h", 8500, 1.0, scheme="http", insecure=False)
+    assert len(items or ()) == 1
+    assert error and "Forbidden" in error
+    result = collector.result()
+    assert result["status"] == "partial"
+    assert result["findings"]
+    assert all("private/password" not in finding["object_path"] for finding in result["findings"])
+
+
+def test_consul_discover_marks_malformed_kv_entry_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = SimpleNamespace(args=SimpleNamespace(discover_time=5, discover_max_bytes=4096), host="h", port=8500)
+    collector = DiscoveryCollector("consul", ctx, {"status": "open_no_auth"})
+    state = consul.ConsulLifecycleState(discovery_collector=collector)
+    monkeypatch.setattr(consul, "_consul_kv_keys_list", lambda *_a, **_kw: (["app/api_token"], None))
+    monkeypatch.setattr(
+        consul,
+        "_consul_get_json_any",
+        lambda *_a, **_kw: (
+            200,
+            [
+                {"Key": "app/api_token", "Value": base64.b64encode(b"glpat-abcdefghijklmnopqrst").decode()},
+                {"Value": "glpat-should-not-be-scanned"},
+            ],
+            None,
+            False,
+            False,
+        ),
+    )
+    with consul._ConsulLifecycleReplay(state):
+        items, error = consul._consul_kv_dump("h", 8500, 1.0, scheme="http", insecure=False)
+    assert len(items or ()) == 1
+    assert error and "invalid kv dump entry" in error
+    result = collector.result()
+    assert result["status"] == "partial"
+    assert result["findings"]
+    assert all("should-not-be-scanned" not in str(item) for item in result["findings"])

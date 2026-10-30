@@ -3,5 +3,9 @@ services:
     user: "0:0"
     privileged: true
     cgroup: private
-    entrypoint: [/bin/sh, -c]
-    command: ["mount -o remount,rw /sys/fs/cgroup && mkdir -p /sys/fs/cgroup/agent && echo $$$$ > /sys/fs/cgroup/agent/cgroup.procs && exec /bin/nomad agent -config=/etc/nomad/qa.hcl"]
+    init: false
+    entrypoint: [/bin/sh, /etc/nomad/execute-entrypoint.sh]
+    command: []
+    volumes: ["./nomad-execute-entrypoint.sh:/etc/nomad/execute-entrypoint.sh:ro"]
+    healthcheck:
+      disable: true

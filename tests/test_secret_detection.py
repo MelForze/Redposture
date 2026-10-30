@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
 
 import pytest
 
@@ -53,6 +54,49 @@ def test_long_non_url_value_does_not_stall_discovery() -> None:
     started = perf_counter()
     assert not sd.scan_value("a" * 120_000, object_path="$.value")
     assert perf_counter() - started < 2.0
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["GF_AUTH_ANONYMOUS_ENABLED=false", "REACT_APP_BUILD_SHA=4e9cd20", "APP_ENV=production"],
+)
+def test_plain_oci_environment_assignments_are_not_high_entropy_secrets(value: str) -> None:
+    assert sd.scan_value(value) == []
+
+
+def test_high_entropy_environment_value_remains_detectable() -> None:
+    matches = sd.scan_value("UNRELATED_VALUE=AbcDef0123+/zYxWvUtSrQpOnMlKjIh")
+    assert any(match.detector == "high_entropy" and match.value.startswith("AbcDef") for match in matches)
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "1/rp-gitlab-volume-12cbe2cf77fb/volume-10000000-single",
+        "1/rp-gitlab-volume-12cbe2cf77fb/volume-10000000-single/-/settings/integrations",
+        "https://gitlab.example/1/rp-gitlab-volume-12cbe2cf77fb/volume-10000000-single",
+        "/status/packages/6f0428ab2e67ebc1f553af47d4145a8e/runtime",
+    ],
+)
+def test_unlabelled_resource_routes_are_not_high_entropy_secrets(route: str) -> None:
+    assert not any(match.detector == "high_entropy" for match in sd.scan_value(route))
+
+
+def test_slash_containing_unlabelled_random_token_remains_detectable() -> None:
+    raw = b"".join(hashlib.sha256(f"4-{index}".encode()).digest() for index in range(3))
+    value = base64.b64encode(raw).decode().rstrip("=")
+    assert value.count("/") >= 2
+    assert any(match.detector == "high_entropy" for match in sd.scan_value(value))
+
+
+def test_explicit_token_with_route_is_still_detected() -> None:
+    value = "https://gitlab.example/1/project/-/settings?access_token=glpat-AbCdEf0123456789abcd"
+    assert "gitlab_token" in {match.detector for match in sd.scan_value(value)}
+
+
+@pytest.mark.parametrize("assignment", ["JWT_SECRET=rp-jwt-lab-2026", "CI_RUNNER_TOKEN=ci-runner-lab-2026"])
+def test_named_oci_secret_assignment_remains_detectable(assignment: str) -> None:
+    assert any(match.detector == "generic_secret" for match in sd.scan_value(assignment))
 
 
 # --- key-name detection over nested containers ------------------------------
@@ -175,29 +219,27 @@ def test_named_secret_is_not_duplicated_as_high_entropy_assignment():
     assert [(item.detector, item.value) for item in matches] == [("password", "OpaqueNeutralValue2026")]
 
 
+def test_xml_closing_tag_name_is_not_a_high_entropy_secret():
+    value = "<config><blockBuildWhenDownstreamBuilding>false</blockBuildWhenDownstreamBuilding><password>glpat-abcdefghijklmnopqrst</password></config>"
+    matches = sd.scan_value(value)
+    assert not any(item.value == "/blockBuildWhenDownstreamBuilding" for item in matches)
+    assert any(item.value == "glpat-abcdefghijklmnopqrst" for item in matches)
+
+
+def test_certificate_body_is_not_reported_as_many_high_entropy_secrets() -> None:
+    body = "MIICjTCCAXWgAwIBAgIUc05OQ2FJbWFnZUJ5dGVzTm90QVNlY3JldDAKBggq" * 4
+    certificate = f"-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----"
+    matches = sd.scan_value(certificate)
+    assert [match.detector for match in matches] == ["certificate"]
+
+
 def test_sensitive_key_with_embedded_json_reports_leaf_not_wrapper():
     matches = sd.scan_value({"credential": '{"password":"NestedValue2026"}'})
     assert any(item.value == "NestedValue2026" for item in matches)
     assert not any(item.value.startswith("{") for item in matches)
 
 
-# --- masking / fingerprint / decode ----------------------------------------
-
-
-def test_mask_secret_redacts_key_material():
-    assert sd.mask_secret("-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----") == "<private-key:redacted>"
-    assert sd.mask_secret("-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----") == "<certificate:redacted>"
-
-
-@pytest.mark.parametrize(("value", "expected"), [("short", "*****"), ("hunter2", "*******"), ("p@ss", "****")])
-def test_mask_secret_fully_hides_short_values(value, expected):
-    assert sd.mask_secret(value) == expected
-
-
-def test_mask_secret_partial_reveals_long_values():
-    # By design this is an audit tool: masking is a display convenience, not a
-    # security boundary, so the fingerprint-style first4...last4 reveal is intended.
-    assert sd.mask_secret("SuperSecretPassword123") == "Supe...d123"
+# --- fingerprint / decode ---------------------------------------------------
 
 
 def test_fingerprint_is_stable_and_distinct():
@@ -278,3 +320,24 @@ def test_boolean_and_mask_sentinels_under_secret_key_are_not_flagged(value):
 @pytest.mark.parametrize("value", ["password", "changeme", "hunter2value"])
 def test_weak_default_passwords_remain_detectable(value):
     assert sd.scan_value({"password": value})
+
+
+def test_oracle_xdb_namespace_uri_is_not_high_entropy_secret() -> None:
+    uri = "http://www.w3.org/2001/XMLSchema-instance"
+    assert sd.scan_value(uri, object_path="$.table.XDB.XDB_NS.nmspcuri") == []
+
+
+def test_explicit_url_credentials_still_detected_in_namespace_uri_field() -> None:
+    matches = sd.scan_value("postgres://user:pass@host:5432/db", object_path="$.table.XDB.XDB_NS.nmspcuri")
+    assert "url_credentials" in {match.detector for match in matches}
+
+
+def test_token_name_label_is_not_secret_but_explicit_token_still_is() -> None:
+    assert sd.scan_value({"token_name": "wallet_password"}) == []
+    matches = sd.scan_value({"token_name": "glpat-abcdefghijklmnopqrst"})
+    assert "gitlab_token" in {match.detector for match in matches}
+
+
+def test_name_field_exception_does_not_hide_actual_secret_fields() -> None:
+    assert sd.scan_value({"token_name_secret": "S3cretValue123"})
+    assert sd.scan_value({"nmspcuri_secret": "S3cretValue123"})

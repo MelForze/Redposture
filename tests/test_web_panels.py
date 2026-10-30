@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -675,6 +676,65 @@ def test_minio_console_dump_walks_all_buckets_and_markers(monkeypatch: pytest.Mo
     assert "/api/v1/buckets/one/objects?limit=10001&marker=a" in paths
 
 
+def test_minio_console_discovery_listing_uses_shared_fifteen_minute_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core import data_discovery
+    from redposture_core.modules.minio import discover
+
+    clock = [1.0]
+    fake_time = SimpleNamespace(monotonic=lambda: clock[0])
+    monkeypatch.setattr(web_panels, "time", fake_time)
+    monkeypatch.setattr(discover, "time", fake_time)
+    monkeypatch.setattr(data_discovery, "time", fake_time)
+    monkeypatch.setattr(web_panels, "HttpSessionPool", lambda **_kw: SimpleNamespace(close=lambda: None))
+    paths = []
+
+    def get(_pool, _base, path, **_kwargs):
+        paths.append(path)
+        if path == "/api/v1/buckets":
+            return _response(200, {"buckets": [{"name": "qa"}]})
+        if path == "/api/v1/buckets/qa/objects?limit=10001":
+            clock[0] = 401.0
+            return _response(200, {"objects": [{"name": "a.env"}], "nextMarker": "a.env", "isTruncated": True})
+        if path == "/api/v1/buckets/qa/objects?limit=10001&marker=a.env":
+            return _response(200, {"objects": [{"name": "b.env"}], "isTruncated": False})
+        if "/objects/download?" in path:
+            return _response(206, "ordinary content", headers={"Content-Range": "bytes 0-15/16"})
+        return _response(404, {})
+
+    monkeypatch.setattr(web_panels, "_get", get)
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(discover=True, timeout=1, secure=False, _proxy_config=None),
+        discovery_started_at=1.0,
+    )
+    result = web_panels.enumerate_panel(ctx, {"ui_product": "minio_console", "ui": {"endpoint": "http://qa"}})
+    report = result["ui"]["inventory"]["discover"]
+    assert "/api/v1/buckets/qa/objects?limit=10001&marker=a.env" in paths
+    assert report["objects_scanned"] == 2
+    assert report["partial_reasons"] == [], paths
+    assert report["partial"] is False, report
+
+
+def test_minio_console_discovery_items_include_full_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(web_panels, "HttpSessionPool", lambda **_kw: SimpleNamespace(close=lambda: None))
+    token = "glpat-abcdefghijklmnopqrstuv"
+
+    def get(_pool, _base, path, **_kwargs):
+        if path == "/api/v1/buckets":
+            return _response(200, {"buckets": [{"name": "qa"}]})
+        if path == "/api/v1/buckets/qa/objects?limit=10001":
+            return _response(200, {"objects": [{"name": "app.env"}]})
+        if "/objects/download?" in path:
+            return _response(200, f"API_TOKEN={token}")
+        return _response(404, {})
+
+    monkeypatch.setattr(web_panels, "_get", get)
+    ctx = SimpleNamespace(args=SimpleNamespace(discover=True, timeout=1, secure=False, _proxy_config=None))
+    result = web_panels.enumerate_panel(ctx, {"ui_product": "minio_console", "ui": {"endpoint": "http://qa"}})
+    report = result["ui"]["inventory"]["discover"]
+    assert any(entry["value"] == token for entry in report["records"])
+    assert any(token in item for item in report["items"])
+
+
 def test_minio_console_dump_descends_into_directory_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web_panels, "HttpSessionPool", lambda **_kw: SimpleNamespace(close=lambda: None))
     paths: list[str] = []
@@ -1090,6 +1150,54 @@ def test_dashboard_discovery_forwards_search_bodies_cleanup_and_limits(monkeypat
     assert requests[0][0] == {"path": ["/qa/_search"], "method": ["POST"]}
     assert requests[0][1] == b'{"size":1}' and requests[0][2]["kbn-xsrf"] == "redposture"
     assert requests[1][0]["method"] == ["DELETE"]
+
+
+def test_dashboard_discovery_streams_one_large_search_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core.modules.elastic import discover
+
+    token = "glpat-abcdefghijklmnopqrst"
+    page = json.dumps(
+        {
+            "hits": {
+                "total": {"value": 1, "relation": "eq"},
+                "hits": [{"_index": "qa", "_id": "one", "_source": {"message": "ordinary line\n" * 25_000 + token}}],
+            }
+        }
+    ).encode()
+    sent: list[tuple[str, bytes, dict[str, str]]] = []
+
+    class Pool:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def request_stream(self, _method: str, url: str, **kwargs: Any) -> Any:
+            sent.append((url, kwargs["body"], kwargs["headers"]))
+            for offset in range(0, len(page), 64 * 1024):
+                kwargs["on_chunk"](page[offset : offset + 64 * 1024])
+            return SimpleNamespace(status=200, headers={}, error=None, truncated=False)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(web_panels, "HttpSessionPool", Pool)
+
+    def run(request: Any, **_kwargs: Any) -> Any:
+        response = request(discover.DiscoverRequest("POST", "/qa/_search", body=b'{"size":1}'))
+        assert response.streamed_search is not None
+        assert response.streamed_search.summary()["hits"]["hits"][0]["_id"] == "one"
+        assert response.streamed_search.compact_source() == {"message": ""}
+        segments: list[str] = []
+        assert response.streamed_search.scan_large_fields(lambda _path, value: segments.append(value))
+        assert sum(token in segment for segment in segments) == 1
+        response.streamed_search.close()
+        return discover.DiscoverReport([], discover.DiscoverCoverage(), [])
+
+    monkeypatch.setattr(discover, "run_discovery", run)
+    ctx = SimpleNamespace(args=SimpleNamespace(discover=True, discover_time=60))
+    web_panels.enumerate_panel(ctx, {"ui_product": "kibana", "ui": {"endpoint": "http://qa"}})
+    assert sent[0][0] == "http://qa/api/console/proxy?path=%2Fqa%2F_search&method=POST"
+    assert sent[0][1] == b'{"size":1}'
+    assert sent[0][2]["kbn-xsrf"] == "redposture"
 
 
 def test_redis_insight_typed_hash_pages_and_repeated_cursor(monkeypatch: pytest.MonkeyPatch) -> None:

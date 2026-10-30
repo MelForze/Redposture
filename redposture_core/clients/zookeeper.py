@@ -19,6 +19,7 @@ from typing import Any, Literal
 
 from ..detection_io import DetectCall as _DetectCall
 from ..detection_io import run_sync as _run_detect_sync
+from ..discovery_bytes import SpoolBytes
 from .tls_cache import shared_client_ssl_context
 from .zookeeper_sasl import DigestMd5Client
 
@@ -197,15 +198,17 @@ def _recv_exact_detect_steps(sock: socket.socket, size: int):
     return bytes(data)
 
 
-def _recv_frame(sock: socket.socket) -> bytes:
-    return _run_detect_sync(_recv_frame_detect_steps(sock))
+def _recv_frame(sock: socket.socket, *, max_size: int | None = None) -> bytes:
+    return _run_detect_sync(_recv_frame_detect_steps(sock, max_size=max_size))
 
 
-def _recv_frame_detect_steps(sock: socket.socket):
+def _recv_frame_detect_steps(sock: socket.socket, *, max_size: int | None = None):
     raw_size = yield _DetectCall(_recv_exact, (sock, 4), {})
     (frame_size,) = struct.unpack(">i", raw_size)
     if frame_size <= 0 or frame_size > _ZK_MAX_FRAME:
         raise ValueError(f"invalid ZooKeeper frame size {frame_size}")
+    if max_size is not None and frame_size > max_size:
+        raise ValueError("ZooKeeper response exceeds discovery byte budget")
     return (yield _DetectCall(_recv_exact, (sock, frame_size), {}))
 
 
@@ -949,14 +952,25 @@ class _ZkClient:
         self._xid += 1
         return xid
 
-    def _request_with_xid(self, xid: int, opcode: int, payload: bytes = b"") -> tuple[int, bytes]:
-        return _run_detect_sync(self._request_with_xid_detect_steps(xid, opcode, payload))
+    def _request_with_xid(
+        self, xid: int, opcode: int, payload: bytes = b"", *, max_response_size: int | None = None
+    ) -> tuple[int, bytes]:
+        return _run_detect_sync(
+            self._request_with_xid_detect_steps(xid, opcode, payload, max_response_size=max_response_size)
+        )
 
-    def _request_with_xid_detect_steps(self, xid: int, opcode: int, payload: bytes = b""):
+    def _request_with_xid_detect_steps(
+        self, xid: int, opcode: int, payload: bytes = b"", *, max_response_size: int | None = None
+    ):
         sock = self._require_sock()
         frame = struct.pack(">ii", xid, int(opcode)) + payload
         yield _DetectCall(_send_frame, (sock, frame), {})
-        response = yield _DetectCall(_recv_frame, (sock,), {})
+        try:
+            response = yield _DetectCall(_recv_frame, (sock,), {"max_size": max_response_size})
+        except ValueError as exc:
+            if "discovery byte budget" in str(exc):
+                self._close_socket_only()
+            raise
         if len(response) < 16:
             raise ValueError("invalid ZooKeeper response header")
         rxid = struct.unpack(">i", response[0:4])[0]
@@ -966,11 +980,135 @@ class _ZkClient:
             raise ValueError(f"unexpected ZooKeeper xid {rxid} (expected {xid})")
         return (int(err), response[16:])
 
-    def _request(self, opcode: int, payload: bytes = b"") -> tuple[int, bytes]:
-        return _run_detect_sync(self._request_detect_steps(opcode, payload))
+    def _request(self, opcode: int, payload: bytes = b"", *, max_response_size: int | None = None) -> tuple[int, bytes]:
+        return _run_detect_sync(self._request_detect_steps(opcode, payload, max_response_size=max_response_size))
 
-    def _request_detect_steps(self, opcode: int, payload: bytes = b""):
-        return (yield _DetectCall(self._request_with_xid, (self._next_xid(), opcode, payload), {}))
+    def _request_discovery(
+        self, opcode: int, payload: bytes, *, deadline: float | None = None
+    ) -> tuple[int, bytes | SpoolBytes]:
+        """Read a complete discovery reply to disk without the ordinary frame cap."""
+        sock = self._require_sock()
+        xid = self._next_xid()
+
+        def read_exact(length: int) -> bytes:
+            result = bytearray()
+            while len(result) < length:
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("discover_time")
+                    settimeout = getattr(sock, "settimeout", None)
+                    if callable(settimeout):
+                        settimeout(min(self.timeout, remaining))
+                chunk = sock.recv(min(65_536, length - len(result)))
+                if not chunk:
+                    raise ConnectionError("unexpected EOF")
+                result.extend(chunk)
+            return bytes(result)
+
+        try:
+            _send_frame(sock, struct.pack(">ii", xid, opcode) + payload)
+            frame_size = struct.unpack(">i", read_exact(4))[0]
+            if frame_size < 16:
+                raise ValueError("invalid ZooKeeper response header")
+            frame = SpoolBytes()
+            remaining_size = frame_size
+            while remaining_size:
+                chunk = read_exact(min(65_536, remaining_size))
+                frame.write(chunk)
+                remaining_size -= len(chunk)
+            reader = frame.reader()
+            response_xid, _zxid, error = struct.unpack(">iqi", reader.read(16))
+            if response_xid != xid:
+                raise ValueError(f"unexpected ZooKeeper xid {response_xid} (expected {xid})")
+            body = frame[16:]
+            if isinstance(body, int):
+                raise ValueError("invalid ZooKeeper response payload")
+            return error, body
+        except (TimeoutError, ConnectionError, OSError, ValueError):
+            self._close_socket_only()
+            raise
+
+    def get_data_discovery(
+        self, path: str, *, deadline: float | None = None
+    ) -> tuple[bytes | SpoolBytes | None, int, dict[str, int] | None]:
+        payload = _encode_zk_string(path) + b"\x00"
+        error, response = self._request_discovery(_ZK_OP_GET_DATA, payload, deadline=deadline)
+        if error != _ZK_ERR_OK:
+            if len(response):
+                raise ValueError("unexpected ZooKeeper error payload")
+            return None, error, None
+        if not isinstance(response, SpoolBytes):
+            raise ValueError("invalid ZooKeeper getData payload")
+        reader = response.reader()
+        raw_size = reader.read(4)
+        if len(raw_size) != 4:
+            raise ValueError("invalid ZooKeeper data length")
+        value_size = struct.unpack(">i", raw_size)[0]
+        if value_size < -1 or value_size > len(response) - 72:
+            raise ValueError("invalid ZooKeeper data length")
+        value = None if value_size == -1 else response[4 : 4 + value_size]
+        if isinstance(value, int):
+            raise ValueError("invalid ZooKeeper data payload")
+        reader.seek(max(0, value_size), 1)
+        stat_bytes = reader.read(68)
+        stat, _ = _parse_stat(stat_bytes)
+        if reader.tell() != len(response):
+            raise ValueError("unexpected trailing ZooKeeper getData payload")
+        return value, error, stat
+
+    def read_children_discovery(
+        self, path: str, on_child: Callable[[str], None], *, deadline: float | None = None
+    ) -> tuple[int, dict[str, int] | None]:
+        """Visit child names individually rather than returning a large vector."""
+        payload = _encode_zk_string(path) + b"\x00"
+        error, response = self._request_discovery(_ZK_OP_GET_CHILDREN2, payload, deadline=deadline)
+        if error != _ZK_ERR_OK:
+            if len(response):
+                raise ValueError("unexpected ZooKeeper error payload")
+            return error, None
+        if not isinstance(response, SpoolBytes):
+            raise ValueError("invalid ZooKeeper children payload")
+        reader = response.reader()
+
+        def read_exact(length: int) -> bytes:
+            result = bytearray()
+            while len(result) < length:
+                chunk = reader.read(length - len(result))
+                if not chunk:
+                    raise ValueError("truncated ZooKeeper children payload")
+                result.extend(chunk)
+            return bytes(result)
+
+        count = struct.unpack(">i", read_exact(4))[0]
+        if count < 0:
+            raise ValueError("invalid ZooKeeper children count")
+        for _ in range(count):
+            size = struct.unpack(">i", read_exact(4))[0]
+            if size < 0 or size > len(response) - reader.tell() - 68:
+                raise ValueError("invalid ZooKeeper child name length")
+            try:
+                name = read_exact(size).decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError("invalid UTF-8 in ZooKeeper child name") from exc
+            on_child(name)
+        stat, _ = _parse_stat(read_exact(68))
+        if reader.tell() != len(response):
+            raise ValueError("unexpected trailing ZooKeeper getChildren2 payload")
+        if count != stat["num_children"] and not (
+            path == _KEEPER_SYSTEM_PREFIX or path.startswith(f"{_KEEPER_SYSTEM_PREFIX}/")
+        ):
+            raise ValueError("ZooKeeper children vector/stat count mismatch")
+        return error, stat
+
+    def _request_detect_steps(self, opcode: int, payload: bytes = b"", *, max_response_size: int | None = None):
+        return (
+            yield _DetectCall(
+                self._request_with_xid,
+                (self._next_xid(), opcode, payload),
+                {"max_response_size": max_response_size},
+            )
+        )
 
     def auth_digest(self, username: str, password: str) -> tuple[bool, str | None]:
         raw_auth = f"{username}:{password}".encode("utf-8", errors="replace")
@@ -1021,13 +1159,21 @@ class _ZkClient:
     def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
         return _run_detect_sync(self._get_children2_detect_steps(path))
 
-    def _get_children2_detect_steps(self, path: str):
+    def get_children2_limited(
+        self, path: str, max_bytes: int
+    ) -> tuple[list[str] | None, int, dict[str, int] | None, int]:
+        return _run_detect_sync(self._get_children2_detect_steps(path, max_bytes=max_bytes))
+
+    def _get_children2_detect_steps(self, path: str, *, max_bytes: int | None = None):
         payload = _encode_zk_string(path) + b"\x00"
-        err, response_payload = yield _DetectCall(self._request, (_ZK_OP_GET_CHILDREN2, payload), {})
+        # Header, vector count and stat take 88 bytes. Charge only the encoded
+        # child names against the discovery source budget.
+        request_options = {"max_response_size": max(0, max_bytes) + 88} if max_bytes is not None else {}
+        err, response_payload = yield _DetectCall(self._request, (_ZK_OP_GET_CHILDREN2, payload), request_options)
         if err != _ZK_ERR_OK:
             if response_payload:
                 raise ValueError("unexpected ZooKeeper error payload")
-            return (None, err, None)
+            return (None, err, None, 0) if max_bytes is not None else (None, err, None)
         children, offset = _parse_children_vector(response_payload, 0)
         if children is None:
             raise ValueError("invalid null ZooKeeper children vector")
@@ -1038,14 +1184,24 @@ class _ZkClient:
             raise ValueError("ZooKeeper children vector/stat count mismatch")
         if offset != len(response_payload):
             raise ValueError("unexpected trailing ZooKeeper getChildren2 payload")
+        if max_bytes is not None:
+            return (children, err, stat, max(0, len(response_payload) - 72))
         return (children, err, stat)
 
     def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
         return _run_detect_sync(self._get_data_detect_steps(path))
 
-    def _get_data_detect_steps(self, path: str):
+    def get_data_limited(self, path: str, max_bytes: int) -> tuple[bytes | None, int, dict[str, int] | None]:
+        return _run_detect_sync(self._get_data_detect_steps(path, max_bytes=max_bytes))
+
+    def _get_data_detect_steps(self, path: str, *, max_bytes: int | None = None):
         payload = _encode_zk_string(path) + b"\x00"
-        err, response_payload = yield _DetectCall(self._request, (_ZK_OP_GET_DATA, payload), {})
+        # Reply header (16), value length (4) and stat (68) precede/follow the
+        # value. Reject an oversized frame after its length, before its body.
+        max_response_size = None if max_bytes is None else max(0, max_bytes) + 88
+        err, response_payload = yield _DetectCall(
+            self._request, (_ZK_OP_GET_DATA, payload), {"max_response_size": max_response_size}
+        )
         if err != _ZK_ERR_OK:
             if response_payload:
                 raise ValueError("unexpected ZooKeeper error payload")
@@ -1145,8 +1301,12 @@ def _enumerate_znodes(
     auth_mechanism: str = "digest",
     transport_config: ZkTransportConfig | None = None,
     nested_scheduler: Any | None = None,
+    deadline: float | None = None,
+    byte_budget: list[int] | None = None,
 ) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
-    worker_count = max(1, int(enum_workers))
+    # Keep discovery reads serial when using one per-response limit; concurrent
+    # sessions would need a separate reservation for their in-flight buffers.
+    worker_count = 1 if byte_budget is not None else max(1, int(enum_workers))
     parallel_capable = all(hasattr(client, attr) for attr in ("host", "port", "timeout"))
     if worker_count > 1 and parallel_capable:
         return _enumerate_znodes_parallel(
@@ -1163,6 +1323,7 @@ def _enumerate_znodes(
             auth_mechanism=auth_mechanism,
             transport_config=transport_config,
             nested_scheduler=nested_scheduler,
+            deadline=deadline,
         )
 
     node_budget = max(0, int(max_znodes))
@@ -1192,11 +1353,25 @@ def _enumerate_znodes(
     last_report_processed = 0
 
     while queue:
+        if deadline is not None and time.monotonic() >= deadline:
+            return listed_nodes, total_count, True, listed_meta, "discover_time"
+        if byte_budget is not None and byte_budget[0] <= 0:
+            return listed_nodes, total_count, True, listed_meta, "discover_max_bytes"
         parent = queue.popleft()
         processed_parents += 1
         try:
-            children, err, _stat = client.get_children2(parent)
+            if byte_budget is not None and callable(getattr(client, "get_children2_limited", None)):
+                children, err, _stat, child_bytes = client.get_children2_limited(parent, byte_budget[0])
+                if child_bytes > byte_budget[0]:
+                    return listed_nodes, total_count, True, listed_meta, "discover_max_bytes"
+            else:
+                children, err, _stat = client.get_children2(parent)
+                if byte_budget is not None and children is not None:
+                    if sum(4 + len(child.encode("utf-8")) for child in children) > byte_budget[0]:
+                        return listed_nodes, total_count, True, listed_meta, "discover_max_bytes"
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            if byte_budget is not None and "discovery byte budget" in str(exc):
+                return listed_nodes, total_count, True, listed_meta, "discover_max_bytes"
             return (
                 listed_nodes,
                 total_count,
@@ -1322,6 +1497,7 @@ def _enumerate_znodes_parallel(
     auth_mechanism: str = "digest",
     transport_config: ZkTransportConfig | None = None,
     nested_scheduler: Any | None = None,
+    deadline: float | None = None,
 ) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
     worker_count = max(1, int(enum_workers))
     task_queue: Queue[str | None] = Queue()
@@ -1491,6 +1667,9 @@ def _enumerate_znodes_parallel(
     enum_error: str | None = None
     try:
         while in_flight > 0 and enum_error is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                enum_error = "discover_time"
+                break
             try:
                 item = result_queue.get(timeout=0.2)
             except Empty:
@@ -1584,7 +1763,7 @@ def _enumerate_znodes_parallel(
         for thread in threads:
             thread.join(timeout=1.0)
 
-    truncated = budget_truncated or (collect_paths and total_count > len(listed_nodes))
+    truncated = budget_truncated or enum_error == "discover_time" or (collect_paths and total_count > len(listed_nodes))
     if progress_hook is not None:
         progress_hook(
             {

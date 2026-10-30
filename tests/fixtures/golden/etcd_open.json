@@ -12,6 +12,8 @@
     "auth_required": false,
     "content_discovery": {
       "bytes_inspected": 713,
+      "bytes_read": 1373,
+      "emitted_fingerprints": [],
       "findings": [
         {
           "confidence": "high",
@@ -19,7 +21,7 @@
           "object_path": "$.key_value_entries./redposture/app/api_key.api_key",
           "source": "anonymous",
           "type": "api_key",
-          "value": "rp-d...2026"
+          "value": "rp-demo-key-2026"
         },
         {
           "confidence": "high",
@@ -27,7 +29,7 @@
           "object_path": "$.key_value_entries./redposture/cache/redis_uri.redis_uri",
           "source": "anonymous",
           "type": "connection_string",
-          "value": "redi...79/0"
+          "value": "redis://default:redis@redis:6379/0"
         },
         {
           "confidence": "high",
@@ -35,7 +37,7 @@
           "object_path": "$.key_value_entries./redposture/cache/redis_uri.redis_uri",
           "source": "anonymous",
           "type": "url_credentials",
-          "value": "redi...79/0"
+          "value": "redis://default:redis@redis:6379/0"
         },
         {
           "confidence": "high",
@@ -43,7 +45,7 @@
           "object_path": "$.key_value_entries./redposture/db/password.password",
           "source": "anonymous",
           "type": "password",
-          "value": "********"
+          "value": "postgres"
         },
         {
           "confidence": "high",
@@ -51,7 +53,7 @@
           "object_path": "$.key_value_entries./redposture/db/readonly_password.readonly_password",
           "source": "anonymous",
           "type": "password",
-          "value": "********"
+          "value": "readonly"
         },
         {
           "confidence": "high",
@@ -59,7 +61,7 @@
           "object_path": "$.key_value_entries./redposture/integrations/slack/webhook.webhook",
           "source": "anonymous",
           "type": "webhook",
-          "value": "http...CTED"
+          "value": "https://hooks.slack.com/services/T000/B000/REDACTED"
         },
         {
           "confidence": "high",
@@ -67,7 +69,7 @@
           "object_path": "$.key_value_entries./redposture/v3/datasource/admin_password.admin_password",
           "source": "anonymous",
           "type": "password",
-          "value": "*****"
+          "value": "admin"
         },
         {
           "confidence": "high",
@@ -75,7 +77,7 @@
           "object_path": "$.key_value_entries./redposture/v3/datasource/postgres_dsn.postgres_dsn",
           "source": "anonymous",
           "type": "connection_string",
-          "value": "post...able"
+          "value": "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
         },
         {
           "confidence": "high",
@@ -83,7 +85,7 @@
           "object_path": "$.key_value_entries./redposture/v3/datasource/postgres_dsn.postgres_dsn",
           "source": "anonymous",
           "type": "url_credentials",
-          "value": "post...able"
+          "value": "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
         },
         {
           "confidence": "high",
@@ -91,7 +93,7 @@
           "object_path": "$.key_value_entries./redposture/v3/kafka/sasl_password.sasl_password",
           "source": "anonymous",
           "type": "password",
-          "value": "Kfka...2026"
+          "value": "Kfka-M0nitor-2026"
         },
         {
           "confidence": "high",
@@ -99,7 +101,7 @@
           "object_path": "$.key_value_entries./redposture/v3/observability/remote_write.remote_write",
           "source": "anonymous",
           "type": "url_credentials",
-          "value": "http...rite"
+          "value": "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
         },
         {
           "confidence": "high",
@@ -107,9 +109,11 @@
           "object_path": "$.key_value_entries./redposture/v3/token.token",
           "source": "anonymous",
           "type": "generic_secret",
-          "value": "rp-v...2026"
+          "value": "rp-v3-token-2026"
         }
       ],
+      "live_emitted": false,
+      "partial_reasons": [],
       "source": "anonymous",
       "status": "complete"
     },
@@ -119,6 +123,7 @@
       "etcd.product_fingerprint"
     ],
     "detection_status": "confirmed",
+    "dump_error": null,
     "dump_keys": true,
     "effective_password": null,
     "effective_username": null,
@@ -349,27 +354,7 @@
         }
       ]
     },
-    "key_values": [
-      "/inventory/services/grafana/url:http://grafana:3000",
-      "/inventory/services/kafka/bootstrap:kafka-open:9092",
-      "/inventory/services/prometheus/url:http://prometheus:9090",
-      "/redposture/app/api_key:rp-demo-key-2026",
-      "/redposture/cache/redis_uri:redis://default:redis@redis:6379/0",
-      "/redposture/db/password:postgres",
-      "/redposture/db/readonly_password:readonly",
-      "/redposture/env:lab",
-      "/redposture/feature_flags/new_ui:true",
-      "/redposture/integrations/pagerduty/routing_key:pd_demo_routing_key_2026",
-      "/redposture/integrations/slack/webhook:https://hooks.slack.com/services/T000/B000/REDACTED",
-      "/redposture/v3/datasource/admin_password:admin",
-      "/redposture/v3/datasource/admin_user:admin",
-      "/redposture/v3/datasource/postgres_dsn:postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable",
-      "/redposture/v3/env:lab",
-      "/redposture/v3/kafka/sasl_password:Kfka-M0nitor-2026",
-      "/redposture/v3/kafka/sasl_username:metrics_collector",
-      "/redposture/v3/observability/remote_write:https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write",
-      "/redposture/v3/token:rp-v3-token-2026"
-    ],
+    "key_values": null,
     "keys": [
       "/inventory/services/grafana/url",
       "/inventory/services/kafka/bootstrap",

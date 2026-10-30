@@ -50,7 +50,7 @@ def configure_vault_parser(
     inventory.add_argument("--show-mounts", action="store_true", help="List visible secrets engines and their types.")
     inventory.add_argument("--show-auth", action="store_true", help="List visible authentication methods.")
     inventory.add_argument("--mount", default=None, metavar="path", help="Limit --discover to this KV mount path.")
-    add_discovery_budget_flags(inventory, default_time=300.0, default_bytes=50 * 1024 * 1024)
+    add_discovery_budget_flags(inventory)
     tls.add_argument("--tls-ca", default=None, metavar="file", help="CA bundle for Vault TLS verification.")
     tls.add_argument("--tls-cert", default=None, metavar="file", help="Client certificate for mTLS.")
     tls.add_argument("--tls-key", default=None, metavar="file", help="Client private key for mTLS.")

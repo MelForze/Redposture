@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,12 +11,106 @@ from redposture_core import stage_mongodb as mongodb
 from redposture_core.cli_args import parse_args
 from redposture_core.modules.mongodb import actions as mongodb_actions
 from redposture_core.modules.mongodb import policy as mongodb_policy
+from redposture_core.storage_discovery import DiscoveryCollector
 from tests.stage_runtime_helpers import run_module_targets_for_test
 
 
 class _Cursor(list):
     def limit(self, value: int):
         return _Cursor(self[:value])
+
+
+def test_mongodb_discovery_scans_each_cursor_document_before_next_read() -> None:
+    emitted: list[str] = []
+
+    class Cursor:
+        def limit(self, _value: int):
+            return self
+
+        def batch_size(self, _value: int):
+            return self
+
+        def __iter__(self):
+            yield {"token": "glpat-abcdefghijklmnopqrst"}
+            assert emitted, "first finding must be emitted before the second cursor item"
+            yield {"note": "ordinary text"}
+
+        def close(self):
+            pass
+
+    class Collection:
+        def find(self, _query: object, _projection: object):
+            return Cursor()
+
+    class Database:
+        def __getitem__(self, _collection: str):
+            return Collection()
+
+        def list_collection_names(self):
+            return ["docs"]
+
+    class Raw:
+        def __getitem__(self, _database: str):
+            return Database()
+
+    client = mongodb_actions.MongoAuditClient(Raw())
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(discover_time=5, discover_max_bytes=1024),
+        host="qa",
+        port=27017,
+        live_emit=lambda lines: emitted.extend(lines),
+    )
+    collector = DiscoveryCollector("mongodb", ctx, {"status": "open_no_auth"})
+    result = mongodb_actions._collect_mongodb_data(
+        client,
+        database_names=["qa"],
+        selected_database=None,
+        collection_targets=[],
+        collection_targets_by_database={},
+        show_databases=False,
+        show_collections=False,
+        show_indexes=False,
+        dump_documents=True,
+        dump_limit=10,
+        query_filter=None,
+        projection=None,
+        discovery_collector=collector,
+    )
+    assert result["content_discovery"]["status"] == "complete"
+    assert len(result["content_discovery"]["findings"]) == 2
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+    assert len(result["documents"]) == 2
+
+
+@pytest.mark.parametrize("server_order", [["service_tokens", "audit_events"], ["audit_events", "service_tokens"]])
+def test_mongodb_discovery_uses_stable_collection_order_for_duplicate_values(server_order: list[str]) -> None:
+    class Client:
+        def list_collection_names(self, _database: str) -> list[str]:
+            return server_order
+
+        def find_documents(self, _database: str, _collection: str, **_kwargs: Any) -> list[dict[str, str]]:
+            return [{"token": "glpat-abcdefghijklmnopqrst"}]
+
+    ctx = SimpleNamespace(args=SimpleNamespace(discover_time=5), host="qa", port=27017)
+    collector = DiscoveryCollector("mongodb", ctx, {"status": "open_no_auth"})
+    result = mongodb_actions._collect_mongodb_data(
+        Client(),
+        database_names=["qa"],
+        selected_database=None,
+        collection_targets=[],
+        collection_targets_by_database={},
+        show_databases=False,
+        show_collections=False,
+        show_indexes=False,
+        dump_documents=True,
+        dump_limit=None,
+        query_filter=None,
+        projection=None,
+        discovery_collector=collector,
+    )
+    findings = result["content_discovery"]["findings"]
+    assert findings
+    assert findings[0]["object_path"].startswith("$.database.qa.collection.audit_events")
 
 
 @pytest.mark.parametrize(

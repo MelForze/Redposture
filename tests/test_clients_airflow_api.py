@@ -33,6 +33,22 @@ class _Resp:
         self.error = None
 
 
+def test_discovery_get_forwards_timeout_and_disables_retries() -> None:
+    class _Pool:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            return _Resp(200, b"{}", {})
+
+    pool = _Pool()
+    client = airflow_api.AirflowClient(pool, scheme="http", host="127.0.0.1", port=8080)
+    assert client.get("/api/v1/dags", timeout=0.2).http_status == 200
+    assert pool.calls[0][2]["timeout"] == 0.2
+    assert pool.calls[0][2]["retries"] == 0
+
+
 _FAB_FORM = (
     b'<link href="/static/appbuilder/css/ab.css" rel="stylesheet">'
     b'<form name="login" method="post" action="">'

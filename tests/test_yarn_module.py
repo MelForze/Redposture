@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from redposture_core.clients.http_api import HttpResponse
+from redposture_core.discovery_values import DiskBackedText
 
 INFO = {
     "clusterInfo": {
@@ -170,11 +171,31 @@ def test_full_snapshot_is_bounded_and_reports_unknown_coverage() -> None:
     assert len(ctx.lifecycle_state.http.calls) == 3
 
 
+def test_discover_scans_all_apps_beyond_inventory_snapshot_limit() -> None:
+    rows = [
+        {
+            **APP,
+            "id": f"application_1234_{index:04}",
+            "diagnostics": "glpat-abcdefghijklmnopqrst" if index == 5000 else "ordinary",
+        }
+        for index in range(5001)
+    ]
+    ctx = context({"/ws/v1/cluster/apps": (200, {"apps": {"app": rows}})}, discover=True, discover_time=60)
+    result = actions().data_record(
+        ctx,
+        {"api_endpoint": "http://localhost:8088", "is_yarn": True, "status": "open_no_auth"},
+    )
+    assert len(result["apps"]) <= 5000
+    assert len(result["app_specs"]) <= 5000
+    assert result["content_discovery"]["status"] == "complete"
+    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+
+
 def test_discovery_reuses_same_origin_valid_application_snapshot() -> None:
     spec = {**APP, "diagnostics": "password=qa-secret", "trackingUrl": "http://foreign/private"}
     ctx = context(
         {
-            "/ws/v1/cluster/apps?limit=5000": (200, {"apps": {"app": [spec, spec]}}),
+            "/ws/v1/cluster/apps": (200, {"apps": {"app": [spec, spec]}}),
         },
         discover=True,
     )
@@ -321,7 +342,7 @@ def test_detection_values_and_auth_colors() -> None:
 def test_policy_rejects_unpaired_tls_and_invalid_budgets() -> None:
     policy = importlib.import_module("redposture_core.modules.yarn.policy")
     errors: list[str] = []
-    for args in ({"tls_cert": "client.pem"}, {"tls_key": "key.pem"}, {"discover_time": 0}, {"discover_max_bytes": -1}):
+    for args in ({"tls_cert": "client.pem"}, {"tls_key": "key.pem"}, {"discover_time": 0}):
         assert policy.validate_args(SimpleNamespace(**args), SimpleNamespace(error=errors.append)) == 2
     assert policy.validate_args(SimpleNamespace(), SimpleNamespace(error=errors.append)) is None
 
@@ -349,7 +370,7 @@ def test_real_hadoop_empty_wrappers_are_accessible_without_inventing_auth() -> N
 
 @pytest.mark.parametrize("identifier", ["application_1234_" + "1" * 4096, "application_1_1\n"])
 def test_discovery_rejects_unbounded_or_control_character_ids(identifier: str) -> None:
-    ctx = context({"/ws/v1/cluster/apps?limit=5000": (200, {"apps": {"app": [{"id": identifier}]}})}, discover=True)
+    ctx = context({"/ws/v1/cluster/apps": (200, {"apps": {"app": [{"id": identifier}]}})}, discover=True)
     result = actions().data_record(ctx, actions().detect_record(ctx))
     assert result["apps_access"] == "unknown"
     assert result["app_specs"] == []
@@ -372,3 +393,79 @@ def test_metric_resource_counts_are_observed_values_not_verdicts(value: int) -> 
     assert any(f'"appsRunning"={value}' in text and painted == "orange" for text, painted in console.paints)
     assert any(f'"totalNodes"={value}' in text and painted == "orange" for text, painted in console.paints)
     assert any('"allocatedMB"=1024' in text and painted == "orange" for text, painted in console.paints)
+
+
+def test_discover_streams_large_application_list_after_response_cap() -> None:
+    ctx = context(
+        {"/ws/v1/cluster/apps": HttpResponse(200, b"{", {}, truncated=True)}, discover=True, discover_max_bytes=4096
+    )
+    detected = actions().detect_record(ctx)
+    payload = json.dumps(
+        {
+            "apps": {
+                "app": [
+                    {
+                        "id": "application_1234_0001",
+                        "description": " " * 8000,
+                        "name": "glpat-abcdefghijklmnopqrst",
+                    }
+                ]
+            }
+        }
+    ).encode()
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        for offset in range(0, len(payload), 257):
+            on_chunk(payload[offset : offset + 257])
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    record = actions().data_record(ctx, detected)
+    assert record["content_discovery"]["status"] == "complete"
+    assert record["app_discovery_partial"] is False
+    assert any(item["type"] == "gitlab_token" for item in record["content_discovery"]["findings"])
+
+
+def test_discover_streamed_app_keeps_full_long_assignment_in_description() -> None:
+    token = "glpat-" + "Ab0" * 5000
+    ctx = context(
+        {"/ws/v1/cluster/apps": HttpResponse(200, b"{", {}, truncated=True)}, discover=True, discover_max_bytes=4096
+    )
+    detected = actions().detect_record(ctx)
+    payload = json.dumps({"apps": {"app": [{**APP, "description": "API_TOKEN=" + token}]}}).encode()
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        for offset in range(0, len(payload), 257):
+            on_chunk(payload[offset : offset + 257])
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    report = actions().data_record(ctx, detected)["content_discovery"]
+    assert report["status"] == "complete", report["partial_reasons"]
+    values = [item["value"] for item in report["findings"]]
+    assert len(values) == 1 and isinstance(values[0], DiskBackedText)
+    assert "".join(values[0].iter_text_chunks()) == token
+
+
+@pytest.mark.parametrize("invalid", ["id", "collection"])
+def test_discover_streamed_apps_rejects_invalid_collection(invalid: str) -> None:
+    ctx = context({"/ws/v1/cluster/apps": HttpResponse(200, b"{", {}, truncated=True)}, discover=True)
+    detected = actions().detect_record(ctx)
+    body: dict[str, Any] = {"apps": {"app": [{"id": "application_1234_0001", "name": "glpat-abcdefghijklmnopqrst"}]}}
+    if invalid == "id":
+        body["apps"]["app"][0]["id"] = "foreign"
+    else:
+        body["apps"]["app"] = {}
+    payload = json.dumps(body).encode()
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        on_chunk(payload)
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    record = actions().data_record(ctx, detected)
+    assert record["content_discovery"]["status"] == "partial"
+    assert record["app_discovery_partial"] is True

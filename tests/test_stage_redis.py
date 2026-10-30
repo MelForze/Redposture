@@ -1511,9 +1511,14 @@ def test_redis_defcreds_checks_full_catalog_after_late_default_success(
     assert commands == [
         ("PING",),
         *[
-            ("AUTH", username, password)
+            command
             for username, password in sorted(
                 redis_actions._REDIS_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
+            )
+            for command in (
+                [("AUTH", username, password), ("DBSIZE",)]
+                if (username, password) == ("default", "password")
+                else [("AUTH", username, password)]
             )
         ],
         ("DBSIZE",),
@@ -1528,6 +1533,53 @@ def test_redis_defcreds_checks_full_catalog_after_late_default_success(
     assert len(rendered) == len(redis_actions._REDIS_DEFAULT_CREDENTIALS)
     assert any("[+] default:password" in line for line in rendered)
     assert any("[-] dev:dev" in line for line in rendered)
+
+
+def test_redis_defcreds_counts_keys_for_each_verified_pair_without_reusing_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pairs = (("admin", "bad"), ("default", "one"), ("default", "two"), ("viewer", "read"))
+    monkeypatch.setattr(redis_actions, "_REDIS_DEFAULT_CREDENTIALS", pairs)
+    monkeypatch.setattr(redis_actions.socket, "create_connection", lambda *_args, **_kwargs: _DummySocket())
+    identities: dict[int, tuple[str, str]] = {}
+    counted: list[tuple[str, str]] = []
+
+    def send_cmd(sock: object, *parts: object):
+        command = tuple(str(item) for item in parts)
+        if command == ("PING",):
+            return "error", "NOAUTH Authentication required."
+        if command[0] == "AUTH":
+            pair = (command[1], command[2])
+            if pair == ("admin", "bad"):
+                return "error", "WRONGPASS invalid credentials"
+            identities[id(sock)] = pair
+            return "simple", "OK"
+        if command == ("DBSIZE",):
+            pair = identities[id(sock)]
+            counted.append(pair)
+            if pair == ("viewer", "read"):
+                return "error", "NOPERM this user has no permissions to run DBSIZE"
+            return "integer", {("default", "one"): 4, ("default", "two"): 7}[pair]
+        pytest.fail(f"unexpected Redis command: {command!r}")
+
+    monkeypatch.setattr(redis_actions, "_send_cmd", send_cmd)
+    args = parse_args(["redis", "-t", "127.0.0.1", "--port", "6379", "--defcreds", "-f", "json"])
+    result = _run_redis_lifecycle_result(args)
+    record = result.records[0]
+    attempts = {(item["username"], item["password"]): item for item in record["attempted_credentials"]}
+    assert (record["effective_username"], record["effective_password"]) == ("default", "one")
+    assert attempts[("default", "one")]["key_count"] == 4
+    assert attempts[("default", "two")]["key_count"] == 7
+    assert attempts[("viewer", "read")]["key_count"] is None
+    assert "NOPERM" in attempts[("viewer", "read")]["key_count_error"]
+    assert attempts[("viewer", "read")]["status"] == "weak_default_creds"
+    assert counted.count(("default", "one")) >= 1
+    assert ("default", "two") in counted and ("viewer", "read") in counted
+    lines = redis_actions._format_credential_attempts_records(record, "txt")
+    assert any("[+] default:one (keys:4)" in line for line in lines)
+    assert any("[+] default:two (keys:7)" in line for line in lines)
+    assert any("[+] viewer:read (keys:unknown)" in line for line in lines)
+    assert any("[-] admin:bad" in line for line in lines)
 
 
 def test_redis_legacy_auth_fallback_is_deduplicated_by_password_without_skipping_acl_pairs(

@@ -26,6 +26,36 @@ from redposture_core.cli_args import (
 from redposture_core.module_registry import COMMAND_SPECS
 
 
+@pytest.mark.parametrize(
+    "command",
+    ["airflow", "elastic", "kafka", "clickhouse", "docker", "docker-registry", "kubeapi", "minio", "portainer"],
+)
+def test_http_modules_accept_repeated_custom_headers(command: str) -> None:
+    parsed = parse_args(
+        [command, "-t", "127.0.0.1:9200", "-H", "Authorization: Bearer one:two", "--header", "X-Tenant: qa"]
+    )
+    assert parsed.http_headers == [("Authorization", "Bearer one:two"), ("X-Tenant", "qa")]
+
+
+@pytest.mark.parametrize("value", ["missing-colon", ": value", "Bad Name: value", "X-Test: a\r\nb"])
+def test_http_header_rejects_malformed_values(value: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["elastic", "-t", "127.0.0.1:9200", "-H", value])
+    assert exc.value.code == 2
+
+
+def test_native_only_module_does_not_offer_http_header() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["postgres", "-t", "127.0.0.1:5432", "-H", "X-Tenant: qa"])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("action", ["collect", "trigger"])
+def test_exporters_accept_custom_http_headers(action: str) -> None:
+    parsed = parse_args(["exporters", action, "-t", "127.0.0.1:9100", "-H", "X-Tenant: qa"])
+    assert parsed.http_headers == [("X-Tenant", "qa")]
+
+
 def test_parse_args_without_args_shows_help_and_exits_cleanly() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args([])
@@ -93,7 +123,7 @@ def test_cli_scalar_type_helpers_reject_invalid_values() -> None:
         ["redis", "-t", "10.0.0.1", "--workers", "0"],
         ["redis", "-t", "10.0.0.1", "--retries", "-1"],
         ["redis", "-t", "10.0.0.1", "--format", "xml"],
-        ["exporters", "scan", "-t", "10.0.0.1", "--timeout", "0"],
+        ["exporters", "collect", "-t", "10.0.0.1", "--timeout", "0"],
         ["exporters", "collect", "-t", "10.0.0.1", "--max-inflight", "0"],
         ["exporters", "trigger", "-t", "10.0.0.1", "--postgres-port", "99999"],
         ["oracle", "-t", "10.0.0.1", "--protocol", "udp"],
@@ -155,7 +185,7 @@ def test_parse_args_legacy_top_level_modes_and_selfcert_paths() -> None:
         parse_args(["redis", "--selfcert"])
     assert exc.value.code == 2
 
-    for legacy_command in ("listen", "scan", "collect", "trigger"):
+    for legacy_command in ("listen", "collect", "collect", "trigger"):
         with pytest.raises(SystemExit) as exc:
             parse_args([legacy_command])
         assert exc.value.code == 2
@@ -186,8 +216,8 @@ def test_help_color_is_disabled_when_supported() -> None:
     exporters_parser = root_action.choices["exporters"]
     assert getattr(exporters_parser, "color", None) is False
     exporters_action = exporters_parser._subparsers._group_actions[0]
-    scan_parser = exporters_action.choices["scan"]
-    assert getattr(scan_parser, "color", None) is False
+    collect_parser = exporters_action.choices["collect"]
+    assert getattr(collect_parser, "color", None) is False
 
 
 def test_exporters_listen_parser_builder_wires_shared_flags() -> None:
@@ -381,11 +411,9 @@ def test_exporters_subcommands_help_has_grouped_sections() -> None:
     exporters_parser = root_action.choices["exporters"]
     exporters_action = exporters_parser._subparsers._group_actions[0]
 
-    scan_help = exporters_action.choices["scan"].format_help()
     collect_help = exporters_action.choices["collect"].format_help()
     trigger_help = exporters_action.choices["trigger"].format_help()
 
-    assert "\nCommon:\n" in scan_help and "\nActions:\n" in scan_help
     assert "\nCommon:\n" in collect_help and "\nActions:\n" in collect_help
     assert "\nCommon:\n" in trigger_help
     assert "\nTrigger callbacks:\n" in trigger_help
@@ -545,7 +573,7 @@ def test_docker_help_sections_and_parse_flags() -> None:
     assert args.exec_cmd == "id"
 
 
-def test_scan_host_flags_parse_repeatable_out_target_values() -> None:
+def test_collect_host_flags_parse_repeatable_out_target_values() -> None:
     args = parse_args(
         [
             "redis",
@@ -775,22 +803,22 @@ def test_trigger_listen_seconds_flag_is_parsed() -> None:
     assert args.listen_seconds == 8.0
 
 
-def test_exporters_scan_flags_are_parsed() -> None:
-    args = parse_args(["exporters", "scan", "-t", "10.0.0.1", "-p", "9100,9115"])
+def test_exporters_collect_flags_are_parsed() -> None:
+    args = parse_args(["exporters", "collect", "-t", "10.0.0.1", "-p", "9100,9115"])
     assert args.command == COMMAND_EXPORTERS
-    assert args.exporters_action == "scan"
+    assert args.exporters_action == "collect"
     assert args.targets == "10.0.0.1"
     assert args.ports == "9100,9115"
 
 
-@pytest.mark.parametrize("action", ["scan", "collect", "trigger"])
+@pytest.mark.parametrize("action", ["collect", "collect", "trigger"])
 def test_exporter_actions_accept_singular_port_alias(action: str) -> None:
     args = parse_args(["exporters", action, "-t", "10.0.0.1:8085", "--port", "9100"])
 
     assert args.ports == "9100"
 
 
-@pytest.mark.parametrize("action", ["scan", "collect", "trigger"])
+@pytest.mark.parametrize("action", ["collect", "collect", "trigger"])
 def test_exporter_tls_skips_server_verification_by_default(action: str) -> None:
     argv = ["exporters", action, "-t", "127.0.0.1"]
     assert parse_args(argv).insecure is True
@@ -828,11 +856,11 @@ def test_trigger_rejects_removed_proxmox_tls_flags(flag: str) -> None:
     assert exc.value.code == 2
 
 
-def test_scan_flags_are_parsed() -> None:
+def test_collect_flags_are_parsed() -> None:
     args = parse_args(
         [
             "exporters",
-            "scan",
+            "collect",
             "-t",
             "10.0.0.1,10.0.0.2",
             "--timeout",
@@ -846,31 +874,31 @@ def test_scan_flags_are_parsed() -> None:
             "-f",
             "json",
             "-o",
-            "scan.jsonl",
+            "collect.jsonl",
             "-p",
             "9100,9115,9200-9202",
         ]
     )
     assert args.command == COMMAND_EXPORTERS
-    assert args.exporters_action == "scan"
+    assert args.exporters_action == "collect"
     assert args.targets == "10.0.0.1,10.0.0.2"
     assert args.timeout == 1.5
     assert args.workers == 12
     assert args.retries == 3
     assert args.profiles_file == "profiles.json"
     assert args.output_format == "json"
-    assert args.output == "scan.jsonl"
+    assert args.output == "collect.jsonl"
     assert args.ports == "9100,9115,9200-9202"
 
 
-def test_scan_save_alias_is_parsed() -> None:
-    args = parse_args(["exporters", "scan", "-t", "10.0.0.1", "--save", "scan.txt"])
-    assert args.output == "scan.txt"
+def test_collect_save_alias_is_parsed() -> None:
+    args = parse_args(["exporters", "collect", "-t", "10.0.0.1", "--save", "collect.txt"])
+    assert args.output == "collect.txt"
 
 
-def test_log_flag_is_parsed_for_scan() -> None:
-    args = parse_args(["exporters", "scan", "-t", "10.0.0.1", "-log", "scan.log"])
-    assert args.log == "scan.log"
+def test_log_flag_is_parsed_for_collect() -> None:
+    args = parse_args(["exporters", "collect", "-t", "10.0.0.1", "-log", "collect.log"])
+    assert args.log == "collect.log"
 
 
 def test_log_flag_is_parsed_for_implicit_listen() -> None:
@@ -891,8 +919,8 @@ def test_trigger_rejects_old_selfcert_flag() -> None:
     assert exc.value.code == 2
 
 
-def test_scan_workers_and_retries_defaults() -> None:
-    args = parse_args(["exporters", "scan", "-t", "10.0.0.1"])
+def test_collect_workers_and_retries_defaults() -> None:
+    args = parse_args(["exporters", "collect", "-t", "10.0.0.1"])
     assert args.workers == 50
     assert args.retries == 3
 
@@ -1099,7 +1127,7 @@ def test_ports_file_is_accepted_across_all_modules(tmp_path) -> None:
     file_value = str(ports_file)
 
     argv_variants = [
-        ["exporters", "scan", "-t", "10.0.0.1", "--ports", file_value],
+        ["exporters", "collect", "-t", "10.0.0.1", "--ports", file_value],
         ["exporters", "collect", "-t", "10.0.0.1", "--ports", file_value],
         [
             "exporters",
@@ -2729,9 +2757,8 @@ def test_collect_rejects_removed_write_vulnerable_targets_flag() -> None:
     assert exc.value.code == 2
 
 
-def test_direct_scan_trigger_collect_are_rejected() -> None:
+def test_direct_trigger_collect_are_rejected() -> None:
     for argv in (
-        ["scan", "-t", "10.0.0.1"],
         ["trigger", "-t", "10.0.0.1", "--callback-ip", "10.0.0.2"],
         ["collect", "-t", "10.0.0.1"],
     ):
@@ -2751,3 +2778,24 @@ def test_proxmox_timeout_default_is_five() -> None:
 
 def test_zookeeper_timeout_default_unchanged() -> None:
     assert parse_args(["zookeeper", "-t", "127.0.0.1"]).timeout == 5.0
+
+
+@pytest.mark.parametrize("prefix", [["scan"], ["exporters", "scan"]])
+def test_removed_exporter_scan_recommends_supported_workflows(prefix, capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args([*prefix, "-t", "127.0.0.1", "-p", "9100"])
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert "removed" in error
+    assert "exporters collect" in error
+    assert "exporters trigger" in error
+    assert "\x1b[" not in error
+
+
+def test_exporters_help_lists_only_collect_and_trigger(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["exporters", "-h"])
+    assert exc.value.code == 0
+    text = capsys.readouterr().out
+    assert "{collect,trigger}" in text
+    assert "scan" not in text

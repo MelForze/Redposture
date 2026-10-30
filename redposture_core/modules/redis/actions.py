@@ -24,6 +24,7 @@ from ...rendering import (
     format_count_value,
     render_colored_marker_line,
     render_tagged_detail_line,
+    sanitize_report_payload,
 )
 from ...show_limits import (
     dump_flag_enabled,
@@ -48,6 +49,7 @@ _is_timeout_error = transport.is_connection_timeout
 _is_connection_refused_fail_record = transport.is_connection_refused_fail_record
 _is_connection_timeout_fail_record = transport.is_connection_timeout_fail_record
 _recv_exact = transport.recv_exact
+
 
 _REDIS_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("admin", "admin"),
@@ -448,6 +450,8 @@ def _stream_dump_redis_keys(
                 entries.append(_redis_kv_entry(display_name, error=_format_redis_text(value_error)))
             else:
                 entries.append(_redis_kv_entry(display_name, value_text))
+            if stream_error:
+                return True
             if limit is not None and len(entries) >= limit:
                 return True
         return False
@@ -537,6 +541,9 @@ def _pairwise(items: list[Any]) -> list[tuple[str, str]]:
 
 
 def _dump_redis_key_value(sock: socket.socket, key: str | bytes) -> tuple[str, str | None]:
+    def value_command(*parts: str | bytes) -> tuple[str, Any]:
+        return _send_cmd(sock, *parts)
+
     key_type_type, key_type_value = _send_cmd(sock, "TYPE", key)
     if key_type_type == "error":
         return "<error>", str(key_type_value)
@@ -547,7 +554,7 @@ def _dump_redis_key_value(sock: socket.socket, key: str | bytes) -> tuple[str, s
         return "<not found>", None
 
     if key_type == "string":
-        value_type, value = _send_cmd(sock, "GET", key)
+        value_type, value = value_command("GET", key)
         if value_type == "error":
             return "<error>", str(value)
         if value_type == "null":
@@ -555,7 +562,7 @@ def _dump_redis_key_value(sock: socket.socket, key: str | bytes) -> tuple[str, s
         return _format_redis_text(value), None
 
     if key_type == "hash":
-        value_type, value = _send_cmd(sock, "HGETALL", key)
+        value_type, value = value_command("HGETALL", key)
         if value_type == "error":
             return "<error>", str(value)
         if value_type == "array" and isinstance(value, list):
@@ -566,7 +573,7 @@ def _dump_redis_key_value(sock: socket.socket, key: str | bytes) -> tuple[str, s
         return f"<{key_type}>", None
 
     if key_type == "list":
-        value_type, value = _send_cmd(sock, "LRANGE", key, "0", "-1")
+        value_type, value = value_command("LRANGE", key, "0", "-1")
         if value_type == "error":
             return "<error>", str(value)
         if value_type == "array" and isinstance(value, list):
@@ -574,7 +581,7 @@ def _dump_redis_key_value(sock: socket.socket, key: str | bytes) -> tuple[str, s
         return f"<{key_type}>", None
 
     if key_type == "set":
-        value_type, value = _send_cmd(sock, "SMEMBERS", key)
+        value_type, value = value_command("SMEMBERS", key)
         if value_type == "error":
             return "<error>", str(value)
         if value_type == "array" and isinstance(value, list):
@@ -583,7 +590,7 @@ def _dump_redis_key_value(sock: socket.socket, key: str | bytes) -> tuple[str, s
         return f"<{key_type}>", None
 
     if key_type == "zset":
-        value_type, value = _send_cmd(sock, "ZRANGE", key, "0", "-1", "WITHSCORES")
+        value_type, value = value_command("ZRANGE", key, "0", "-1", "WITHSCORES")
         if value_type == "error":
             return "<error>", str(value)
         if value_type == "array" and isinstance(value, list):
@@ -632,11 +639,14 @@ class RedisAuditLifecycleState:
     dump_keys_limit: int | None = None
     query_key: str | None = None
     key_count: int | None = None
+    key_count_error: str | None = None
     keys: list[str] | None = None
     key_values: list[str] | None = None
     key_value_entries: list[dict[str, str | None]] | None = None
+    dump_error: str | None = None
     query_key_value: str | None = None
     query_key_entry: dict[str, str | None] | None = None
+    discovery_data: dict[str, Any] | None = None
     active_username: str | None = None
     active_password: str | None = None
     active_source: str = "anonymous"
@@ -752,10 +762,16 @@ def _redis_lifecycle_record(state: RedisAuditLifecycleState, *, include_data: bo
         "show_keys_limit": state.show_keys_limit if include_data else None,
         "dump_keys": state.dump_keys if include_data else False,
         "query_key": state.query_key if include_data else None,
-        "key_count": state.key_count if include_data else None,
+        "key_count": state.key_count
+        if include_data or state.status in {"valid_credentials", "weak_default_creds"}
+        else None,
+        "key_count_error": state.key_count_error
+        if include_data or state.status in {"valid_credentials", "weak_default_creds"}
+        else None,
         "keys": state.keys if include_data else None,
         "key_values": state.key_values if include_data else None,
         "key_value_entries": state.key_value_entries if include_data else None,
+        "dump_error": state.dump_error if include_data else None,
         "query_key_value": state.query_key_value if include_data else None,
         "query_key_entry": state.query_key_entry if include_data else None,
         "elapsed_ms": elapsed_ms,
@@ -794,6 +810,8 @@ def _redis_lifecycle_record(state: RedisAuditLifecycleState, *, include_data: bo
     else:
         telemetry.stage("access_capabilities", "skip", "deep checks disabled", 0)
         telemetry.stage("data", "skip", "deep checks disabled", 0)
+    if include_data and state.discovery_data is not None:
+        payload.update(state.discovery_data)
     payload = telemetry.attach(payload, status=state.status, total_ms=elapsed_ms)
     payload["attempts"] = 1
     payload["max_attempts"] = attempts
@@ -858,6 +876,8 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
         return _redis_lifecycle_record(state, include_data=False)
     credential = ctx.credential
     exhaustive_credentials = bool(getattr(ctx.args, "defcreds", False))
+    state.key_count = None
+    state.key_count_error = None
     if credential.username is None and credential.password is None:
         state.status = "open_no_auth" if state.auth_required is False else "auth_required"
         return _redis_lifecycle_record(state, include_data=False)
@@ -887,6 +907,11 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
                 if default_ok:
                     state.status = "weak_default_creds"
                     state.error = None
+                    if exhaustive_credentials:
+                        try:
+                            state.key_count, state.key_count_error = _count_redis_keys(state.sock)
+                        except (OSError, ValueError, ConnectionError) as exc:
+                            state.key_count_error = str(exc)
                     if bool(getattr(ctx.args, "enum_cve", False)) or bool(
                         getattr(ctx.args, "_spray_capabilities", False)
                     ):
@@ -923,6 +948,11 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
             if provided_ok:
                 state.status = "valid_credentials"
                 state.error = None
+                if exhaustive_credentials:
+                    try:
+                        state.key_count, state.key_count_error = _count_redis_keys(state.sock)
+                    except (OSError, ValueError, ConnectionError) as exc:
+                        state.key_count_error = str(exc)
                 if bool(getattr(ctx.args, "enum_cve", False)) or bool(getattr(ctx.args, "_spray_capabilities", False)):
                     _capture_redis_server_identity(state)
                 if not exhaustive_credentials:
@@ -962,11 +992,14 @@ def _redis_reset_lifecycle_data(state: RedisAuditLifecycleState, args: Any) -> t
     dump_batch = int(getattr(args, "dump_batch", 10000) or 10000)
     dump_delay = int(getattr(args, "dump_delay", 20) or 0)
     state.key_count = None
+    state.key_count_error = None
     state.keys = None
     state.key_values = None
     state.key_value_entries = None
+    state.dump_error = None
     state.query_key_value = None
     state.query_key_entry = None
+    state.discovery_data = None
     return dump_batch, dump_delay
 
 
@@ -1004,19 +1037,22 @@ def _redis_collect_lifecycle_data_once(
     if count_error:
         state.error = count_error
     if state.dump_keys:
-        dumped_entries, dump_error = _stream_dump_redis_keys(
-            state.sock,
-            batch=dump_batch,
-            delay_ms=dump_delay,
-            limit=state.dump_keys_limit,
-        )
+        dump_kwargs: dict[str, Any] = {
+            "batch": dump_batch,
+            "delay_ms": dump_delay,
+            "limit": state.dump_keys_limit,
+        }
+        dumped_entries, dump_error = _stream_dump_redis_keys(state.sock, **dump_kwargs)
         if dump_error:
             state.error = dump_error if state.error is None else f"{state.error}; {dump_error}"
+            state.dump_error = dump_error
         state.key_value_entries = dumped_entries
         state.key_values = [_redis_kv_entry_text(item) for item in dumped_entries]
         state.keys = [str(entry.get("key") or "") for entry in dumped_entries]
         if state.key_count is None:
             state.key_count = len(dumped_entries)
+        if dump_error in {"byte_budget", "time_budget"}:
+            return
     elif state.show_keys:
         state.keys, keys_error = _scan_redis_keys(state.sock, limit=state.show_keys_limit)
         if keys_error:
@@ -1060,7 +1096,6 @@ def redis_data_hook(ctx: Any, _auth_record: AuditRecord) -> AuditRecord:
             state.sock = state.selected_sock
             state.selected_sock = None
     dump_batch, dump_delay = _redis_reset_lifecycle_data(state, args)
-
     if state.status not in _REDIS_DEEP_STATUSES:
         return _redis_lifecycle_record(state, include_data=False)
 
@@ -1073,6 +1108,14 @@ def redis_data_hook(ctx: Any, _auth_record: AuditRecord) -> AuditRecord:
                 _open_redis_lifecycle_socket(state)
                 _redis_reauthenticate_lifecycle_state(state)
             state.error = None
+            if bool(getattr(args, "discover", False)):
+                from .discovery import discover_redis
+
+                state.key_count, state.error = _count_redis_keys(state.sock)
+                state.discovery_data = discover_redis(ctx, _auth_record.to_dict(), state.sock)
+                state.dump_error = state.discovery_data.get("dump_error")
+                state.error = state.dump_error or state.error
+                return _redis_lifecycle_record(state, include_data=True)
             _redis_collect_lifecycle_data_once(
                 state,
                 dump_batch=dump_batch,
@@ -1447,6 +1490,8 @@ def _with_optional_keys(record: dict[str, Any], message: str) -> str:
 
 
 def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if record.get("_redis_streamed_details"):
+        return []
     show_keys = bool(record.get("show_keys"))
     dump_keys = bool(record.get("dump_keys"))
     query_key = str(record.get("query_key") or "").strip()
@@ -1631,9 +1676,6 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         return []
 
     prefix = _nxc_prefix(record)
-    selected_username = record.get("effective_username")
-    selected_password = record.get("effective_password")
-    selected_success_rendered = False
     lines: list[str] = []
     for attempt in attempts:
         if not isinstance(attempt, dict):
@@ -1650,13 +1692,11 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         if status not in {"valid_credentials", "weak_default_creds"}:
             lines.append(f"{prefix} [-] {username}:{password_text}")
             continue
-        selected = (
-            not selected_success_rendered
-            and attempt.get("username") == selected_username
-            and password == selected_password
-        )
-        suffix = f" (keys:{format_count_value(record.get('key_count'))})" if selected else ""
-        selected_success_rendered = selected_success_rendered or selected
+        count = attempt.get("key_count")
+        suffix = f" (keys:{format_count_value(count)})"
+        if count is None and attempt.get("key_count_error"):
+            reason = sanitize_report_payload(str(attempt["key_count_error"]))
+            suffix += f" (DBSIZE:{reason[:120]})"
         lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
     return lines
 

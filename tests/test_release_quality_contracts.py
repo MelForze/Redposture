@@ -173,17 +173,18 @@ def test_every_audit_module_obeys_mixed_target_output_contract(module: str) -> N
     ]
 
 
-def test_default_discovery_budget_has_exact_fifty_mib_boundary_without_allocating_payload() -> None:
-    limit = 50 * 1024 * 1024
+def test_default_discovery_budget_has_exact_portion_boundary_without_allocating_payload() -> None:
+    limit = 300_000_000
     budget = Budget()
 
     assert budget.max_total_bytes == limit
     assert budget.claim(limit - 1) == limit - 1
-    budget.release(0)
-    assert budget.claim(2) == 1
-    budget.release(0)
-    assert budget.byte_limit_reached() is True
-    assert budget.claim(1) == 0
+    budget.release(limit - 1)
+    assert budget.claim(2) == 2
+    budget.release(2)
+    assert budget.byte_limit_reached() is False
+    assert budget.claim(1) == 1
+    budget.release(1)
 
 
 def test_shared_nested_scheduler_worker_exception_cancels_queue_and_joins_threads() -> None:

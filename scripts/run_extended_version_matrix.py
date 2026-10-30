@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.qa_owned_images import compose_images, missing_images, remove_images  # noqa: E402
+from scripts.qa_owned_volumes import guarded_command  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,7 @@ CASES = (
 
 
 def _run(command: list[str], log: Path, *, timeout: int) -> subprocess.CompletedProcess[str]:
+    command = guarded_command(command, log.parent)
     started = time.monotonic()
     with log.open("a", encoding="utf-8") as stream:
         stream.write(f"$ {subprocess.list2cmdline(command)}\n")

@@ -16,7 +16,9 @@ import re
 from typing import Any
 
 from ...console import Console
+from ...discovery_paths import concat_discovery_text
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
+from ...discovery_values import DiskBackedText
 from ...rendering import (
     BooleanColorRule,
     CountColorRule,
@@ -195,13 +197,18 @@ def _prefix_hp(host: Any, port: Any) -> str:
 def format_finding_line(host: Any, port: Any, finding: dict[str, Any]) -> str:
     """One common discovery line with severity, type, value and object location.
 
-    Shows the full value (like clickhouse/elastic discover), falling back to the
-    masked form only if no full value was retained. Reused by the batch renderer
-    and by real-time (self-emitted) discovery.
+    Shows the full value, including in real-time discovery.
     """
     shown = finding.get("value")
-    if shown is None:
-        shown = finding.get("masked_value")
+    if isinstance(shown, DiskBackedText):
+        # Direct renderer callers have no streaming sink; normal CLI output
+        # uses live_discovery_value to keep this path out of large scans.
+        shown = "".join(shown.iter_text_chunks())
+    place = concat_discovery_text(
+        f"{finding.get('bucket', '?')}/{finding.get('key', '?')}", finding.get("object_path", "$")
+    )
+    if isinstance(place, DiskBackedText):
+        place = "".join(place.iter_text_chunks())
     return format_discovery_finding_line(
         "MINIO",
         host,
@@ -209,7 +216,7 @@ def format_finding_line(host: Any, port: Any, finding: dict[str, Any]) -> str:
         severity=finding.get("confidence"),
         finding_type=finding.get("type"),
         value=shown or "",
-        place=f"{finding.get('bucket', '?')}/{finding.get('key', '?')}{finding.get('object_path', '$')}",
+        place=place,
     )
 
 

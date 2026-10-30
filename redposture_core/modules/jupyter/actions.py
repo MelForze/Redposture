@@ -8,14 +8,16 @@ from urllib.parse import quote
 
 from ...clients.http_api import http_response_requires_https
 from ...detection_steps import DetectionRequests, run_requests
+from ...json_stream import JSONPath, JSONScalarStream
+from ...storage_discovery import DiscoveryCollector
 from ..token_api import ReadBudget, access, bases, json_value, request, safe_path, verdict
 from .types import DetectionStatus
 
 host_stage = None
 
 
-def _get(ctx: Any, base: str, path: str, token: str | None = None) -> Any:
-    return request(ctx, base, path, header="Authorization", token=token)
+def _get(ctx: Any, base: str, path: str, token: str | None = None, *, budget: ReadBudget | None = None) -> Any:
+    return request(ctx, base, path, header="Authorization", token=token, budget=budget)
 
 
 def _status(data: Any) -> bool:
@@ -32,6 +34,143 @@ def _contents(data: Any) -> bool:
         and data.get("type") in {"directory", "notebook", "file"}
         and isinstance(data.get("path"), str)
         and isinstance(data.get("name"), str)
+    )
+
+
+def _stream_directory(
+    ctx: Any,
+    base: str,
+    path: str,
+    token: str | None,
+    budget: ReadBudget,
+    discovery: DiscoveryCollector,
+    rows: list[dict[str, Any]],
+    pending: deque[str],
+) -> tuple[bool, bool]:
+    """Traverse a large Contents API listing without materializing the JSON body."""
+    root: dict[str, str] = {}
+    current: dict[str, Any] = {}
+    current_index: int | None = None
+    fragments: dict[JSONPath, str] = {}
+    has_content_array = False
+    inventory_truncated = False
+    invalid_child = False
+
+    def finish_child() -> None:
+        nonlocal current, invalid_child, inventory_truncated
+        if current_index is None:
+            return
+        child = current
+        if (
+            not _contents(child)
+            or not safe_path(child["path"])
+            or not child["path"].startswith(path + "/" if path else "")
+        ):
+            invalid_child = True
+        else:
+            if len(rows) < 5000:
+                rows.append({key: child.get(key) for key in ("name", "path", "type", "size", "writable")})
+            else:
+                inventory_truncated = True
+            if child["type"] in {"directory", "notebook"}:
+                pending.append(child["path"])
+        current = {}
+
+    def field(path_parts: JSONPath, value: Any) -> None:
+        nonlocal current_index
+        if len(path_parts) == 1 and path_parts[0] in {"name", "path", "type"}:
+            root[str(path_parts[0])] = value
+        elif len(path_parts) == 3 and path_parts[0] == "content" and isinstance(path_parts[1], int):
+            index = path_parts[1]
+            if current_index != index:
+                finish_child()
+                current_index = index
+            if path_parts[2] in {"name", "path", "type", "size", "writable"}:
+                current[str(path_parts[2])] = value
+
+    def on_string(path_parts: JSONPath, text: str, final: bool) -> None:
+        if len(path_parts) == 2 and path_parts[0] == "content" and isinstance(path_parts[1], int):
+            raise ValueError("Contents API directory entry is not an object")
+        if not (
+            len(path_parts) == 1
+            and path_parts[0] in {"name", "path", "type"}
+            or len(path_parts) == 3
+            and path_parts[0] == "content"
+            and isinstance(path_parts[1], int)
+            and path_parts[2] in {"name", "path", "type"}
+        ):
+            return
+        value = fragments.get(path_parts, "") + text
+        if len(value) > 4096:
+            raise ValueError("Contents API field exceeds path limit")
+        if final:
+            fragments.pop(path_parts, None)
+            field(path_parts, value)
+        else:
+            fragments[path_parts] = value
+
+    def on_container(path_parts: JSONPath, kind: str) -> None:
+        nonlocal has_content_array, current_index
+        if path_parts == ("content",):
+            if kind != "array":
+                raise ValueError("Contents API directory has no child array")
+            has_content_array = True
+        elif len(path_parts) == 2 and path_parts[0] == "content" and isinstance(path_parts[1], int):
+            if kind != "object":
+                raise ValueError("Contents API directory entry is not an object")
+            if current_index != path_parts[1]:
+                finish_child()
+                current_index = path_parts[1]
+
+    def on_primitive(item: tuple[JSONPath, Any]) -> None:
+        path_parts, value = item
+        if len(path_parts) == 2 and path_parts[0] == "content" and isinstance(path_parts[1], int):
+            raise ValueError("Contents API directory entry is not an object")
+        field(path_parts, value)
+
+    parser = JSONScalarStream(on_string, on_primitive=on_primitive, on_container=on_container)
+    request_path = "/api/contents" + ("/" + quote(path, safe="/") if path else "") + "?content=1"
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = "token " + token
+
+    def on_response(status: int, response_headers: Any) -> None:
+        media_type = next(
+            (str(value).lower() for key, value in response_headers.items() if str(key).lower() == "content-type"), ""
+        )
+        if status != 200 or "json" not in media_type:
+            raise ValueError("unexpected Contents API response")
+
+    def on_chunk(chunk: bytes) -> None:
+        if not discovery.charge(len(chunk)):
+            raise TimeoutError("discover_time")
+        parser.feed(chunk)
+
+    try:
+        response = ctx.lifecycle_state.http.request_stream(
+            "GET",
+            base + request_path,
+            on_chunk=on_chunk,
+            on_response=on_response,
+            chunk_size=64 * 1024,
+            headers=headers,
+            timeout=budget.timeout(),
+            deadline=discovery.deadline,
+        )
+        if response.status != 200 or response.error or response.truncated:
+            return False, inventory_truncated
+        parser.finish()
+        finish_child()
+    except (OSError, TimeoutError, UnicodeError, ValueError):
+        return False, inventory_truncated
+    return (
+        parser.root_kind == "object"
+        and has_content_array
+        and root.get("type") == "directory"
+        and root.get("path") == path
+        and isinstance(root.get("name"), str)
+        and not invalid_child,
+        inventory_truncated,
     )
 
 
@@ -158,9 +297,10 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     result = dict(prior)
     token = getattr(ctx.credential, "token", None) if prior.get("token_valid") else None
     base = prior["api_endpoint"]
-    budget = ReadBudget(ctx.args)
+    budget = ReadBudget(ctx.args, started_at=getattr(ctx, "discovery_started_at", None))
     states: list[str] = []
     requested: list[str] = []
+    inventory_truncated = False
     for name in ("sessions", "kernels", "terminals"):
         if not getattr(ctx.args, "show_" + name, False):
             continue
@@ -183,13 +323,13 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 result[name + "_error"] = "bounded snapshot item limit"
                 budget.partial = True
     discover = bool(getattr(ctx.args, "discover", False))
+    discovery = DiscoveryCollector("jupyter", ctx, prior) if discover else None
     if getattr(ctx.args, "show_contents", False) or discover:
         if getattr(ctx.args, "show_contents", False):
             requested.append("contents")
         pending = deque([str(getattr(ctx.args, "path", "")).rstrip("/")])
         seen: set[str] = set()
         rows: list[dict[str, Any]] = []
-        notebooks: list[dict[str, Any]] = []
         content_state = "unknown"
         content_partial = False
         while pending and budget.allowed():
@@ -197,12 +337,61 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             if path in seen:
                 continue
             seen.add(path)
-            if len(seen) > 5000:
+            if len(seen) > 5000 and not discover:
                 content_partial = True
                 break
             response = _get(
-                ctx, base, "/api/contents" + ("/" + quote(path, safe="/") if path else "") + "?content=1", token
+                ctx,
+                base,
+                "/api/contents" + ("/" + quote(path, safe="/") if path else "") + "?content=1",
+                token,
+                budget=budget,
             )
+            if discover and response.truncated and discovery is not None:
+                metadata_response = _get(
+                    ctx,
+                    base,
+                    "/api/contents" + ("/" + quote(path, safe="/") if path else "") + "?content=0",
+                    token,
+                    budget=budget,
+                )
+                if not budget.consume(metadata_response):
+                    content_partial = True
+                    continue
+                metadata = json_value(metadata_response)
+                state = access(metadata_response, _contents(metadata))
+                if len(seen) == 1:
+                    content_state = state
+                if state != "allowed" or metadata.get("path") != path:
+                    content_partial = True
+                    continue
+                if metadata.get("type") == "directory":
+                    complete, clipped_inventory = _stream_directory(
+                        ctx, base, path, token, budget, discovery, rows, pending
+                    )
+                    inventory_truncated |= clipped_inventory
+                    if not complete:
+                        content_partial = True
+                    continue
+                if metadata.get("type") != "notebook":
+                    content_partial = True
+                    continue
+                if len(seen) == 1:
+                    rows.append({key: metadata.get(key) for key in ("name", "path", "type", "size", "writable")})
+                request_path = "/api/contents/" + quote(path, safe="/") + "?content=1"
+                headers = {"Accept": "application/json"}
+                if token:
+                    headers["Authorization"] = "token " + token
+                if not discovery.stream_json_scalars(
+                    ctx.lifecycle_state.http,
+                    base + request_path,
+                    "jupyter/notebook/" + path,
+                    headers=headers,
+                    timeout=budget.timeout(),
+                    root_kind="object",
+                ):
+                    content_partial = True
+                continue
             if not budget.consume(response):
                 content_partial = True
                 break
@@ -226,35 +415,47 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                     ):
                         content_partial = True
                         continue
-                    if len(rows) >= 5000:
-                        content_partial = True
-                        break
-                    rows.append({key: item.get(key) for key in ("name", "path", "type", "size", "writable")})
+                    if len(rows) < 5000:
+                        rows.append({key: item.get(key) for key in ("name", "path", "type", "size", "writable")})
+                    else:
+                        inventory_truncated = True
+                        if not discover:
+                            content_partial = True
+                            break
                     if discover and item["type"] in {"notebook", "directory"}:
                         pending.append(item["path"])
             elif data["type"] == "notebook" and discover:
                 if isinstance(data.get("content"), dict):
-                    notebooks.append({"path": data["path"], "notebook": data["content"]})
+                    if discovery is not None:
+                        discovery.add("jupyter/notebook/" + data["path"], data["content"], charge=False)
                 else:
                     content_partial = True
             else:
-                rows.append({key: data.get(key) for key in ("name", "path", "type", "size", "writable")})
+                if len(rows) < 5000:
+                    rows.append({key: data.get(key) for key in ("name", "path", "type", "size", "writable")})
+                else:
+                    inventory_truncated = True
         states.append(content_state)
         result["contents_access"] = content_state
         if content_state == "allowed":
             result["contents"] = rows
         content_partial |= bool(pending)
-        result["contents_partial"] = content_partial
+        result["contents_partial"] = content_partial or inventory_truncated
         budget.partial |= content_partial
         if content_partial:
             result["contents_error"] = "incomplete content inventory or discovery budget reached"
         if discover:
-            result["notebook_contents"] = notebooks
+            if discovery is not None:
+                if content_partial or budget.partial:
+                    discovery.partial("jupyter/contents", budget.reason or "incomplete_content_traversal")
+                result["content_discovery"] = discovery.result()
     result["inventory_requested"] = requested
     result["content_discovery_partial"] = budget.partial
+    if discover and budget.reason is not None:
+        result["discovery_budget_reason"] = budget.reason
     result["inventory_status"] = (
         "complete"
-        if states and all(s == "allowed" for s in states) and not budget.partial
+        if states and all(s == "allowed" for s in states) and not budget.partial and not inventory_truncated
         else "partial"
         if any(s == "allowed" for s in states)
         else "unavailable"

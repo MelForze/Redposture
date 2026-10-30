@@ -12,7 +12,7 @@ from ..audit_models import AuditRecord
 from ..clients.http_api import HttpResponse, build_http_target_url, current_http_target_binding, http_target_context
 from ..clients.http_session import HttpSessionPool
 from ..clients.scoped_http import HttpLifecycleState, ScopedHttpClient
-from ..discovery_options import validate_discovery_budget
+from ..discovery_options import DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES, validate_discovery_budget
 from ..stage_runtime import AuditCredentialRun, ModuleAuditSpec, build_basic_audit_plan
 
 CAP = 4 * 1024 * 1024
@@ -40,12 +40,22 @@ def bases(ctx: Any) -> tuple[str, str]:
 
 
 def request(
-    ctx: Any, base: str, path: str, *, header: str, token: str | None = None, method: str = "GET"
+    ctx: Any,
+    base: str,
+    path: str,
+    *,
+    header: str,
+    token: str | None = None,
+    method: str = "GET",
+    budget: ReadBudget | None = None,
 ) -> HttpResponse:
     headers = {"Accept": "application/json"}
     if token:
         headers[header] = f"token {token}" if header == "Authorization" else token
-    return client(ctx).request(method, base + path, headers=headers)
+    scoped = client(ctx)
+    if budget is not None:
+        return budget.read(scoped, method, base + path, headers=headers)
+    return scoped.request(method, base + path, headers=headers)
 
 
 def path_value(value: str) -> str:
@@ -104,24 +114,43 @@ def access(response: HttpResponse, valid_shape: bool) -> str:
 
 
 class ReadBudget:
-    """Global request, byte and time caps, including unsuccessful traversal."""
+    """Target-wide deadline and request cap, with a per-response byte cap."""
 
-    def __init__(self, args: Any) -> None:
-        self.deadline = time.monotonic() + float(getattr(args, "discover_time", None) or 300)
-        self.remaining = int(getattr(args, "discover_max_bytes", None) or 50 * 1024 * 1024)
+    def __init__(self, args: Any, *, started_at: float | None = None) -> None:
+        self.deadline = (time.monotonic() if started_at is None else float(started_at)) + float(
+            getattr(args, "discover_time", None) or DEFAULT_DISCOVER_TIME
+        )
+        private_limit = getattr(args, "discover_max_bytes", None)
+        self.remaining = int(private_limit) if private_limit is not None else UNLIMITED_DISCOVER_BYTES
         self.calls = 0
         self.partial = False
+        self.reason: str | None = None
 
     def allowed(self) -> bool:
-        allowed = self.calls < 10000 and self.remaining > 0 and time.monotonic() < self.deadline
+        if time.monotonic() >= self.deadline:
+            self.reason = self.reason or "time_budget"
+        allowed = self.reason is None
         self.partial |= not allowed
         return allowed
 
+    def read(self, client: ScopedHttpClient, method: str, url: str, *, headers: dict[str, str]) -> HttpResponse:
+        return self.scoped(client).request(method, url, headers=headers, timeout=self.timeout())
+
+    def scoped(self, client: ScopedHttpClient) -> ScopedHttpClient:
+        return replace(client, response_size_cap=max(1, min(client.response_size_cap, self.remaining)))
+
+    def timeout(self) -> float:
+        return max(0.001, self.deadline - time.monotonic())
+
     def consume(self, response: HttpResponse) -> bool:
         self.calls += 1
-        self.remaining -= len(response.body)
-        self.partial |= bool(response.error or response.truncated or self.remaining < 0)
-        return not (response.error or response.truncated or self.remaining < 0)
+        over_portion = len(response.body) > self.remaining
+        if response.truncated or over_portion:
+            self.reason = self.reason or "byte_budget"
+        elif time.monotonic() >= self.deadline:
+            self.reason = self.reason or "time_budget"
+        self.partial |= bool(response.error or response.truncated or over_portion)
+        return not (response.error or response.truncated or over_portion)
 
 
 def validate_token_args(args: Any, console: Any, module: str) -> int | None:

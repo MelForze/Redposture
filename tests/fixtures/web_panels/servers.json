@@ -1,0 +1,1 @@
+{"Servers":{"1":{"Name":"QA warehouse","Group":"Servers","Host":"postgres","Port":5432,"MaintenanceDB":"qa","Username":"reader","SSLMode":"prefer"}}}

@@ -136,6 +136,42 @@ def test_unsupported_native_http_restarts_legacy_detection_and_closes_both_state
     assert len(states) == len(closed) == 80 and set(states) == set(closed)
 
 
+def test_async_fallback_preserves_discovery_deadline_from_first_probe():
+    from redposture_core.clients.async_http_detect import AsyncHttpFallback
+    from redposture_core.storage_discovery import DiscoveryCollector
+
+    expired: list[bool] = []
+
+    async def native(ctx, http):
+        await asyncio.sleep(0.03)
+        raise AsyncHttpFallback("native API unsupported")
+
+    def legacy(ctx):
+        return AuditRecord(host=ctx.host, port=1, service="probe", module="probe", status="open_no_auth")
+
+    def data(ctx, record):
+        collector = DiscoveryCollector("probe", ctx, {"status": "open_no_auth"})
+        expired.append(not collector.allowed())
+        return record
+
+    spec = ModuleAuditSpec(
+        module="probe",
+        label="PROBE",
+        default_port=1,
+        detect=legacy,
+        detect_async=native,
+        async_detect_sync_hook=legacy,
+        data=data,
+        is_detected=lambda record: record.status == "open_no_auth",
+    )
+    AuditCommandRunner(
+        args=SimpleNamespace(timeout=1, retries=0, debug=False, discover=True, discover_time=0.01),
+        spec=spec,
+        emit_line=lambda _: None,
+    ).run_plan(AuditCommandPlan(targets_by_port={1: tuple(str(i) for i in range(40))}, workers=4, output_format="json"))
+    assert len(expired) == 40 and all(expired)
+
+
 def test_automatic_detect_has_more_inflight_than_sync_data_workers():
     active = peak = 0
     data_active = data_peak = 0

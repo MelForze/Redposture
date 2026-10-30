@@ -16,6 +16,9 @@ from ...clients.http_api import http_response_requires_https
 from ...clients.http_session import HttpSessionPool
 from ...clients.minio_api import MinioClient, MinioResponse
 from ...detection_io import DetectCall, run_sync
+from ...discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME
+from ...discovery_paths import concat_discovery_text
+from ...discovery_values import DiskBackedText, InlineDiskText
 from .types import AdminCapability, AnonymousResult, CredentialResult, MinioDetection
 
 # `Server: MinIO/RELEASE.2021-06-17T00-10-46Z` on older deployments; modern ones
@@ -1233,9 +1236,11 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             if grouped:
                 merged["_inventory_grouped_stream"] = True
         if want_discover:
+            started_at = getattr(ctx, "discovery_started_at", None)
             budget = _discover.Budget(
-                time_budget=getattr(args, "discover_time", None),
-                max_total_bytes=getattr(args, "discover_max_bytes", 50 * 1024 * 1024),
+                time_budget=getattr(args, "discover_time", None) or DEFAULT_DISCOVER_TIME,
+                max_total_bytes=getattr(args, "discover_max_bytes", DEFAULT_DISCOVER_MAX_BYTES),
+                _started=started_at if started_at is not None else time.monotonic(),
             )
             scan_iter = _enum.iter_objects_multi(client, target_buckets, on_error=listing_errors.append)
 
@@ -1248,6 +1253,22 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             if self_emit:
 
                 def on_finding(finding: dict[str, Any]) -> None:
+                    value = finding.get("value")
+                    if isinstance(value, DiskBackedText) or isinstance(finding.get("object_path"), DiskBackedText):
+                        disk_emit = getattr(ctx, "live_discovery_value", None)
+                        if callable(disk_emit):
+                            disk_emit(
+                                "MINIO",
+                                ctx.host,
+                                ctx.port,
+                                finding_type=finding.get("type"),
+                                value=value if isinstance(value, DiskBackedText) else InlineDiskText(str(value or "")),
+                                place=concat_discovery_text(
+                                    f"{finding.get('bucket', '?')}/{finding.get('key', '?')}",
+                                    finding.get("object_path", "$"),
+                                ),
+                            )
+                            return
                     live_emit([_render.format_finding_line(ctx.host, ctx.port, finding)])
 
             debug_emit = getattr(ctx, "debug_emit", None)
@@ -1272,8 +1293,10 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             # `status:partial` + partial reasons flag that the denominator itself
             # may be incomplete, so the two axes stay honest together.
             coverage_percent: float | None
-            if result.coverage_complete or candidates_count == 0:
+            if result.coverage_complete:
                 coverage_percent = 100.0
+            elif candidates_count == 0:
+                coverage_percent = None
             else:
                 coverage_percent = 100.0 * result.objects_scanned / candidates_count
             if listing_errors:

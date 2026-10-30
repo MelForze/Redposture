@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from urllib.parse import parse_qs, urlsplit
 
 from hypothesis import strategies as st
@@ -30,12 +31,7 @@ class ElasticBudgetMachine(RuleBasedStateMachine):
 
     @rule(length=st.integers(0, 70))
     def document(self, length: int) -> None:
-        expected = (
-            not self.model_stopped
-            and self.now < 10
-            and self.model_documents + 1 <= 5
-            and self.model_bytes + length <= 50
-        )
+        expected = not self.model_stopped and self.now < 10 and self.model_documents + 1 <= 5 and length <= 50
         actual = self.budget.consume_document(length)
         assert actual is expected
         if expected:
@@ -46,7 +42,7 @@ class ElasticBudgetMachine(RuleBasedStateMachine):
 
     @rule(length=st.integers(0, 70))
     def richer_source(self, length: int) -> None:
-        expected = not self.model_stopped and self.now < 10 and self.model_bytes + length <= 50
+        expected = not self.model_stopped and self.now < 10 and length <= 50
         actual = self.budget.consume_source_bytes(length)
         assert actual is expected
         if expected:
@@ -64,7 +60,7 @@ class ElasticBudgetMachine(RuleBasedStateMachine):
     @invariant()
     def never_exceed_budgets(self) -> None:
         assert self.budget.documents == self.model_documents <= 5
-        assert self.budget.source_bytes == self.model_bytes <= 50
+        assert self.budget.source_bytes == self.model_bytes
 
 
 TestElasticBudgetMachine = ElasticBudgetMachine.TestCase
@@ -146,8 +142,10 @@ class ClickHouseInventoryMachine(RuleBasedStateMachine):
     def switch_permissions(self) -> None:
         self.fallback = not self.fallback
 
-    @invariant()
-    def inventory_matches_catalog_or_read_only_fallback(self) -> None:
+    def teardown(self) -> None:
+        # collect_inventory is stateless for this generated catalog. Checking
+        # the final state of every program avoids repeating its SQLite-backed
+        # catalog walk after each intermediate rule.
         entries = self.entries
         fallback = self.fallback
 
@@ -205,7 +203,9 @@ class ProxmoxFindingMachine(RuleBasedStateMachine):
 
     @invariant()
     def credentials_match_unique_evidence_from_the_read_sequence(self) -> None:
-        assert {(item["endpoint"], item["sample"]) for item in self.findings} == self.expected
+        assert Counter((item["endpoint"], item["sample"]) for item in self.findings) == Counter(
+            (endpoint, secret) for endpoint, secret in self.expected
+        )
         assert len(self.findings) == len(self.expected)
 
 

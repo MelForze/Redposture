@@ -3,13 +3,394 @@ from __future__ import annotations
 import argparse
 import json
 import ssl
+import time
 import urllib.error
 from types import SimpleNamespace
 
 import pytest
 
 from redposture_core import stage_kubeapi as kube
+from redposture_core.discovery_spool import SpoolingRecords
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
+
+
+def test_discover_kube_emits_completed_page_before_requesting_next(monkeypatch: pytest.MonkeyPatch) -> None:
+    emitted: list[str] = []
+    calls: list[str] = []
+
+    def get(_host, _port, path, _timeout, **kwargs):
+        calls.append(path)
+        if path.startswith("/api/v1/secrets") and len(calls) == 1:
+            return (
+                200,
+                {
+                    "items": [
+                        {"metadata": {"namespace": "ns", "name": "db"}, "data": {"password": "c2VjcmV0LXZhbHVl"}}
+                    ],
+                    "metadata": {"continue": "next"},
+                },
+                {},
+                None,
+            )
+        assert emitted, "a complete secret must be emitted before another page/source request"
+        return 200, {"items": [], "metadata": {}}, {}, None
+
+    monkeypatch.setattr(kube, "_api_get_json", get)
+    ctx = SimpleNamespace(
+        host="qa",
+        port=6443,
+        args=_kube_args(discover=True, discover_time=30),
+        lifecycle_state=kube.KubeApiLifecycleState(),
+        discovery_started_at=time.monotonic(),
+        live_emit=emitted.append,
+    )
+    result = kube.collect_kubeapi_data(
+        ctx,
+        {"status": "open_no_auth"},
+        {
+            "show_namespaces": False,
+            "show_pods": False,
+            "show_secrets": True,
+            "namespace_filters": [],
+            "exec_pod": None,
+            "exec_command": None,
+        },
+    )
+    report = result["content_discovery"]
+    assert report["status"] == "complete"
+    assert [item["value"] for item in report["findings"]] == ["secret-value"]
+    assert report["findings"][0]["object_path"] == "$.secrets.ns.db.password"
+    assert len(emitted) == 1
+
+
+def test_kube_configmap_reads_binary_data_and_keeps_public_ca_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        kube,
+        "_api_get_json",
+        lambda *a, **kw: (
+            200,
+            {
+                "items": [
+                    {
+                        "metadata": {"namespace": "ns", "name": "settings"},
+                        "data": {"ordinary": "hello"},
+                        "binaryData": {"password": "c2VjcmV0LXZhbHVl"},
+                    }
+                ]
+            },
+            {},
+            None,
+        ),
+    )
+    result = kube._list_secrets(
+        "qa",
+        6443,
+        1,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        namespaces=[],
+        resource="configmaps",
+        discovery_budget=kube.KubeDiscoveryReadBudget(remaining=1024, deadline=time.monotonic() + 5),
+    )
+    assert result.complete
+    assert result.items[0]["data"] == {"ordinary": "hello", "password": "secret-value"}
+
+
+def test_discover_kube_list_uses_independent_wire_portions_across_pages_and_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_caps: list[int] = []
+
+    def fake_request(_host, _port, path, _timeout, **kwargs):
+        requested_caps.append(kwargs["response_size_cap"])
+        if len(requested_caps) == 1:
+            return (
+                200,
+                {"items": [{"metadata": {"name": "first"}}], "metadata": {"continue": "next"}},
+                {"__redposture_body_bytes__": "80"},
+                None,
+            )
+        return 200, {"items": [], "metadata": {}}, {"__redposture_body_bytes__": "20"}, None
+
+    monkeypatch.setattr(kube, "_api_get_json", fake_request)
+    budget = kube.KubeDiscoveryReadBudget(remaining=90, deadline=time.monotonic() + 5)
+    result = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/secrets",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        discovery_budget=budget,
+    )
+    assert requested_caps == [90, 90]
+    assert budget.remaining == 90
+    assert result.items == [{"metadata": {"name": "first"}}]
+    assert result.complete is True
+    assert result.error is None
+    second = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/configmaps",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        discovery_budget=budget,
+    )
+    assert second.complete is True
+    assert second.error is None
+    assert requested_caps == [90, 90, 90]
+
+
+def test_discover_kube_spools_items_as_pages_arrive(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_paths: list[str] = []
+
+    def fake_request(_host, _port, path, _timeout, **_kwargs):
+        seen_paths.append(path)
+        if len(seen_paths) == 1:
+            return (
+                200,
+                {
+                    "items": [{"metadata": {"namespace": "ns", "name": "z"}, "data": {"key": "last"}}],
+                    "metadata": {"continue": "next"},
+                },
+                {},
+                None,
+            )
+        return (
+            200,
+            {"items": [{"metadata": {"namespace": "ns", "name": "a"}, "data": {"key": "first"}}], "metadata": {}},
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(kube, "_api_get_json", fake_request)
+    result = kube._list_secrets(
+        "127.0.0.1",
+        16443,
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        namespaces=[],
+        resource="configmaps",
+        discovery_budget=kube.KubeDiscoveryReadBudget(remaining=1024, deadline=time.monotonic() + 5),
+    )
+    assert isinstance(result.items, SpoolingRecords)
+    assert result.complete is True
+    assert [item["name"] for item in result.items] == ["a", "z"]
+    assert len(seen_paths) == 2
+
+
+def test_discover_kube_list_expired_budget_skips_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        kube,
+        "_api_get_json",
+        lambda *_args, **_kwargs: pytest.fail("expired discover must not read network"),
+    )
+    result = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/secrets",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        discovery_budget=kube.KubeDiscoveryReadBudget(remaining=1024, deadline=time.monotonic() - 1),
+    )
+    assert result.complete is False
+    assert result.error == "time_budget"
+
+
+def test_discover_kube_secrets_and_configmaps_share_one_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    budgets: list[object] = []
+
+    def fake_list(_host, _port, _timeout, *, resource="secrets", discovery_budget=None, **_kwargs):
+        assert discovery_budget is not None
+        budgets.append(discovery_budget)
+        return kube.KubeResourceResult([], None, True, True)
+
+    monkeypatch.setattr(kube, "_list_secrets", fake_list)
+    ctx = SimpleNamespace(
+        host="kube.local",
+        port=6443,
+        args=_kube_args(discover=True, discover_max_bytes=100, discover_time=300),
+        lifecycle_state=kube.KubeApiLifecycleState(),
+        discovery_started_at=time.monotonic(),
+    )
+    options = {
+        "show_namespaces": False,
+        "show_pods": False,
+        "show_secrets": True,
+        "namespace_filters": [],
+        "exec_pod": None,
+        "exec_command": None,
+    }
+    result = kube.collect_kubeapi_data(ctx, {"status": "auth_valid"}, options)
+    assert result["secrets"] == []
+    assert result["configmaps"] == []
+    assert len(budgets) == 2 and budgets[0] is budgets[1]
+    assert budgets[0].remaining == 100
+
+
+def test_discover_kube_oversized_decoded_response_marks_only_this_source_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        kube,
+        "_api_get_json",
+        lambda *_args, **_kwargs: (0, None, {}, "decompressed HTTP response exceeds limit"),
+    )
+    budget = kube.KubeDiscoveryReadBudget(remaining=32, deadline=time.monotonic() + 5)
+    result = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/secrets",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        discovery_budget=budget,
+    )
+    assert result.error == "byte_budget"
+    assert result.complete is False
+    assert budget.remaining == 32
+
+
+def test_discover_kube_pagination_continues_past_inventory_page_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kube, "_KUBE_MAX_LIST_PAGES", 2)
+    calls = 0
+
+    def fake_request(_host, _port, _path, _timeout, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return (
+            200,
+            {
+                "items": [{"metadata": {"name": f"item-{calls}"}}],
+                "metadata": {"continue": str(calls) if calls < 3 else ""},
+            },
+            {"__redposture_body_bytes__": "40"},
+            None,
+        )
+
+    monkeypatch.setattr(kube, "_api_get_json", fake_request)
+    result = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/secrets",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        discovery_budget=kube.KubeDiscoveryReadBudget(remaining=200, deadline=time.monotonic() + 5),
+    )
+    assert calls == 3
+    assert result.complete is True
+    assert result.error is None
+    assert [item["metadata"]["name"] for item in result.items] == ["item-1", "item-2", "item-3"]
+
+
+def test_discover_kube_retries_oversized_page_with_smaller_limit_without_losing_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    def fake_request(_host, _port, path, _timeout, **_kwargs):
+        paths.append(path)
+        if "limit=500" in path:
+            return 0, None, {}, "decompressed HTTP response exceeds limit"
+        if "continue=next" in path:
+            return 200, {"items": [{"metadata": {"name": "second"}}], "metadata": {}}, {}, None
+        return 200, {"items": [{"metadata": {"name": "first"}}], "metadata": {"continue": "next"}}, {}, None
+
+    monkeypatch.setattr(kube, "_api_get_json", fake_request)
+    result = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/secrets",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        discovery_budget=kube.KubeDiscoveryReadBudget(remaining=4096, deadline=time.monotonic() + 5),
+    )
+    assert result.complete is True
+    assert result.error is None
+    assert [item["metadata"]["name"] for item in result.items] == ["first", "second"]
+    assert paths == [
+        "/api/v1/secrets?limit=500",
+        "/api/v1/secrets?limit=250",
+        "/api/v1/secrets?limit=250&continue=next",
+    ]
+
+
+def test_discover_kube_one_oversized_item_preserves_previous_page_as_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    def fake_request(_host, _port, path, _timeout, **_kwargs):
+        paths.append(path)
+        if "continue=next" in path:
+            return 0, None, {}, "decompressed HTTP response exceeds limit"
+        return 200, {"items": [{"metadata": {"name": "first"}}], "metadata": {"continue": "next"}}, {}, None
+
+    monkeypatch.setattr(kube, "_api_get_json", fake_request)
+    result = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/secrets",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        discovery_budget=kube.KubeDiscoveryReadBudget(remaining=4096, deadline=time.monotonic() + 5),
+    )
+    assert result.complete is False
+    assert result.error == "partial: byte_budget"
+    assert [item["metadata"]["name"] for item in result.items] == ["first"]
+    assert "limit=1&continue=next" in paths[-1]
+
+
+def test_discover_kube_namespace_portion_continues_to_second_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    budget = kube.KubeDiscoveryReadBudget(remaining=40, deadline=time.monotonic() + 5)
+    calls: list[str] = []
+
+    def fake_list(_host, _port, path, _timeout, **_kwargs):
+        calls.append(path)
+        return kube.KubeListResult(
+            [
+                {
+                    "metadata": {"name": "first" if len(calls) == 1 else "second"},
+                    "data": {"token": "glpat-abcdefghijklmnopqrst"},
+                }
+            ],
+            200,
+            None,
+            True,
+            True,
+        )
+
+    monkeypatch.setattr(kube, "_invoke_kube_list_items", fake_list)
+    result = kube._list_secrets(
+        "127.0.0.1",
+        16443,
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        namespaces=["first", "second"],
+        resource="configmaps",
+        discovery_budget=budget,
+    )
+    assert calls == ["/api/v1/namespaces/first/configmaps", "/api/v1/namespaces/second/configmaps"]
+    assert result.complete is True
+    assert {item["name"] for item in result.items} == {"first", "second"}
+    assert result.error is None
 
 
 def test_tls_verify_error_detection() -> None:
@@ -1402,7 +1783,12 @@ def test_http_request_and_ws_exec_paths(monkeypatch: pytest.MonkeyPatch) -> None
         insecure=True,
         ca_file=None,
     )
-    assert (status, payload, headers, error) == (200, b'{"ok":true}', {"content-type": "application/json"}, None)
+    assert (status, payload, headers, error) == (
+        200,
+        b'{"ok":true}',
+        {"content-type": "application/json", "__redposture_body_bytes__": "11"},
+        None,
+    )
 
     monkeypatch.setattr(
         "redposture_core.clients.http_api._open_http_request",
@@ -1982,3 +2368,85 @@ def test_kube_run_stage_and_audit_output_branches(monkeypatch: pytest.MonkeyPatc
     rc = kube.run_kubeapi_stage(args, logger=SimpleNamespace(log=lambda *a, **k: None))
     assert rc == 2
     assert any("failed to process kubeapi output" in msg for msg in _Console.instances[-1].errors)
+
+
+@pytest.mark.parametrize("raw", ["cWEtZnVsbC3OuwpsaW5lLXR3bw==", "%%%"])
+def test_kube_discovery_preserves_unicode_and_reports_invalid_base64(monkeypatch, raw) -> None:
+    def get(_host, _port, path, _timeout, **kwargs):
+        if "/secrets" in path:
+            return (
+                200,
+                {"items": [{"metadata": {"namespace": "ns", "name": "db"}, "data": {"password": raw}}]},
+                {},
+                None,
+            )
+        return (
+            200,
+            {
+                "items": [
+                    {
+                        "metadata": {"namespace": "ns", "name": "kube-root-ca.crt"},
+                        "data": {"ca.crt": "-----BEGIN CERTIFICATE-----\\npublic-only\\n-----END CERTIFICATE-----"},
+                    }
+                ]
+            },
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(kube, "_api_get_json", get)
+    ctx = SimpleNamespace(
+        host="qa",
+        port=6443,
+        args=_kube_args(discover=True, discover_time=30),
+        lifecycle_state=kube.KubeApiLifecycleState(),
+        discovery_started_at=time.monotonic(),
+    )
+    result = kube.collect_kubeapi_data(
+        ctx,
+        {"status": "open_no_auth"},
+        {
+            "show_namespaces": False,
+            "show_pods": False,
+            "show_secrets": True,
+            "namespace_filters": [],
+            "exec_pod": None,
+            "exec_command": None,
+        },
+    )["content_discovery"]
+    if raw == "%%%":
+        assert result["status"] == "partial"
+        assert any("invalid_base64" in reason for reason in result["partial_reasons"])
+        assert not result["findings"]
+    else:
+        assert result["status"] == "complete"
+        assert [item["value"] for item in result["findings"]] == ["qa-full-λ\nline-two"]
+
+
+def test_kube_discovery_cursor_history_uses_disk_and_cleans_up(monkeypatch) -> None:
+    from redposture_core.discovery_frontier import DiscoveryFrontier
+
+    histories = []
+
+    class History(DiscoveryFrontier):
+        def __init__(self):
+            super().__init__()
+            histories.append(self)
+
+    monkeypatch.setattr(kube, "DiscoveryFrontier", History)
+    monkeypatch.setattr(
+        kube, "_api_get_json", lambda *a, **kw: (200, {"items": [], "metadata": {"continue": "same-cursor"}}, {}, None)
+    )
+    result = kube._kube_list_items(
+        "qa",
+        6443,
+        "/api/v1/secrets",
+        1,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        discovery_budget=kube.KubeDiscoveryReadBudget(remaining=4096, deadline=time.monotonic() + 5),
+    )
+    assert not result.complete and "repeated" in result.error
+    assert len(histories) == 1
+    assert not histories[0].location.exists()

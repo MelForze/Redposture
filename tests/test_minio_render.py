@@ -188,7 +188,7 @@ def test_detail_lines_buckets_header_and_streamed_objects_header_only():
                 "type": "aws_access_key",
                 "bucket": "public",
                 "key": "creds.env",
-                "masked_value": "AKIA...MPLE",
+                "value": "AKIAIOSFODNN7EXAMPLE",
                 "object_path": "$",
             }
         ],
@@ -204,7 +204,7 @@ def test_detail_lines_buckets_header_and_streamed_objects_header_only():
     assert not any("/" in line.split("\t")[-1] and "size:" in line for line in lines)
     assert "[+] bucket" not in body and "[+] object" not in body
     # clickhouse-style finding line: type, then value=/place= (no "secret" word)
-    assert '[!] ApiKey Value="AKIA...MPLE" Place="public/creds.env$"' in body
+    assert '[!] ApiKey Value="AKIAIOSFODNN7EXAMPLE" Place="public/creds.env$"' in body
     assert "[+] secret " not in body
     assert "[!] Discover partial: object_too_large" in body
 
@@ -221,24 +221,24 @@ def test_discover_summary_line_clickhouse_style():
                 "type": "aws_access_key",
                 "bucket": "creds",
                 "key": "app.env",
-                "masked_value": "AKIA...MPLE",
+                "value": "AKIAIOSFODNN7EXAMPLE",
                 "object_path": "$",
             },
             {
                 "type": "password",
                 "bucket": "creds",
                 "key": "db.yml",
-                "masked_value": "p***d",
+                "value": "pAssw0rd!",
                 "object_path": ".db.pass",
             },
         ],
     )
     lines = render._format_minio_detail_records(rec, "txt")
     assert f"{_PFX} [*] Discover Secrets (status:complete) (coverage:100.00%) (findings:2) (objects:3)" in lines
-    assert f'{_PFX} [!] ApiKey Value="AKIA...MPLE" Place="creds/app.env$"' in lines
-    assert f'{_PFX} [!] Pass Value="p***d" Place="creds/db.yml.db.pass"' in lines
+    assert f'{_PFX} [!] ApiKey Value="AKIAIOSFODNN7EXAMPLE" Place="creds/app.env$"' in lines
+    assert f'{_PFX} [!] Pass Value="pAssw0rd!" Place="creds/db.yml.db.pass"' in lines
     assert lines.index(next(line for line in lines if "Discover Secrets (status:" in line)) > lines.index(
-        next(line for line in lines if 'Pass Value="p***d"' in line)
+        next(line for line in lines if 'Pass Value="pAssw0rd!"' in line)
     )
 
 
@@ -345,7 +345,7 @@ def test_secret_finding_line_still_orange():
                 "type": "aws_access_key",
                 "bucket": "b",
                 "key": "creds.env",
-                "masked_value": "AKIA...MPLE",
+                "value": "AKIAIOSFODNN7EXAMPLE",
                 "object_path": "$",
             }
         ]
@@ -354,7 +354,7 @@ def test_secret_finding_line_still_orange():
     secret_line = next(line for line in lines if " Value=" in line and " Place=" in line)
     console = _Console()
     assert render._render_colored_minio_line(console, secret_line) is True
-    assert '<orange>ApiKey Value="AKIA...MPLE" Place="b/creds.env$"</orange>' in console.lines[0]
+    assert '<orange>ApiKey Value="AKIAIOSFODNN7EXAMPLE" Place="b/creds.env$"</orange>' in console.lines[0]
 
 
 def test_detect_record_appends_version_when_known():

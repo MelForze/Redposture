@@ -44,6 +44,7 @@ from ...clients.zookeeper import (
 from ...console import Console
 from ...detection_io import DetectCall as _DetectCall
 from ...detection_io import run_sync as _run_detect_sync
+from ...discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME
 from ...rendering import (
     BooleanColorRule,
     CountColorRule,
@@ -2387,6 +2388,7 @@ def _read_zookeeper_lifecycle_with_retry(
     authenticated: bool,
     operation: str,
     path: str,
+    max_data_bytes: int | None = None,
 ) -> tuple[_ZkClient, tuple[Any, int, Any] | None, str | None, int]:
     """Replay one idempotent read on a fresh selected-identity session."""
 
@@ -2412,8 +2414,14 @@ def _read_zookeeper_lifecycle_with_retry(
                     continue
                 return current_client, None, last_error, attempt + 1
 
+        result: tuple[Any, int, Any]
         try:
-            result = current_client.get_children2(path) if operation == "children" else current_client.get_data(path)
+            if operation == "children":
+                result = current_client.get_children2(path)
+            elif max_data_bytes is not None and callable(getattr(current_client, "get_data_limited", None)):
+                result = current_client.get_data_limited(path, max_data_bytes)
+            else:
+                result = current_client.get_data(path)
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             last_error = _friendly_error_from_exception(exc)
             retryable = _is_retryable_zookeeper_read_error(last_error)
@@ -2447,6 +2455,8 @@ def _enumerate_zookeeper_lifecycle(
     authenticated: bool,
     collect_paths: bool,
     progress_hook: Callable[[dict[str, Any]], None] | None,
+    deadline: float | None = None,
+    byte_budget: list[int] | None = None,
 ) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
     credential = ctx.credential
     enum_kwargs: dict[str, Any] = {
@@ -2461,6 +2471,10 @@ def _enumerate_zookeeper_lifecycle(
         enum_kwargs["nested_scheduler"] = nested_scheduler
     if state.selected_transport_config is not None:
         enum_kwargs["transport_config"] = state.selected_transport_config
+    if deadline is not None:
+        enum_kwargs["deadline"] = deadline
+    if byte_budget is not None:
+        enum_kwargs["byte_budget"] = byte_budget
     try:
         return _enumerate_znodes(
             client,
@@ -2479,6 +2493,8 @@ def _enumerate_zookeeper_lifecycle(
                 "auth_mechanism",
                 "transport_config",
                 "nested_scheduler",
+                "deadline",
+                "byte_budget",
             },
         ):
             raise
@@ -2524,6 +2540,19 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
         return payload
 
     started = time.monotonic()
+    target_started = getattr(ctx, "discovery_started_at", None)
+    discover_seconds = float(getattr(ctx.args, "discover_time", None) or DEFAULT_DISCOVER_TIME)
+    discover_deadline = (
+        (target_started if target_started is not None else started) + discover_seconds
+        if bool(getattr(ctx.args, "discover", False))
+        else None
+    )
+    remaining_data_bytes = (
+        int(getattr(ctx.args, "discover_max_bytes", None) or DEFAULT_DISCOVER_MAX_BYTES)
+        if bool(getattr(ctx.args, "discover", False))
+        else None
+    )
+    remaining_data_budget = [remaining_data_bytes] if remaining_data_bytes is not None else None
     show_znodes = bool(options["show_znodes"])
     dump = bool(options["dump"])
     query_znode = options.get("query_znode")
@@ -2558,6 +2587,19 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
     if refreshed_client is not None:
         client = refreshed_client
     refresh_action_error = f"session refresh failed: {reopen_error}" if reopen_error else None
+
+    if bool(getattr(ctx.args, "discover", False)):
+        from ...storage_discovery import DiscoveryCollector
+        from .discovery import discover_znodes
+
+        if reopen_error is None:
+            payload["timestamp"] = utc_now_iso()
+            return discover_znodes(ctx, payload, client, options)
+        collector = DiscoveryCollector(str(payload.get("module") or "zookeeper"), ctx, payload)
+        collector.partial("session", refresh_action_error or "refresh_failed")
+        payload["content_discovery"] = collector.result()
+        payload["stage2_error"] = refresh_action_error
+        return payload
 
     progress_hook: Callable[[dict[str, Any]], None] | None = None
     if callable(ctx.debug_emit):
@@ -2595,6 +2637,10 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
     enumeration_attempted = False
     if collect_paths and reopen_error is None:
         for attempt in range(attempts):
+            if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                enum_error = "discover_time"
+                truncated = True
+                break
             attempts_done = attempt + 1
             if attempt > 0:
                 try:
@@ -2624,6 +2670,8 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
                     authenticated=authenticated,
                     collect_paths=True,
                     progress_hook=progress_hook,
+                    deadline=discover_deadline,
+                    byte_budget=remaining_data_budget,
                 )
             finally:
                 enumerate_ms += int((time.monotonic() - enum_started) * 1000)
@@ -2633,6 +2681,9 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
             break
     else:
         attempts_done = 1
+
+    if remaining_data_budget is not None:
+        remaining_data_bytes = remaining_data_budget[0]
 
     sorted_znodes = sorted(listed) if collect_paths else []
     znode_details = (
@@ -2645,9 +2696,21 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
     noauth_text = "Access Denied"
     dump_started = time.monotonic() if (dump or query_znode) else None
     dump_errors: set[str] = set()
+    if enum_error in {"discover_max_bytes", "discover_time"}:
+        dump_errors.add(enum_error)
     znode_values: list[str] | None = None
     znode_dump_items: list[dict[str, Any]] | None = None
-    if dump and collect_paths and reopen_error is None:
+    if dump and not query_znode and enum_error in {"discover_max_bytes", "discover_time"}:
+        znode_values = []
+        znode_dump_items = []
+    if (
+        dump
+        and collect_paths
+        and reopen_error is None
+        and enum_error not in {"discover_max_bytes", "discover_time"}
+        and (remaining_data_bytes is None or remaining_data_bytes > 0)
+        and not (discover_deadline is not None and time.monotonic() >= discover_deadline)
+    ):
         refreshed_client, dump_reopen_error = _refresh_zookeeper_lifecycle_client(
             ctx,
             state,
@@ -2659,14 +2722,22 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
             reopen_error = dump_reopen_error
             refresh_action_error = f"session refresh failed: {dump_reopen_error}"
             dump_errors.add(refresh_action_error)
+    elif dump and discover_deadline is not None and time.monotonic() >= discover_deadline:
+        dump_errors.add("discover_time")
     elif dump and collect_paths and refresh_action_error:
         dump_errors.add(refresh_action_error)
-    if dump and not query_znode and reopen_error is None:
+    if dump and not query_znode and reopen_error is None and enum_error not in {"discover_max_bytes", "discover_time"}:
         znode_values = []
         znode_dump_items = []
         dump_limit = options.get("dump_limit")
         dump_paths = sorted_znodes[: int(dump_limit)] if isinstance(dump_limit, int) else sorted_znodes
         for path in dump_paths:
+            if remaining_data_bytes is not None and remaining_data_bytes <= 0:
+                dump_errors.add("discover_max_bytes")
+                break
+            if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                dump_errors.add("discover_time")
+                break
             client, read_result, read_error, read_attempts = _read_zookeeper_lifecycle_with_retry(
                 ctx,
                 state,
@@ -2674,12 +2745,15 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
                 authenticated=authenticated,
                 operation="data",
                 path=path,
+                max_data_bytes=remaining_data_bytes,
             )
             attempts_done = max(attempts_done, read_attempts)
             if read_result is None:
                 error_text = str(read_error or "ZooKeeper read failed")
                 znode_values.append(f"{path}:<error:{error_text}>")
                 dump_errors.add(error_text)
+                if "discovery byte budget" in error_text:
+                    break
                 continue
             value, value_err, _stat = read_result
             if value_err == _ZK_ERR_OK:
@@ -2707,7 +2781,12 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
         if dump:
             query_dump_error = query_error
             dump_errors.add(query_error)
-    if query_znode and reopen_error is None:
+    if query_znode and reopen_error is None and discover_deadline is not None and time.monotonic() >= discover_deadline:
+        query_error = "discover_time"
+        if dump:
+            query_dump_error = "discover_time"
+            dump_errors.add("discover_time")
+    if query_znode and reopen_error is None and query_error is None:
         client, query_result, query_read_error, query_attempts = _read_zookeeper_lifecycle_with_retry(
             ctx,
             state,
@@ -2731,31 +2810,36 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
                     f"bytes:{int((query_stat or {}).get('data_length') or 0)})"
                 )
                 if dump:
-                    client, data_result, data_read_error, data_attempts = _read_zookeeper_lifecycle_with_retry(
-                        ctx,
-                        state,
-                        client,
-                        authenticated=authenticated,
-                        operation="data",
-                        path=str(query_znode),
-                    )
-                    attempts_done = max(attempts_done, data_attempts)
-                    if data_result is None:
-                        query_dump_error = str(data_read_error or "ZooKeeper read failed")
+                    if remaining_data_bytes is not None and remaining_data_bytes <= 0:
+                        query_dump_error = "discover_max_bytes"
                         dump_errors.add(query_dump_error)
                     else:
-                        value, value_err, _stat = data_result
-                        if value_err == _ZK_ERR_OK:
-                            query_dump = _format_znode_data(value)
-                        elif value_err == _ZK_ERR_NOAUTH:
-                            query_dump_error = noauth_text
-                            dump_errors.add("NOAUTH")
-                        elif value_err == _ZK_ERR_NONODE:
-                            query_dump_error = "znode not found"
-                            dump_errors.add("NONODE")
-                        else:
-                            query_dump_error = _zk_error_name(value_err)
+                        client, data_result, data_read_error, data_attempts = _read_zookeeper_lifecycle_with_retry(
+                            ctx,
+                            state,
+                            client,
+                            authenticated=authenticated,
+                            operation="data",
+                            path=str(query_znode),
+                            max_data_bytes=remaining_data_bytes,
+                        )
+                        attempts_done = max(attempts_done, data_attempts)
+                        if data_result is None:
+                            query_dump_error = str(data_read_error or "ZooKeeper read failed")
                             dump_errors.add(query_dump_error)
+                        else:
+                            value, value_err, _stat = data_result
+                            if value_err == _ZK_ERR_OK:
+                                query_dump = _format_znode_data(value)
+                            elif value_err == _ZK_ERR_NOAUTH:
+                                query_dump_error = noauth_text
+                                dump_errors.add("NOAUTH")
+                            elif value_err == _ZK_ERR_NONODE:
+                                query_dump_error = "znode not found"
+                                dump_errors.add("NONODE")
+                            else:
+                                query_dump_error = _zk_error_name(value_err)
+                                dump_errors.add(query_dump_error)
             elif query_err == _ZK_ERR_NOAUTH:
                 query_value = f"{query_znode}:<{noauth_text}>"
                 query_error = "NOAUTH"
@@ -2778,8 +2862,12 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
     dump_ms = int((time.monotonic() - dump_started) * 1000) if dump_started is not None else None
     refresh_blocked_enumeration = bool(collect_paths and not enumeration_attempted and refresh_action_error)
     coverage_partial = bool(truncated or noauth_partial or enum_error or refresh_blocked_enumeration)
+    expected_budget_stop = bool(getattr(ctx.args, "discover", False)) and enum_error in {
+        "discover_max_bytes",
+        "discover_time",
+    }
     errors: list[str] = []
-    for item in (payload.get("error"), refresh_action_error, enum_error):
+    for item in (payload.get("error"), refresh_action_error, None if expected_budget_stop else enum_error):
         clean = str(item or "").strip()
         if clean and clean not in errors:
             errors.append(clean)
@@ -2822,7 +2910,9 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
                 if noauth_partial and not enum_error
                 else None
             ),
-            "stage2_error": refresh_action_error or enum_error or payload.get("stage2_error"),
+            "stage2_error": refresh_action_error
+            or (None if expected_budget_stop else enum_error)
+            or payload.get("stage2_error"),
             "attempts": attempts_done,
             "max_attempts": attempts,
             "stage_attempts": {
@@ -3247,6 +3337,8 @@ def _format_znode_capability_records(record: dict[str, Any], output_format: str)
 
 
 def _format_znodes_detail_records(record: dict[str, Any], output_format: str, *, debug: bool = False) -> list[str]:
+    if record.get("_zookeeper_discovery_streamed"):
+        return []
     show_znodes = bool(record.get("show_znodes"))
     dump = bool(record.get("dump"))
     query_znode = str(record.get("query_znode") or "").strip()

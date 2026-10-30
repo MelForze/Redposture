@@ -1,4 +1,4 @@
-"""Exporter scan/collect/trigger subsystem facades."""
+"""Exporter detection, collect and trigger subsystem facades."""
 
 from __future__ import annotations
 

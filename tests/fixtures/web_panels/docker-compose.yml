@@ -1,0 +1,76 @@
+services:
+  mongo:
+    profiles: [mongo]
+    image: mongo:7.0.14
+    mem_limit: 512m
+    cpus: 1.0
+    volumes: ["./mongo.js:/docker-entrypoint-initdb.d/qa.js:ro"]
+    healthcheck:
+      test: [CMD, mongosh, --quiet, --eval, 'db.adminCommand({ping:1})']
+      interval: 2s
+      retries: 60
+  mongo-express:
+    profiles: [mongo]
+    image: mongo-express:1.0.2-20
+    mem_limit: 256m
+    cpus: 1.0
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://mongo:27017/
+      ME_CONFIG_BASICAUTH_ENABLED: 'false'
+      ME_CONFIG_BASICAUTH: 'false'
+    ports: ["127.0.0.1::8081"]
+    depends_on:
+      mongo: {condition: service_healthy}
+  redis:
+    profiles: [redis]
+    image: redis:7.4.11-alpine
+    mem_limit: 128m
+    cpus: 0.5
+    command: [redis-server, --requirepass, reader-pass-22]
+    healthcheck:
+      test: [CMD, redis-cli, -a, reader-pass-22, PING]
+      interval: 2s
+      retries: 60
+  redis-seed:
+    profiles: [redis]
+    image: redis:7.4.11-alpine
+    mem_limit: 64m
+    cpus: 0.25
+    command: [redis-cli, -h, redis, -a, reader-pass-22, MSET, 'qa:key', seeded-redis-content, 'qa:second', seeded-redis-second-row]
+    depends_on:
+      redis: {condition: service_healthy}
+  redisinsight:
+    profiles: [redis]
+    image: redis/redisinsight:2.68
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      RI_ACCEPT_TERMS_AND_CONDITIONS: 'true'
+      RI_ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef'
+    ports: ["127.0.0.1::5540"]
+    depends_on:
+      redis-seed: {condition: service_completed_successfully}
+  postgres:
+    profiles: [pgadmin]
+    image: postgres:16.15-alpine
+    mem_limit: 256m
+    cpus: 1.0
+    environment: {POSTGRES_USER: reader, POSTGRES_PASSWORD: reader-pass-22, POSTGRES_DB: qa}
+    volumes: ["./postgres.sql:/docker-entrypoint-initdb.d/qa.sql:ro"]
+    healthcheck:
+      test: [CMD, pg_isready, -U, reader, -d, qa]
+      interval: 2s
+      retries: 60
+  pgadmin:
+    profiles: [pgadmin]
+    image: dpage/pgadmin4:9.9
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      PGADMIN_DEFAULT_EMAIL: qa@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin-password-22
+      PGADMIN_REPLACE_SERVERS_ON_STARTUP: 'True'
+    volumes: ["./servers.json:/pgadmin4/servers.json:ro"]
+    ports: ["127.0.0.1::80"]
+    depends_on:
+      postgres: {condition: service_healthy}

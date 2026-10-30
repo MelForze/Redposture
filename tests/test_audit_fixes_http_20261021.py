@@ -107,16 +107,15 @@ def test_http21_e01_yarn_discovery_uses_full_list_snapshot(monkeypatch):
     rows = [{"id": f"application_1_{i}", "name": f"app{i}", "diagnostics": "full text"} for i in range(100)]
     paths = []
 
-    def get(ctx, base, path):
+    def get(ctx, base, path, *, budget=None):
+        assert budget is not None
         paths.append(path)
-        return reply(
-            {"apps": {"app": rows}} if "?" in path else {"app": next(r for r in rows if path.endswith(r["id"]))}
-        )
+        return reply({"apps": {"app": rows}} if path == "/ws/v1/cluster/apps" else {})
 
     monkeypatch.setattr(yarn, "_get", get)
     result = yarn.data_record(NS(args=NS(discover=True)), {"api_endpoint": "http://qa", "is_yarn": True})
     assert [x["spec"] for x in result["app_specs"]] == rows
-    assert paths == ["/ws/v1/cluster/apps?limit=5000"]
+    assert paths == ["/ws/v1/cluster/apps"]
 
 
 def test_http21_e02_airflow_negative_corroboration_reused():
@@ -321,7 +320,9 @@ def test_partial_coverage_airflow_colors_and_plain_saved_output(module, tmp_path
 
 
 def test_http21_03_session_cap_does_not_mark_complete_contents_partial(monkeypatch):
-    def get(ctx, base, path, token):
+    def get(ctx, base, path, token, *, budget=None):
+        if path.startswith("/api/contents"):
+            assert budget is not None
         return reply(
             [{"id": str(i), "kernel": {}} for i in range(5001)]
             if path == "/api/sessions"

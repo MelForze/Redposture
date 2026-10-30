@@ -22,8 +22,8 @@ def context(port):
     "payload,expected",
     [
         (b"R\x00\x00\x00\x08\x00\x00\x00\x03", ("auth_required", "cleartext")),
-        (b"R\x00\x00\x00\x08\x00\x00\x00\x0a", ("auth_required", "scram-sha-256")),
-        (b"R\x00\x00\x00\x08\x00\x00\x00\x05", ("auth_required", "md5")),
+        (b"R\x00\x00\x00\x17\x00\x00\x00\x0aSCRAM-SHA-256\x00\x00", ("auth_required", "scram-sha-256")),
+        (b"R\x00\x00\x00\x0c\x00\x00\x00\x05salt", ("auth_required", "md5")),
         (b"R\x00\x00\x00\x08\x00\x00\x00\x00Z\x00\x00\x00\x05I", ("open_no_auth", None)),
     ],
 )

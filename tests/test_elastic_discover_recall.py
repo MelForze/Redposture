@@ -8,12 +8,17 @@ import json
 
 import pytest
 
+from redposture_core.discovery_values import DiskBackedText
 from redposture_core.modules.elastic.discover import DiscoverOptions, scan_value_tree
 
 
 def _values(document: dict[str, str], *, options: DiscoverOptions | None = None) -> set[str]:
     result = scan_value_tree(document, source_kind="document", object_name="recall", options=options)
-    return {item.value for item, _location in result.detections if item.available}
+    return {
+        "".join(item.value.iter_text_chunks()) if isinstance(item.value, DiskBackedText) else item.value
+        for item, _location in result.detections
+        if item.available
+    }
 
 
 @pytest.mark.parametrize(
@@ -96,10 +101,10 @@ def test_neutral_encoded_basic_pair_and_public_material_are_not_findings() -> No
     assert _values({"markup": '<div notatoken="ordinary-state-value"></div>'}) == set()
 
 
-def test_oversized_gzip_blob_is_not_decompressed_past_limit() -> None:
+def test_large_gzip_blob_is_fully_scanned_beyond_local_json_portion() -> None:
     raw = b"password=" + b"A" * 10_000
     encoded = base64.b64encode(gzip.compress(raw)).decode()
-    assert _values({"blob": encoded}, options=DiscoverOptions(max_embedded_json_bytes=128)) == set()
+    assert _values({"blob": encoded}, options=DiscoverOptions(max_embedded_json_bytes=128)) == {"A" * 10_000}
 
 
 def test_escaped_json_and_unicode_escapes_are_scanned_once() -> None:

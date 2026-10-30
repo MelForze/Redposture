@@ -70,12 +70,13 @@ Port `24648` is an isolated server/client with `raw_exec` enabled. The optional
 `nomad-execute-root.yml` override runs the client privileged with a **private cgroup
 namespace**, no Docker socket and no host directories. It remounts this container's
 cgroup hierarchy and moves the agent into its own child group. This is needed for
-reliable allocation exec on the tested Docker Desktop ARM environment. The base
+reliable allocation exec on the tested Docker Desktop ARM environment. Its Docker exec healthcheck is disabled: an external HTTP check waits for both a leader and an eligible healthy raw_exec client, avoiding cgroup delegation races. Do not replace this wait with `up --wait`: with healthchecks disabled it only proves that the container started. The base
 unprivileged profile supports batch commands, but allocation exec crashed the
 vendor executor there, including with the official Nomad CLI.
 
 ```bash
-docker compose -p rp-token-execute -f tests/fixtures/token_apis/docker-compose.yml -f tests/fixtures/token_apis/nomad-execute-root.yml --profile nomad-execute up -d --wait nomad-execute
+docker compose -p rp-token-execute -f tests/fixtures/token_apis/docker-compose.yml -f tests/fixtures/token_apis/nomad-execute-root.yml --profile nomad-execute up -d nomad-execute
+.venv/bin/python scripts/wait_nomad_ready.py http://127.0.0.1:24648 --timeout 150
 .venv/bin/python redposture.py nomad -t http://127.0.0.1:24648
 .venv/bin/python redposture.py nomad -t http://127.0.0.1:24648 --enum-cve
 .venv/bin/python redposture.py nomad -t http://127.0.0.1:24648 --probe-submit

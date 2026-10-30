@@ -21,6 +21,7 @@ from ...clients.http_api import (
 )
 from ...clients.http_redirects import follow_redirects, http_origin
 from ...clients.tls_cache import clear_tls_context_cache, shared_client_ssl_context
+from ...http_headers import merge_custom_http_headers
 
 
 def _ca_cache_key(ca_file: str | None) -> tuple[str, int, int] | None:
@@ -170,7 +171,7 @@ class KubeApiHttpSession:
             path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
             return self._request_once(method, path, headers, body, timeout=timeout, response_size_cap=response_size_cap)
 
-        response = follow_redirects(send, method, initial_url, headers=headers, body=body)
+        response = follow_redirects(send, method, initial_url, headers=merge_custom_http_headers(headers), body=body)
         response = decode_http_content(response, max_bytes=response_size_cap)
         pin_http_redirect_path(response, method=method)
         return response

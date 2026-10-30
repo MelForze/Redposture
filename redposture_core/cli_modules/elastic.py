@@ -68,7 +68,7 @@ def configure_elastic_parser(
         dest="username",
         default=None,
         metavar="name",
-        help="Basic auth username or credential file.",
+        help="Basic auth username or credential file. Verified access checks use a temporary index or document and clean it up.",
     )
     auth.add_argument(
         "-p",
@@ -88,7 +88,7 @@ def configure_elastic_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try the curated Elasticsearch/OpenSearch credential set after API token or basic credentials.",
+        help="Try curated credentials; each verified pair receives its own write/delete check with cleanup.",
     )
 
     actions.add_argument(
@@ -125,7 +125,7 @@ def configure_elastic_parser(
         action="store_true",
         help="Audit accessible indices and configurations for potential secret leaks.",
     )
-    add_discovery_budget_flags(actions, default_time=300.0, default_bytes=50 * 1024 * 1024)
+    add_discovery_budget_flags(actions)
 
 
 __all__ = ["configure_elastic_parser"]

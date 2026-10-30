@@ -43,7 +43,7 @@ MUTATIONS = (
     Mutation(
         name="Elastic leaves a compressed redirected response opaque",
         source="redposture_core/modules/elastic/http_session.py",
-        original="        response = decode_http_content(response, max_bytes=self.response_cap)",
+        original="        response = decode_http_content(response, max_bytes=cap)",
         replacement="        response = response",
         tests=(
             "tests/test_http_redirect_policy.py::test_redirect_to_tls_proxy_gzip_keeps_json_and_final_origin[302-elastic]",
@@ -96,7 +96,7 @@ MUTATIONS = (
     Mutation(
         name="Jenkins treats unknown whoAmI response as a rejected password",
         source="redposture_core/modules/jenkins/actions.py",
-        original='result["provided_credentials_ok"] = True if verified else False if identity.status == 401 else None',
+        original='result["provided_credentials_ok"] = True if verified else False if rejected else None',
         replacement='result["provided_credentials_ok"] = verified',
         tests=("tests/test_jenkins.py::test_auth_does_not_accept_public_200_or_ambiguous_403",),
     ),
@@ -324,8 +324,8 @@ MUTATIONS = (
     Mutation(
         name="Elastic rejects the document at the exact count limit",
         source="redposture_core/modules/elastic/discover.py",
-        original="if self.documents + 1 > self.options.max_documents:",
-        replacement="if self.documents + 1 >= self.options.max_documents:",
+        original="if self.options.max_documents is not None and self.documents + 1 > self.options.max_documents:",
+        replacement="if self.options.max_documents is not None and self.documents + 1 >= self.options.max_documents:",
         tests=(
             "tests/test_quality_discovery_stateful.py::test_elastic_budget_accepts_exact_document_and_byte_boundaries",
         ),
@@ -333,8 +333,8 @@ MUTATIONS = (
     Mutation(
         name="Elastic rejects source bytes exactly at the limit",
         source="redposture_core/modules/elastic/discover.py",
-        original="if proposed_bytes > self.options.max_source_bytes:",
-        replacement="if proposed_bytes >= self.options.max_source_bytes:",
+        original="if self.options.max_source_bytes is not None and source_bytes > self.options.max_source_bytes:",
+        replacement="if self.options.max_source_bytes is not None and source_bytes >= self.options.max_source_bytes:",
         tests=(
             "tests/test_quality_discovery_stateful.py::test_elastic_budget_accepts_exact_document_and_byte_boundaries",
         ),
@@ -349,9 +349,9 @@ MUTATIONS = (
     Mutation(
         name="Airflow log truncation reports the wrong budget boundary",
         source="redposture_core/modules/airflow/discover.py",
-        original="if len(encoded) > remaining:",
-        replacement="if len(encoded) < remaining:",
-        tests=("tests/test_quality_discovery_properties.py::test_airflow_log_stream_never_exceeds_either_byte_budget",),
+        original='if remaining is not None and len(encoded) > remaining:\n            return "".join(parts), used, "max_log_bytes"',
+        replacement='if remaining is not None and len(encoded) < remaining:\n            return "".join(parts), used, "max_log_bytes"',
+        tests=("tests/test_airflow_discover.py::test_discover_enforces_per_log_byte_limit",),
     ),
     Mutation(
         name="ClickHouse reads a malformed one-column table row",
@@ -406,8 +406,8 @@ MUTATIONS = (
     Mutation(
         name="Kafka accepts a zero-length frame",
         source="redposture_core/clients/kafka.py",
-        original="if frame_size <= 0 or frame_size > KAFKA_MAX_FRAME:",
-        replacement="if frame_size < 0 or frame_size > KAFKA_MAX_FRAME:",
+        original="if frame_size <= 0 or (budget is None and frame_size > KAFKA_MAX_FRAME):",
+        replacement="if frame_size < 0 or (budget is None and frame_size > KAFKA_MAX_FRAME):",
         tests=("tests/test_quality_kafka_fuzz.py::test_kafka_framed_socket_rejects_foreign_and_invalid_prefixes",),
     ),
     Mutation(

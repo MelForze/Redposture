@@ -48,8 +48,8 @@ def test_parser_default_audit_is_read_only_and_has_no_password_options():
 
 
 def test_parser_exposes_only_explicit_non_executing_submit_probe():
-    args = parse(["-t", "master", "--probe-submit", "--tls-ca", "ca.pem", "--discover-max-bytes", "1000"])
-    assert args.probe_submit and args.tls_ca == "ca.pem" and args.discover_max_bytes == 1000
+    args = parse(["-t", "master", "--probe-submit", "--tls-ca", "ca.pem"])
+    assert args.probe_submit and args.tls_ca == "ca.pem" and not hasattr(args, "discover_max_bytes")
 
 
 def test_plan_scans_ui_and_rest_ports_with_no_credential_attempts():
@@ -69,7 +69,7 @@ def test_plan_keeps_explicit_target_port_and_prefix():
 
 @pytest.mark.parametrize(
     "values",
-    [{"tls_cert": "client.pem"}, {"tls_key": "client.key"}, {"discover_time": float("nan")}, {"discover_max_bytes": 0}],
+    [{"tls_cert": "client.pem"}, {"tls_key": "client.key"}, {"discover_time": float("nan")}],
 )
 def test_invalid_tls_pairs_and_discovery_budgets_fail_before_connect(values):
     errors = []

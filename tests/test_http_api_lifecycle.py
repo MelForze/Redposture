@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import pytest
@@ -49,7 +50,11 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
         if path == "/api/health":
             return 401, "", {}
         if path == "/login":
+            if method == "POST":
+                return 401, '{"message":"Invalid username or password"}', {}
             return 200, "<title>Grafana</title>", {}
+        if path == "/api/org":
+            return 401, '{"message":"Unauthorized"}', {}
         if path == "/api/user":
             return (
                 (200, '{"id":1,"login":"good","isGrafanaAdmin":false}', {})
@@ -64,13 +69,19 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
     args = parse_args(["grafana", "-t", "127.0.0.1", "--port", "3000", "-u", str(credentials), "--format", "json"])
     result = _run(grafana, "grafana", args)
 
+    invalid_control = events[8][1]
+    assert invalid_control is not None and invalid_control.startswith("Basic ")
+    assert base64.b64decode(invalid_control.split()[1]).decode().split(":", 1)[0].startswith("redposture-invalid-")
     assert events == [
         ("/api/health", None),
         ("/login", None),
         ("/api/datasources", None),
         ("/api/user", grafana._auth_header("bad", "bad")),
+        ("/api/org", grafana._auth_header("bad", "bad")),
+        ("/login", None),
         ("/api/user", grafana._auth_header("good", "good")),
         ("/api/user", None),
+        ("/api/user", invalid_control),
         ("/api/health", grafana._auth_header("good", "good")),
         ("/api/datasources", grafana._auth_header("good", "good")),
     ]
@@ -126,12 +137,16 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
     winning_header = grafana._auth_header("admin", "password")
     later_header = grafana._auth_header("grafana", "grafana")
 
-    def fake_http(_host, _port, path, _timeout, *, headers=None, **_kwargs):
+    def fake_http(_host, _port, path, _timeout, *, headers=None, method="GET", **_kwargs):
         authorization = (headers or {}).get("Authorization")
         if path == "/api/health":
             return 401, "", {}
         if path == "/login":
+            if method == "POST":
+                return 401, '{"message":"Invalid username or password"}', {}
             return 200, "<title>Grafana</title>", {}
+        if path == "/api/org":
+            return 401, '{"message":"Unauthorized"}', {}
         if path == "/api/user":
             auth_headers.append(authorization)
             if authorization == first_header:
@@ -168,9 +183,13 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
     expected_headers: list[str | None] = [
         grafana._auth_header(run.username or "admin", run.password or "") for run in plan.credential_runs
     ]
-    # A valid-looking identity needs a same-endpoint anonymous control: the
-    # earlier datasource denial cannot exclude a fixed /api/user front end.
+    controls = [header for header in auth_headers if header is not None and header not in expected_headers]
+    assert len(controls) == 1 and controls[0].startswith("Basic ")
+    assert base64.b64decode(controls[0].split()[1]).decode().split(":", 1)[0].startswith("redposture-invalid-")
+    # The same endpoint must reject both anonymous and a nonexistent user;
+    # neither an earlier datasource denial nor arbitrary Basic-header access proves a pair.
     expected_headers.insert(expected_headers.index(winning_header) + 1, None)
+    expected_headers.insert(expected_headers.index(winning_header) + 2, controls[0])
     assert auth_headers == expected_headers
     # Later accepted pairs reuse this baseline in the live lifecycle state.
     assert auth_headers.count(None) == 1

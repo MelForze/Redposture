@@ -9,14 +9,21 @@ import secrets
 import socket
 import ssl
 import struct
+import time
 import zlib
 from collections import OrderedDict
+from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from ..detection_io import DetectCall as _DetectCall
 from ..detection_io import run_sync as _run_detect_sync
+from ..discovery_bytes import SpoolBytes
+from ..discovery_spool import SpoolingValues
+from ..discovery_values import DiskBackedText
+from ..kafka_discovery_compression import CompressedBatchError
+from ..kafka_discovery_compression import decompress as decompress_spooled_kafka
 from . import transport
 from .tls_cache import shared_client_ssl_context
 
@@ -37,6 +44,7 @@ KAFKA_SASL_AUTHENTICATE = 36
 KAFKA_AUTH_ERROR_CODES = {29, 31, 58}
 KAFKA_MAX_FRAME = 16 * 1024 * 1024
 KAFKA_FETCH_MAX_BYTES = 1024 * 1024
+KAFKA_DISCOVERY_FETCH_MAX_BYTES = 128 * 1024 * 1024
 KAFKA_MAX_WRITE_VALUE_BYTES = 1024 * 1024
 _KAFKA_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("admin", "admin"),
@@ -74,6 +82,32 @@ class _TlsProbeError(Exception):
     (not `ValueError`) so plain framing errors stay distinguishable from
     "listener is TLS, retry with wrap_socket".
     """
+
+
+class KafkaDiscoveryBudgetExceeded(ValueError):
+    """A discovery frame could not be read within the target budget."""
+
+
+@dataclass
+class KafkaDiscoveryReadBudget:
+    remaining: int
+    deadline: float | None = None
+    portion_bytes: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.portion_bytes = self.remaining
+
+    def begin_frame(self) -> None:
+        self.remaining = self.portion_bytes
+
+    def check_time(self) -> None:
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise KafkaDiscoveryBudgetExceeded("discover_time")
+
+    def take(self, size: int) -> None:
+        if size > self.remaining:
+            raise KafkaDiscoveryBudgetExceeded("byte_budget")
+        self.remaining -= size
 
 
 @dataclass(frozen=True)
@@ -651,11 +685,28 @@ def _identify_non_kafka_prelude(raw: bytes) -> str | None:
     return None
 
 
-def _recv_kafka_frame(sock: socket.socket) -> bytes:
-    return _run_detect_sync(_recv_kafka_frame_detect_steps(sock))
+def _recv_kafka_frame(sock: socket.socket, *, budget: KafkaDiscoveryReadBudget | None = None) -> bytes:
+    if budget is None or budget.deadline is None:
+        return _run_detect_sync(_recv_kafka_frame_detect_steps(sock, budget=budget))
+    budget.check_time()
+    previous_timeout = sock.gettimeout()
+    remaining_time = max(0.001, budget.deadline - time.monotonic())
+    sock.settimeout(min(previous_timeout, remaining_time) if previous_timeout is not None else remaining_time)
+    try:
+        return _run_detect_sync(_recv_kafka_frame_detect_steps(sock, budget=budget))
+    except TimeoutError as exc:
+        if time.monotonic() >= budget.deadline:
+            raise KafkaDiscoveryBudgetExceeded("discover_time") from exc
+        raise
+    finally:
+        sock.settimeout(previous_timeout)
 
 
-def _recv_kafka_frame_detect_steps(sock: socket.socket):
+def _recv_kafka_frame_detect_steps(sock: socket.socket, *, budget: KafkaDiscoveryReadBudget | None = None):
+    if budget is not None:
+        budget.begin_frame()
+        budget.check_time()
+        budget.take(4)
     raw_size = yield _DetectCall(_recv_exact, (sock, 4), {})
     if _is_tls_record_prelude(raw_size):
         raise _TlsProbeError(f"plaintext read returned TLS record prelude: {raw_size!r}")
@@ -679,11 +730,29 @@ def _recv_kafka_frame_detect_steps(sock: socket.socket):
             f"not a Kafka broker: peer sent {non_kafka_kind} ({first_line!r}). Check the port — an HTTP service or admin panel is likely listening here instead of Kafka."
         )
     (frame_size,) = struct.unpack(">i", raw_size)
-    if frame_size <= 0 or frame_size > KAFKA_MAX_FRAME:
+    if frame_size <= 0 or (budget is None and frame_size > KAFKA_MAX_FRAME):
         raise ValueError(
             f"invalid Kafka frame size {frame_size} (raw bytes: 0x{raw_size.hex()}; expected 1..{KAFKA_MAX_FRAME}). The peer may be a load balancer or proxy speaking an unknown protocol."
         )
+    if budget is not None:
+        budget.check_time()
+        if frame_size > 65536 or budget.portion_bytes >= 1_000_000:
+            return (yield _DetectCall(_recv_spooled_frame, (sock, frame_size, budget), {}))
+        budget.take(frame_size)
     return (yield _DetectCall(_recv_exact, (sock, frame_size), {}))
+
+
+def _recv_spooled_frame(sock: socket.socket, size: int, budget: KafkaDiscoveryReadBudget) -> SpoolBytes:
+    frame = SpoolBytes()
+    remaining = size
+    while remaining:
+        budget.check_time()
+        chunk = sock.recv(min(65536, remaining))
+        if not chunk:
+            raise ConnectionError("unexpected EOF while receiving Kafka frame")
+        frame.write(chunk)
+        remaining -= len(chunk)
+    return frame
 
 
 def _encode_kafka_string(value: str) -> bytes:
@@ -712,37 +781,66 @@ def _build_request_header(api_key: int, api_version: int, correlation_id: int, c
 
 
 def _send_kafka_request(
-    sock: socket.socket, *, api_key: int, api_version: int, correlation_id: int, client_id: str, body: bytes = b""
+    sock: socket.socket,
+    *,
+    api_key: int,
+    api_version: int,
+    correlation_id: int,
+    client_id: str,
+    body: bytes = b"",
+    budget: KafkaDiscoveryReadBudget | None = None,
 ) -> bytes:
-    return _run_detect_sync(
-        _send_kafka_request_detect_steps(
-            sock,
-            api_key=api_key,
-            api_version=api_version,
-            correlation_id=correlation_id,
-            client_id=client_id,
-            body=body,
+    if budget is not None:
+        budget.check_time()
+    previous_timeout = sock.gettimeout() if budget is not None and budget.deadline is not None else None
+    if budget is not None and budget.deadline is not None:
+        remaining_time = max(0.001, budget.deadline - time.monotonic())
+        sock.settimeout(min(previous_timeout, remaining_time) if previous_timeout is not None else remaining_time)
+    try:
+        return _run_detect_sync(
+            _send_kafka_request_detect_steps(
+                sock,
+                api_key=api_key,
+                api_version=api_version,
+                correlation_id=correlation_id,
+                client_id=client_id,
+                body=body,
+                budget=budget,
+            )
         )
-    )
+    except TimeoutError as exc:
+        if budget is not None and budget.deadline is not None and time.monotonic() >= budget.deadline:
+            raise KafkaDiscoveryBudgetExceeded("discover_time") from exc
+        raise
+    finally:
+        if budget is not None and budget.deadline is not None:
+            sock.settimeout(previous_timeout)
 
 
 def _send_kafka_request_detect_steps(
-    sock: socket.socket, *, api_key: int, api_version: int, correlation_id: int, client_id: str, body: bytes = b""
+    sock: socket.socket,
+    *,
+    api_key: int,
+    api_version: int,
+    correlation_id: int,
+    client_id: str,
+    body: bytes = b"",
+    budget: KafkaDiscoveryReadBudget | None = None,
 ):
     frame = _build_request_header(api_key, api_version, correlation_id, client_id) + body
     yield _DetectCall(sock.sendall, (struct.pack(">i", len(frame)) + frame,), {})
-    return (yield _DetectCall(_recv_kafka_frame, (sock,), {}))
+    return (yield _DetectCall(_recv_kafka_frame, (sock,), {"budget": budget} if budget is not None else {}))
 
 
 class _KafkaReader:
-    def __init__(self, data: bytes) -> None:
+    def __init__(self, data: bytes | SpoolBytes) -> None:
         self._data = data
         self._pos = 0
 
     def remaining(self) -> int:
         return len(self._data) - self._pos
 
-    def _read(self, size: int) -> bytes:
+    def _read(self, size: int) -> Any:
         if size < 0:
             raise ValueError("negative read size")
         end = self._pos + size
@@ -1199,7 +1297,12 @@ def _decode_xerial_snappy(payload: bytes, snappy_module: Any) -> bytes:
     return bytes(output)
 
 
-def _decompress_kafka_records(codec: int, payload: bytes) -> bytes:
+def _decompress_kafka_records(codec: int, payload: bytes | SpoolBytes) -> bytes | SpoolBytes:
+    if isinstance(payload, SpoolBytes):
+        try:
+            return decompress_spooled_kafka(codec, payload)
+        except CompressedBatchError as exc:
+            raise KafkaCompressionError(str(exc)) from exc
     codec_names = {1: "gzip", 2: "snappy", 3: "lz4", 4: "zstd"}
     name = codec_names.get(codec)
     if name is None:
@@ -1247,7 +1350,7 @@ def _parse_record_entries(
     min_offset: int | None = None,
     max_offset: int | None = None,
 ) -> list[tuple[int, str]]:
-    items: list[tuple[int, str]] = []
+    items: list[tuple[int, str]] = SpoolingValues() if isinstance(reader._data, SpoolBytes) else []
     if record_count > KAFKA_MAX_PARSE_STEPS:
         raise ValueError("Kafka record count exceeds parse budget")
     for _ in range(record_count):
@@ -1330,7 +1433,7 @@ def _parse_record_batch_entries(
 
 
 def _parse_message_set_entries(
-    message_set: bytes,
+    message_set: bytes | SpoolBytes,
     max_messages: int | None,
     *,
     _depth: int = 0,
@@ -1340,7 +1443,7 @@ def _parse_message_set_entries(
 ) -> list[tuple[int, str]]:
     if _depth > KAFKA_MAX_COMPRESSION_DEPTH:
         raise KafkaCompressionError("Kafka compression nesting exceeds 4 levels")
-    items: list[tuple[int, str]] = []
+    items: list[tuple[int, str]] = SpoolingValues() if isinstance(message_set, SpoolBytes) else []
     reader = _KafkaReader(message_set)
 
     parse_steps = 0
@@ -1613,29 +1716,42 @@ def _read_partition_messages_on_leader(
     remaining: int | None,
     *,
     fetch_api_version: int = KAFKA_FETCH_API_VERSION,
+    deadline: float | None = None,
+    budget: KafkaDiscoveryReadBudget | None = None,
+    on_message: Callable[[int, Any], None] | None = None,
 ) -> tuple[list[str], int, str | None]:
     """Do ListOffsets + Fetch for a single partition on the leader socket.
     Returns `(items, next_correlation, error)`. Items are `[f"p{partition}@{offset} text", ...]`.
     """
-    list_offsets_payload = _send_kafka_request(
-        leader_sock,
-        api_key=KAFKA_LIST_OFFSETS,
-        api_version=0,
-        correlation_id=correlation,
-        client_id=KAFKA_CLIENT_ID,
-        body=_build_list_offsets_request_body(topic, partition, time_value=-2),
-    )
+    if deadline is not None and time.monotonic() >= deadline:
+        return [], correlation, "discover_time"
+    try:
+        list_offsets_payload = _send_kafka_request(
+            leader_sock,
+            api_key=KAFKA_LIST_OFFSETS,
+            api_version=0,
+            correlation_id=correlation,
+            client_id=KAFKA_CLIENT_ID,
+            body=_build_list_offsets_request_body(topic, partition, time_value=-2),
+            **({"budget": budget} if budget is not None else {}),
+        )
+    except KafkaDiscoveryBudgetExceeded as exc:
+        return [], correlation + 1, str(exc)
     earliest_offset, list_offsets_error = _parse_list_offsets_response(list_offsets_payload, correlation)
     correlation += 1
     if list_offsets_error:
         return [], correlation, list_offsets_error
     if earliest_offset is None:
         return [], correlation, None
+    if deadline is not None and time.monotonic() >= deadline:
+        return [], correlation, "discover_time"
 
-    items: list[str] = []
+    items: list[Any] = SpoolingValues() if budget is not None else []
     next_offset = earliest_offset
     snapshot_end: int | None = None
     while remaining is None or len(items) < remaining:
+        if deadline is not None and time.monotonic() >= deadline:
+            return items, correlation, "discover_time"
         try:
             fetch_payload = _send_kafka_request(
                 leader_sock,
@@ -1644,9 +1760,16 @@ def _read_partition_messages_on_leader(
                 correlation_id=correlation,
                 client_id=KAFKA_CLIENT_ID,
                 body=_build_fetch_request_body(
-                    topic, partition, next_offset, max_bytes=KAFKA_FETCH_MAX_BYTES, api_version=fetch_api_version
+                    topic,
+                    partition,
+                    next_offset,
+                    max_bytes=(KAFKA_DISCOVERY_FETCH_MAX_BYTES if budget is not None else KAFKA_FETCH_MAX_BYTES),
+                    api_version=fetch_api_version,
                 ),
+                **({"budget": budget} if budget is not None else {}),
             )
+        except KafkaDiscoveryBudgetExceeded as exc:
+            return items, correlation + 1, str(exc)
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             return items, correlation + 1, _friendly_error_from_exception(exc)
         progress: dict[str, int] = {}
@@ -1665,12 +1788,25 @@ def _read_partition_messages_on_leader(
             return items, correlation, fetch_error
         if snapshot_end is None:
             snapshot_end = progress.get("high_watermark")
-        accepted = [
-            (offset, text)
-            for offset, text in fetch_items or []
-            if offset >= next_offset and (snapshot_end is None or offset < snapshot_end)
-        ]
-        if not accepted:
+        accepted_count = 0
+        accepted_max = next_offset - 1
+        for offset, value in fetch_items or []:
+            if offset < next_offset or (snapshot_end is not None and offset >= snapshot_end):
+                continue
+            if on_message is not None:
+                on_message(offset, value)
+            if isinstance(value, DiskBackedText):
+                combined = DiskBackedText()
+                combined.append_text(f"p{partition}@{offset} ")
+                for chunk in value.iter_text_chunks():
+                    combined.append_text(chunk)
+                combined.finish()
+                items.append(combined)
+            else:
+                items.append(f"p{partition}@{offset} {value}")
+            accepted_count += 1
+            accepted_max = max(accepted_max, offset)
+        if not accepted_count:
             advanced_offset = progress.get("next_offset", next_offset)
             if advanced_offset > next_offset:
                 next_offset = advanced_offset
@@ -1680,8 +1816,7 @@ def _read_partition_messages_on_leader(
             if snapshot_end is not None and next_offset < snapshot_end:
                 return items, correlation, "Fetch made no progress before partition high watermark (partial dump)"
             return items, correlation, None
-        items.extend(f"p{partition}@{offset} {text}" for offset, text in accepted)
-        next_offset = max(max(offset for offset, _text in accepted) + 1, progress.get("next_offset", next_offset))
+        next_offset = max(accepted_max + 1, progress.get("next_offset", next_offset))
         if snapshot_end is None or next_offset >= snapshot_end:
             break
     return items, correlation, None
@@ -2482,6 +2617,9 @@ def _read_topic_messages(
     sasl_first: bool = False,
     existing_session: KafkaSession | None = None,
     leader_pool: KafkaLeaderPool | None = None,
+    deadline: float | None = None,
+    budget: KafkaDiscoveryReadBudget | None = None,
+    on_message: Callable[[str, int, int, Any], None] | None = None,
 ) -> tuple[list[str] | None, str | None, str]:
     """Read to the partition high watermark when `max_messages` is None; otherwise read up to `max_messages` messages from `topic` across all partitions.
 
@@ -2498,6 +2636,8 @@ def _read_topic_messages(
     """
     if max_messages is not None and max_messages <= 0:
         return [], None, "plaintext"
+    if deadline is not None and time.monotonic() >= deadline:
+        return None, "discover_time", "plaintext"
 
     try:
         if existing_session is not None and not existing_session.closed:
@@ -2564,14 +2704,29 @@ def _read_topic_messages(
                     continue
                 partitions_by_leader.setdefault(leader_id, []).append(partition)
 
-            out: list[str] = []
+            out: list[str] = SpoolingValues() if budget is not None else []
             partition_errors: list[str] = []
+            budget_stopped = False
 
             def _handle_partitions(leader_sock: socket.socket, partitions: list[int], corr_start: int) -> int:
+                nonlocal budget_stopped
                 corr = corr_start
                 for partition in partitions:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        partition_errors.append("discover_time")
+                        break
                     if max_messages is not None and len(out) >= max_messages:
                         break
+                    discovery_kwargs: dict[str, Any] = {}
+                    if deadline is not None:
+                        discovery_kwargs["deadline"] = deadline
+                    if budget is not None:
+                        discovery_kwargs["budget"] = budget
+                    callback_kwargs: dict[str, Any] = (
+                        {"on_message": lambda offset, value, part=partition: on_message(topic, part, offset, value)}
+                        if on_message is not None
+                        else {}
+                    )
                     items, corr, err = _read_partition_messages_on_leader(
                         leader_sock,
                         corr,
@@ -2579,14 +2734,24 @@ def _read_topic_messages(
                         partition,
                         None if max_messages is None else max_messages - len(out),
                         fetch_api_version=fetch_api_version,
+                        **callback_kwargs,
+                        **discovery_kwargs,
                     )
                     out.extend(items)
                     if err:
                         partition_errors.append(f"p{partition}: {err}")
+                        if "byte_budget" in err or "discover_time" in err:
+                            budget_stopped = True
+                            break
                 return corr
 
             # 1) Per-leader connections for partitions with a known leader.
             for leader_id, partitions in partitions_by_leader.items():
+                if budget_stopped:
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    partition_errors.append("discover_time")
+                    break
                 if max_messages is not None and len(out) >= max_messages:
                     break
                 leader_host, leader_port = broker_map[leader_id]
@@ -2668,7 +2833,7 @@ def _read_topic_messages(
 
             # 2) Partitions without a known leader / broker_map miss:
             #    fall back to the bootstrap socket (best-effort).
-            if unassigned_partitions and (max_messages is None or len(out) < max_messages):
+            if unassigned_partitions and not budget_stopped and (max_messages is None or len(out) < max_messages):
                 correlation = _handle_partitions(sock, unassigned_partitions, correlation)
 
             if partition_errors:
@@ -2678,6 +2843,7 @@ def _read_topic_messages(
     except _TlsProbeError:
         if use_tls is True:
             return None, "plaintext read returned TLS record prelude", "tls"
+        callback_kwargs: dict[str, Any] = {"on_message": on_message} if on_message is not None else {}
         return _read_topic_messages(
             host,
             port,
@@ -2691,6 +2857,9 @@ def _read_topic_messages(
             known_kafka=known_kafka,
             bootstrap_metadata=bootstrap_metadata,
             sasl_first=sasl_first,
+            deadline=deadline,
+            budget=budget,
+            **callback_kwargs,
         )
     except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
         return None, _friendly_error_from_exception(exc), "plaintext" if use_tls is not True else "tls"
@@ -2907,10 +3076,23 @@ def _read_dump_topics(
     sasl_first: bool = False,
     existing_session: KafkaSession | None = None,
     leader_pool: KafkaLeaderPool | None = None,
+    deadline: float | None = None,
+    max_bytes: int | None = None,
+    on_message: Callable[[str, int, int, Any], None] | None = None,
 ) -> tuple[dict[str, list[str] | None], dict[str, str]]:
     dump_results: dict[str, list[str] | None] = {}
     dump_errors: dict[str, str] = {}
+    budget = KafkaDiscoveryReadBudget(remaining=max(0, max_bytes), deadline=deadline) if max_bytes is not None else None
     for topic_name in topics:
+        if deadline is not None and time.monotonic() >= deadline:
+            dump_errors.update({pending: "discover_time" for pending in topics if pending not in dump_results})
+            break
+        discovery_kwargs: dict[str, Any] = {}
+        if deadline is not None:
+            discovery_kwargs["deadline"] = deadline
+        if budget is not None:
+            discovery_kwargs["budget"] = budget
+        callback_kwargs: dict[str, Any] = {"on_message": on_message} if on_message is not None else {}
         read_items, read_error, _transport = _read_topic_messages(
             host=host,
             port=port,
@@ -2926,10 +3108,16 @@ def _read_dump_topics(
             sasl_first=sasl_first,
             existing_session=existing_session,
             leader_pool=leader_pool,
+            **callback_kwargs,
+            **discovery_kwargs,
         )
         dump_results[topic_name] = read_items
         if read_error:
             dump_errors[topic_name] = read_error
+            if "byte_budget" in read_error or "discover_time" in read_error:
+                reason = "byte_budget" if "byte_budget" in read_error else "discover_time"
+                dump_errors.update({pending: reason for pending in topics if pending not in dump_results})
+                break
     return dump_results, dump_errors
 
 

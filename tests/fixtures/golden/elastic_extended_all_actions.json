@@ -10,6 +10,19 @@
         "auth_probe_endpoint": "/_security/_authenticate",
         "auth_probe_http_status": 200,
         "auth_probe_status": "verified",
+        "credential_cluster_access": "allowed",
+        "credential_delete_access": "allowed",
+        "credential_documents_access": "allowed",
+        "credential_indices_access": "allowed",
+        "credential_indices_count": 5,
+        "credential_nodes_access": "allowed",
+        "credential_nodes_count": 1,
+        "credential_probe_cleanup": "complete",
+        "credential_probe_index": "redposture-access-probe-<RUN_ID>",
+        "credential_resource_access_checked": true,
+        "credential_users_access": "allowed",
+        "credential_users_count": 8,
+        "credential_write_access": "allowed",
         "error": null,
         "network_attempted": true,
         "password": "<redacted>",
@@ -108,11 +121,14 @@
     ],
     "credential_accepted": true,
     "credential_cluster_access": "allowed",
+    "credential_delete_access": "allowed",
     "credential_documents_access": "allowed",
     "credential_indices_access": "allowed",
     "credential_indices_count": 5,
     "credential_nodes_access": "allowed",
     "credential_nodes_count": 1,
+    "credential_probe_cleanup": "complete",
+    "credential_probe_index": "redposture-access-probe-<RUN_ID>",
     "credential_resource_access_checked": true,
     "credential_users_access": "allowed",
     "credential_users_count": 8,
@@ -124,6 +140,7 @@
       "supported_endpoint": "/_security/_authenticate",
       "unsupported_endpoints": []
     },
+    "credential_write_access": "allowed",
     "credentials_source": "provided",
     "defcreds_enabled": false,
     "detect_confidence": "high",
@@ -164,14 +181,14 @@
         "FLS/DLS and current authorization can hide documents or fields"
       ],
       "limits": {
-        "max_array_items": 256,
+        "max_array_items": null,
         "max_depth": 32,
-        "max_documents": 50000,
+        "max_documents": null,
         "max_embedded_json_bytes": 65536,
-        "max_findings": 10000,
+        "max_findings": null,
         "max_scalar_bytes": 262144,
-        "max_seconds": 300.0,
-        "max_source_bytes": 52428800
+        "max_seconds": 900.0,
+        "max_source_bytes": null
       },
       "locations_dropped": 0,
       "missing_source_documents": 0,
@@ -1196,83 +1213,37 @@
           {
             "id": "sensitive-fields",
             "index": "redposture-discover-corpus-v2",
-            "source": {
-              "clientSecret": "CorpusClientSecret!2026",
-              "databasePassword": "CorpusPassword!2026",
-              "payload": {
-                "awsSecretAccessKey": "CorpusAwsSecretKey2026AbCdEfGhIjKlMnOpQr",
-                "azureStorageKey": "CorpusAzureStorageKey!2026-NotBase64"
-              },
-              "unindexedPassword": "CorpusUnindexedPassword!2026"
-            }
+            "source": {}
           },
           {
             "id": "nested-credentials",
             "index": "redposture-discover-corpus-v2",
-            "source": {
-              "payload": {
-                "services": [
-                  {
-                    "credentials": {
-                      "apiKey": "CorpusNestedApiKey!2026"
-                    }
-                  },
-                  {
-                    "dockerconfigjson": {
-                      "auths": {
-                        "registry.corpus.invalid": {
-                          "auth": "Y29ycHVzLWRvY2tlcjpDb3JwdXNEb2NrZXJQYXNzd29yZCEyMDI2"
-                        }
-                      }
-                    }
-                  }
-                ]
-              }
-            }
+            "source": {}
           },
           {
             "id": "duplicate",
             "index": "redposture-discover-corpus-v2",
-            "source": {
-              "databasePassword": "CorpusPassword!2026",
-              "dynamic_secret_value": "CorpusDynamicFieldSecret!2026"
-            }
+            "source": {}
           },
           {
             "id": "negative-controls",
             "index": "redposture-discover-corpus-v2",
-            "source": {
-              "negative": {
-                "api_token": "********",
-                "client_secret": "REDACTED",
-                "password": "${CORPUS_PASSWORD}"
-              }
-            }
+            "source": {}
           },
           {
             "id": "jwt-jwe-auth",
             "index": "redposture-discover-corpus-v2",
-            "source": {
-              "case": "jwt_jwe_auth",
-              "message": "jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjb3JwdXMtMjAyNiJ9.CorpusSignature2026 jwe=eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..Y29ycHVzaXY.Y29ycHVzY2lwaGVydGV4dA.Y29ycHVzdGFn Authorization: Bearer CorpusBearerToken.2026-AbCdEfGh Authorization: Basic Y29ycHVzOkNvcnB1c0Jhc2ljUGFzc3dvcmQhMjAyNg=="
-            }
+            "source": {}
           },
           {
             "id": "azure-uri-kv",
             "index": "redposture-discover-corpus-v2",
-            "source": {
-              "case": "azure_uri_kv",
-              "connectionString": "postgresql://corpus:CorpusDsnPassword%212026@db.corpus.invalid/app",
-              "message": "sas=https://corpus.blob.core.windows.net/c/b?sv=2023-11-03&se=2030-01-01T00%3A00%3A00Z&sp=r&sr=b&sig=CorpusAzureSasSignature%2B2026%3D account=DefaultEndpointsProtocol=https;AccountName=corpus;AccountKey=CorpusAzureAccountKey2026+/=;EndpointSuffix=core.windows.net client_secret=CorpusKeyValueSecret!2026"
-            }
+            "source": {}
           },
           {
             "id": "service-account",
             "index": "redposture-discover-corpus-v2",
-            "source": {
-              "case": "service_account",
-              "credentials": "eyJ0eXBlIjoic2VydmljZV9hY2NvdW50IiwiY2xpZW50X3NlY3JldCI6IkNvcnB1c1NlcnZpY2VBY2NvdW50U2VjcmV0ITIwMjYiLCJwcml2YXRlX2tleSI6Ii0tLS0tQkVHSU4gUFJJVkFURSBLRVktLS0tLVxuUTI5eWNIVnpVMlZ5ZG1salpVRmpZMjkxYm5STFpYaz1cbi0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0ifQ=="
-            }
+            "source": {}
           }
         ],
         "index": "redposture-discover-corpus-v2",
@@ -1291,11 +1262,7 @@
           {
             "id": "log-2",
             "index": "redposture-logs-2026.05",
-            "source": {
-              "attrs": {
-                "sasl_password": "metricspass"
-              }
-            }
+            "source": {}
           }
         ],
         "index": "redposture-logs-2026.05",

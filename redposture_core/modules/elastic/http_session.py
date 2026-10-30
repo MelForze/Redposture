@@ -25,6 +25,7 @@ from ...clients.http_api import (
 )
 from ...clients.http_redirects import follow_redirects, http_origin
 from ...clients.tls_cache import shared_client_ssl_context
+from ...http_headers import merge_custom_http_headers
 
 _STALE_SOCKET_ERRNOS = frozenset(
     value
@@ -208,14 +209,16 @@ class ElasticHttpSession:
         path: str,
         headers: Mapping[str, str],
         data: bytes | None,
+        response_size_cap: int | None = None,
     ) -> tuple[HttpResponse, BaseException | None, bool]:
         connection, reused = self._ensure_connection(scheme)
         response: http.client.HTTPResponse | None = None
         try:
             connection.request(method, path, body=data, headers=dict(headers))
             response = connection.getresponse()
-            payload = response.read(self.response_cap + 1)
-            truncated = len(payload) > self.response_cap
+            cap = self.response_cap if response_size_cap is None else max(0, int(response_size_cap))
+            payload = response.read(cap + 1)
+            truncated = len(payload) > cap
             remaining_length = getattr(response, "length", None)
             if not truncated and remaining_length is not None and remaining_length > 0:
                 raise ConnectionError(
@@ -223,7 +226,7 @@ class ElasticHttpSession:
                     f"({len(payload)} bytes received, {remaining_length} more expected)"
                 )
             if truncated:
-                payload = payload[: self.response_cap]
+                payload = payload[:cap]
             normalized_headers = {str(key): str(value) for key, value in response.getheaders()}
             result = HttpResponse(
                 status=int(response.status),
@@ -257,6 +260,7 @@ class ElasticHttpSession:
         path: str,
         headers: Mapping[str, str] | None = None,
         data: bytes | str | None = None,
+        response_size_cap: int | None = None,
     ) -> HttpResponse:
         """Send one direct request and return a normalized shared response.
 
@@ -281,7 +285,7 @@ class ElasticHttpSession:
         normalized_method = str(method or "GET").strip().upper()
         try:
             normalized_path = self._normalize_path(path)
-            normalized_headers = {str(key): str(value) for key, value in (headers or {}).items()}
+            normalized_headers = merge_custom_http_headers(headers)
             for key, value in normalized_headers.items():
                 if not key or "\r" in key or "\n" in key or "\r" in value or "\n" in value:
                     raise ValueError("invalid HTTP request header")
@@ -304,19 +308,24 @@ class ElasticHttpSession:
                 self._connect_host, self._connect_port = host, port
             parsed = urllib.parse.urlsplit(url)
             path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
-            result, request_error, reused = self._request_once(scheme, method, path, headers, body)
+            result, request_error, reused = self._request_once(
+                scheme, method, path, headers, body, response_size_cap=response_size_cap
+            )
             if (
                 request_error is not None
                 and reused
                 and _is_read_only_elastic_request(method, path)
                 and _is_stale_keep_alive_error(request_error)
             ):
-                result, _, _ = self._request_once(scheme, method, path, headers, body)
+                result, _, _ = self._request_once(
+                    scheme, method, path, headers, body, response_size_cap=response_size_cap
+                )
             return result
 
         url = f"{normalized_scheme}://{self._authority(normalized_scheme)}{normalized_path}"
         response = follow_redirects(send, normalized_method, url, headers=normalized_headers, body=body)
-        response = decode_http_content(response, max_bytes=self.response_cap)
+        cap = self.response_cap if response_size_cap is None else max(0, int(response_size_cap))
+        response = decode_http_content(response, max_bytes=cap)
         pin_http_redirect_path(response, method=normalized_method)
         return response
 

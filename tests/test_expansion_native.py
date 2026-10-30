@@ -116,8 +116,8 @@ def test_postgres_scram_handshake_validates_server_signature(monkeypatch: pytest
                 (b"R", struct.pack(">i", 11) + challenge.encode()),
                 (b"R", struct.pack(">i", 12) + f"v={signature}".encode()),
                 (b"R", struct.pack(">i", 0)),
-                (b"K", b"backend key"),
-                (b"N", b"notice"),
+                (b"K", struct.pack(">ii", 1, 2)),
+                (b"N", b"SNOTICE\x00C00000\x00Mhello\x00\x00"),
                 (b"S", b"server_version\0" + b"16.4\0"),
                 (b"Z", b"I"),
             ]
@@ -131,24 +131,30 @@ def test_postgres_scram_handshake_validates_server_signature(monkeypatch: pytest
 
 
 @pytest.mark.parametrize(
-    ("auth_code", "payload", "message", "method"),
+    ("auth_code", "payload", "message", "method", "detected"),
     [
-        (5, b"x", "invalid MD5 authentication payload", "md5"),
-        (10, b"SCRAM-SHA-256\0\0", "SCRAM authentication required", "scram-sha-256"),
-        (11, b"unexpected challenge", "unexpected SCRAM continue", "scram-sha-256"),
-        (12, b"v=signature", "unexpected SCRAM final", "scram-sha-256"),
-        (99, b"", "unsupported auth method: 99", None),
+        (5, b"x", "invalid MD5 authentication payload", None, False),
+        (10, b"SCRAM-SHA-256\0\0", "SCRAM authentication required", "scram-sha-256", True),
+        (11, b"unexpected challenge", "unexpected SCRAM continue", "scram-sha-256", True),
+        (12, b"v=signature", "unexpected SCRAM final", "scram-sha-256", True),
+        (99, b"", "invalid authentication payload", None, False),
     ],
 )
 def test_postgres_auth_challenges_do_not_turn_malformed_sequences_into_success(
-    monkeypatch: pytest.MonkeyPatch, auth_code: int, payload: bytes, message: str, method: str | None
+    monkeypatch: pytest.MonkeyPatch,
+    auth_code: int,
+    payload: bytes,
+    message: str,
+    method: str | None,
+    detected: bool,
 ) -> None:
     monkeypatch.setattr(pg, "_pg_send_startup", Mock())
     monkeypatch.setattr(pg, "_pg_read_message", Mock(return_value=(b"R", struct.pack(">i", auth_code) + payload)))
     with pytest.raises(pg._PgAuditError, match=message) as caught:
         pg._pg_startup_and_auth(None, "alice", None, "app")
-    assert caught.value.detected is True
-    assert caught.value.auth_required is True and caught.value.auth_method == method
+    assert caught.value.detected is detected
+    assert caught.value.auth_required is (True if detected else None)
+    assert caught.value.auth_method == method
 
 
 @pytest.mark.parametrize(

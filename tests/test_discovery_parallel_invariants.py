@@ -54,8 +54,10 @@ def test_minio_parallel_discovery_has_exact_budget_and_stable_merge(workers: int
     finally:
         scheduler.close()
 
-    assert result.bytes_read == 73
-    assert result.partial_reasons == ["max_bytes"]
+    assert result.bytes_read == sum(len(body) for body in bodies.values())
+    assert result.partial_reasons == []
+    assert result.coverage_complete is True
+    assert len(result.findings) == len(bodies)
     assert result.candidates == sorted(
         result.candidates, key=lambda item: objects.index(next(o for o in objects if o.key == item["key"]))
     )

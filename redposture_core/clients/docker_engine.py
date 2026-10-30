@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from ..detection_io import DetectCall, run_sync
+from ..http_headers import merge_custom_http_headers
 from ..shell_capture import is_binary
 from .http_api import HttpResponse, decode_http_content
 from .http_redirects import follow_redirects, http_origin
@@ -205,6 +206,7 @@ class DockerEngineClient:
         if json_body is not None:
             body = json.dumps(json_body, separators=(",", ":")).encode("utf-8")
             req_headers["Content-Type"] = "application/json"
+        req_headers = merge_custom_http_headers(req_headers)
         last_reason = ""
         failure: DockerEngineError | None = None
 

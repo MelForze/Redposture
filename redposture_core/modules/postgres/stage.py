@@ -14,6 +14,7 @@ from typing import Any
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...console import Console
+from ...discovery_spool import contains_spooled
 from ...shell_capture import CommandResult, ShellView
 from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
@@ -241,6 +242,7 @@ def _postgres_detect(ctx: AuditHookContext) -> AuditRecord:
                 "auth_required": session.auth_required,
                 "auth_method": session.auth_method,
                 "server_version": session.server_version,
+                **actions._pg_startup_record_fields(session, username="postgres", database=target_database),
                 "provided_credentials": False,
                 "defcreds_enabled": False,
                 "effective_username": "postgres",
@@ -272,6 +274,7 @@ def _postgres_detect(ctx: AuditHookContext) -> AuditRecord:
                 "sqlstate": exc.sqlstate,
                 "failure_phase": exc.failure_phase or ("startup" if exc.detected else "connect"),
                 "error_kind": exc.error_kind or ("startup_rejected" if exc.detected else "connection_error"),
+                **actions._pg_startup_record_fields(exc, username="postgres", database=target_database),
                 "provided_credentials": False,
                 "defcreds_enabled": False,
                 "effective_username": "postgres",
@@ -304,6 +307,12 @@ def _postgres_detect(ctx: AuditHookContext) -> AuditRecord:
             "effective_username": "postgres",
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": last_error or "connection failed",
+            "failure_phase": "connect",
+            "error_kind": "transport_error",
+            "password_sent": False,
+            "credential_verified": None,
+            "startup_username": "postgres",
+            "startup_database": target_database,
         }
     )
     if isinstance(ctx.lifecycle_state, _PostgresLifecycleState):
@@ -320,7 +329,18 @@ def _postgres_run_host_stage(
     source: str,
 ) -> AuditRecord:
     cfg = AuditConfig.from_namespace(ctx.args)
-    record = _resolved_postgres_host_stage()(
+    resolved_stage = _resolved_postgres_host_stage()
+    discovery_kwargs = (
+        {
+            "discover_ctx": ctx,
+            "discover_implicit_dump": bool(getattr(ctx.args, "_discover_implicit_dump", False)),
+        }
+        if run_deep_checks
+        and bool(getattr(ctx.args, "discover", False))
+        and resolved_stage is _POSTGRES_HOST_STAGE_IMPL
+        else {}
+    )
+    record = resolved_stage(
         host=ctx.host,
         port=ctx.port,
         timeout=cfg.timeout,
@@ -351,7 +371,18 @@ def _postgres_run_host_stage(
         debug=cfg.debug,
         debug_emit=ctx.debug_emit,
         **_postgres_tls_stage_kwargs(ctx.args),
+        **discovery_kwargs,
     )
+    if (
+        run_deep_checks
+        and bool(getattr(ctx.args, "discover", False))
+        and isinstance(record, dict)
+        and cfg.output_format == "txt"
+        and not getattr(ctx.args, "_discover_implicit_dump", False)
+        and contains_spooled(record.get("table_dumps"))
+    ):
+        record["_stream_lines_file"] = render.spool_table_dump_details(record)
+        record["_postgres_dump_streamed"] = True
     return _postgres_record(record)
 
 
@@ -363,7 +394,9 @@ def _postgres_auth_probe_record(
 
     payload = record.to_dict()
     status = str(record.status or "")
-    verified: bool | None = status in {"valid_credentials", "weak_default_creds"} and record.auth_required is not False
+    verified = record.extra.get("credential_verified")
+    if not isinstance(verified, bool):
+        verified = None
     if _postgres_host_stage_is_replaced() and status in {"valid_credentials", "weak_default_creds"}:
         # Test/embedding replacements often omit a truthful auth_required
         # value. Their accepted status remains the compatibility contract.
@@ -371,21 +404,25 @@ def _postgres_auth_probe_record(
     verification: str
     if status == "open_no_auth" or (record.auth_required is False and not verified):
         status = "invalid_credentials_anonymous"
-        verified = False
+        verified = None
         verification = "unverified"
     elif verified and ctx.credential.source == "default":
         status = "weak_default_creds"
         verification = "verified"
     elif verified:
         verification = "verified"
+    elif verified is False:
+        verification = "rejected"
     elif status == "unknown_auth":
-        verification = "unavailable"
+        verification = actions._pg_credential_verification(None, record.extra.get("error_kind"))
         verified = None
     elif status == "fail":
         verification = "error"
         verified = None
     else:
-        verification = "rejected"
+        verification = actions._pg_credential_verification(verified, record.extra.get("error_kind"))
+        if verification == "unavailable":
+            status = "unknown_auth"
     payload.update(
         {
             "status": status,
@@ -447,13 +484,15 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
                         actions._pg_send_terminate(sock)
                     except Exception:
                         pass
-            credential_verified = session.auth_required is not False
+            credential_verified = session.credential_verified
             status = (
                 "invalid_credentials_anonymous"
-                if not credential_verified
+                if session.auth_required is False
                 else "weak_default_creds"
-                if is_default
+                if credential_verified is True and is_default
                 else "valid_credentials"
+                if credential_verified is True
+                else "unknown_auth"
             )
             return _postgres_record(
                 {
@@ -469,13 +508,18 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
                     "auth_required": session.auth_required,
                     "auth_method": session.auth_method,
                     "server_version": session.server_version,
+                    **actions._pg_startup_record_fields(session, username=username, database=target_database),
                     "provided_credentials": provided_credentials,
                     "provided_username": ctx.credential.username,
                     "provided_password": password if provided_credentials else None,
                     "defcreds_enabled": is_default,
                     "effective_username": username,
                     "credential_verified": credential_verified,
-                    "credential_verification": "verified" if credential_verified else "unverified",
+                    "credential_verification": (
+                        "unverified"
+                        if session.auth_required is False
+                        else actions._pg_credential_verification(credential_verified)
+                    ),
                     **capability_fields,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": None,
@@ -483,13 +527,11 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
             )
         except actions._PgAuditError as exc:
             status = (
-                "auth_required"
-                if exc.detected and exc.auth_required is True
-                else ("unknown_auth" if exc.detected else "fail")
+                "auth_required" if exc.credential_verified is False else ("unknown_auth" if exc.detected else "fail")
             )
-            verification = (
-                "rejected" if status == "auth_required" else "unavailable" if status == "unknown_auth" else "error"
-            )
+            verification = actions._pg_credential_verification(exc.credential_verified, exc.error_kind)
+            if status == "fail":
+                verification = "error"
             return _postgres_record(
                 {
                     "timestamp": actions.utc_now_iso(),
@@ -506,12 +548,13 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
                     "sqlstate": exc.sqlstate,
                     "failure_phase": exc.failure_phase or ("startup" if exc.detected else "connect"),
                     "error_kind": exc.error_kind or ("authentication_failed" if exc.detected else "connection_error"),
+                    **actions._pg_startup_record_fields(exc, username=username, database=target_database),
                     "provided_credentials": provided_credentials,
                     "provided_username": ctx.credential.username,
                     "provided_password": password if provided_credentials else None,
                     "defcreds_enabled": is_default,
                     "effective_username": username,
-                    "credential_verified": False if verification == "rejected" else None,
+                    "credential_verified": exc.credential_verified,
                     "credential_verification": verification,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": str(exc),
@@ -541,6 +584,11 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
             "effective_username": username,
             "credential_verified": None,
             "credential_verification": "error",
+            "failure_phase": "connect",
+            "error_kind": "transport_error",
+            "password_sent": False,
+            "startup_username": username,
+            "startup_database": target_database,
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": last_error or "connection failed",
         }
@@ -552,7 +600,7 @@ def _postgres_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRe
         return _postgres_record(
             {
                 **detect_record.to_dict(),
-                "credential_verified": False,
+                "credential_verified": None,
                 "credential_verification": "anonymous",
             }
         )
@@ -566,8 +614,10 @@ def _postgres_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRe
                 password=ctx.credential.password,
                 source=ctx.credential.source,
             )
-            return _postgres_auth_probe_record(ctx, record)
-        return _postgres_probe_credential(ctx)
+            result = _postgres_auth_probe_record(ctx, record)
+        else:
+            result = _postgres_probe_credential(ctx)
+        return result
 
     coordinator = getattr(ctx.args, "_postgres_credential_coordinator", None)
     if not isinstance(coordinator, _PostgresCredentialCoordinator):
@@ -586,7 +636,7 @@ def _postgres_credential_gate(
     _credential: AuditCredentialRun,
     record: AuditRecord,
 ) -> tuple[bool, str]:
-    verified = record.extra.get("credential_verified") is True
+    verified = record.extra.get("credential_verified") is True and record.extra.get("startup_complete") is not False
     return verified, "credential verified" if verified else "credential unverified"
 
 
@@ -629,8 +679,24 @@ def build_postgres_spec(args: Any) -> ModuleAuditSpec:
         continue_after_credential_success=bool(getattr(args, "defcreds", False))
         and not bool(getattr(args, "stop_on_success", False)),
         record_all_credential_attempts=bool(getattr(args, "defcreds", False)),
-        credential_attempt_detail_fields=("credential_verified", "credential_verification"),
+        credential_attempt_detail_fields=(
+            "credential_verified",
+            "credential_verification",
+            "sqlstate",
+            "failure_phase",
+            "error_kind",
+            "auth_required",
+            "auth_method",
+            "server_version",
+            "password_sent",
+            "startup_username",
+            "startup_database",
+            "protocol_evidence",
+            "service_identity",
+            "startup_complete",
+        ),
         defer_phase_output_until_final=True,
+        defer_discovery_findings_until_final=True,
     )
 
 

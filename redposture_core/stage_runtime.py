@@ -23,14 +23,22 @@ from .audit_config import AuditConfig
 from .audit_models import StageTrace
 from .clients.tls_cache import tls_context_cache_stats
 from .cve import CveCatalog, ProductResolver, enumerate_record, load_catalog, render_finding_lines
-from .discovery_rendering import discovery_color_spans
-from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle
+from .discovery_options import DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
+from .discovery_rendering import (
+    discovery_color_spans,
+    format_discovery_finding_line,
+    iter_disk_discovery_finding_line_chunks,
+)
+from .discovery_spool import SpoolingFindings, SpoolingStrings, contains_spooled
+from .discovery_values import DiskBackedText, contains_disk_backed, iter_json_chunks
+from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle, suspend_active_progress_for_output
 from .rendering import (
     format_report_line_for_console,
     normalize_report_line_for_storage,
     order_detection_fields,
     render_colored_marker_line,
     sanitize_report_line,
+    sanitize_report_payload,
     suppress_redundant_auth_requirement,
 )
 from .scheduler import BoundedScheduler, SharedNestedScheduler
@@ -70,6 +78,8 @@ _LARGE_NESTED_WORKERS = 64
 _TARGET_LIVE_EMIT: ContextVar[Callable[[Iterable[str]], None] | None] = ContextVar(
     "audit_target_live_emit", default=None
 )
+_TARGET_DISK_EMIT: ContextVar[Callable[..., None] | None] = ContextVar("audit_target_disk_emit", default=None)
+_TARGET_DISCOVERY_STARTED_AT: ContextVar[float | None] = ContextVar("audit_target_discovery_started_at", default=None)
 
 
 def _merge_debug_events(*records: dict[str, Any]) -> list[str]:
@@ -334,9 +344,12 @@ class LineOutputSink:
     file+console teeing, and each multi-line record atomic in both cases.
     """
 
-    def __init__(self, output_path: str | None, emit_line: Callable[[str], None], *, append: bool = False) -> None:
+    def __init__(
+        self, output_path: str | None, emit_line: Callable[[str], None], *, append: bool = False, console: Any = None
+    ) -> None:
         self.output_path = output_path
         self.emit_line = emit_line
+        self.console = console
         self.output_written = bool(append)
         self._append = bool(append)
         self._handle: Any = None
@@ -387,6 +400,122 @@ class LineOutputSink:
                 self.emit_line(line)
             self.output_written = True
 
+    def emit_json_chunks(self, chunks: Iterable[str]) -> None:
+        """Tee one JSONL record without joining its contents in memory."""
+        with self._lock:
+            if self._closed:
+                return
+            if self.output_path:
+                self._prepare_unlocked()
+            for chunk in chunks:
+                if not chunk:
+                    continue
+                if self._handle is not None:
+                    self._handle.write(chunk)
+                sys.stdout.write(chunk)
+            if self._handle is not None:
+                self._handle.write("\n")
+                self._handle.flush()
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            self.output_written = True
+
+    def emit_discovery_value(
+        self,
+        module: str,
+        host: Any,
+        port: Any,
+        *,
+        finding_type: Any,
+        value: DiskBackedText,
+        place: Any,
+    ) -> None:
+        """Tee one long TXT finding atomically without materializing its value."""
+        chunks = iter_disk_discovery_finding_line_chunks(
+            module, host, port, finding_type=finding_type, value=value, place=place
+        )
+        with self._lock:
+            if self._closed:
+                return
+            if self.output_path:
+                self._prepare_unlocked()
+            with suspend_active_progress_for_output(sys.stdout):
+                for index, chunk in enumerate(chunks):
+                    if not chunk:
+                        continue
+                    if self._handle is not None:
+                        self._handle.write(chunk)
+                    if index == 0:
+                        display = format_report_line_for_console(chunk)
+                        parts = display.split("\t", 3)
+                        if len(parts) == 4 and self.console is not None and hasattr(self.console, "_paint"):
+                            tag, host_text, port_text, detail = parts
+                            marker, _, payload = detail.partition("[!]")
+                            sys.stdout.write(self.console._paint(tag.rstrip(), "blue", sys.stdout))
+                            sys.stdout.write(
+                                self.console._paint(
+                                    f"{tag[len(tag.rstrip()) :]}\t{host_text}\t{port_text}\t{marker}",
+                                    "white",
+                                    sys.stdout,
+                                )
+                            )
+                            sys.stdout.write(self.console._paint("[!]", "true_red", sys.stdout))
+                            sys.stdout.write(self.console._paint(payload, "orange", sys.stdout))
+                        else:
+                            sys.stdout.write(display)
+                    elif self.console is not None and hasattr(self.console, "_paint"):
+                        sys.stdout.write(self.console._paint(chunk, "orange", sys.stdout))
+                    else:
+                        sys.stdout.write(chunk)
+                if self._handle is not None:
+                    self._handle.write("\n")
+                    self._handle.flush()
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            self.output_written = True
+
+    def emit_text_chunks(self, chunks: Iterable[str]) -> None:
+        """Tee one long plain TXT row while retaining only a bounded fragment."""
+        with self._lock:
+            if self._closed:
+                return
+            if self.output_path:
+                self._prepare_unlocked()
+            with suspend_active_progress_for_output(sys.stdout):
+                continuation_color = "white"
+                for index, raw in enumerate(chunks):
+                    chunk = sanitize_report_line(raw) if index == 0 else sanitize_report_payload(raw)
+                    if self._handle is not None:
+                        self._handle.write(normalize_report_line_for_storage(chunk) if index == 0 else chunk)
+                    display = format_report_line_for_console(chunk) if index == 0 else chunk
+                    if self.console is not None and hasattr(self.console, "_paint"):
+                        columns = display.split("\t", 3) if index == 0 else []
+                        if len(columns) == 4 and columns[3].lstrip().startswith("[!] "):
+                            tag, host_text, port_text, detail = columns
+                            before, _, payload = detail.partition("[!]")
+                            sys.stdout.write(self.console._paint(tag, "blue", sys.stdout))
+                            sys.stdout.write(
+                                self.console._paint(f"\t{host_text}\t{port_text}\t{before}", "white", sys.stdout)
+                            )
+                            sys.stdout.write(self.console._paint("[!]", "true_red", sys.stdout))
+                            sys.stdout.write(self.console._paint(payload, "orange", sys.stdout))
+                            continuation_color = "orange"
+                            continue
+                        parts = display.split("\t", 1) if index == 0 else [display]
+                        if len(parts) == 2:
+                            sys.stdout.write(self.console._paint(parts[0], "blue", sys.stdout))
+                            sys.stdout.write(self.console._paint("\t" + parts[1], "white", sys.stdout))
+                        else:
+                            sys.stdout.write(self.console._paint(display, continuation_color, sys.stdout))
+                    else:
+                        sys.stdout.write(display)
+                if self._handle is not None:
+                    self._handle.write("\n")
+                    self._handle.flush()
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            self.output_written = True
+
     def emit_stream_file(self, path: str, *, batch: int = 1000) -> int:
         """Stream a file of pre-formatted lines to the sink without materialising it.
 
@@ -402,15 +531,35 @@ class LineOutputSink:
             return 0
         try:
             buffer: list[str] = []
-            for raw in handle:
+            buffer_chars = 0
+            while raw := handle.readline(65_536):
+                if len(raw) == 65_536 and not raw.endswith("\n"):
+                    if buffer:
+                        self.emit_many(buffer)
+                        emitted += len(buffer)
+                        buffer = []
+                        buffer_chars = 0
+
+                    def fragments(first: str) -> Iterator[str]:
+                        yield first
+                        while following := handle.readline(65_536):
+                            yield following.removesuffix("\n")
+                            if following.endswith("\n"):
+                                break
+
+                    self.emit_text_chunks(fragments(raw))
+                    emitted += 1
+                    continue
                 line = raw.rstrip("\n")
                 if not line:
                     continue
                 buffer.append(line)
-                if len(buffer) >= max(1, batch):
+                buffer_chars += len(line)
+                if len(buffer) >= max(1, batch) or buffer_chars >= 1024 * 1024:
                     self.emit_many(buffer)
                     emitted += len(buffer)
                     buffer = []
+                    buffer_chars = 0
             if buffer:
                 self.emit_many(buffer)
                 emitted += len(buffer)
@@ -471,6 +620,9 @@ class AuditHookContext:
     # detect/auth/capability output; data hooks may use the same sink for findings.
     # JSON remains one complete record per target. None disables live output.
     live_emit: Callable[[Iterable[str]], None] | None = None
+    live_discovery_value: Callable[..., None] | None = None
+    discovery_started_at: float | None = None
+    cancelled: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -543,6 +695,11 @@ class ModuleAuditSpec:
     # successful final candidate. Default-off keeps other module payloads
     # unchanged.
     record_all_credential_attempts: bool = False
+    # Opt-in completeness ledger, including candidates left unverified by a
+    # safety stop or cancellation. Existing module payloads remain unchanged.
+    record_skipped_credential_attempts: bool = False
+    logical_target_key: Callable[[AuditRecord], object | None] | None = None
+    phase_output_key: Callable[[AuditRecord, str], str] | None = None
     # If every supplied credential is rejected or unverified, continue data
     # collection with a previously confirmed anonymous-open detect record.
     fallback_to_anonymous_detect_record: bool = False
@@ -575,6 +732,10 @@ class ModuleAuditSpec:
     # emit the stable detection after capabilities and the remaining complete
     # record after the target lifecycle finishes.
     defer_phase_output_until_final: bool = False
+    # Some scanners inspect content while the same data phase is still
+    # collecting capability fields. Render those findings with the final
+    # record so the complete credential line precedes them.
+    defer_discovery_findings_until_final: bool = False
     # A module may have a stable service/auth verdict after capabilities while
     # its data phase streams findings. Emit that verdict before entering data,
     # then append only newly rendered inventory/summary lines at completion.
@@ -807,6 +968,7 @@ class _AuditDetectOutcome:
     record: AuditRecord
     lifecycle_state: Any = None
     runtime_stage_telemetry: bool = False
+    started_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -824,6 +986,7 @@ class _AuditPipelineOutcome:
     deep_candidate: bool
     deep_processed: bool
     additional_records: tuple[AuditRecord, ...] = ()
+    duplicate_target: bool = False
 
 
 @dataclass(frozen=True)
@@ -1312,19 +1475,7 @@ def _prepare_host_stage_call(
         func = _resolve_host_stage(func)
         signature = _cached_signature(func)
     if run_deep_checks is not None:
-        ctx = AuditHookContext(
-            args=ctx.args,
-            logger=ctx.logger,
-            host=ctx.host,
-            port=ctx.port,
-            credential=ctx.credential,
-            target=ctx.target,
-            run_deep_checks=bool(run_deep_checks),
-            debug_emit=ctx.debug_emit,
-            phase=ctx.phase,
-            credential_runs=ctx.credential_runs,
-            lifecycle_state=ctx.lifecycle_state,
-        )
+        ctx = replace(ctx, run_deep_checks=bool(run_deep_checks))
 
     # C6 fix: cache the resolved AuditConfig on the argparse Namespace so
     # repeated per-host stage invocations don't re-coerce every field of the
@@ -1614,6 +1765,8 @@ def _credential_attempt_rate_limited(record: AuditRecord) -> bool:
     """Stop a weak-password sweep when the server limits or locks login attempts."""
 
     payload = record.to_dict()
+    if payload.get("credential_stop_reason") in {"rate_limited", "account_locked", "locked_out"}:
+        return True
     if str(payload.get("status") or "").lower() in {"rate_limited", "account_locked", "locked_out"}:
         return True
     for key in ("http_status", "auth_probe_http_status", "auth_http_status"):
@@ -1689,6 +1842,8 @@ def _can_call_detail_renderer(func: Callable[..., Any]) -> bool:
 def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig) -> Any:
     args = ctx.args
     credential = ctx.credential
+    if name == "audit_ctx":
+        return ctx
     if name == "lifecycle_state":
         return ctx.lifecycle_state
     target_scheme = str(ctx.target.scheme).lower() if ctx.target is not None and ctx.target.scheme else None
@@ -1730,6 +1885,12 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         return ctx.debug_emit
     if name == "discover":
         return bool(getattr(args, "discover", False))
+    if name == "discover_implicit_dump":
+        return bool(getattr(args, "_discover_implicit_dump", False))
+    if name == "discovery_started_at":
+        return ctx.discovery_started_at
+    if name == "discover_ctx":
+        return ctx
     if name in {"discover_time", "discover_max_bytes"}:
         return getattr(args, name, None)
     if name == "ssrf_capture":
@@ -2059,6 +2220,12 @@ class AuditCommandRunner:
         self._transport_stats = {"connections": 0, "reused": 0, "requests": 0, "retries": 0}
         self._nested_scheduler: SharedNestedScheduler | None = None
         self._cve_catalog: CveCatalog | None = None
+        self._audit_cancelled = threading.Event()
+        self._credential_ledger_lock = threading.RLock()
+        self._active_credential_ledgers: dict[int, dict[str, Any]] = {}
+        self._completed_credential_ledgers: dict[int, tuple[AuditRecord, Counter[str], int]] = {}
+        self._credential_phase_counts: dict[int, Counter[str]] = {}
+        self._claimed_logical_targets: set[object] = set()
         if emit_line is not None:
             self.emit_line = emit_line
         elif console is not None:
@@ -2091,7 +2258,11 @@ class AuditCommandRunner:
             return lines
         lines = [order_detection_fields(line) for line in lines]
         if self.spec.module in data_discovery.DISCOVERY_MODULES:
-            lines.extend(data_discovery.render_discovery(self.spec.module, record.to_dict()))
+            discovery = record.extra.get("content_discovery")
+            spooled = isinstance(discovery, Mapping) and isinstance(discovery.get("findings"), SpoolingFindings)
+            lines.extend(
+                data_discovery.render_discovery(self.spec.module, record.to_dict(), include_findings=not spooled)
+            )
         lines = suppress_redundant_auth_requirement(lines)
         cve_lines = render_finding_lines(record.to_dict(), label=self.spec.label, host=record.host, port=record.port)
         if cve_lines:
@@ -2193,6 +2364,11 @@ class AuditCommandRunner:
         return not status or status == "fail" or status.startswith(("not_", "unknown"))
 
     def run_plan(self, plan: AuditCommandPlan) -> AuditCommandResult:
+        self._audit_cancelled.clear()
+        self._active_credential_ledgers.clear()
+        self._completed_credential_ledgers.clear()
+        self._credential_phase_counts.clear()
+        self._claimed_logical_targets.clear()
         if bool(getattr(self.args, "enum_cve", False)):
             self._cve_catalog = load_catalog()
         nested_default = (
@@ -2207,7 +2383,7 @@ class AuditCommandRunner:
             pass
         if self.console is not None and hasattr(self.console, "set_structured_output"):
             self.console.set_structured_output(plan.output_format == "json")
-        sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append)
+        sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append, console=self.console)
         sink.prepare()
         if self.console is not None and bool(getattr(self.args, "debug", False)) and plan.target_count > 1:
             port_counts = plan.target_counts_by_port()
@@ -2239,6 +2415,7 @@ class AuditCommandRunner:
             completed = True
             return result
         finally:
+            self._audit_cancelled.set()
             live_cancelled.set()
             if not completed and self._nested_scheduler is not None:
                 self._nested_scheduler.cancel()
@@ -2309,7 +2486,9 @@ class AuditCommandRunner:
         render_plan = build_render_plan(self.spec.render_module) if self.spec.render_module is not None else None
         debug = bool(getattr(self.args, "debug", False))
         raw_debug_emit = getattr(self.args, "debug_emit", None) if debug else None
-        cancelled = threading.Event()
+        cancelled = self._audit_cancelled
+        fallback_detect_started_at: dict[int, float] = {}
+        fallback_start_lock = threading.Lock()
 
         def _emit_target_live(lines: Iterable[str]) -> None:
             # A long-running target must publish its confirmed findings while
@@ -2318,17 +2497,57 @@ class AuditCommandRunner:
             if not cancelled.is_set():
                 sink.emit_many(lines)
 
+        def _emit_target_disk(*args: Any, **kwargs: Any) -> None:
+            if not cancelled.is_set():
+                sink.emit_discovery_value(*args, **kwargs)
+
         def _run_target(
             item: tuple[int, str, int, ScanTargetSpec | None], prepared: _AuditDetectOutcome | None = None
         ) -> _AuditPipelineOutcome:
             token = _TARGET_LIVE_EMIT.set(_emit_target_live if plan.output_format == "txt" else None)
+            disk_token = _TARGET_DISK_EMIT.set(_emit_target_disk if plan.output_format == "txt" else None)
+            with fallback_start_lock:
+                fallback_started_at = fallback_detect_started_at.pop(item[0], None)
+            discovery_token = _TARGET_DISCOVERY_STARTED_AT.set(
+                prepared.started_at
+                if prepared is not None and prepared.started_at is not None
+                else fallback_started_at
+                if fallback_started_at is not None
+                else time.monotonic()
+            )
             try:
                 if prepared is None:
-                    return self._run_target_pipeline(item[1], item[2], item[3], plan.credential_runs, debug_emit)
-                return self._run_target_pipeline(
-                    item[1], item[2], item[3], plan.credential_runs, debug_emit, prepared_detect=prepared
-                )
+                    outcome = self._run_target_pipeline(item[1], item[2], item[3], plan.credential_runs, debug_emit)
+                else:
+                    outcome = self._run_target_pipeline(
+                        item[1], item[2], item[3], plan.credential_runs, debug_emit, prepared_detect=prepared
+                    )
+                if self.spec.record_skipped_credential_attempts and not outcome.duplicate_target:
+                    with self._credential_ledger_lock:
+                        ledger = self._active_credential_ledgers.get(threading.get_ident())
+                        if ledger is not None and not self._audit_cancelled.is_set():
+                            worker_id = threading.get_ident()
+                            phase_counts = self._credential_phase_counts.pop(worker_id, Counter()).copy()
+                            # One atomic handoff: cancellation must see either
+                            # the active ledger or the completed record, never both.
+                            self._active_credential_ledgers.pop(worker_id, None)
+                            self._completed_credential_ledgers[id(outcome.record)] = (
+                                outcome.record,
+                                phase_counts,
+                                ledger["debug_count"],
+                            )
+                return outcome
+            except BaseException:
+                if self.spec.record_skipped_credential_attempts:
+                    self._audit_cancelled.set()
+                raise
             finally:
+                if self.spec.record_skipped_credential_attempts and not self._audit_cancelled.is_set():
+                    with self._credential_ledger_lock:
+                        self._active_credential_ledgers.pop(threading.get_ident(), None)
+                        self._credential_phase_counts.pop(threading.get_ident(), None)
+                _TARGET_DISCOVERY_STARTED_AT.reset(discovery_token)
+                _TARGET_DISK_EMIT.reset(disk_token)
                 _TARGET_LIVE_EMIT.reset(token)
 
         def _debug_emit(message: str) -> None:
@@ -2350,6 +2569,157 @@ class AuditCommandRunner:
             # minio object listing) into a temp file; emit it after the static
             # content and always delete it, even when the record is suppressed.
             stream_file = record.extra.get("_stream_lines_file") if isinstance(record.extra, dict) else None
+            discovery = record.extra.get("content_discovery") if isinstance(record.extra, dict) else None
+            spooled = isinstance(discovery, Mapping) and isinstance(discovery.get("findings"), SpoolingFindings)
+            airflow_discovery = record.extra.get("discover_report") if isinstance(record.extra, dict) else None
+            airflow_spooled = isinstance(airflow_discovery, Mapping) and (
+                isinstance(airflow_discovery.get("findings"), SpoolingFindings)
+                or isinstance(airflow_discovery.get("variable_keys"), SpoolingStrings)
+            )
+            elastic_spooled = isinstance(record.extra.get("discover_findings"), SpoolingFindings)
+            source_spooled = contains_spooled(record.extra)
+
+            def emit_pending_clickhouse_disk_findings() -> int:
+                if self.spec.module != "clickhouse" or record.extra.get("_clickhouse_disk_live_emitted"):
+                    return 0
+                report = record.extra.get("discover_report")
+                pending = report.get("findings") if isinstance(report, Mapping) else None
+                if not isinstance(pending, list):
+                    return 0
+                from .modules.clickhouse.actions import _clickhouse_discovery_place
+
+                count = 0
+                for finding in pending:
+                    value = finding.get("value") if isinstance(finding, Mapping) else None
+                    if isinstance(value, DiskBackedText):
+                        sink.emit_discovery_value(
+                            "CLICKHOUSE",
+                            record.host,
+                            record.port,
+                            finding_type=finding.get("type"),
+                            value=value,
+                            place=_clickhouse_discovery_place(finding),
+                        )
+                        count += 1
+                return count
+
+            def emit_pending_spooled_findings() -> int:
+                if not spooled:
+                    return 0
+                count = 0
+                batch: list[str] = []
+                assert isinstance(discovery, Mapping)
+                pending = discovery["findings"]
+                assert isinstance(pending, SpoolingFindings)
+                for finding in pending.iter_unemitted():
+                    value = finding.get("value")
+                    if isinstance(value, DiskBackedText):
+                        if batch:
+                            sink.emit_many(batch)
+                            count += len(batch)
+                            batch.clear()
+                        sink.emit_discovery_value(
+                            self.spec.module.upper(),
+                            record.host,
+                            record.port,
+                            finding_type=finding.get("type"),
+                            value=value,
+                            place=finding.get("object_path"),
+                        )
+                        count += 1
+                        continue
+                    batch.append(
+                        format_discovery_finding_line(
+                            self.spec.module.upper(),
+                            record.host,
+                            record.port,
+                            severity=finding.get("confidence"),
+                            finding_type=finding.get("type"),
+                            value=value,
+                            place=finding.get("object_path"),
+                        )
+                    )
+                    if len(batch) >= 256:
+                        sink.emit_many(batch)
+                        count += len(batch)
+                        batch.clear()
+                if batch:
+                    sink.emit_many(batch)
+                    count += len(batch)
+                return count
+
+            def emit_pending_airflow_findings() -> int:
+                if record.extra.get("_airflow_spooled_phase_emitted"):
+                    return 0
+                if not airflow_spooled or not isinstance(airflow_discovery, Mapping):
+                    return 0
+                pending = airflow_discovery.get("findings")
+                if not isinstance(pending, SpoolingFindings):
+                    return 0
+                count = 0
+                for finding in pending.iter_unemitted():
+                    place = finding.get("place") or finding.get("object_path")
+                    value = finding.get("value")
+                    if isinstance(value, DiskBackedText):
+                        sink.emit_discovery_value(
+                            "AIRFLOW",
+                            record.host,
+                            record.port,
+                            finding_type=finding.get("type"),
+                            value=value,
+                            place=place,
+                        )
+                    else:
+                        sink.emit_many(
+                            (
+                                format_discovery_finding_line(
+                                    "AIRFLOW",
+                                    record.host,
+                                    record.port,
+                                    severity=finding.get("confidence"),
+                                    finding_type=finding.get("type"),
+                                    value=value,
+                                    place=place,
+                                ),
+                            )
+                        )
+                    count += 1
+                return count
+
+            def emit_pending_elastic_disk_findings() -> int:
+                if (
+                    not elastic_spooled
+                    or record.extra.get("_elastic_disk_live_emitted")
+                    or record.extra.get("_elastic_disk_phase_emitted")
+                ):
+                    return 0
+                pending = record.extra.get("discover_findings")
+                if not isinstance(pending, SpoolingFindings):
+                    return 0
+                count = 0
+                for finding in pending:
+                    value = finding.get("value")
+                    if not isinstance(value, DiskBackedText):
+                        continue
+                    locations = finding.get("locations")
+                    first = locations[0] if isinstance(locations, list) and locations else None
+                    parts = []
+                    if isinstance(first, Mapping):
+                        for key in ("source_kind", "object", "index", "id", "path"):
+                            item = first.get(key)
+                            if item is not None and str(item).strip():
+                                parts.append(f"{key}:{item}")
+                    sink.emit_discovery_value(
+                        "ELASTIC",
+                        record.host,
+                        record.port,
+                        finding_type=finding.get("secret_type"),
+                        value=value,
+                        place="/".join(parts) or "unknown",
+                    )
+                    count += 1
+                return count
+
             try:
                 if plan.output_format == "json":
                     payload = record.to_dict()
@@ -2366,7 +2736,12 @@ class AuditCommandRunner:
                             ]
                     payload.pop("_stream_lines_file", None)
                     emitted_lines += 1
-                    sink.emit_many((json.dumps(payload, ensure_ascii=False),))
+                    if source_spooled or contains_disk_backed(payload):
+                        sink.emit_json_chunks(iter_json_chunks(payload))
+                    elif spooled or airflow_spooled or elastic_spooled or source_spooled:
+                        sink.emit_json_chunks(json.JSONEncoder(ensure_ascii=False).iterencode(payload))
+                    else:
+                        sink.emit_many((json.dumps(payload, ensure_ascii=False),))
                     if stream_file:
                         emitted_lines += sink.emit_stream_file(stream_file)
                     return
@@ -2380,6 +2755,11 @@ class AuditCommandRunner:
                         )
                         emitted_lines += len(cve_lines)
                         sink.emit_many(cve_lines)
+                    if not record.extra.get("_spooled_findings_phase_emitted"):
+                        emitted_lines += emit_pending_spooled_findings()
+                    emitted_lines += emit_pending_airflow_findings()
+                    emitted_lines += emit_pending_elastic_disk_findings()
+                    emitted_lines += emit_pending_clickhouse_disk_findings()
                     if stream_file:
                         emitted_lines += sink.emit_stream_file(stream_file)
                     return
@@ -2390,7 +2770,41 @@ class AuditCommandRunner:
                     return
                 lines = self._render_record(record, render_plan, plan.output_format, debug)
                 emitted_lines += len(lines)
-                sink.emit_many(lines)
+                if self.spec.module == "clickhouse":
+                    summary_index = next(
+                        (index for index, line in enumerate(lines) if "Discover Secrets (status:" in line), len(lines)
+                    )
+                    sink.emit_many(lines[:summary_index])
+                    emitted_lines += emit_pending_clickhouse_disk_findings()
+                    sink.emit_many(lines[summary_index:])
+                elif spooled:
+                    summary_index = next(
+                        (index for index, line in enumerate(lines) if "Discover Secrets (status:" in line), len(lines)
+                    )
+                    sink.emit_many(lines[:summary_index])
+                    emitted_lines += emit_pending_spooled_findings()
+                    sink.emit_many(lines[summary_index:])
+                elif airflow_spooled:
+                    summary_index = next(
+                        (index for index, line in enumerate(lines) if "Discover Secrets (status:" in line), len(lines)
+                    )
+                    sink.emit_many(lines[:summary_index])
+                    emitted_lines += emit_pending_airflow_findings()
+                    sink.emit_many(lines[summary_index:])
+                elif elastic_spooled:
+                    summary_index = next(
+                        (
+                            index
+                            for index, line in enumerate(lines)
+                            if "Discover Complete (status:" in line or "Discover Secrets (status:" in line
+                        ),
+                        len(lines),
+                    )
+                    sink.emit_many(lines[:summary_index])
+                    emitted_lines += emit_pending_elastic_disk_findings()
+                    sink.emit_many(lines[summary_index:])
+                else:
+                    sink.emit_many(lines)
                 if stream_file:
                     emitted_lines += sink.emit_stream_file(stream_file)
             finally:
@@ -2402,6 +2816,7 @@ class AuditCommandRunner:
 
         def _finalize_record(record: AuditRecord) -> None:
             nonlocal operational_failure_count, record_count
+            ledger_record_id = id(record)
             record = _with_http_detection_diagnostics(record, confirmed=self._is_detected(record))
             record = self._with_cve_enumeration(record)
             if debug_emit is not None and self.spec.module in _HTTP_DETECTION_MODULES:
@@ -2443,6 +2858,9 @@ class AuditCommandRunner:
                 for record_callback in record_callbacks:
                     record_callback(dict(payload))
             _emit_record(record)
+            if self.spec.record_skipped_credential_attempts:
+                with self._credential_ledger_lock:
+                    self._completed_credential_ledgers.pop(ledger_record_id, None)
 
         total_deep_candidates = 0
         processed_deep = 0
@@ -2465,7 +2883,12 @@ class AuditCommandRunner:
         if use_async_detect and detect_concurrency > 0:
 
             async def _detect_item(item: tuple[int, str, int, ScanTargetSpec | None]) -> _AuditDetectOutcome | None:
-                return await self._run_async_detect_with_state(item[1], item[2], item[3], debug_emit)
+                started_at = time.monotonic()
+                outcome = await self._run_async_detect_with_state(item[1], item[2], item[3], debug_emit)
+                if outcome is None:
+                    with fallback_start_lock:
+                        fallback_detect_started_at[item[0]] = started_at
+                return outcome
 
             outcomes = AsyncDetectScheduler[
                 tuple[int, str, int, ScanTargetSpec | None], _AuditDetectOutcome | None, _AuditPipelineOutcome
@@ -2485,6 +2908,9 @@ class AuditCommandRunner:
             outcomes = scheduler.iter_completed(plan.iter_target_specs(), _run_target)
         try:
             for (_idx, _host, _port, _target), outcome in outcomes:
+                if outcome.duplicate_target:
+                    progress.advance(1)
+                    continue
                 detected_count += int(outcome.detected)
                 total_deep_candidates += int(outcome.deep_candidate)
                 processed_deep += int(outcome.deep_processed)
@@ -2500,6 +2926,26 @@ class AuditCommandRunner:
                     _finalize_record(surface_record)
         except BaseException:
             cancelled.set()
+            if self.spec.record_skipped_credential_attempts:
+                cancelled_records = self._cancelled_credential_records()
+                self._close_all_lifecycle_states()
+                for record, prior_counts, debug_start in cancelled_records:
+                    if callable(raw_debug_emit):
+                        self._debug_credential_ledger(record, raw_debug_emit, start=debug_start)
+                    if plan.output_format == "txt":
+                        rendered = self._render_record(record, render_plan, "txt", debug)
+                        counts: Counter[str] = Counter()
+                        pending = []
+                        for line in rendered:
+                            key = self.spec.phase_output_key(record, line) if self.spec.phase_output_key else line
+                            counts[key] += 1
+                            if counts[key] > prior_counts[key]:
+                                pending.append(line)
+                        sink.emit_many(pending)
+                        record = replace(
+                            record, extra={**record.extra, "_self_emitted": True, "_self_emitted_lines": len(pending)}
+                        )
+                    _finalize_record(record)
             raise
         finally:
             close_outcomes = getattr(outcomes, "close", None)
@@ -2619,7 +3065,16 @@ class AuditCommandRunner:
             credential_runs=credential_runs,
             lifecycle_state=lifecycle_state,
             nested_scheduler=self._nested_scheduler,
-            live_emit=_TARGET_LIVE_EMIT.get() or getattr(self, "_live_emit", None),
+            live_emit=(
+                None
+                if phase == "data"
+                and self.spec.defer_discovery_findings_until_final
+                and bool(getattr(self.args, "discover", False))
+                else _TARGET_LIVE_EMIT.get() or getattr(self, "_live_emit", None)
+            ),
+            live_discovery_value=_TARGET_DISK_EMIT.get(),
+            discovery_started_at=_TARGET_DISCOVERY_STARTED_AT.get(),
+            cancelled=self._audit_cancelled.is_set,
         )
 
     def _register_lifecycle_state(self, state: Any) -> None:
@@ -2748,6 +3203,7 @@ class AuditCommandRunner:
                 record=record,
                 lifecycle_state=state,
                 runtime_stage_telemetry=runtime_stage_telemetry,
+                started_at=started_at,
             )
         except TypeError:
             self._close_lifecycle_state(state)
@@ -2770,6 +3226,7 @@ class AuditCommandRunner:
             return _AuditDetectOutcome(
                 record=record,
                 runtime_stage_telemetry=True,
+                started_at=started_at,
             )
 
     async def _run_async_detect_with_state(
@@ -2836,7 +3293,9 @@ class AuditCommandRunner:
                     error=error,
                     debug_emit=debug_emit,
                 )
-            return _AuditDetectOutcome(record=record, lifecycle_state=state, runtime_stage_telemetry=telemetry)
+            return _AuditDetectOutcome(
+                record=record, lifecycle_state=state, runtime_stage_telemetry=telemetry, started_at=started
+            )
         except AsyncHttpFallback as exc:
             self._close_lifecycle_state(state)
             if debug_emit is not None:
@@ -2860,7 +3319,7 @@ class AuditCommandRunner:
                 error=str(exc),
                 debug_emit=debug_emit,
             )
-            return _AuditDetectOutcome(record=record, runtime_stage_telemetry=True)
+            return _AuditDetectOutcome(record=record, runtime_stage_telemetry=True, started_at=started)
         finally:
             resolver_fallbacks.reset(resolution_token)
             await http.close()
@@ -2881,10 +3340,25 @@ class AuditCommandRunner:
     ) -> _AuditPipelineOutcome:
         """Run one target's entire lifecycle in a single scheduler worker."""
 
+        discovery_started_at = _TARGET_DISCOVERY_STARTED_AT.get() or time.monotonic()
+
         phase_emit: Callable[..., None] | None = None
         phase_line_counts: Counter[str] = Counter()
+        if self.spec.record_skipped_credential_attempts:
+            with self._credential_ledger_lock:
+                self._credential_phase_counts[threading.get_ident()] = phase_line_counts
+                self._active_credential_ledgers[threading.get_ident()] = {
+                    "detect": AuditRecord(
+                        host=host, port=port, module=self.spec.module, service=self.spec.module, status="unknown"
+                    ),
+                    "candidates": merge_audit_credential_runs(credential_runs),
+                    "attempts": [],
+                    "current": None,
+                    "debug_count": 0,
+                }
         phase_emitted_lines = 0
         live_emit = _TARGET_LIVE_EMIT.get() or getattr(self, "_live_emit", None)
+        disk_emit = _TARGET_DISK_EMIT.get()
         if (
             (
                 bool(getattr(self.args, "discover", False))
@@ -2918,19 +3392,184 @@ class AuditCommandRunner:
                 rendered = self._render_record(phase_record, render_plan, "txt", debug)
                 if detect_only:
                     rendered = rendered[:1]
+                elastic_findings = phase_record.extra.get("discover_findings")
+                elastic_spooled = isinstance(elastic_findings, SpoolingFindings)
+                elastic_findings_iter: SpoolingFindings | tuple[()] = (
+                    elastic_findings if isinstance(elastic_findings, SpoolingFindings) else ()
+                )
+                if (
+                    elastic_spooled
+                    and not final
+                    and any(isinstance(finding.get("value"), DiskBackedText) for finding in elastic_findings_iter)
+                ):
+                    rendered = [
+                        line
+                        for line in rendered
+                        if "Discover Complete (status:" not in line and "Discover Secrets (status:" not in line
+                    ]
                 current_counts: Counter[str] = Counter()
                 new_lines: list[str] = []
                 for line in rendered:
-                    current_counts[line] += 1
-                    if current_counts[line] > phase_line_counts[line]:
+                    key = self.spec.phase_output_key(phase_record, line) if self.spec.phase_output_key else line
+                    current_counts[key] += 1
+                    if current_counts[key] > phase_line_counts[key]:
                         new_lines.append(line)
                 for line, count in current_counts.items():
                     phase_line_counts[line] = max(phase_line_counts[line], count)
-                if new_lines:
+                discovery = phase_record.extra.get("content_discovery")
+                spooled = isinstance(discovery, Mapping) and isinstance(discovery.get("findings"), SpoolingFindings)
+                airflow_discovery = phase_record.extra.get("discover_report")
+                airflow_spooled = isinstance(airflow_discovery, Mapping) and isinstance(
+                    airflow_discovery.get("findings"), SpoolingFindings
+                )
+                if spooled and final:
+                    summary_index = next(
+                        (index for index, line in enumerate(new_lines) if "Discover Secrets (status:" in line),
+                        len(new_lines),
+                    )
+                    if summary_index:
+                        live_emit(new_lines[:summary_index])
+                    batch: list[str] = []
+                    assert isinstance(discovery, Mapping)
+                    pending = discovery["findings"]
+                    assert isinstance(pending, SpoolingFindings)
+                    for finding in pending.iter_unemitted():
+                        value = finding.get("value")
+                        if isinstance(value, DiskBackedText):
+                            if batch:
+                                live_emit(batch)
+                                phase_emitted_lines += len(batch)
+                                batch.clear()
+                            if callable(disk_emit):
+                                disk_emit(
+                                    self.spec.module.upper(),
+                                    phase_record.host,
+                                    phase_record.port,
+                                    finding_type=finding.get("type"),
+                                    value=value,
+                                    place=finding.get("object_path"),
+                                )
+                                phase_emitted_lines += 1
+                            continue
+                        batch.append(
+                            format_discovery_finding_line(
+                                self.spec.module.upper(),
+                                phase_record.host,
+                                phase_record.port,
+                                severity=finding.get("confidence"),
+                                finding_type=finding.get("type"),
+                                value=value,
+                                place=finding.get("object_path"),
+                            )
+                        )
+                        if len(batch) >= 256:
+                            live_emit(batch)
+                            phase_emitted_lines += len(batch)
+                            batch.clear()
+                    if batch:
+                        live_emit(batch)
+                        phase_emitted_lines += len(batch)
+                    if summary_index < len(new_lines):
+                        live_emit(new_lines[summary_index:])
+                    phase_record.extra["_spooled_findings_phase_emitted"] = True
+                    record.extra["_spooled_findings_phase_emitted"] = True
+                    phase_emitted_lines += len(new_lines)
+                elif airflow_spooled and final:
+                    summary_index = next(
+                        (index for index, line in enumerate(new_lines) if "Discover Secrets (status:" in line),
+                        len(new_lines),
+                    )
+                    if summary_index:
+                        live_emit(new_lines[:summary_index])
+                    assert isinstance(airflow_discovery, Mapping)
+                    pending = airflow_discovery["findings"]
+                    assert isinstance(pending, SpoolingFindings)
+                    for finding in pending.iter_unemitted():
+                        value = finding.get("value")
+                        place = finding.get("place") or finding.get("object_path")
+                        if isinstance(value, DiskBackedText):
+                            if callable(disk_emit):
+                                disk_emit(
+                                    "AIRFLOW",
+                                    phase_record.host,
+                                    phase_record.port,
+                                    finding_type=finding.get("type"),
+                                    value=value,
+                                    place=place,
+                                )
+                                phase_emitted_lines += 1
+                        else:
+                            live_emit(
+                                [
+                                    format_discovery_finding_line(
+                                        "AIRFLOW",
+                                        phase_record.host,
+                                        phase_record.port,
+                                        severity=finding.get("confidence"),
+                                        finding_type=finding.get("type"),
+                                        value=value,
+                                        place=place,
+                                    )
+                                ]
+                            )
+                            phase_emitted_lines += 1
+                    if summary_index < len(new_lines):
+                        live_emit(new_lines[summary_index:])
+                    phase_record.extra["_airflow_spooled_phase_emitted"] = True
+                    record.extra["_airflow_spooled_phase_emitted"] = True
+                    phase_emitted_lines += len(new_lines)
+                elif elastic_spooled and final:
+                    summary_index = next(
+                        (
+                            index
+                            for index, line in enumerate(new_lines)
+                            if "Discover Complete (status:" in line or "Discover Secrets (status:" in line
+                        ),
+                        len(new_lines),
+                    )
+                    if summary_index:
+                        live_emit(new_lines[:summary_index])
+                    if not phase_record.extra.get("_elastic_disk_live_emitted") and callable(disk_emit):
+                        for finding in elastic_findings_iter:
+                            value = finding.get("value")
+                            if not isinstance(value, DiskBackedText):
+                                continue
+                            locations = finding.get("locations")
+                            first = locations[0] if isinstance(locations, list) and locations else None
+                            parts = []
+                            if isinstance(first, Mapping):
+                                for key in ("source_kind", "object", "index", "id", "path"):
+                                    item = first.get(key)
+                                    if item is not None and str(item).strip():
+                                        parts.append(f"{key}:{item}")
+                            disk_emit(
+                                "ELASTIC",
+                                phase_record.host,
+                                phase_record.port,
+                                finding_type=finding.get("secret_type"),
+                                value=value,
+                                place="/".join(parts) or "unknown",
+                            )
+                            phase_emitted_lines += 1
+                    if summary_index < len(new_lines):
+                        live_emit(new_lines[summary_index:])
+                    phase_record.extra["_elastic_disk_phase_emitted"] = True
+                    record.extra["_elastic_disk_phase_emitted"] = True
+                    phase_emitted_lines += len(new_lines)
+                elif new_lines:
                     live_emit(new_lines)
                     phase_emitted_lines += len(new_lines)
 
-            phase_emit = _emit_phase
+            if self.spec.record_skipped_credential_attempts:
+
+                def _emit_locked_phase(*args: Any, **kwargs: Any) -> None:
+                    with self._credential_ledger_lock:
+                        if not self._audit_cancelled.is_set():
+                            _emit_phase(*args, **kwargs)
+
+                phase_emit = _emit_locked_phase
+            else:
+                phase_emit = _emit_phase
 
         detect_outcome = (
             prepared_detect
@@ -2939,6 +3578,19 @@ class AuditCommandRunner:
         )
         detect_record = detect_outcome.record
         detected = self._is_detected(detect_record)
+        if detected and self.spec.logical_target_key is not None:
+            logical_key = self.spec.logical_target_key(detect_record)
+            if logical_key is not None:
+                with self._credential_ledger_lock:
+                    duplicate = logical_key in self._claimed_logical_targets
+                    self._claimed_logical_targets.add(logical_key)
+                    if duplicate and self.spec.record_skipped_credential_attempts:
+                        worker_id = threading.get_ident()
+                        self._active_credential_ledgers.pop(worker_id, None)
+                        self._credential_phase_counts.pop(worker_id, None)
+                if duplicate:
+                    self._close_lifecycle_state(detect_outcome.lifecycle_state)
+                    return _AuditPipelineOutcome(detect_record, False, False, False, duplicate_target=True)
         deep_candidate = detected and self._deep_gate(detect_record)[0]
         has_credential_candidate = any(
             any(value is not None for value in (credential.username, credential.password, credential.token))
@@ -2997,8 +3649,9 @@ class AuditCommandRunner:
                 payload["content_discovery"] = data_discovery.inspect_record(
                     self.spec.module,
                     payload,
-                    max_bytes=int(getattr(self.args, "discover_max_bytes", None) or 50 * 1024 * 1024),
-                    max_seconds=float(getattr(self.args, "discover_time", None) or 300.0),
+                    max_bytes=int(getattr(self.args, "discover_max_bytes", None) or UNLIMITED_DISCOVER_BYTES),
+                    max_seconds=float(getattr(self.args, "discover_time", None) or DEFAULT_DISCOVER_TIME),
+                    started_at=discovery_started_at,
                 )
             payload = data_discovery.project_discovery_output(self.args, payload)
             final_record = AuditRecord.from_mapping(
@@ -3192,13 +3845,29 @@ class AuditCommandRunner:
 
         auth_records: list[tuple[AuditCredentialRun, AuditRecord]] = []
         candidates = credential_runs or (AuditCredentialRun(source="anonymous"),)
+        if self.spec.record_skipped_credential_attempts:
+            candidates = merge_audit_credential_runs(candidates)
         if bool(getattr(self.args, "defcreds", False)) and detect_record.extra.get("surface") == "ui":
             extra_defaults = (
                 AuditCredentialRun(username=user, password=password, source="default")
                 for user, password in web_panels.default_pairs(str(detect_record.extra.get("ui_product") or ""))
             )
             candidates = merge_audit_credential_runs(candidates, tuple(extra_defaults))
-        retain_all_attempts = self.spec.record_all_credential_attempts or self.spec.continue_after_credential_success
+        retain_all_attempts = (
+            self.spec.record_all_credential_attempts
+            or self.spec.continue_after_credential_success
+            or self.spec.record_skipped_credential_attempts
+        )
+        stop_reason: str | None = None
+        if self.spec.record_skipped_credential_attempts:
+            with self._credential_ledger_lock:
+                self._active_credential_ledgers[threading.get_ident()] = {
+                    "detect": detect_record,
+                    "candidates": candidates,
+                    "attempts": auth_records,
+                    "current": None,
+                    "debug_count": 0,
+                }
         verifier_unavailable = bool(
             (self.spec.skip_credentials_without_verifier or detect_record.extra.get("surface") == "ui")
             and detect_record.extra.get("credential_verification_status") == "unavailable"
@@ -3216,6 +3885,7 @@ class AuditCommandRunner:
                     debug_emit=debug_emit,
                 )
             gate_reason = "credential verification unavailable" if verifier_unavailable else "status=open_no_auth"
+            stop_reason = gate_reason
         else:
             for credential in candidates:
                 ctx = self._ctx(
@@ -3229,6 +3899,14 @@ class AuditCommandRunner:
                     credential_runs=(credential,),
                     lifecycle_state=lifecycle_state,
                 )
+                if self.spec.record_skipped_credential_attempts:
+                    with self._credential_ledger_lock:
+                        if callable(ctx.cancelled) and ctx.cancelled():
+                            stop_reason = "cancelled"
+                            break
+                        ledger = self._active_credential_ledgers.get(threading.get_ident())
+                        if ledger is not None:
+                            ledger["current"] = credential
                 auth_started_at = time.monotonic()
                 try:
                     auth_record = self._auth(ctx, detect_record)
@@ -3252,10 +3930,11 @@ class AuditCommandRunner:
                             reason="deep checks disabled",
                             debug_emit=debug_emit,
                         )
-                    auth_records.append((credential, auth_record))
+                    auth_record = self._record_credential_attempt(credential, auth_record, auth_records, debug_emit)
                     if phase_emit is not None:
                         phase_emit(auth_record, False)
                     if bool(getattr(self.args, "defcreds", False)) and _credential_attempt_rate_limited(auth_record):
+                        stop_reason = str(auth_record.extra.get("credential_stop_reason") or "rate_limited")
                         break
                     if self.spec.continue_after_credential_error:
                         continue
@@ -3274,10 +3953,11 @@ class AuditCommandRunner:
                         error=error,
                         debug_emit=debug_emit,
                     )
-                auth_records.append((credential, auth_record))
+                auth_record = self._record_credential_attempt(credential, auth_record, auth_records, debug_emit)
                 if phase_emit is not None:
                     phase_emit(auth_record, False)
                 if bool(getattr(self.args, "defcreds", False)) and _credential_attempt_rate_limited(auth_record):
+                    stop_reason = str(auth_record.extra.get("credential_stop_reason") or "rate_limited")
                     break
                 if (
                     self._credential_gate(credential, auth_record)[0]
@@ -3296,6 +3976,23 @@ class AuditCommandRunner:
                 selected_record,
                 extra={**selected_record.extra, "credential_attempts_skipped": skipped_credentials},
             )
+        if self.spec.record_skipped_credential_attempts:
+            with self._credential_ledger_lock:
+                completed = len(auth_records)
+                auth_records.extend(
+                    self._skipped_credential_records(
+                        detect_record, candidates[completed:], stop_reason or "credential sweep stopped"
+                    )
+                )
+                if stop_reason:
+                    selected_record = replace(
+                        selected_record, extra={**selected_record.extra, "credential_stop_reason": stop_reason}
+                    )
+                ledger = self._active_credential_ledgers.get(threading.get_ident())
+                if ledger is not None and debug_emit is not None:
+                    history = self._with_attempted_credentials(selected_record, auth_records, force=True)
+                    self._debug_credential_ledger(history, debug_emit, start=ledger["debug_count"])
+                    ledger["debug_count"] = len(history.extra.get("attempted_credentials") or [])
         credentials_verified = self._credential_gate(selected_credential, selected_record)[0]
         selected_record = self._mark_cve_credentials_verified(
             selected_record,
@@ -3304,6 +4001,15 @@ class AuditCommandRunner:
         )
         if retain_all_attempts:
             selected_record = self._with_attempted_credentials(selected_record, auth_records, force=True)
+        if self.spec.record_skipped_credential_attempts and stop_reason in {
+            "cancelled",
+            "rate_limited",
+            "account_locked",
+            "locked_out",
+        }:
+            if phase_emit is not None:
+                phase_emit(selected_record, False)
+            return selected_record
         gate = self._deep_gate(selected_record)
         if not gate[0]:
             # No credential gated (all attempts failed). Record every attempted credential
@@ -4057,6 +4763,135 @@ class AuditCommandRunner:
             return False, "credential unverified"
         return self._deep_gate(record)
 
+    def _record_credential_attempt(
+        self,
+        credential: AuditCredentialRun,
+        record: AuditRecord,
+        attempts: list[tuple[AuditCredentialRun, AuditRecord]],
+        debug_emit: Callable[[str], None] | None,
+    ) -> AuditRecord:
+        if not self.spec.record_skipped_credential_attempts:
+            attempts.append((credential, record))
+            return record
+        record = replace(
+            record,
+            extra={
+                **record.extra,
+                "credential_state": record.extra.get("credential_state")
+                or (
+                    "valid"
+                    if record.status == "valid_credentials"
+                    else "invalid"
+                    if record.status == "invalid_credentials"
+                    else "unknown"
+                ),
+                "auth_http_status": record.extra.get("auth_http_status", 0),
+                "credential_results": [{"username": credential.username}],
+                "credential_password": credential.password,
+                "credential_source": credential.source,
+                "credential_verification_reason": record.extra.get("credential_verification_reason")
+                or record.extra.get("error")
+                or str(record.status),
+            },
+        )
+        with self._credential_ledger_lock:
+            if self._audit_cancelled.is_set():
+                return record
+            attempts.append((credential, record))
+            ledger = self._active_credential_ledgers.get(threading.get_ident())
+            if ledger is not None:
+                ledger["current"] = None
+                if debug_emit is not None:
+                    history = self._with_attempted_credentials(record, attempts, force=True)
+                    self._debug_credential_ledger(history, debug_emit, start=ledger["debug_count"])
+                    ledger["debug_count"] = len(history.extra.get("attempted_credentials") or [])
+        return record
+
+    def _skipped_credential_records(
+        self,
+        detect_record: AuditRecord,
+        candidates: Iterable[AuditCredentialRun],
+        reason: str,
+    ) -> list[tuple[AuditCredentialRun, AuditRecord]]:
+        return [
+            (
+                credential,
+                replace(
+                    detect_record,
+                    status="skipped",
+                    extra={
+                        **detect_record.extra,
+                        "credential_state": "unknown",
+                        "reason": reason,
+                        "credential_verification_reason": reason,
+                    },
+                ),
+            )
+            for credential in candidates
+            if any(value is not None for value in (credential.username, credential.password, credential.token))
+        ]
+
+    def _debug_credential_ledger(
+        self,
+        record: AuditRecord,
+        emit: Callable[[str], None],
+        *,
+        start: int = 0,
+    ) -> None:
+        for attempt in (record.extra.get("attempted_credentials") or [])[start:]:
+            emit(
+                f"credential_attempt host={record.host} port={record.port} result="
+                + json.dumps(attempt, ensure_ascii=False)
+            )
+
+    def _cancelled_credential_records(self) -> list[tuple[AuditRecord, Counter[str], int]]:
+        """Snapshot active opt-in ledgers while workers are being abandoned.
+
+        No socket or worker wait is needed: cancellation makes the in-flight
+        identity unverified and every remaining planned pair explicitly skipped.
+        """
+        records: list[tuple[AuditRecord, Counter[str], int]] = []
+        with self._credential_ledger_lock:
+            records.extend(self._completed_credential_ledgers.values())
+            self._completed_credential_ledgers.clear()
+            for worker_id, ledger in self._active_credential_ledgers.items():
+                detect = ledger["detect"]
+                attempts = list(ledger["attempts"])
+                current = ledger["current"]
+                if current is not None:
+                    attempts.append(
+                        (
+                            current,
+                            replace(
+                                detect,
+                                status="auth_required",
+                                extra={
+                                    **detect.extra,
+                                    "credential_state": "unknown",
+                                    "reason": "cancelled",
+                                    "credential_verification_reason": "cancelled during identity verification",
+                                },
+                            ),
+                        )
+                    )
+                _credential, selected, _reason = self._select_deep_record(detect, attempts)
+                remaining = ledger["candidates"][len(attempts) :]
+                skipped = self._skipped_credential_records(detect, remaining, "cancelled")
+                attempts.extend(skipped)
+                selected = replace(
+                    selected,
+                    extra={
+                        **selected.extra,
+                        "credential_stop_reason": "cancelled",
+                        "credential_attempts_skipped": len(skipped),
+                    },
+                )
+                record = self._with_attempted_credentials(selected, attempts, force=True)
+                counts = self._credential_phase_counts.get(worker_id, Counter()).copy()
+                records.append((record, counts, ledger["debug_count"]))
+            self._active_credential_ledgers.clear()
+        return records
+
     def _with_attempted_credentials(
         self,
         record: AuditRecord,
@@ -4076,6 +4911,13 @@ class AuditCommandRunner:
             }
             if force:
                 payload["error"] = attempt.extra.get("error")
+            if self.spec.record_skipped_credential_attempts:
+                payload["reason"] = (
+                    attempt.extra.get("reason")
+                    or attempt.extra.get("credential_verification_reason")
+                    or attempt.extra.get("error")
+                    or str(attempt.status)
+                )
             for field_name in self.spec.credential_attempt_detail_fields:
                 if field_name in attempt.extra:
                     payload[field_name] = attempt.extra.get(field_name)
@@ -4084,10 +4926,21 @@ class AuditCommandRunner:
             return record
         import dataclasses as _dc
 
-        return _dc.replace(
-            record,
-            extra={**record.extra, "attempted_credentials": attempts_payload},
-        )
+        extra = {**record.extra, "attempted_credentials": attempts_payload}
+        if self.spec.record_skipped_credential_attempts:
+            skipped = sum(item["status"] == "skipped" for item in attempts_payload)
+            extra.update(
+                {
+                    "credential_attempts_planned": len(attempts_payload),
+                    "credential_attempts_executed": len(attempts_payload) - skipped,
+                    "credential_attempts_unverified": sum(
+                        item["status"] not in {"valid_credentials", "invalid_credentials", "skipped"}
+                        for item in attempts_payload
+                    ),
+                    "credential_attempts_skipped": skipped,
+                }
+            )
+        return _dc.replace(record, extra=extra)
 
     def _is_detected(self, record: AuditRecord) -> bool:
         if self.spec.module in web_panels.MODULE_PRODUCTS and record.extra.get("is_ui") is True:

@@ -112,9 +112,9 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     result = web_panels.enumerate_panel(data_ctx, panel)
     inventory_bytes_read = int(result.pop("_portainer_inventory_bytes_read", 0) or 0)
     if collector is not None and inventory_bytes_read:
-        if not collector.charge(inventory_bytes_read):
-            collector.partial("portainer/inventory", "discover_max_bytes")
-            collector.remaining = 0
+        # enumerate_panel caps each HTTP response before reading it. The
+        # aggregate can legitimately exceed one discover portion.
+        collector.bytes_read += inventory_bytes_read
     ui = dict(result.get("ui") or {})
     for field in _SESSIONS:
         ui.pop(field, None)
@@ -135,7 +135,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         )
         if collector is not None:
             for name, items in result["portainer_metadata"].items():
-                collector.add(f"portainer/inventory/{name}", _portainer_discovery_view(items))
+                collector.add(f"portainer/inventory/{name}", _portainer_discovery_view(items), prefer_specific=True)
             for name, items in inventory.items():
                 if not isinstance(items, dict) or items.get("partial") or items.get("status"):
                     collector.partial(f"portainer/inventory/{name}", "inventory_incomplete")

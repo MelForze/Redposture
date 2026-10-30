@@ -4,7 +4,6 @@ D1 — Postgres `_pg_try_read_server_file` no longer calls pg_switch_wal.
 D2 — MongoDB stage now surfaces `_group_collection_targets` parse errors.
 D3 — ZooKeeper: anon=NOAUTH + post-auth=NOAUTH disambiguated via /zookeeper.
 D4 — should_use_color caches the default-stream result.
-D5 — stage_scan warns when the -t URL path is ignored.
 """
 
 from __future__ import annotations
@@ -201,86 +200,3 @@ def test_fix_d4_should_use_color_cache_invalidates_on_env_change(
     monkeypatch.delenv("NO_COLOR")
     monkeypatch.setenv("FORCE_COLOR", "1")
     assert console.should_use_color() is True
-
-
-# ---------------------------------------------------------------------------
-# D5 — stage_scan warns when the -t URL path would be ignored
-# ---------------------------------------------------------------------------
-
-
-def test_fix_d5_stage_scan_warns_when_url_path_is_dropped(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """D5: users typing `-t http://host/some/other/metrics` used to get their
-    path silently discarded because the probe always hits /metrics. We now
-    emit a `[-] ignoring path on N target(s)...` warning."""
-    from redposture_core import stage_scan
-
-    warnings: list[str] = []
-
-    class _Console:
-        def error(self, _m: str) -> None:
-            pass
-
-        def warn(self, m: str) -> None:
-            warnings.append(m)
-
-        def info(self, _m: str) -> None:
-            pass
-
-        def plain(self, _m: str) -> None:
-            pass
-
-        def success(self, _m: str) -> None:
-            pass
-
-    _console = _Console()
-    monkeypatch.setattr(stage_scan, "Console", lambda **_kw: _console)
-
-    # Stub out everything downstream — we only need to reach the warn branch.
-    class _Plan:
-        target_count = 1
-
-        def has_scheme(self, _s: str) -> bool:
-            return False
-
-        def iter_specs(self):
-            return [
-                argparse.Namespace(host="host.example.com", path="/api/metrics"),
-                argparse.Namespace(host="another.example.com", path="/metrics"),
-                argparse.Namespace(host="third.example.com", path="/"),
-            ]
-
-    monkeypatch.setattr(stage_scan, "stream_scan_target_specs", lambda *_a, **_kw: _Plan())
-    # After the warn branch, force an early clean return by making the code
-    # bail on "scan requires -t/--targets" (target_specs will be empty).
-    monkeypatch.setattr(stage_scan, "collect_scan_target_specs", lambda _t: [])
-    monkeypatch.setattr(stage_scan, "collect_scan_ports", lambda _p: [])
-    monkeypatch.setattr(stage_scan, "load_profiles", lambda _p: {})
-
-    args = argparse.Namespace(
-        targets="http://host.example.com/api/metrics",
-        hosts=None,
-        hosts_file=None,
-        ports=None,
-        profiles_file=None,
-        output=None,
-        output_format="txt",
-        workers=1,
-        debug=False,
-        timeout=1.0,
-        retries=0,
-    )
-
-    # Actual exit code isn't the point — we only care the warn fired.
-    try:
-        stage_scan.run_scan_stage(args, logger=None)
-    except Exception:
-        pass  # downstream noise from the stub is fine
-
-    assert any("ignoring path" in m for m in warnings), f"expected 'ignoring path' warning, got {warnings!r}"
-    ignored = warnings[0]
-    assert "host.example.com/api/metrics" in ignored
-    # `/metrics` and `/` must NOT be flagged (they aren't dropped).
-    assert "another.example.com/metrics" not in ignored
-    assert "third.example.com/" not in ignored

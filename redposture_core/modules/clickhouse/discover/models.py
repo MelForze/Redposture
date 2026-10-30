@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from ....discovery_containers import DiskSequence
+
 
 @dataclass(frozen=True)
 class ColumnInventory:
@@ -34,6 +36,22 @@ class TableInventory:
     partitions: list[dict[str, Any]] = field(default_factory=list)
     inventory_errors: list[str] = field(default_factory=list)
 
+    _catalog_record: Any = field(default=None, repr=False, compare=False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        record = getattr(self, "_catalog_record", None)
+        if record is not None and name in {"columns", "partitions", "inventory_errors"}:
+            from .catalog import ColumnSequence
+
+            if name == "columns":
+                payload = record._owner.sequence(column.to_dict() for column in value)
+                record[name] = payload
+                value = ColumnSequence(payload)
+            else:
+                record[name] = record._owner.sequence(value)
+                value = record[name]
+        object.__setattr__(self, name, value)
+
     @property
     def full_name(self) -> str:
         return f"{self.database}.{self.name}"
@@ -48,9 +66,13 @@ class TableInventory:
             "primary_key": self.primary_key,
             "total_rows": self.total_rows,
             "total_bytes": self.total_bytes,
-            "columns": [column.to_dict() for column in self.columns],
-            "partitions": list(self.partitions),
-            "inventory_errors": list(self.inventory_errors),
+            "columns": self.columns.payload
+            if hasattr(self.columns, "payload")
+            else [column.to_dict() for column in self.columns],
+            "partitions": self.partitions if isinstance(self.partitions, DiskSequence) else list(self.partitions),
+            "inventory_errors": self.inventory_errors
+            if isinstance(self.inventory_errors, DiskSequence)
+            else list(self.inventory_errors),
         }
 
 

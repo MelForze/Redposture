@@ -58,40 +58,6 @@ def configure_listen_parser(
     add_listener_flags(parser)
 
 
-def configure_scan_parser(
-    parser: argparse.ArgumentParser,
-    *,
-    add_output_flags: Callable[..., None],
-    add_log_flag: Callable[..., None],
-    add_scan_host_flags: Callable[..., None],
-    add_save_flag: Callable[..., None],
-) -> None:
-    common = parser.add_argument_group("Common")
-    actions = parser.add_argument_group("Actions")
-    add_output_flags(common)
-    add_log_flag(common)
-    add_scan_host_flags(common)
-    add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
-    _add_exporter_tls_flags(common)
-    common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Scan output format for stdout/file.",
-    )
-    actions.add_argument(
-        "-p",
-        "--port",
-        "--ports",
-        dest="ports",
-        default=None,
-        metavar="ports",
-        help="Optional custom ports to probe: single port, comma-separated list/range, or file path.",
-    )
-
-
 def configure_trigger_parser(
     parser: argparse.ArgumentParser,
     *,
@@ -341,4 +307,4 @@ def configure_collect_parser(
     )
 
 
-__all__ = ["configure_listen_parser", "configure_scan_parser", "configure_trigger_parser", "configure_collect_parser"]
+__all__ = ["configure_listen_parser", "configure_trigger_parser", "configure_collect_parser"]

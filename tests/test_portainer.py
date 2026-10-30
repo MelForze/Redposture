@@ -573,6 +573,30 @@ def test_discovery_budget_stops_additional_proxy_requests(monkeypatch, budget):
     assert result["content_discovery_partial"] is True
 
 
+def test_discovery_inventory_reads_second_response_after_first_portion(monkeypatch):
+    monkeypatch.setattr(web_panels, "HttpSessionPool", lambda **kw: SimpleNamespace(close=lambda: None))
+    endpoints = response(200, [{"Id": 1, "Name": "qa"}])
+    containers = response(200, [{"Id": "container", "Names": ["/app"], "Image": "qa", "State": "running"}])
+    cap = max(len(endpoints.body), len(containers.body)) + 1
+    assert len(endpoints.body) + len(containers.body) > cap
+    paths = []
+
+    def get(_pool, _base, path, **kwargs):
+        paths.append((path, kwargs["response_size_cap"]))
+        return endpoints if path.startswith("/api/endpoints?") else containers
+
+    monkeypatch.setattr(web_panels, "_get", get)
+    ctx = context()
+    ctx.args.discover = True
+    ctx.args.containers = True
+    ctx.args.discover_max_bytes = cap
+    ctx.args.discover_time = 30
+    result = web_panels.enumerate_panel(ctx, panel())
+    assert result["ui"]["inventory"]["containers"]["count"] == 1
+    assert result["_portainer_inventory_bytes_read"] == len(endpoints.body) + len(containers.body)
+    assert len(paths) == 2 and [size for _, size in paths] == [cap, cap]
+
+
 def test_mixed_token_and_pair_outcomes_keep_attempt_order_without_duplicate_final():
     from redposture_core.modules.portainer import render
 

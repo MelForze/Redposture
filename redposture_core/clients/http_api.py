@@ -16,6 +16,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ..http_headers import merge_custom_http_headers
 from ..network_proxy import ProxyConfig, open_connection_via_proxy, parse_proxy_config
 from . import transport
 from .http_redirects import NoAutomaticRedirects, follow_redirects
@@ -386,6 +387,24 @@ def normalize_http_error(exc: BaseException) -> str:
     return text or exc.__class__.__name__
 
 
+def _bound_response_read_timeout(response: Any, deadline: float) -> None:
+    """Bound the next urllib body read by the remaining total request time."""
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("HTTP response timeout budget exhausted")
+    stream = getattr(response, "fp", None)
+    for _ in range(4):
+        if stream is None:
+            return
+        sock = getattr(stream, "_sock", None)
+        if sock is not None and callable(getattr(sock, "settimeout", None)):
+            sock.settimeout(remaining)
+            return
+        nested = getattr(stream, "fp", None)
+        stream = nested if nested is not None else getattr(stream, "raw", None)
+
+
 def _ssl_context(
     insecure: bool,
     ca_file: str | None = None,
@@ -400,11 +419,16 @@ def _ssl_context(
     )
 
 
-def _flush_tls_outgoing(sock: Any, outgoing: ssl.MemoryBIO) -> None:
+def _flush_tls_outgoing(sock: Any, outgoing: ssl.MemoryBIO, *, deadline: float | None = None) -> None:
     while True:
         chunk = outgoing.read()
         if not chunk:
             return
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("HTTP request timeout budget exhausted in TLS tunnel")
+            sock.settimeout(remaining)
         sock.sendall(chunk)
 
 
@@ -415,39 +439,57 @@ def _tls_over_tls_exchange(
     server_hostname: str,
     request_payload: bytes,
     response_cap: int,
+    deadline: float | None = None,
 ) -> tuple[bytes, bool]:
     incoming = ssl.MemoryBIO()
     outgoing = ssl.MemoryBIO()
     tls = context.wrap_bio(incoming, outgoing, server_side=False, server_hostname=server_hostname)
 
+    def apply_deadline() -> None:
+        if deadline is None:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("HTTP request timeout budget exhausted in TLS tunnel")
+        sock.settimeout(remaining)
+
+    def receive() -> bytes:
+        apply_deadline()
+        return sock.recv(65536)
+
+    def flush() -> None:
+        _flush_tls_outgoing(sock, outgoing, deadline=deadline)
+
     while True:
+        apply_deadline()
         try:
             tls.do_handshake()
-            _flush_tls_outgoing(sock, outgoing)
+            flush()
             break
         except ssl.SSLWantReadError:
-            _flush_tls_outgoing(sock, outgoing)
-            chunk = sock.recv(65536)
+            flush()
+            chunk = receive()
             if not chunk:
                 raise OSError("target TLS handshake closed") from None
             incoming.write(chunk)
         except ssl.SSLWantWriteError:
-            _flush_tls_outgoing(sock, outgoing)
+            flush()
 
     view = memoryview(request_payload)
     while view:
+        apply_deadline()
         try:
             written = tls.write(view)
             view = view[written:]
-            _flush_tls_outgoing(sock, outgoing)
+            flush()
         except ssl.SSLWantReadError:
-            _flush_tls_outgoing(sock, outgoing)
-            chunk = sock.recv(65536)
+            flush()
+            chunk = receive()
             if not chunk:
                 raise OSError("target TLS write closed") from None
             incoming.write(chunk)
         except ssl.SSLWantWriteError:
-            _flush_tls_outgoing(sock, outgoing)
+            flush()
 
     chunks: list[bytes] = []
     total = 0
@@ -459,6 +501,13 @@ def _tls_over_tls_exchange(
             truncated = True
             break
         try:
+            apply_deadline()
+        except TimeoutError:
+            if not chunks:
+                raise
+            truncated = True
+            break
+        try:
             chunk = tls.read(65536)
             if chunk:
                 chunks.append(chunk)
@@ -466,8 +515,14 @@ def _tls_over_tls_exchange(
             else:
                 break
         except ssl.SSLWantReadError:
-            _flush_tls_outgoing(sock, outgoing)
-            outer = sock.recv(65536)
+            try:
+                flush()
+                outer = receive()
+            except TimeoutError:
+                if not chunks:
+                    raise
+                truncated = True
+                break
             if not outer:
                 break
             incoming.write(outer)
@@ -650,7 +705,7 @@ class HttpApiClient:
         chunk_size: int = 1024 * 64,
     ) -> tuple[int, int, str | None]:
         size = 0
-        request_headers = {**dict(self.config.default_headers), **dict(headers or {})}
+        request_headers = merge_custom_http_headers({**dict(self.config.default_headers), **dict(headers or {})})
 
         def download_hop(method: str, url: str, headers: dict[str, str], body: bytes | None) -> HttpResponse:
             nonlocal size
@@ -689,13 +744,17 @@ class HttpApiClient:
     def send(self, request: HttpRequest, *, timeout: float | None = None) -> HttpResponse:
         headers = {str(k): str(v) for k, v in self.config.default_headers.items()}
         headers.update({str(k): str(v) for k, v in request.headers.items()})
+        headers = merge_custom_http_headers(headers)
         body = request.body
         if request.json_body is not None:
             body = json.dumps(request.json_body, separators=(",", ":")).encode("utf-8")
             headers.setdefault("Content-Type", "application/json")
+        deadline = time.monotonic() + max(0.001, float(timeout)) if timeout is not None else None
 
         def send_hop(method: str, url: str, headers: dict[str, str], body: bytes | None) -> HttpResponse:
-            return self._send_with_retries(HttpRequest(method, url, headers, body), timeout=timeout)
+            if deadline is not None and deadline <= time.monotonic():
+                raise TimeoutError("HTTP request timeout budget exhausted before redirect")
+            return self._send_with_retries(HttpRequest(method, url, headers, body), timeout=timeout, deadline=deadline)
 
         response = follow_redirects(
             send_hop,
@@ -709,7 +768,9 @@ class HttpApiClient:
         pin_http_redirect_path(response, method=request.method)
         return response
 
-    def _send_with_retries(self, request: HttpRequest, *, timeout: float | None = None) -> HttpResponse:
+    def _send_with_retries(
+        self, request: HttpRequest, *, timeout: float | None = None, deadline: float | None = None
+    ) -> HttpResponse:
         # A transport failure does not tell us whether the peer applied a
         # request before the connection disappeared.  Replaying GET/HEAD is
         # safe; replaying a mutating request may execute an operator-approved
@@ -720,16 +781,31 @@ class HttpApiClient:
         base_timeout = self.config.timeout if timeout is None else float(timeout)
         last_error = ""
         for attempt in range(1, attempts + 1):
-            attempt_timeout = transport.escalating_timeout(base_timeout, attempt - 1)
-            response = self._send_once(request, timeout=attempt_timeout)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                attempt_timeout = min(base_timeout, remaining)
+            else:
+                attempt_timeout = transport.escalating_timeout(base_timeout, attempt - 1)
+            response = self._send_once(
+                request,
+                timeout=attempt_timeout,
+                **({"deadline": deadline} if deadline is not None else {}),
+            )
             if response.error is None:
+                return response
+            if response.body:
                 return response
             last_error = response.error
             if response.error.startswith("cross-origin redirect blocked:"):
                 return response
             reason = transport.classify_failure_reason(response.error)
             if attempt < attempts and transport.is_escalating_reason(reason):
-                time.sleep(max(0.0, float(self.config.backoff)) * attempt)
+                delay = max(0.0, float(self.config.backoff)) * attempt
+                if deadline is not None:
+                    delay = min(delay, max(0.0, deadline - time.monotonic()))
+                time.sleep(delay)
                 continue
             break
         return HttpResponse(
@@ -741,7 +817,9 @@ class HttpApiClient:
             final_url=request.url,
         )
 
-    def _send_once(self, request: HttpRequest, *, timeout: float | None = None) -> HttpResponse:
+    def _send_once(
+        self, request: HttpRequest, *, timeout: float | None = None, deadline: float | None = None
+    ) -> HttpResponse:
         headers = {str(key): str(value) for key, value in request.headers.items()}
         body = request.body
         if request.json_body is not None:
@@ -761,6 +839,7 @@ class HttpApiClient:
                 req,
                 body=body,
                 timeout=timeout,
+                deadline=deadline,
             )
         try:
             timeout_value = float(timeout if timeout is not None else self.config.timeout)
@@ -771,11 +850,35 @@ class HttpApiClient:
             with open_response as resp:
                 response_cap = max(0, int(self.config.response_size_cap))
                 read_size = response_cap + 1
-                try:
-                    payload = resp.read(read_size)
-                except TypeError:
-                    payload = resp.read()
-                truncated = len(payload) > response_cap
+                timed_out = False
+                if deadline is not None and callable(getattr(resp, "read1", None)):
+                    chunks: list[bytes] = []
+                    received = 0
+                    while received < read_size:
+                        if time.monotonic() >= deadline:
+                            if getattr(resp, "length", None) == 0:
+                                break
+                            timed_out = True
+                            break
+                        try:
+                            _bound_response_read_timeout(resp, deadline)
+                            chunk = resp.read1(min(64 * 1024, read_size - received))
+                        except (TimeoutError, OSError) as exc:
+                            if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
+                                timed_out = True
+                                break
+                            raise
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        received += len(chunk)
+                    payload = b"".join(chunks)
+                else:
+                    try:
+                        payload = resp.read(read_size)
+                    except TypeError:
+                        payload = resp.read()
+                truncated = len(payload) > response_cap or timed_out
                 if not truncated and request.method.upper() != "HEAD":
                     check_http_body_complete(resp, len(payload))
                 if truncated:
@@ -793,7 +896,7 @@ class HttpApiClient:
                     status=int(getattr(resp, "status", 0) or resp.getcode()),
                     body=payload,
                     headers={str(key): str(value) for key, value in getattr(resp, "headers", {}).items()},
-                    error=redirect_error,
+                    error=redirect_error or ("HTTP response timeout budget exhausted" if timed_out else None),
                     truncated=truncated,
                     request_url=request.url,
                     final_url=final_url,
@@ -801,13 +904,35 @@ class HttpApiClient:
                 )
         except urllib.error.HTTPError as exc:
             response_cap = max(0, int(self.config.response_size_cap))
+            timed_out = False
             try:
                 read_size = response_cap + 1
-                try:
-                    payload = exc.read(read_size)
-                except TypeError:
-                    payload = exc.read()
-                if len(payload) <= response_cap and request.method.upper() != "HEAD":
+                if deadline is not None and callable(getattr(exc, "read1", None)):
+                    chunks = []
+                    received = 0
+                    while received < read_size:
+                        if time.monotonic() >= deadline:
+                            timed_out = True
+                            break
+                        try:
+                            _bound_response_read_timeout(exc, deadline)
+                            chunk = exc.read1(min(64 * 1024, read_size - received))
+                        except (TimeoutError, OSError) as read_error:
+                            if isinstance(read_error, TimeoutError) or "timed out" in str(read_error).lower():
+                                timed_out = True
+                                break
+                            raise
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        received += len(chunk)
+                    payload = b"".join(chunks)
+                else:
+                    try:
+                        payload = exc.read(read_size)
+                    except TypeError:
+                        payload = exc.read()
+                if not timed_out and len(payload) <= response_cap and request.method.upper() != "HEAD":
                     check_http_body_complete(exc, len(payload))
             except Exception as read_error:
                 exc.close()
@@ -820,7 +945,7 @@ class HttpApiClient:
                     final_url=request.url,
                 )
             exc.close()
-            truncated = len(payload) > response_cap
+            truncated = len(payload) > response_cap or timed_out
             if truncated:
                 payload = payload[:response_cap]
             # urllib's HTTPError URL is not a redirect history: adapters and
@@ -833,7 +958,7 @@ class HttpApiClient:
                 status=int(exc.code),
                 body=payload,
                 headers={str(key): str(value) for key, value in exc.headers.items()},
-                error=None,
+                error="HTTP response timeout budget exhausted" if timed_out else None,
                 truncated=truncated,
                 request_url=request.url,
                 final_url=final_url,
@@ -871,6 +996,7 @@ class HttpApiClient:
         *,
         body: bytes | None,
         timeout: float | None,
+        deadline: float | None = None,
     ) -> HttpResponse:
         proxy = self._proxy_config()
         if proxy is None:
@@ -896,6 +1022,8 @@ class HttpApiClient:
         port = int(parsed.port or 443)
         path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
         timeout_value = float(timeout if timeout is not None else self.config.timeout)
+        if deadline is not None:
+            timeout_value = min(timeout_value, max(0.001, deadline - time.monotonic()))
         host_header = f"[{host}]:{port}" if ":" in host and not host.startswith("[") else f"{host}:{port}"
         if port == 443:
             host_header = f"[{host}]" if ":" in host and not host.startswith("[") else host
@@ -916,7 +1044,11 @@ class HttpApiClient:
         outer = None
         try:
             outer = open_connection_via_proxy(proxy, (host, port), timeout=timeout_value)
-            outer.settimeout(timeout_value)
+            if deadline is not None and deadline <= time.monotonic():
+                raise TimeoutError("HTTP request timeout budget exhausted in proxy connection")
+            outer.settimeout(
+                min(timeout_value, max(0.001, deadline - time.monotonic())) if deadline is not None else timeout_value
+            )
             tls_context = self._context or _ssl_context(
                 False,
                 self.config.ca_file,
@@ -929,6 +1061,7 @@ class HttpApiClient:
                 server_hostname=host,
                 request_payload=payload,
                 response_cap=max(0, int(self.config.response_size_cap)),
+                **({"deadline": deadline} if deadline is not None else {}),
             )
             status, response_headers, response_body, response_truncated = _parse_http_response_bytes_detailed(
                 response_raw,

@@ -6,25 +6,45 @@
       "delete": true
     },
     "content_discovery": {
-      "bytes_inspected": 1565,
+      "bytes_inspected": 1304,
+      "bytes_read": 0,
+      "emitted_fingerprints": [],
       "findings": [
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.topic.orders[3]",
+          "object_path": "$.topic.audit.logs.partition.0.offset.1.token_hint",
           "source": "anonymous",
-          "type": "connection_string",
-          "value": "post.../app"
+          "type": "generic_secret",
+          "value": "gfa_demo_token_123"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.topic.orders[3]",
+          "object_path": "$.topic.orders.partition.1.offset.3.api_key",
+          "source": "anonymous",
+          "type": "api_key",
+          "value": "kfk_live_AKIA7SECRET2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.topic.orders.partition.1.offset.3.db",
+          "source": "anonymous",
+          "type": "connection_string",
+          "value": "postgres://admin:S3cret@db:5432/app"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.topic.orders.partition.1.offset.3.db",
           "source": "anonymous",
           "type": "url_credentials",
-          "value": "post.../app"
+          "value": "postgres://admin:S3cret@db:5432/app"
         }
       ],
+      "live_emitted": false,
+      "partial_reasons": [],
       "source": "anonymous",
       "status": "complete"
     },

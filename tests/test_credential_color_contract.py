@@ -106,6 +106,22 @@ def test_successful_pair_uses_same_red_as_postgres_superuser_true(capsys):
     _assert_color(output, "superuser:True", "1;38;5;196")
 
 
+def test_elastic_pair_and_active_capability_fields_keep_separate_colors(capsys):
+    spec = _build_real_spec("elastic")
+    assert spec.colorize is not None
+    line = (
+        "ELASTIC\tqa\t9200\t [+] reader:secret (Indices:2) (Write:Allowed) "
+        "(Delete:Access Denied) (Documents:Read) (Cluster:Access Denied) (Nodes:1) (Users:Unknown)"
+    )
+    assert spec.colorize(_ColorConsole(), line)
+    output = capsys.readouterr().out
+    _assert_color(output, "[+]", "1;92")
+    _assert_color(output, "reader:secret", "1;38;5;196")
+    _assert_color(output, "Write:Allowed", "1;38;5;196")
+    _assert_color(output, "Delete:Access Denied", "1;92")
+    _assert_color(output, "Users:Unknown", "1;38;5;208")
+
+
 @pytest.mark.parametrize(
     "module,payload",
     [

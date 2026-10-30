@@ -15,6 +15,8 @@ fi
 CERTS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/redposture-minio-certs.XXXXXX")"
 export MINIO_CERTS_DIR="$CERTS_DIR"
 
+source "$ROOT_DIR/scripts/qa_volume_guard.sh"
+
 QA_IMAGE_SNAPSHOT=""
 cleanup() {
   local rc=0
@@ -35,7 +37,7 @@ if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")"
   rmdir "$CERTS_DIR"
   exit 2
 fi
-trap cleanup EXIT
+trap 'rc=$?; cleanup || rc=1; exit "$rc"' EXIT
 if [[ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" == "1" ]]; then
   QA_IMAGE_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/redposture-minio-images.XXXXXX")"
   "$PYTHON_BIN" "$ROOT_DIR/scripts/qa_owned_images.py" snapshot "$QA_IMAGE_SNAPSHOT" -- \

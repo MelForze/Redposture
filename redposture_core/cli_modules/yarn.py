@@ -45,7 +45,7 @@ def configure_yarn_parser(
     )
     inventory.add_argument("--show-nodes", action="store_true", help="List visible cluster nodes (up to 5000).")
     inventory.add_argument("--show-metrics", action="store_true", help="Show visible cluster metrics.")
-    add_discovery_budget_flags(inventory, default_time=300.0, default_bytes=50 * 1024 * 1024)
+    add_discovery_budget_flags(inventory)
     probe.add_argument(
         "--probe-submit",
         action="store_true",

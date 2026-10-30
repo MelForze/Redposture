@@ -153,6 +153,53 @@ def test_mongo_audit_client_wraps_database_collection_helpers() -> None:
     ]
 
 
+def test_mongo_discovery_cursor_stops_after_budget_and_closes() -> None:
+    from redposture_core.clients.mongodb import MongoPartialReadError
+
+    class Cursor:
+        closed = False
+        batch = None
+
+        def limit(self, _value: int):
+            return self
+
+        def batch_size(self, value: int):
+            self.batch = value
+            return self
+
+        def __iter__(self):
+            yield {"token": "glpat-abcdefghijklmnopqrst"}
+            yield {"token": "second-value"}
+
+        def close(self):
+            self.closed = True
+
+    cursor = Cursor()
+
+    class Collection:
+        def find(self, _query: object, _projection: object):
+            return cursor
+
+    class Database:
+        def __getitem__(self, _name: str):
+            return Collection()
+
+    class Raw:
+        def __getitem__(self, _name: str):
+            return Database()
+
+    seen: list[dict[str, object]] = []
+
+    def on_document(doc: dict[str, object]) -> bool:
+        seen.append(doc)
+        return len(seen) < 2
+
+    with pytest.raises(MongoPartialReadError) as error:
+        MongoAuditClient(Raw()).find_documents("qa", "docs", on_document=on_document, batch_size=1)
+    assert cursor.batch == 1 and cursor.closed
+    assert error.value.documents == [{"token": "glpat-abcdefghijklmnopqrst"}]
+
+
 def test_json_safe_and_database_filter_helpers() -> None:
     class Weird:
         def __str__(self) -> str:

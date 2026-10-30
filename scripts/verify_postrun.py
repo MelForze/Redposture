@@ -37,11 +37,8 @@ _EXPECTED_MODULES = (
 )
 
 _EXPECTED_LABELS = (
-    "exporters_scan",
     "exporters_collect",
     "exporters_trigger",
-    "exporters_scan_url_http",
-    "exporters_scan_url_https_transport_fail",
     "exporters_collect_url_http",
     "exporters_collect_url_https_transport_fail",
     "exporters_trigger_url_http",
@@ -218,7 +215,6 @@ _EXTENDED_EXPECTED_LABELS = (
     "harbor_extended_discover_budget",
     "gitlab_extended_discover_budget",
     "exporters_debug_smoke",
-    "exporters_scan_extended_controls",
     "exporters_collect_extended_controls",
     "exporters_collect_resume_checkpoint",
     "exporters_collect_debug_smoke",
@@ -310,9 +306,9 @@ _EXTENDED_EXPECTED_LABELS = (
     "redis_mutate_show_keys_3",
     "redis_mutate_show_keys_100",
     # P4-E fuzz: CLI must reject invalid inputs with exit=2 (no Python traceback).
-    "fuzz_exporters_scan_missing_targets",
-    "fuzz_exporters_scan_invalid_ports",
-    "fuzz_exporters_scan_zero_timeout",
+    "fuzz_exporters_collect_missing_targets",
+    "fuzz_exporters_collect_invalid_ports",
+    "fuzz_exporters_collect_zero_timeout",
     "fuzz_exporters_collect_zero_max_inflight",
     "fuzz_exporters_trigger_missing_callback",
     "fuzz_exporters_trigger_bad_callback_ip",
@@ -449,7 +445,6 @@ _EXTENDED_EXPECTED_LABELS = (
 )
 
 _PROGRESS_EXPECTED_TARGETS = {
-    "exporters_scan": 51,
     "registry_multi_instance_urls": 5,
     "grafana_multi_instance_urls": 5,
     "gitlab_multi_instance_urls": 5,
@@ -567,7 +562,7 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     # P0 additions: assert that runs against seeded lab services actually produced the
     # expected content, not just exit=0. Substrings chosen from real matrix JSON artifacts
     # so they are stable across runs (no per-run-random tokens).
-    "redis_default": ("stream_len=", "svc:grafana", "ratelimit:ip", "queue:payments:retry"),
+    "redis_default": ("svc:grafana", "ratelimit:ip", "queue:payments:retry"),
     "redis_multi_ports": ("stream:alerts", "svc:grafana"),
     "redis_extended_defcreds": ("weak_default_creds",),
     "postgres_default": ("valid_credentials", "redposture.demo_accounts"),
@@ -645,7 +640,7 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "kubeapi_url_override_https": ("v1.31.6",),
     # P4-D idempotency twins must produce capability-bearing output (P3-E covers this
     # already, the explicit substring is a belt-and-suspenders).
-    "redis_idempotency": ('"key_count": 16',),
+    "redis_idempotency": (),
     "postgres_idempotency": ("redposture.demo_accounts",),
     "etcd_idempotency": ("/redposture/app/api_key",),
     "mongodb_idempotency": ('"database_count": 5',),
@@ -655,7 +650,6 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     # actually reached the deep phase.
     "redis_mutate_show_keys_3": ('"is_redis": true',),
     "redis_mutate_show_keys_100": ('"is_redis": true', '"key_count": 16'),
-    "exporters_scan_url_http": ('"exporter":',),
     "exporters_collect_url_http": ('"exporter":',),
     "exporters_trigger_url_http": ('"exporter":',),
 }
@@ -1296,6 +1290,22 @@ def _validate_rich_lab_outputs(rows: list[dict[str, str]]) -> None:
             if needle in output_text:
                 raise SystemExit(f"label '{label}' contains empty/unseeded lab output: {needle}")
 
+        if label == "redis_default":
+            has_seeded_stream = any(
+                isinstance(entry, dict)
+                and entry.get("key") == "stream:alerts"
+                and "severity=critical" in str(entry.get("value") or "")
+                for payload in _iter_json_objects(output_text)
+                for entry in (payload.get("key_value_entries") or [])
+            )
+            if not has_seeded_stream:
+                raise SystemExit("label 'redis_default' is missing expected seeded lab data: stream:alerts value")
+
+        if label == "redis_idempotency" and not any(
+            payload.get("key_count") == 16 for payload in _iter_json_objects(output_text)
+        ):
+            raise SystemExit("label 'redis_idempotency' is missing expected seeded lab data: key_count=16")
+
         if label == "oracle_large_file_resume":
             ok = False
             for payload in _iter_json_objects(output_text):
@@ -1354,13 +1364,12 @@ def _validate_rich_lab_outputs(rows: list[dict[str, str]]) -> None:
                 if not records:
                     missing_ports.append(port)
                     continue
-                for record in records:
-                    rendered = _render_znode_dump_content(record)
-                    if not rendered:
-                        empty_ports.append(port)
-                        continue
-                    if any(needle not in rendered for needle in needles):
-                        seed_mismatch_ports.append(port)
+                rendered_dumps = [_render_znode_dump_content(record) for record in records]
+                rendered_dumps = [dump for dump in rendered_dumps if dump]
+                if not rendered_dumps:
+                    empty_ports.append(port)
+                elif not any(all(needle in dump for needle in needles) for dump in rendered_dumps):
+                    seed_mismatch_ports.append(port)
             if missing_ports or empty_ports or seed_mismatch_ports:
                 raise SystemExit(
                     f"label '{label}' did not dump seeded znodes for every expected target: "
@@ -1369,7 +1378,7 @@ def _validate_rich_lab_outputs(rows: list[dict[str, str]]) -> None:
                     f"seed_mismatch_ports={sorted(set(seed_mismatch_ports))}"
                 )
 
-        if label in {"exporters_scan", "exporters_collect"}:
+        if label == "exporters_collect":
             pgbackrest_ports = {
                 int(item["port"])
                 for item in _iter_json_objects(output_text)
@@ -1480,6 +1489,10 @@ def _validate_dump_not_empty(rows: list[dict[str, str]]) -> None:
             continue
         if "dump" not in label and not label.endswith("_default") and not label.endswith("_open"):
             continue
+        # Streaming znode output has a detection record with null dump fields before
+        # its separate znodes_dump event. The seeded per-port check above validates it.
+        if label in _SEEDED_ZNODE_EXPECTATIONS:
+            continue
         output_text = _combined_run_output(row)
         if not output_text:
             continue
@@ -1535,7 +1548,6 @@ def _validate_status_coherence(rows: list[dict[str, str]]) -> None:
 _MIXED_STATUS_MULTI_RECORD = frozenset(
     {
         "docker_multi_ports",
-        "exporters_scan",  # fan-by-check (48 progress events ≠ host record count)
     }
 )
 
@@ -1711,7 +1723,7 @@ _CAPABILITY_FIELDS_BY_MODULE: dict[str, tuple[str, ...]] = {
 
 def _is_audit_record(record: dict[str, object]) -> bool:
     """An audit record is a per-host audit payload: status is a non-empty STRING (excludes
-    exporters scan/collect records where `status` is an HTTP int code), the record is not
+    exporters collect records where `status` is an HTTP int code), the record is not
     summary/index scaffolding, and it is not an exporter probe/trigger record (which carry
     `exporter`/`source_type` instead of the audit's `module`/`stages` shape)."""
     status = record.get("status")
@@ -1840,6 +1852,12 @@ def _validate_capability_sanity(rows: list[dict[str, str]]) -> None:
                 # inventory, so empty image/component fields are expected.
                 continue
             if any(_field_is_populated(record.get(field)) for field in capability_fields):
+                continue
+            discovery = record.get("content_discovery")
+            if isinstance(discovery, dict) and (
+                _field_is_populated(discovery.get("findings"))
+                or (discovery.get("status") == "complete" and (discovery.get("bytes_inspected") or 0) > 0)
+            ):
                 continue
             if _empty_inventory_query_completed(module, record):
                 continue
@@ -2259,6 +2277,13 @@ def _validate_action_contracts(rows: list[dict[str, str]]) -> None:
         records = [record for record in _iter_audit_records_for_row(row) if _record_has_meaningful_outcome(record)]
         if not records:
             raise SystemExit(f"typed action contract for '{label}' has no meaningful audit records")
+        streamed_znode_ports: set[int] = set()
+        if label in _SEEDED_ZNODE_EXPECTATIONS:
+            streamed_znode_ports = {
+                item["port"]
+                for item in _iter_json_objects(_combined_run_output(row))
+                if isinstance(item.get("port"), int) and _field_is_populated(item.get("znode_values"))
+            }
         for record in records:
             for field, expected in (expected_values or {}).items():
                 actual = _nested_field(record, field)
@@ -2268,6 +2293,8 @@ def _validate_action_contracts(rows: list[dict[str, str]]) -> None:
                     )
             for field in nonempty_fields:
                 if not _field_is_populated(_nested_field(record, field)):
+                    if field == "znode_values" and record.get("port") in streamed_znode_ports:
+                        continue
                     raise SystemExit(f"typed action contract for '{label}' failed: {field} is empty")
             for field, expected_items in list_contains.items():
                 actual = _nested_field(record, field)
@@ -2500,7 +2527,6 @@ _MISSING_TARGET_MODULES = (
 
 _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_jenkins_missing_targets": ("targets are required",),
-    "exporters_scan_url_https_transport_fail": ("scan inconclusive: no exporter confirmed",),
     "exporters_collect_url_https_transport_fail": ("collect inconclusive: no exporter confirmed",),
     "exporters_trigger_without_listener": ("trigger inconclusive: no callback attempt was confirmed",),
     "minio_default": ("partial_operational_failure",),
@@ -2514,9 +2540,9 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "docker_tls_requires_client_certificate": ("TLSV13_ALERT_CERTIFICATE_REQUIRED",),
     "kafka_extended_dump_max_conflict": ("--dump count cannot conflict with --max-messages",),
     "clickhouse_extended_query_columns": ('"requested_operation_failure": true',),
-    "fuzz_exporters_scan_missing_targets": ("scan requires -t/--targets",),
-    "fuzz_exporters_scan_invalid_ports": ("failed to parse --ports",),
-    "fuzz_exporters_scan_zero_timeout": ("value must be > 0",),
+    "fuzz_exporters_collect_missing_targets": ("collect requires -t/--targets",),
+    "fuzz_exporters_collect_invalid_ports": ("failed to parse --ports",),
+    "fuzz_exporters_collect_zero_timeout": ("value must be > 0",),
     "fuzz_exporters_collect_zero_max_inflight": ("value must be > 0",),
     "fuzz_exporters_trigger_missing_callback": ("trigger requires --callback-ip and/or --callback-dns",),
     "fuzz_exporters_trigger_bad_callback_ip": ("--callback-ip must be a valid IP address",),
@@ -2640,7 +2666,6 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
 # cases below still must not create an output artifact.
 _EXPECTED_RUNTIME_FAILURE_JSON_LABELS = frozenset(
     {
-        "exporters_scan_url_https_transport_fail",
         "exporters_collect_url_https_transport_fail",
         "exporters_trigger_without_listener",
         "minio_default",
@@ -2763,7 +2788,7 @@ _GOLDEN_DOCKER_HEX_NAME = re.compile(r"\b[0-9a-f]{12}\b")
 # Audit code itself generates random identifiers for one-shot privesc/file operations.
 _GOLDEN_AUDIT_RANDOM = re.compile(
     r"REDPOSTURE_(?:JOB|EXT)_[0-9A-Fa-f]+|rp_(?:ext|read|exec)_[0-9a-f]+|\$oid|"
-    r"redposture_large_file_[0-9a-f]+|redposture_wallet_hint_[0-9a-f]+"
+    r"redposture_large_file_[0-9a-f]+|redposture_wallet_hint_[0-9a-f]+|redposture_[0-9a-f]{32}"
 )
 # Docker container Ids are 64-char hex hashes; container names are 12-char (handled above).
 _GOLDEN_DOCKER_CONTAINER_ID = re.compile(r"\b[0-9a-f]{64}\b")
@@ -2771,6 +2796,8 @@ _GOLDEN_DOCKER_CONTAINER_ID = re.compile(r"\b[0-9a-f]{64}\b")
 _GOLDEN_BCRYPT = re.compile(r"\$2[ab]\$\d{2}\$[A-Za-z0-9./]+")
 # Kafka message envelope prefix `pN@offset` (partition/offset assignment varies per topic).
 _GOLDEN_KAFKA_OFFSET = re.compile(r"\bp\d+@\d+\b")
+_GOLDEN_KAFKA_OBJECT_LOCATION = re.compile(r"\.partition\.\d+\.offset\.\d+")
+_GOLDEN_ACCESS_PROBE_INDEX = re.compile(r"\bredposture-access-probe-[0-9a-f]+\b")
 # Fields populated by remote services and inherently per-boot/per-connection.
 _GOLDEN_VOLATILE_NESTED_FIELDS = frozenset(
     {
@@ -2993,6 +3020,7 @@ _MONGODB_UNORDERED_LIST_FIELDS = frozenset({"database_names", "collections", "do
 _GOLDEN_UNORDERED_LIST_FIELDS_BY_MODULE: dict[str, frozenset[str]] = {
     "clickhouse": frozenset({"rows"}),  # table dumps without ORDER BY
     "elastic": frozenset({"discover_findings"}),  # discovery concurrency changes arrival order
+    "keeper": frozenset({"znodes", "znode_values"}),  # each znode is scanned independently
     "mongodb": _MONGODB_UNORDERED_LIST_FIELDS | {"operation_results"},
 }
 
@@ -3009,6 +3037,7 @@ def _normalize_string_value(value: str, *, out_dir: Path | None = None) -> str:
     value = _GOLDEN_KAFKA_OFFSET.sub("<KAFKA_OFFSET>", value)
     value = _GOLDEN_DOCKER_HEX_NAME.sub("<DOCKER_HEX>", value)
     value = _GOLDEN_AUDIT_RANDOM.sub("<AUDIT_RND>", value)
+    value = _GOLDEN_ACCESS_PROBE_INDEX.sub("redposture-access-probe-<RUN_ID>", value)
     return value
 
 
@@ -3024,6 +3053,13 @@ def _normalize_for_golden(
     (paths, timestamps) so the golden diff catches semantic regressions only."""
     if isinstance(payload, dict):
         effective_module = str(payload.get("module") or module or "").strip() or None
+        clickhouse_chunks = (
+            effective_module == "clickhouse"
+            and isinstance(payload.get("completed_chunks"), int)
+            and not isinstance(payload.get("completed_chunks"), bool)
+            and isinstance(payload.get("total_chunks"), int)
+            and not isinstance(payload.get("total_chunks"), bool)
+        )
         module_volatile_fields = _GOLDEN_MODULE_VOLATILE_FIELDS.get(effective_module or "", frozenset())
         label_volatile_fields = _GOLDEN_LABEL_VOLATILE_FIELDS.get(label or "", frozenset())
         context_volatile_fields = _GOLDEN_CONTEXT_VOLATILE_FIELDS.get(
@@ -3041,7 +3077,8 @@ def _normalize_for_golden(
         result: dict[str, Any] = {}
         for key, value in payload.items():
             if (
-                key in _GOLDEN_VOLATILE_FIELDS
+                (clickhouse_chunks and key in {"completed_chunks", "total_chunks", "total_partitions"})
+                or key in _GOLDEN_VOLATILE_FIELDS
                 or key in _GOLDEN_VOLATILE_NESTED_FIELDS
                 or key in module_volatile_fields
                 or key in label_volatile_fields
@@ -3071,6 +3108,10 @@ def _normalize_for_golden(
                 label=label,
                 parent_key=key,
             )
+            if effective_module == "kafka" and key == "object_path" and isinstance(normalized_value, str):
+                normalized_value = _GOLDEN_KAFKA_OBJECT_LOCATION.sub(
+                    ".partition.<PARTITION>.offset.<OFFSET>", normalized_value
+                )
             if key == "content_discovery" and isinstance(normalized_value, dict):
                 findings = normalized_value.get("findings")
                 if isinstance(findings, list):
@@ -3079,6 +3120,10 @@ def _normalize_for_golden(
                         key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                     )
             result[key] = normalized_value
+        if clickhouse_chunks:
+            # A live table can be split into different numbers of partitions
+            # between runs. Preserve whether every planned chunk completed.
+            result["chunks_complete"] = payload["completed_chunks"] == payload["total_chunks"]
         return result
     if isinstance(payload, list):
         normalized = [
@@ -3368,8 +3413,6 @@ def _validate_progress_target_mappings(
         return
     cases = {case.label: case for case in parse_matrix_cases(script_path.read_text(encoding="utf-8"))}
     for label, expected in _PROGRESS_EXPECTED_TARGETS.items():
-        if label == "exporters_scan":
-            continue  # port list is supplied through the EXPORTER_PORTS shell variable
         case = cases.get(label)
         if case is None:
             continue
@@ -3437,7 +3480,6 @@ def _cli_smoke_checks() -> None:
         ("docker-registry", "-h"),
         ("harbor", "-h"),
         ("nexus", "-h"),
-        ("exporters", "scan", "-h"),
         ("postgres", "-h"),
         ("elastic", "-h"),
         ("grpc", "-h"),

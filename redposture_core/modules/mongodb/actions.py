@@ -10,6 +10,7 @@ from typing import Any
 from ...clients import transport
 from ...clients.mongodb import (
     MongoAuditClient,
+    MongoBudgetStop,
     MongoDependencyError,
     MongoNotMongoError,
     MongoPartialReadError,
@@ -24,6 +25,8 @@ from ...clients.mongodb import (
     probe_legacy_mongodb_hello,
 )
 from ...console import Console
+from ...discovery_spool import SpoolingRecords
+from ...discovery_values import iter_json_chunks
 from ...rendering import (
     CountColorRule,
     RegexColorRule,
@@ -39,6 +42,7 @@ from ...stage_runtime import (
     StageTelemetryBuilder,
     merge_stage_records,
 )
+from ...storage_discovery import DiscoveryCollector
 from ...utils import (
     utc_now_iso,
 )
@@ -83,6 +87,17 @@ def _clip(text: str, width: int = 96) -> str:
     if width <= 3:
         return text[:width]
     return text[: width - 3] + "..."
+
+
+def _document_preview(value: Any, width: int = 240) -> str:
+    parts: list[str] = []
+    remaining = width + 1
+    for part in iter_json_chunks(value, max_chars=width + 1):
+        parts.append(part[:remaining])
+        remaining -= len(parts[-1])
+        if remaining <= 0:
+            break
+    return _clip("".join(parts), width)
 
 
 def _retry_delay(attempt_index: int) -> float:
@@ -341,7 +356,7 @@ def _selected_databases(
     if selected_database:
         return [selected_database]
     if needs_collection_walk and database_names:
-        return non_system_databases(database_names) or list(database_names)
+        return sorted(non_system_databases(database_names) or database_names)
     return []
 
 
@@ -361,6 +376,7 @@ def _collect_mongodb_data(
     projection: dict[str, Any] | None,
     index_filter: str | None = None,
     nosql_command: dict[str, Any] | None = None,
+    discovery_collector: DiscoveryCollector | None = None,
 ) -> dict[str, Any]:
     query_requested = query_filter is not None
     command_database = selected_database or "admin"
@@ -368,8 +384,8 @@ def _collect_mongodb_data(
     databases_for_walk = _selected_databases(database_names, selected_database, needs_collection_walk)
     collection_rows: list[dict[str, Any]] = []
     index_rows: list[dict[str, Any]] = []
-    document_rows: list[dict[str, Any]] = []
-    query_rows: list[dict[str, Any]] = []
+    document_rows: list[dict[str, Any]] = SpoolingRecords() if discovery_collector is not None else []
+    query_rows: list[dict[str, Any]] = SpoolingRecords() if discovery_collector is not None else []
     operation_errors: list[str] = []
     operation_results: list[dict[str, Any]] = []
     nosql_command_result: dict[str, Any] | None = None
@@ -429,11 +445,13 @@ def _collect_mongodb_data(
             target_map[db_name] = None
 
     for db_name, explicit_collections in target_map.items():
+        if discovery_collector is not None and not discovery_collector.allowed():
+            break
         try:
             collections = (
                 list(explicit_collections)
                 if explicit_collections is not None
-                else client.list_collection_names(db_name)
+                else sorted(client.list_collection_names(db_name))
             )
             if explicit_collections is None:
                 note("can_list_collections", True, "list_collections", database=db_name)
@@ -443,8 +461,14 @@ def _collect_mongodb_data(
             continue
 
         for collection_name in collections:
+            if discovery_collector is not None and not discovery_collector.allowed():
+                break
             try:
-                count = client.count_documents(db_name, collection_name)
+                count = (
+                    client.count_documents(db_name, collection_name)
+                    if discovery_collector is None or show_collections
+                    else None
+                )
                 if count is not None:
                     note(
                         "can_read_documents",
@@ -490,15 +514,41 @@ def _collect_mongodb_data(
                     )
 
             if dump_documents or query_requested:
-                limit = dump_limit if dump_limit is not None else _MONGODB_DUMP_SAFETY_LIMIT
+                limit = (
+                    dump_limit
+                    if dump_limit is not None
+                    else None
+                    if discovery_collector is not None
+                    else _MONGODB_DUMP_SAFETY_LIMIT
+                )
                 try:
+                    discovery_kwargs: dict[str, Any] = {}
+                    if discovery_collector is not None and isinstance(client, MongoAuditClient):
+                        discovery_kwargs = {
+                            "on_document": lambda doc, db=db_name, coll=collection_name: discovery_collector.add(
+                                f"database.{db}.collection.{coll}.document", doc
+                            ),
+                            "deadline": discovery_collector.deadline,
+                            "batch_size": 1,
+                        }
                     docs = client.find_documents(
                         db_name,
                         collection_name,
                         query=query_filter or {},
                         projection=projection,
                         limit=limit,
+                        **discovery_kwargs,
                     )
+                    if discovery_collector is not None:
+                        discovery_collector.mark_accessible_source()
+                        if limit is not None and len(docs) >= limit:
+                            discovery_collector.partial(f"{db_name}.{collection_name}", "document_limit")
+                        if not discovery_kwargs:
+                            for doc in docs:
+                                if not discovery_collector.add(
+                                    f"database.{db_name}.collection.{collection_name}.document", doc
+                                ):
+                                    break
                     note(
                         "can_read_documents",
                         True,
@@ -510,6 +560,22 @@ def _collect_mongodb_data(
                     for doc in docs:
                         target.append({"database": db_name, "collection": collection_name, "document": doc})
                 except Exception as exc:
+                    if discovery_collector is not None:
+                        reason = "access_denied" if is_auth_error(exc) else normalize_mongodb_error(exc)
+                        discovery_collector.partial(f"{db_name}.{collection_name}", reason)
+                    if isinstance(exc, MongoBudgetStop):
+                        target = query_rows if query_requested else document_rows
+                        for doc in exc.documents:
+                            target.append({"database": db_name, "collection": collection_name, "document": doc})
+                        if exc.documents:
+                            note(
+                                "can_read_documents",
+                                True,
+                                "find_documents",
+                                database=db_name,
+                                collection=collection_name,
+                            )
+                        continue
                     if isinstance(exc, MongoPartialReadError):
                         target = query_rows if query_requested else document_rows
                         for doc in exc.documents:
@@ -517,6 +583,12 @@ def _collect_mongodb_data(
                         # A returned document proves read access even if count
                         # and the eventual getMore both failed.
                         capability_outcomes["can_read_documents"].append(True)
+                        if discovery_collector is not None and not discovery_kwargs:
+                            for doc in exc.documents:
+                                if not discovery_collector.add(
+                                    f"database.{db_name}.collection.{collection_name}.document", doc
+                                ):
+                                    break
                     note(
                         "can_read_documents",
                         False,
@@ -559,7 +631,7 @@ def _collect_mongodb_data(
     # single capability hid that cross-operation partial coverage.
     partial = coverage_successes > 0 and coverage_failures > 0
 
-    return {
+    result = {
         "database_names": database_names if show_databases else None,
         "database_count": len(database_names) if isinstance(database_names, list) else None,
         "collections": collection_rows
@@ -579,6 +651,9 @@ def _collect_mongodb_data(
         "nosql_command_error": nosql_command_error,
         "capabilities": capabilities,
     }
+    if discovery_collector is not None:
+        result["content_discovery"] = discovery_collector.result()
+    return result
 
 
 def _base_record(
@@ -674,6 +749,8 @@ def _audit_mongodb_host(
     tls_ca: str | None = None,
     tls_cert_key: str | None = None,
     tls_insecure: bool = False,
+    discover: bool = False,
+    audit_ctx: Any | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, int(retries) + 1)
     last_error: str | None = None
@@ -696,6 +773,8 @@ def _audit_mongodb_host(
         index_filter=index_filter,
         nosql_command=nosql_command,
     )
+    if discover:
+        record_template["dump_safety_limit"] = None
 
     # A12 fix: persist credential_attempts across retries so the final fail
     # record still shows what was tried before the connection ultimately died.
@@ -824,6 +903,15 @@ def _audit_mongodb_host(
                 effective_password = None
 
             allow_data_actions = status in _MONGODB_DEEP_STATUSES
+            discovery_collector = (
+                DiscoveryCollector(
+                    "mongodb",
+                    audit_ctx,
+                    {"status": status, "provided_credentials_ok": selected_credential is not None},
+                )
+                if discover and audit_ctx is not None and allow_data_actions
+                else None
+            )
             data = _collect_mongodb_data(
                 active_client,
                 database_names=database_names,
@@ -839,6 +927,7 @@ def _audit_mongodb_host(
                 projection=projection if allow_data_actions else None,
                 index_filter=index_filter if allow_data_actions else None,
                 nosql_command=nosql_command if allow_data_actions else None,
+                discovery_collector=discovery_collector,
             )
             if active_client_owned:
                 active_client.close()
@@ -987,6 +1076,8 @@ def _audit_mongodb_host_stage(
     run_deep_checks: bool,
     debug: bool,
     debug_emit: Callable[[str], None] | None,
+    discover: bool = False,
+    audit_ctx: Any | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     record = _audit_mongodb_host(
@@ -1013,6 +1104,8 @@ def _audit_mongodb_host_stage(
         tls_ca=tls_ca,
         tls_cert_key=tls_cert_key,
         tls_insecure=tls_insecure,
+        discover=discover and run_deep_checks,
+        audit_ctx=audit_ctx,
     )
     record["show_databases_limit"] = show_databases_limit if run_deep_checks else None
     record["show_collections_limit"] = show_collections_limit if run_deep_checks else None
@@ -1322,8 +1415,8 @@ def _format_documents_detail_records(record: dict[str, Any], output_format: str)
     prefix = _nxc_prefix(record)
     lines = [f"{prefix} [*] Dump Documents"]
     for row in rows:
-        payload = json.dumps(row.get("document"), ensure_ascii=False, separators=(",", ":"))
-        lines.append(f"{prefix} {row.get('database')}.{row.get('collection')}:{_clip(payload, 240)}")
+        payload = _document_preview(row.get("document"))
+        lines.append(f"{prefix} {row.get('database')}.{row.get('collection')}:{payload}")
     return lines
 
 
@@ -1353,8 +1446,8 @@ def _format_query_detail_records(record: dict[str, Any], output_format: str) -> 
     if error:
         lines.append(f"{prefix} [!] query failed err={_clip(str(error), 120)}")
     for row in rows or []:
-        payload = json.dumps(row.get("document"), ensure_ascii=False, separators=(",", ":"))
-        lines.append(f"{prefix} {row.get('database')}.{row.get('collection')}:{_clip(payload, 240)}")
+        payload = _document_preview(row.get("document"))
+        lines.append(f"{prefix} {row.get('database')}.{row.get('collection')}:{payload}")
     return lines
 
 

@@ -1,5 +1,6 @@
 [
   {
+    "_clickhouse_disk_live_emitted": false,
     "_discover_findings_streamed": false,
     "action_statuses": {
       "columns": "not_requested",
@@ -252,7 +253,7 @@
     ],
     "detection_status": "confirmed",
     "discover_report": {
-      "bytes_scanned": 434176,
+      "bytes_scanned": 333764,
       "checkpoint": "<OUT_DIR>/clickhouse-discover.checkpoint.json",
       "coverage": {
         "analytics.orders.amount": {
@@ -320,7 +321,7 @@
         },
         "analytics.orders.promo_code": {
           "approximate_total_rows": 4,
-          "bytes_scanned": 21,
+          "bytes_scanned": 13,
           "completed_chunks": 1,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
@@ -460,7 +461,7 @@
         },
         "discovery.secret_corpus.attributes": {
           "approximate_total_rows": 5004,
-          "bytes_scanned": 204115,
+          "bytes_scanned": 124067,
           "completed_chunks": 7,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
@@ -492,7 +493,7 @@
         },
         "discovery.secret_corpus.fragments": {
           "approximate_total_rows": 5004,
-          "bytes_scanned": 84116,
+          "bytes_scanned": 64092,
           "completed_chunks": 7,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
@@ -524,7 +525,7 @@
         },
         "discovery.secret_corpus.payload_b": {
           "approximate_total_rows": 5004,
-          "bytes_scanned": 20196,
+          "bytes_scanned": 192,
           "completed_chunks": 7,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
@@ -575,7 +576,7 @@
         },
         "iam.api_clients.scopes": {
           "approximate_total_rows": 3,
-          "bytes_scanned": 80,
+          "bytes_scanned": 60,
           "completed_chunks": 1,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
@@ -601,7 +602,7 @@
         },
         "observability.events.attrs": {
           "approximate_total_rows": 8,
-          "bytes_scanned": 345,
+          "bytes_scanned": 217,
           "completed_chunks": 1,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
@@ -781,7 +782,7 @@
         },
         "observability.metric_samples.labels": {
           "approximate_total_rows": 10,
-          "bytes_scanned": 519,
+          "bytes_scanned": 327,
           "completed_chunks": 1,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
@@ -843,7 +844,6 @@
               "table": "secret_corpus"
             }
           ],
-          "masked_value": "stil...8899",
           "object_path": "$",
           "occurrences": 1,
           "partition": "202609",
@@ -874,7 +874,6 @@
               "table": "secret_corpus"
             }
           ],
-          "masked_value": "clie...b731",
           "object_path": "$.service.client_secret",
           "occurrences": 1,
           "partition": "202608",
@@ -905,7 +904,6 @@
               "table": "secret_corpus"
             }
           ],
-          "masked_value": "eyJh...ture",
           "object_path": "$.Authorization",
           "occurrences": 1,
           "partition": "202608",
@@ -936,7 +934,6 @@
               "table": "sessions"
             }
           ],
-          "masked_value": "eyJh...sion",
           "object_path": "$",
           "occurrences": 1,
           "partition": "all",
@@ -967,7 +964,6 @@
               "table": "sessions"
             }
           ],
-          "masked_value": "eyJh...sion",
           "object_path": "$",
           "occurrences": 1,
           "partition": "all",
@@ -998,7 +994,6 @@
               "table": "secret_corpus"
             }
           ],
-          "masked_value": "<private-key:redacted>",
           "object_path": "$",
           "occurrences": 1,
           "partition": "202608",
@@ -1045,7 +1040,6 @@
               "table": "secret_corpus"
             }
           ],
-          "masked_value": "sk_l...ijkl",
           "object_path": "$.api_key",
           "occurrences": 3,
           "partition": "202608",

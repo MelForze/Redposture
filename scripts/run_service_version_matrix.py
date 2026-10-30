@@ -26,11 +26,13 @@ from redposture_core.cve import normalize_version  # noqa: E402
 from scripts.check_compose_readiness import readiness_issues  # noqa: E402
 from scripts.qa_cve_contract import assert_cve_rendering  # noqa: E402
 from scripts.qa_owned_images import compose_images, missing_images, remove_images  # noqa: E402
+from scripts.qa_owned_volumes import guarded_command  # noqa: E402
 from scripts.qa_service_policy import startup_timeout  # noqa: E402
 from scripts.run_extended_version_matrix import _record  # noqa: E402
 
 
 def run(command: list[str], log: Path, *, timeout: int, env: dict[str, str] | None = None) -> str:
+    command = guarded_command(command, log.parent)
     started = time.monotonic()
     with log.open("a", encoding="utf-8") as stream:
         stream.write(f"$ {subprocess.list2cmdline(command)}\n")

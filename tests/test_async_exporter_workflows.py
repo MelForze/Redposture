@@ -6,6 +6,7 @@ import threading
 
 import pytest
 
+from redposture_core import async_detection
 from redposture_core.exporters import async_detect, discover, trigger
 
 
@@ -24,6 +25,7 @@ def test_scan_presence_uses_native_prefetch_with_exact_results(monkeypatch):
         }
 
     monkeypatch.setattr(async_detect, "prefetch_metrics", prefetch)
+    monkeypatch.setattr(async_detection, "async_detection_allowed", lambda _args: True)
     hosts = [f"127.0.0.{i + 1}" for i in range(40)]
     exporter = {"name": "node_exporter", "port": 9100, "markers": ["node_exporter_build_info"]}
     got = discover.scan_exporter_presence(
@@ -50,6 +52,7 @@ def test_trigger_native_detection_never_prefetches_callback_action(monkeypatch):
         }
 
     monkeypatch.setattr(async_detect, "prefetch_metrics", prefetch)
+    monkeypatch.setattr(async_detection, "async_detection_allowed", lambda _args: True)
     exporter = {
         "name": "mysql_exporter",
         "port": 9104,
@@ -85,6 +88,7 @@ def test_trigger_closes_detection_iterator_if_callback_fails(monkeypatch):
 
     results = Results()
     monkeypatch.setattr(AsyncDetectScheduler, "iter_completed", lambda *args, **kwargs: results)
+    monkeypatch.setattr(async_detection, "async_detection_allowed", lambda _args: True)
 
     def fail(amount):
         raise RuntimeError("output unavailable")

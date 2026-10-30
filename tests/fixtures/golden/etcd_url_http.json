@@ -16,6 +16,7 @@
       "etcd.product_fingerprint"
     ],
     "detection_status": "confirmed",
+    "dump_error": null,
     "dump_keys": true,
     "effective_password": null,
     "effective_username": null,

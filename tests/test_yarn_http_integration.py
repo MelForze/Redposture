@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import select
+import selectors
 import socket
 import ssl
 import threading
@@ -61,15 +61,20 @@ def server(
                 self.send_response(200)
                 self.end_headers()
                 peers = {self.connection: upstream, upstream: self.connection}
-                while True:
-                    readable, _, _ = select.select(list(peers), [], [], 2)
-                    if not readable:
-                        return
-                    for source in readable:
-                        payload = source.recv(65536)
-                        if not payload:
+                with selectors.DefaultSelector() as readiness:
+                    for source in peers:
+                        readiness.register(source, selectors.EVENT_READ)
+                    while True:
+                        events = readiness.select(2)
+                        if not events:
                             return
-                        peers[source].sendall(payload)
+                        for event, _mask in events:
+                            source = event.fileobj
+                            assert isinstance(source, socket.socket)
+                            payload = source.recv(65536)
+                            if not payload:
+                                return
+                            peers[source].sendall(payload)
 
         def respond(self) -> None:
             calls.append((self.command, self.path))

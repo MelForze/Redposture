@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import codecs
 import json
 import time
 from collections.abc import Callable
@@ -12,8 +13,17 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from ...clients.airflow_api import AirflowClient
+from ...data_discovery import _scan_portioned_value
+from ...discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
+from ...discovery_paths import concat_discovery_text
+from ...discovery_spool import FINDING_SPOOL_MAX_CHARS, SpoolingFindings, SpoolingStrings
+from ...discovery_text import DiscoveryTextStream
+from ...discovery_values import DiskBackedText, iter_json_chunks
+from ...json_stream import JSONPath, JSONScalarStream, SingleStringFieldStream
 from ...scheduler import NestedSchedulerCancelled
-from ...secret_detection import fingerprint, mask_secret, scan_value
+from ...secret_detection import fingerprint
+
+AIRFLOW_FINDING_SPOOL_THRESHOLD = 4096
 
 
 @dataclass(frozen=True)
@@ -22,9 +32,9 @@ class DiscoverConfig:
     max_runs: int | None = None
     max_tasks: int | None = None
     max_logs: int | None = None
-    max_log_bytes: int = 50 * 1024 * 1024
-    max_bytes: int = 50 * 1024 * 1024
-    max_seconds: float | None = None
+    max_log_bytes: int | None = None
+    max_bytes: int = UNLIMITED_DISCOVER_BYTES
+    max_seconds: float | None = DEFAULT_DISCOVER_TIME
     max_findings: int | None = None
     include_dag_sources: bool = False
     include_variables: bool = False
@@ -39,8 +49,86 @@ class _Collection:
     total: int | None = None
 
 
+@dataclass
+class _NetworkBudget:
+    remaining: int
+
+
+def _request_timeout(deadline: float | None) -> float | None:
+    return max(0.001, deadline - time.monotonic()) if deadline is not None else None
+
+
 def _component(value: str) -> str:
     return quote(value, safe="")
+
+
+class _StreamedCollectionJSON:
+    """Rebuild one oversized API page while spooling long string scalars."""
+
+    def __init__(self) -> None:
+        self.value: Any = None
+        self._parts: list[str] = []
+        self._active_path: JSONPath | None = None
+        self._disk: DiskBackedText | None = None
+        self._owned: list[DiskBackedText] = []
+        self.parser = JSONScalarStream(
+            self._string,
+            on_primitive=self._primitive,
+            on_container=self._container,
+        )
+
+    def _set(self, path: JSONPath, value: Any) -> None:
+        if not path:
+            self.value = value
+            return
+        parent = self.value
+        for component in path[:-1]:
+            parent = parent[component]
+        final = path[-1]
+        if isinstance(parent, list) and isinstance(final, int):
+            if final != len(parent):
+                raise ValueError("out-of-order JSON array")
+            parent.append(value)
+        elif isinstance(parent, dict) and isinstance(final, (str, DiskBackedText)):
+            parent[final] = value
+        else:
+            raise ValueError("invalid JSON collection path")
+
+    def _container(self, path: JSONPath, kind: str) -> None:
+        self._set(path, {} if kind == "object" else [])
+
+    def _primitive(self, entry: tuple[JSONPath, Any]) -> None:
+        self._set(*entry)
+
+    def _string(self, path: JSONPath, fragment: str, final: bool) -> None:
+        if self._active_path is None:
+            self._active_path = path
+        if self._active_path != path:
+            raise ValueError("overlapping JSON scalars")
+        if self._disk is None and sum(map(len, self._parts)) + len(fragment) > 64 * 1024:
+            self._disk = DiskBackedText()
+            self._owned.append(self._disk)
+            for part in self._parts:
+                self._disk.append_text(part)
+            self._parts.clear()
+        if self._disk is None:
+            self._parts.append(fragment)
+        else:
+            self._disk.append_text(fragment)
+        if final:
+            if self._disk is None:
+                value: str | DiskBackedText = "".join(self._parts)
+            else:
+                self._disk.finish()
+                value = self._disk
+            self._set(path, value)
+            self._disk = None
+            self._parts.clear()
+            self._active_path = None
+
+    def close(self) -> None:
+        for value in self._owned:
+            value.close()
 
 
 def _collection(
@@ -53,32 +141,95 @@ def _collection(
     order_by: str | None = None,
     start_offset: int = 0,
     cancelled: Callable[[], bool] | None = None,
+    network_budget: _NetworkBudget | None = None,
 ) -> _Collection:
     items: list[dict[str, Any]] = []
     seen_pages: set[tuple[str, str, int]] = set()
     selected_order = order_by
     latest_total: int | None = None
+    page_size_ceiling = 100
     while limit is None or len(items) < limit:
         if cancelled is not None and cancelled():
             raise NestedSchedulerCancelled("Airflow discovery cancelled")
         if deadline is not None and time.monotonic() >= deadline:
             return _Collection(tuple(items), False, "discover_time")
-        page_size = min(100, limit - len(items)) if limit is not None else 100
+        page_size = min(page_size_ceiling, limit - len(items)) if limit is not None else page_size_ceiling
         query_args: dict[str, int | str] = {"limit": page_size, "offset": start_offset + len(items)}
         if selected_order is not None:
             query_args["order_by"] = selected_order
         query = urlencode(query_args)
-        response = client.get(f"{path}?{query}")
+        cap = min(2 * 1024 * 1024, network_budget.remaining) if network_budget is not None else None
+        request_kwargs: dict[str, Any] = {}
+        if cap is not None:
+            request_kwargs["response_size_cap"] = cap
+        if network_budget is not None and deadline is not None:
+            request_kwargs["timeout"] = _request_timeout(deadline)
+        response = client.get(
+            f"{path}?{query}",
+            **request_kwargs,
+        )
+        if response.http_status != 200:
+            if response.transport_error:
+                return _Collection(tuple(items), False, "transport_error")
+            if response.http_status in {400, 422} and selected_order is not None and not items:
+                selected_order = None
+                continue
+            return _Collection(tuple(items), False, f"http_{response.http_status}")
+        streamed_payload: Any = None
+        if network_budget is not None:
+            assert cap is not None
+            budget_limited = cap == network_budget.remaining
+            if len(response.body) > cap or response.truncated:
+                if budget_limited:
+                    return _Collection(tuple(items), False, "max_bytes")
+                if page_size > 1:
+                    page_size_ceiling = max(1, page_size // 2)
+                    continue
+                decoded = _StreamedCollectionJSON()
+                try:
+
+                    def on_chunk(chunk: bytes, stream: _StreamedCollectionJSON = decoded) -> None:
+                        if cancelled is not None and cancelled():
+                            raise NestedSchedulerCancelled("Airflow discovery cancelled")
+                        if deadline is not None and time.monotonic() >= deadline:
+                            raise TimeoutError("discover_time")
+                        stream.parser.feed(chunk)
+
+                    streamed = client.get_stream(
+                        f"{path}?{query}",
+                        on_chunk=on_chunk,
+                        timeout=_request_timeout(deadline),
+                        deadline=deadline,
+                    )
+                    if streamed.http_status != 200 or streamed.transport_error or streamed.truncated:
+                        decoded.close()
+                        if streamed.http_status not in {0, 200}:
+                            reason = f"http_{streamed.http_status}"
+                        elif deadline is not None and time.monotonic() >= deadline:
+                            reason = "discover_time"
+                        elif streamed.truncated:
+                            reason = "response_truncated"
+                        else:
+                            reason = "transport_error"
+                        return _Collection(tuple(items), False, reason)
+                    decoded.parser.finish()
+                    streamed_payload = decoded.value
+                except NestedSchedulerCancelled:
+                    decoded.close()
+                    raise
+                except (ValueError, UnicodeError, TimeoutError):
+                    decoded.close()
+                    return _Collection(tuple(items), False, "invalid_collection")
+            if budget_limited and response.transport_error and "exceeds limit" in response.transport_error:
+                return _Collection(tuple(items), False, "max_bytes")
+            if response.transport_error and "exceeds limit" in response.transport_error and page_size > 1:
+                page_size_ceiling = max(1, page_size // 2)
+                continue
         if response.transport_error:
             return _Collection(tuple(items), False, "transport_error")
-        if response.http_status in {400, 422} and selected_order is not None and not items:
-            selected_order = None
-            continue
-        if response.http_status != 200:
-            return _Collection(tuple(items), False, f"http_{response.http_status}")
-        if response.truncated:
+        if response.truncated and streamed_payload is None:
             return _Collection(tuple(items), False, "response_truncated")
-        payload = response.json()
+        payload = streamed_payload if streamed_payload is not None else response.json()
         if not isinstance(payload, dict):
             return _Collection(tuple(items), False, "invalid_collection")
         page = payload.get(key)
@@ -154,48 +305,378 @@ def _continuation_at_end(token: str) -> bool:
     return isinstance(payload, dict) and payload.get("end_of_log") is True
 
 
+class _WrappedLogStream:
+    """Decode Airflow 2.x ``[(host, log), ...]`` repr without retaining a log."""
+
+    _ESCAPES = {
+        "a": "\a",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+        "\\": "\\",
+        "'": "'",
+        '"': '"',
+    }
+
+    def __init__(self, emit: Callable[[str], None]) -> None:
+        self.emit = emit
+        self.state = "open"
+        self.quote = ""
+        self.escape = ""
+        self.digits = ""
+        self.expected_digits = 0
+        self.line: list[str] = []
+        self.line_passthrough = False
+        self.line_skip = False
+        self.output: list[str] = []
+        self.has_pair = False
+
+    def _flush_output(self) -> None:
+        if self.output:
+            self.emit("".join(self.output))
+            self.output.clear()
+
+    def _queue(self, value: str) -> None:
+        self.output.append(value)
+        if len(self.output) >= 8192:
+            self._flush_output()
+
+    def _flush_line(self) -> None:
+        line = "".join(self.line)
+        if line.strip() != "*** Found local files:" and not line.strip().startswith("***   * "):
+            self._queue(line)
+        self.line.clear()
+        self.line_passthrough = False
+        self.line_skip = False
+
+    def _content_char(self, char: str) -> None:
+        if self.line_skip:
+            if char == "\n":
+                self.line_skip = False
+            return
+        if self.line_passthrough:
+            self._queue(char)
+            if char == "\n":
+                self.line_passthrough = False
+            return
+        self.line.append(char)
+        if len(self.line) == 8 and "".join(self.line) == "***   * ":
+            self.line.clear()
+            self.line_skip = True
+            return
+        if char == "\n":
+            self._flush_line()
+        elif len(self.line) >= 128:
+            self._queue("".join(self.line))
+            self.line.clear()
+            self.line_passthrough = True
+
+    def _decoded_char(self, char: str) -> None:
+        if self.state == "content":
+            self._content_char(char)
+
+    def _string_char(self, char: str) -> None:
+        if self.escape == "start":
+            self.escape = ""
+            if char in self._ESCAPES:
+                self._decoded_char(self._ESCAPES[char])
+            elif char in "xuU":
+                self.escape = "hex"
+                self.expected_digits = {"x": 2, "u": 4, "U": 8}[char]
+                self.digits = ""
+            elif char in "01234567":
+                self.escape = "octal"
+                self.digits = char
+            else:
+                raise ValueError("unsupported Python string escape")
+            return
+        if self.escape == "hex":
+            if char not in "0123456789abcdefABCDEF":
+                raise ValueError("invalid Python hex escape")
+            self.digits += char
+            if len(self.digits) == self.expected_digits:
+                self._decoded_char(chr(int(self.digits, 16)))
+                self.escape = ""
+            return
+        if self.escape == "octal":
+            if char in "01234567" and len(self.digits) < 3:
+                self.digits += char
+                if len(self.digits) == 3:
+                    self._decoded_char(chr(int(self.digits, 8)))
+                    self.escape = ""
+                return
+            self._decoded_char(chr(int(self.digits, 8)))
+            self.escape = ""
+            self._string_char(char)
+            return
+        if char == "\\":
+            self.escape = "start"
+        elif char == self.quote:
+            if self.state == "content":
+                self._flush_line()
+                self._queue("\n")
+                self.has_pair = True
+                self.state = "content_end"
+            else:
+                self.state = "host_end"
+        else:
+            self._decoded_char(char)
+
+    def feed(self, fragment: str) -> None:
+        for char in fragment:
+            if self.state in {"host", "content"}:
+                self._string_char(char)
+                continue
+            if char.isspace():
+                continue
+            if self.state == "open" and char == "[":
+                self.state = "item_or_end"
+            elif self.state == "item_or_end" and char == "(":
+                self.state = "host_start"
+            elif self.state == "item_or_end" and char == "]":
+                self.state = "done"
+            elif self.state in {"host_start", "content_start"} and char in "\"'":
+                self.quote = char
+                self.state = "host" if self.state == "host_start" else "content"
+            elif self.state == "host_end" and char == ",":
+                self.state = "content_start"
+            elif self.state == "content_end" and char == ")":
+                self.state = "next"
+            elif self.state == "next" and char == ",":
+                self.state = "item_or_end"
+            elif self.state == "next" and char == "]":
+                self.state = "done"
+            else:
+                raise ValueError("invalid Airflow multi-host log wrapper")
+
+    def finish(self) -> bool:
+        if self.escape == "octal":
+            self._decoded_char(chr(int(self.digits, 8)))
+            self.escape = ""
+        if self.state != "done" or not self.has_pair:
+            return False
+        self._flush_output()
+        return True
+
+
 def _read_log(
     client: AirflowClient,
     path: str,
     *,
-    max_log_bytes: int,
+    max_log_bytes: int | None,
     max_total_bytes: int,
     deadline: float | None,
     cancelled: Callable[[], bool] | None = None,
+    network_budget: _NetworkBudget | None = None,
+    on_chunk: Callable[[str], bool] | None = None,
 ) -> tuple[str, int, str | None]:
+    def stream_large_page(page_path: str) -> tuple[int, str | None, str | None]:
+        """Retry one truncated page as a validated, incremental response."""
+        assert on_chunk is not None
+        received = 0
+        continuation_parts: list[str] = []
+        has_content = False
+        unsupported_content = False
+        wrapped_content = False
+        content_started = False
+        wrapped_parser: _WrappedLogStream | None = None
+        stream_error: str | None = None
+        media_type = ""
+        text_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+        def emit_part(part: str) -> None:
+            nonlocal received, stream_error
+            if not part:
+                return
+            encoded_size = len(part.encode("utf-8", errors="replace"))
+            received += encoded_size
+            if max_log_bytes is not None and received > max_log_bytes:
+                stream_error = "max_log_bytes"
+                raise StopIteration
+            if not on_chunk(part):
+                stream_error = "max_findings"
+                raise StopIteration
+
+        def on_string(path: JSONPath, fragment: str, final: bool) -> None:
+            nonlocal has_content, unsupported_content, wrapped_content, content_started, wrapped_parser
+            if path == ("continuation_token",):
+                if sum(map(len, continuation_parts)) + len(fragment) <= 8192:
+                    continuation_parts.append(fragment)
+                else:
+                    unsupported_content = True
+                return
+            if (
+                path == ("content",)
+                or (len(path) == 3 and path[0] == "content" and isinstance(path[1], int) and path[2] == "event")
+                or (len(path) == 2 and path[0] == "content" and isinstance(path[1], int))
+            ):
+                has_content = True
+                if not content_started:
+                    content_started = True
+                    wrapped_content = fragment.startswith("[(")
+                    if wrapped_content:
+                        wrapped_parser = _WrappedLogStream(emit_part)
+                if wrapped_content:
+                    if not unsupported_content and wrapped_parser is not None:
+                        try:
+                            wrapped_parser.feed(fragment)
+                            if final and not wrapped_parser.finish():
+                                unsupported_content = True
+                        except ValueError:
+                            unsupported_content = True
+                    if final:
+                        content_started = False
+                        wrapped_parser = None
+                    return
+                emit_part(fragment + ("\n" if final and len(path) == 3 else ""))
+                if final:
+                    content_started = False
+                return
+            if path and path[0] == "content":
+                unsupported_content = True
+
+        json_decoder = JSONScalarStream(on_string)
+
+        def on_response(_status: int, headers: Any) -> None:
+            nonlocal media_type, stream_error
+            if _status != 200:
+                stream_error = f"http_{_status}"
+                raise StopIteration
+            media_type = next(
+                (str(value).lower() for key, value in headers.items() if str(key).lower() == "content-type"),
+                "",
+            )
+
+        def on_wire_chunk(chunk: bytes) -> None:
+            nonlocal stream_error
+            if cancelled is not None and cancelled():
+                stream_error = "cancelled"
+                raise StopIteration("cancelled")
+            if deadline is not None and time.monotonic() >= deadline:
+                stream_error = "discover_time"
+                raise TimeoutError("discover_time")
+            try:
+                if "json" in media_type:
+                    json_decoder.feed(chunk)
+                else:
+                    emit_part(text_decoder.decode(chunk))
+            except (UnicodeDecodeError, ValueError):
+                stream_error = "invalid_log_response"
+                raise
+
+        try:
+            streamed = client.get_stream(
+                page_path,
+                on_chunk=on_wire_chunk,
+                on_response=on_response,
+                extra_headers={"Accept": "application/json"},
+                chunk_size=64 * 1024,
+                timeout=_request_timeout(deadline),
+                deadline=deadline,
+            )
+            if stream_error:
+                return received, None, stream_error
+            if streamed.http_status != 200:
+                return received, None, f"http_{streamed.http_status}"
+            if streamed.transport_error or streamed.truncated:
+                return received, None, "transport_error"
+            if "json" in media_type:
+                json_decoder.finish()
+                if not has_content or unsupported_content:
+                    return received, None, "unsupported_log_content"
+            else:
+                emit_part(text_decoder.decode(b"", final=True))
+        except StopIteration as exc:
+            return received, None, stream_error or ("cancelled" if str(exc) == "cancelled" else "transport_error")
+        except TimeoutError:
+            return received, None, "discover_time"
+        except (UnicodeDecodeError, ValueError):
+            return received, None, "invalid_log_response"
+        continuation = "".join(continuation_parts)
+        return received, continuation or None, None
+
     parts: list[str] = []
     used = 0
     token: str | None = None
     seen_tokens: set[str] = set()
-    for _page in range(64):
+    while True:
         if cancelled is not None and cancelled():
             raise NestedSchedulerCancelled("Airflow discovery cancelled")
         if deadline is not None and time.monotonic() >= deadline:
             return "".join(parts), used, "discover_time"
-        remaining = min(max_log_bytes - used, max_total_bytes - used)
-        if remaining <= 0:
-            return "".join(parts), used, "max_log_bytes" if used >= max_log_bytes else "max_bytes"
+        remaining = max_log_bytes
+        if remaining is not None and remaining <= 0:
+            return "".join(parts), used, "max_log_bytes"
         query = f"&token={quote(token, safe='')}" if token is not None else ""
         separator = "&" if "?" in path else "?"
         page_path = f"{path}{separator}full_content=false{query}"
+        cap = min(2 * 1024 * 1024, remaining + 64 * 1024) if remaining is not None else 2 * 1024 * 1024
+        if network_budget is not None:
+            cap = min(cap, network_budget.remaining)
+        request_kwargs: dict[str, Any] = {}
+        if network_budget is not None and deadline is not None:
+            request_kwargs["timeout"] = _request_timeout(deadline)
         response = client.get(
             page_path,
             extra_headers={"Accept": "application/json"},
-            response_size_cap=min(2 * 1024 * 1024, remaining + 64 * 1024),
+            response_size_cap=cap,
+            **request_kwargs,
         )
-        if response.transport_error:
+        can_stream = (
+            response.truncated
+            and on_chunk is not None
+            and hasattr(client, "get_stream")
+            and (not response.transport_error or "exceeds limit" in response.transport_error.lower())
+        )
+        if network_budget is not None:
+            budget_limited = cap == network_budget.remaining
+            if (len(response.body) > cap or (response.truncated and budget_limited)) and not can_stream:
+                return "".join(parts), used, "max_bytes" if budget_limited else "response_truncated"
+            if (
+                budget_limited
+                and response.transport_error
+                and "exceeds limit" in response.transport_error
+                and not can_stream
+            ):
+                return "".join(parts), used, "max_bytes"
+        if response.transport_error and not can_stream:
             return "".join(parts), used, "transport_error"
         if response.http_status != 200:
             return "".join(parts), used, f"http_{response.http_status}"
         text, next_token = _log_content(response.body, response.json())
         encoded = text.encode("utf-8", errors="replace")
-        accepted = encoded[:remaining]
-        parts.append(accepted.decode("utf-8", errors="replace"))
+        if can_stream:
+            streamed_used, next_token, stream_error = stream_large_page(page_path)
+            used += streamed_used
+            if stream_error:
+                return "".join(parts), used, stream_error
+            if next_token is None or _continuation_at_end(next_token):
+                return "".join(parts), used, None
+            if next_token in seen_tokens:
+                return "".join(parts), used, "continuation_loop"
+            seen_tokens.add(next_token)
+            token = next_token
+            continue
+        accepted = encoded[:remaining] if remaining is not None else encoded
+        accepted_text = accepted.decode("utf-8", errors="replace")
+        if on_chunk is None:
+            parts.append(accepted_text)
+        elif not response.truncated:
+            safe_text = accepted_text
+            if remaining is not None and len(encoded) > remaining:
+                boundary = max(safe_text.rfind(char) for char in " \t\r\n,;\"'")
+                safe_text = safe_text[: boundary + 1] if boundary >= 0 else ""
+            if safe_text and not on_chunk(safe_text):
+                used += len(accepted)
+                return "", used, "max_findings"
         used += len(accepted)
         if response.truncated:
             return "".join(parts), used, "response_truncated"
-        if len(encoded) > remaining:
-            return "".join(parts), used, "max_log_bytes" if used >= max_log_bytes else "max_bytes"
+        if remaining is not None and len(encoded) > remaining:
+            return "".join(parts), used, "max_log_bytes" if used >= remaining else "max_bytes"
         if next_token is None:
             return "".join(parts), used, None
         if _continuation_at_end(next_token):
@@ -204,7 +685,6 @@ def _read_log(
             return "".join(parts), used, "continuation_loop"
         seen_tokens.add(next_token)
         token = next_token
-    return "".join(parts), used, "max_log_pages"
 
 
 def list_variable_keys(client: AirflowClient, generation: str, *, limit: int | None = None) -> dict[str, Any]:
@@ -260,7 +740,7 @@ def list_dag_sources(
     *,
     source_ids: list[str] | None = None,
     max_items: int = 10_000,
-    max_seconds: float = 300.0,
+    max_seconds: float = DEFAULT_DISCOVER_TIME,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """List API source handles without downloading code.
@@ -363,8 +843,8 @@ def dump_airflow(
     sources: list[str] | None = None,
     all_sources: bool = False,
     source_inventory: dict[str, Any] | None = None,
-    max_bytes: int = 50 * 1024 * 1024,
-    max_seconds: float = 300.0,
+    max_bytes: int = DEFAULT_DISCOVER_MAX_BYTES,
+    max_seconds: float = DEFAULT_DISCOVER_TIME,
     max_items: int = 10_000,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -520,22 +1000,26 @@ def discover_task_logs(
     client: AirflowClient,
     generation: str,
     config: DiscoverConfig,
-    on_finding: Callable[[dict[str, Any]], None] | None = None,
+    on_finding: Callable[[dict[str, Any]], bool | None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    started_at: float | None = None,
 ) -> dict[str, Any]:
     """Read DAG task logs in stable order and retain only secret findings."""
-    started = time.monotonic()
+    started = time.monotonic() if started_at is None else started_at
     deadline = started + config.max_seconds if config.max_seconds is not None else None
     prefix = "/api/v2" if generation == "v2" else "/api/v1"
     reasons: list[str] = []
     errors: list[dict[str, str]] = []
     findings: list[dict[str, Any]] = []
+    retained_value_chars = 0
     seen_findings: set[tuple[str, str]] = set()
+    emitted_findings: set[tuple[str, str]] = set()
     dags_scanned = runs_scanned = tasks_seen = logs_scanned = bytes_scanned = 0
     dag_sources_scanned = variables_scanned = connections_scanned = 0
     dag_source_bytes_scanned = variable_bytes_scanned = connection_bytes_scanned = log_bytes_scanned = 0
     variable_keys: list[str] = []
     variables_error: str | None = None
+    network_budget = _NetworkBudget(config.max_bytes)
 
     def partial(reason: str, path: str | None = None) -> None:
         if reason not in reasons:
@@ -545,26 +1029,36 @@ def discover_task_logs(
 
     def add_matches(value: Any, *, source_kind: str, place: str, context: dict[str, Any] | None = None) -> bool:
         """Append and stream stable, de-duplicated findings. Return False at the finding limit."""
-        matches = scan_value(value)
+        nonlocal findings, retained_value_chars
+        matches, _scanned_bytes, covered = _scan_portioned_value(value, "$", config.max_bytes, _deadline=deadline)
+        if not covered:
+            partial(
+                "discover_time"
+                if deadline is not None and time.monotonic() >= deadline
+                else "unscannable_continuous_field"
+            )
         for match in matches:
             # A vendor-specific detector and the generic api-key detector can
             # identify the exact same value. Likewise, the entropy fallback can
             # encompass an already classified assignment. Keep the specific
             # finding so live output contains one useful line per secret/place.
-            if match.detector == "high_entropy" and any(
-                other.detector != "high_entropy" and other.value in match.value for other in matches
+            if (
+                match.detector == "high_entropy"
+                and isinstance(match.value, str)
+                and any(
+                    other.detector != "high_entropy" and isinstance(other.value, str) and other.value in match.value
+                    for other in matches
+                )
             ):
                 continue
-            location = f"{place}{match.object_path}"
-            key = (fingerprint(match.value), location)
-            if key in seen_findings:
+            location = concat_discovery_text(place, match.object_path)
+            key = (fingerprint(match.value), location.digest if isinstance(location, DiskBackedText) else location)
+            if not isinstance(findings, SpoolingFindings) and key in seen_findings:
                 continue
-            seen_findings.add(key)
             finding: dict[str, Any] = {
                 "type": match.detector,
                 "confidence": match.confidence,
                 "value": match.value,
-                "masked_value": mask_secret(match.value),
                 "fingerprint": key[0],
                 "source_kind": source_kind,
                 "place": location,
@@ -572,27 +1066,143 @@ def discover_task_logs(
             }
             if context:
                 finding.update(context)
-            findings.append(finding)
+            if not isinstance(findings, SpoolingFindings) and (
+                isinstance(match.value, DiskBackedText)
+                or len(findings) >= AIRFLOW_FINDING_SPOOL_THRESHOLD
+                or retained_value_chars + len(match.value) > FINDING_SPOOL_MAX_CHARS
+            ):
+                spool = SpoolingFindings()
+                for previous in findings:
+                    previous_place = previous["place"]
+                    previous_key = (
+                        str(previous["fingerprint"]),
+                        previous_place.digest if isinstance(previous_place, DiskBackedText) else previous_place,
+                    )
+                    spool.add(
+                        previous,
+                        identity=previous_key,
+                        emitted=previous_key in emitted_findings,
+                    )
+                findings = spool
+                seen_findings.clear()
+                emitted_findings.clear()
+            if isinstance(findings, SpoolingFindings):
+                if not findings.add(finding, identity=key):
+                    continue
+            else:
+                seen_findings.add(key)
+                findings.append(finding)
+                retained_value_chars += len(match.value)
             if on_finding is not None:
-                on_finding(dict(finding))
+                emitted = on_finding(dict(finding))
+                was_emitted = emitted is True or (emitted is None and not isinstance(match.value, DiskBackedText))
+                if was_emitted:
+                    if isinstance(findings, SpoolingFindings):
+                        findings.mark_emitted(*key)
+                    else:
+                        emitted_findings.add(key)
             if config.max_findings is not None and len(findings) >= config.max_findings:
                 partial("max_findings")
                 return False
         return True
 
     def consume_value(value: Any) -> tuple[Any, int, bool]:
-        """Apply the shared byte budget to a JSON-compatible value."""
+        """Account for inspected source data without a cumulative target cap."""
         nonlocal bytes_scanned
-        raw = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
-        encoded = raw.encode("utf-8", errors="replace")
-        remaining = max(0, config.max_bytes - bytes_scanned)
-        accepted = encoded[:remaining]
-        bytes_scanned += len(accepted)
-        text = accepted.decode("utf-8", errors="replace")
-        if len(encoded) > remaining:
-            partial("max_bytes")
-            return text, len(accepted), False
-        return value, len(accepted), True
+        used = sum(len(chunk.encode("utf-8", errors="replace")) for chunk in iter_json_chunks(value))
+        bytes_scanned += used
+        return value, used, True
+
+    def stream_dag_source(path: str, dag_id: str) -> tuple[int, bool]:
+        """Scan plain text or the API JSON envelope as one bounded HTTP stream."""
+        received = 0
+        json_mode = False
+        stop_reason: str | None = None
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        context = {"dag_id": dag_id}
+
+        class StopSourceStream(Exception):
+            pass
+
+        def publish(value: Any) -> None:
+            nonlocal stop_reason
+            if not add_matches(value, source_kind="dag_source", place=f"dag_source:{dag_id}", context=context):
+                stop_reason = "max_findings"
+                raise StopSourceStream
+
+        scanner = DiscoveryTextStream(
+            publish, lambda reason: partial(f"dag_sources:{reason}", path), portion=config.max_bytes
+        )
+
+        def scan_text(value: str, *, final: bool = False) -> None:
+            if value:
+                scanner.feed(value)
+            if final and not scanner.finished:
+                scanner.finish()
+
+        def on_response(_status: int, headers: Any) -> None:
+            nonlocal json_mode
+            json_mode = "json" in next(
+                (str(value).lower() for key, value in headers.items() if str(key).lower() == "content-type"),
+                "",
+            )
+
+        json_decoder = SingleStringFieldStream("content", scan_text, on_complete=lambda: scan_text("", final=True))
+
+        def on_chunk(chunk: bytes) -> None:
+            nonlocal received, stop_reason
+            if cancelled is not None and cancelled():
+                stop_reason = "cancelled"
+                raise StopSourceStream
+            if deadline is not None and time.monotonic() >= deadline:
+                stop_reason = "discover_time"
+                raise StopSourceStream
+            received += len(chunk)
+            try:
+                if json_mode:
+                    json_decoder.feed(chunk)
+                else:
+                    scan_text(decoder.decode(chunk))
+            except (UnicodeDecodeError, ValueError):
+                stop_reason = "dag_sources:invalid_source"
+                raise StopSourceStream from None
+
+        response = client.get_stream(
+            path,
+            on_chunk=on_chunk,
+            on_response=on_response,
+            extra_headers={"Accept": "text/plain, application/json"},
+            chunk_size=max(1, min(config.max_bytes, 64 * 1024)),
+            timeout=_request_timeout(deadline),
+            deadline=deadline,
+        )
+        if stop_reason:
+            scanner.close()
+            partial(stop_reason, path)
+            return received, stop_reason in {"cancelled", "discover_time", "max_findings"}
+        if response.transport_error or response.truncated:
+            scanner.close()
+            partial("dag_sources:transport_error", path)
+            return received, False
+        if response.http_status != 200:
+            scanner.close()
+            partial(f"dag_sources:http_{response.http_status}", path)
+            return received, False
+        try:
+            if json_mode:
+                json_decoder.finish()
+            else:
+                scan_text(decoder.decode(b"", final=True))
+            scan_text("", final=True)
+        except (UnicodeDecodeError, ValueError):
+            scanner.close()
+            partial("dag_sources:invalid_source", path)
+        except StopSourceStream:
+            partial("max_findings", path)
+        scanner.close()
+        return received, False
+
+    stopped = False
 
     def iter_collection(
         path: str,
@@ -603,6 +1213,7 @@ def discover_task_logs(
         max_reason: str,
         order_by: str | None = None,
     ):
+        nonlocal stopped
         offset = 0
         seen_pages: set[tuple[str, str, int]] = set()
         while True:
@@ -621,6 +1232,7 @@ def discover_task_logs(
                 order_by=order_by,
                 start_offset=offset,
                 cancelled=cancelled,
+                network_budget=network_budget,
             )
             if page.items:
                 signature = (repr(page.items[0])[:256], repr(page.items[-1])[:256], len(page.items))
@@ -632,14 +1244,15 @@ def discover_task_logs(
             offset += len(page.items)
             if page.error:
                 partial(f"{error_prefix}:{page.error}", path)
+                if page.error == "max_bytes":
+                    partial("max_bytes")
+                    stopped = True
                 return
             if page.complete:
                 return
             if not page.items:
                 partial(f"{error_prefix}:pagination_stalled", path)
                 return
-
-    stopped = False
 
     # Variables and Connections are global configuration surfaces. Inspect them
     # before potentially large task-log walks so a busy deployment cannot starve
@@ -660,6 +1273,11 @@ def discover_task_logs(
             key_value = variable.get("key")
             key_name = str(key_value) if isinstance(key_value, str) and key_value else "?"
             if key_name != "?":
+                if (
+                    not isinstance(variable_keys, SpoolingStrings)
+                    and len(variable_keys) >= AIRFLOW_FINDING_SPOOL_THRESHOLD
+                ):
+                    variable_keys = SpoolingStrings(variable_keys)
                 variable_keys.append(key_name)
             scanned, used, complete = consume_value(variable)
             variables_scanned += 1
@@ -733,48 +1351,73 @@ def discover_task_logs(
                 partial("dag_sources:missing_file_token", f"{prefix}/dags/{_component(dag_id)}")
             else:
                 source_path = f"{prefix}/dagSources/{_component(source_id)}"
-                remaining = config.max_bytes - bytes_scanned
-                if remaining <= 0:
-                    partial("max_bytes")
-                    stopped = True
-                    break
-                # Airflow 2.x exposes DAG source as ``text/plain`` and returns
-                # HTTP 406 when the shared HTTP client advertises JSON only.
-                # Airflow 3.x may return the JSON ``{"content": ...}`` shape;
-                # accepting both representations keeps the read-only probe
-                # compatible with both API generations.
-                source_response = client.get(
-                    source_path,
-                    extra_headers={"Accept": "text/plain, application/json"},
-                    response_size_cap=min(remaining + 64 * 1024, 2 * 1024 * 1024),
-                )
-                if source_response.transport_error:
-                    partial("dag_sources:transport_error", source_path)
-                elif source_response.http_status != 200:
-                    partial(f"dag_sources:http_{source_response.http_status}", source_path)
-                else:
-                    payload = source_response.json()
-                    source_value: Any = (
-                        payload.get("content")
-                        if isinstance(payload, dict) and isinstance(payload.get("content"), str)
-                        else source_response.body.decode("utf-8", errors="replace")
-                    )
-                    scanned, used, complete = consume_value(source_value)
+                if callable(getattr(client, "get_stream", None)):
+                    used, stop_all = stream_dag_source(source_path, dag_id)
                     dag_sources_scanned += 1
                     dag_source_bytes_scanned += used
-                    if source_response.truncated:
-                        partial("dag_sources:response_truncated", source_path)
-                    if not add_matches(
-                        scanned,
-                        source_kind="dag_source",
-                        place=f"dag_source:{dag_id}",
-                        context={"dag_id": dag_id},
+                    bytes_scanned += used
+                    if stop_all:
+                        stopped = True
+                        break
+                    continue_source = True
+                else:
+                    continue_source = False
+                if not continue_source:
+                    # Airflow 2.x exposes DAG source as ``text/plain`` and returns
+                    # HTTP 406 when the shared HTTP client advertises JSON only.
+                    # Airflow 3.x may return the JSON ``{"content": ...}`` shape;
+                    # accepting both representations keeps the read-only probe
+                    # compatible with both API generations.
+                    source_cap = min(config.max_bytes, 2 * 1024 * 1024)
+                    source_request_kwargs: dict[str, Any] = {}
+                    if deadline is not None:
+                        source_request_kwargs["timeout"] = _request_timeout(deadline)
+                    source_response = client.get(
+                        source_path,
+                        extra_headers={"Accept": "text/plain, application/json"},
+                        response_size_cap=source_cap,
+                        **source_request_kwargs,
+                    )
+                    budget_limited = source_cap == network_budget.remaining
+                    if len(source_response.body) > source_cap or (source_response.truncated and budget_limited):
+                        partial("max_bytes" if budget_limited else "dag_sources:response_truncated", source_path)
+                        stopped = True
+                        break
+                    if (
+                        budget_limited
+                        and source_response.transport_error
+                        and "exceeds limit" in source_response.transport_error
                     ):
+                        partial("max_bytes", source_path)
                         stopped = True
                         break
-                    if not complete:
-                        stopped = True
-                        break
+                    if source_response.transport_error:
+                        partial("dag_sources:transport_error", source_path)
+                    elif source_response.http_status != 200:
+                        partial(f"dag_sources:http_{source_response.http_status}", source_path)
+                    else:
+                        payload = source_response.json()
+                        source_value: Any = (
+                            payload.get("content")
+                            if isinstance(payload, dict) and isinstance(payload.get("content"), str)
+                            else source_response.body.decode("utf-8", errors="replace")
+                        )
+                        scanned, used, complete = consume_value(source_value)
+                        dag_sources_scanned += 1
+                        dag_source_bytes_scanned += used
+                        if source_response.truncated:
+                            partial("dag_sources:response_truncated", source_path)
+                        if not add_matches(
+                            scanned,
+                            source_kind="dag_source",
+                            place=f"dag_source:{dag_id}",
+                            context={"dag_id": dag_id},
+                        ):
+                            stopped = True
+                            break
+                        if not complete:
+                            stopped = True
+                            break
         runs_path = f"{prefix}/dags/{_component(dag_id)}/dagRuns"
         runs = iter_collection(
             runs_path,
@@ -824,10 +1467,6 @@ def discover_task_logs(
                         partial("max_logs")
                         stopped = True
                         break
-                    if bytes_scanned >= config.max_bytes:
-                        partial("max_bytes")
-                        stopped = True
-                        break
                     if config.max_findings is not None and len(findings) >= config.max_findings:
                         partial("max_findings")
                         stopped = True
@@ -835,33 +1474,59 @@ def discover_task_logs(
                     log_path = f"{tasks_path}/{_component(task_id)}/logs/{attempt}"
                     if map_index >= 0:
                         log_path += f"?map_index={map_index}"
-                    text, used, error = _read_log(
+                    log_place = f"log:{dag_id}/{run_id}/{task_id}/try:{attempt}/map:{map_index}"
+                    log_context = {
+                        "dag_id": dag_id,
+                        "dag_run_id": run_id,
+                        "task_id": task_id,
+                        "try_number": attempt,
+                        "map_index": map_index,
+                    }
+
+                    class StopLogScan(Exception):
+                        pass
+
+                    def publish_log(
+                        value: Any, *, log_place: str = log_place, log_context: dict[str, Any] = log_context
+                    ) -> None:
+                        if not add_matches(value, source_kind="task_log", place=log_place, context=log_context):
+                            raise StopLogScan
+
+                    def log_partial(reason: str, *, log_path: str = log_path) -> None:
+                        partial(f"logs:{reason}", log_path)
+
+                    log_scanner = DiscoveryTextStream(publish_log, log_partial, portion=config.max_bytes)
+
+                    def emit_log_chunk(part: str, *, log_scanner: DiscoveryTextStream = log_scanner) -> bool:
+                        try:
+                            log_scanner.feed(part)
+                        except StopLogScan:
+                            return False
+                        return True
+
+                    _text, used, error = _read_log(
                         client,
                         log_path,
                         max_log_bytes=config.max_log_bytes,
-                        max_total_bytes=config.max_bytes - bytes_scanned,
+                        max_total_bytes=config.max_bytes,
                         deadline=deadline,
                         cancelled=cancelled,
+                        network_budget=network_budget,
+                        on_chunk=emit_log_chunk,
                     )
                     logs_scanned += 1
                     bytes_scanned += used
                     log_bytes_scanned += used
                     if error:
+                        log_scanner.close()
                         partial(f"logs:{error}", log_path)
-                    log_place = f"log:{dag_id}/{run_id}/{task_id}/try:{attempt}/map:{map_index}"
-                    if not add_matches(
-                        text,
-                        source_kind="task_log",
-                        place=log_place,
-                        context={
-                            "dag_id": dag_id,
-                            "dag_run_id": run_id,
-                            "task_id": task_id,
-                            "try_number": attempt,
-                            "map_index": map_index,
-                        },
-                    ):
-                        stopped = True
+                    else:
+                        try:
+                            log_scanner.finish()
+                        except StopLogScan:
+                            stopped = True
+                        finally:
+                            log_scanner.close()
                     if stopped:
                         break
                 if stopped:
@@ -871,6 +1536,10 @@ def discover_task_logs(
         if stopped:
             break
 
+    if isinstance(findings, SpoolingFindings):
+        findings.finish()
+    if isinstance(variable_keys, SpoolingStrings):
+        variable_keys.finish()
     return {
         "status": "partial" if reasons else "complete",
         "api_generation": generation,

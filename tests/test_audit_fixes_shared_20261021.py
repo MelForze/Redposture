@@ -26,7 +26,7 @@ def test_znode_structured_dump_preserves_colons_in_path(module: str) -> None:
     assert "prod:team/password" in inspect_record(module, record)["findings"][0]["object_path"]
 
 
-def test_discovery_rejects_oversized_nested_value_before_json_copy() -> None:
+def test_discovery_streams_oversized_nested_value_without_json_copy() -> None:
     record = {"notebook_contents": [{"name": "large", "data": "x" * (8 * 1024**2)}]}
     tracemalloc.start()
     try:
@@ -35,13 +35,14 @@ def test_discovery_rejects_oversized_nested_value_before_json_copy() -> None:
         peak = tracemalloc.get_traced_memory()[1] - baseline
     finally:
         tracemalloc.stop()
-    assert result["status"] == "partial" and result["bytes_inspected"] == 0
-    assert peak < 2 * 1024**2, f"serialization of rejected value allocated {peak} bytes"
+    assert result["status"] == "complete" and result["bytes_inspected"] >= 8 * 1024**2
+    assert result["findings"] == []
+    assert peak < 2 * 1024**2, f"streamed value allocated {peak} bytes"
 
 
 def test_discovery_byte_budget_keeps_exact_utf8_accounting() -> None:
     record = {"notebook_contents": [{"x": "é"}]}
-    assert inspect_record("jupyter", record, max_bytes=12)["bytes_inspected"] == 0
+    assert inspect_record("jupyter", record, max_bytes=12)["bytes_inspected"] == 11
     assert inspect_record("jupyter", record, max_bytes=13)["bytes_inspected"] == 13
 
 

@@ -115,6 +115,21 @@ def test_response_cap_marks_truncated_and_discards_connection(monkeypatch: pytes
     assert second.closed is True
 
 
+def test_discovery_response_cap_override_is_applied_before_body_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    first = _FakeConnection([_FakeResponse(b"abcdef")])
+    second = _FakeConnection([_FakeResponse(b"next")])
+    connections = [first, second]
+    monkeypatch.setattr(session_module.http.client, "HTTPConnection", lambda *_args, **_kwargs: connections.pop(0))
+    client = ElasticHttpSession("127.0.0.1", 9200, response_cap=1024)
+
+    limited = client.request("http", "GET", "/", response_size_cap=3)
+    normal = client.request("http", "GET", "/next")
+
+    assert limited.body == b"abc" and limited.truncated is True
+    assert first.closed is True
+    assert normal.body == b"next" and normal.truncated is False
+
+
 def test_ipv6_authority_and_request_body(monkeypatch: pytest.MonkeyPatch) -> None:
     connection = _FakeConnection([_FakeResponse()])
     monkeypatch.setattr(session_module.http.client, "HTTPConnection", lambda *_args, **_kwargs: connection)

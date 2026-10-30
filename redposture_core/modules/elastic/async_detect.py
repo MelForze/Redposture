@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from ...clients.http_api import HttpResponse, decode_http_content
 from ...clients.tls_cache import shared_client_ssl_context
+from ...http_headers import merge_custom_http_headers
 
 # Fingerprint bodies are small.  Larger responses are replayed through the
 # existing client instead of retaining five 10 MiB bodies per scan worker.
@@ -26,6 +27,15 @@ _MAX_DIRECT_CONNECTIONS = 3072
 # timeout boundary as an async failure followed by a redundant sync replay.
 _SCHEDULING_GRACE = 0.25
 _DIRECT_CONNECTIONS = threading.BoundedSemaphore(_MAX_DIRECT_CONNECTIONS)
+
+
+def _direct_request(host: str, port: int, path: str, scheme: str) -> bytes:
+    authority = f"[{host.strip('[]')}]" if ":" in host.strip("[]") else host.strip("[]")
+    if port != (443 if scheme == "https" else 80):
+        authority = f"{authority}:{port}"
+    headers = merge_custom_http_headers({"Host": authority, "User-Agent": "RedPosture/1.0", "Connection": "close"})
+    fields = "".join(f"{name}: {value}\r\n" for name, value in headers.items())
+    return f"GET {path} HTTP/1.1\r\n{fields}\r\n".encode("latin-1")
 
 
 @dataclass(frozen=True)
@@ -145,13 +155,7 @@ async def _probe_one(
                 server_hostname=host.strip("[]") if tls is not None else None,
                 limit=_MAX_HEADER + 4,
             )
-            authority = f"[{host.strip('[]')}]" if ":" in host.strip("[]") else host.strip("[]")
-            if port != (443 if scheme == "https" else 80):
-                authority = f"{authority}:{port}"
-            request = (
-                f"GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: RedPosture/1.0\r\nConnection: close\r\n\r\n"
-            )
-            writer.write(request.encode("ascii"))
+            writer.write(_direct_request(host, port, path, scheme))
             await writer.drain()
             return await _read_http_response(writer_reader, path)
 

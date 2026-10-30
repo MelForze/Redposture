@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,6 +20,116 @@ from hypothesis import strategies as st
 from redposture_core.clients.http_api import HttpResponse
 from redposture_core.modules.kafka import render as kafka_render
 from redposture_core.modules.kafka import ui
+
+
+def test_ui_discover_caps_message_response_before_body_is_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Pool:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def request(self, _method: str, _url: str, **kwargs: object) -> HttpResponse:
+            self.calls.append(kwargs)
+            return HttpResponse(status=200, body=b"x" * 100, headers={}, truncated=True)
+
+    monkeypatch.setattr(
+        ui,
+        "_get",
+        lambda *_args, **_kwargs: HttpResponse(
+            status=200, body=b'[{"name":"qa","brokerCount":1,"topicCount":1}]', headers={}
+        ),
+    )
+    pool = Pool()
+    result = ui.collect_ui(
+        SimpleNamespace(
+            args=SimpleNamespace(discover=True, discover_max_bytes=100, discover_time=30),
+            discovery_started_at=time.monotonic(),
+        ),
+        {"status": "open_no_auth"},
+        SimpleNamespace(ui_base="http://qa", ui_http=pool, ui_cookie="", ui_vendor="provectus"),
+        {"dump": True, "query_topic": "orders"},
+    )
+    assert result["ui_dump_partial"] is True
+    assert result["ui_dump_records"][0]["error"] == "byte_budget"
+    assert pool.calls[0]["response_size_cap"] <= 100
+    assert pool.calls[0]["retries"] == 0
+
+
+def test_ui_discover_budget_exhausted_on_cluster_catalog_is_partial_without_stage_error() -> None:
+    class Pool:
+        def request(self, _method: str, _url: str, **kwargs: object) -> HttpResponse:
+            assert kwargs["response_size_cap"] == 10
+            return HttpResponse(status=200, body=b"x" * 10, headers={}, truncated=True)
+
+    result = ui.collect_ui(
+        SimpleNamespace(
+            args=SimpleNamespace(discover=True, discover_max_bytes=10, discover_time=30),
+            discovery_started_at=time.monotonic(),
+        ),
+        {"status": "open_no_auth"},
+        SimpleNamespace(ui_base="http://qa", ui_http=Pool(), ui_cookie="", ui_vendor="provectus"),
+        {"dump": True},
+    )
+    assert result["ui_dump_partial"] is True
+    assert result["ui_discovery_budget_reason"] == "byte_budget"
+    assert result.get("error") is None
+
+
+def test_ui_discovery_uses_fifteen_minutes_instead_of_legacy_dump_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [1.0]
+    monkeypatch.setattr(ui, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(
+        ui,
+        "_get",
+        lambda *_a, **_k: HttpResponse(status=200, body=b'[{"name":"qa","brokerCount":1,"topicCount":1}]', headers={}),
+    )
+    calls = []
+
+    def read(*_args, **_kwargs):
+        calls.append(len(calls))
+        clock[0] = 401.0
+        return (
+            [{"partition": 0, "offset": len(calls), "value": "safe"}],
+            True,
+            None,
+            "next" if len(calls) == 1 else None,
+            True,
+        )
+
+    monkeypatch.setattr(ui, "_read_ui_messages", read)
+    result = ui.collect_ui(
+        SimpleNamespace(args=SimpleNamespace(discover=True), discovery_started_at=1.0),
+        {"status": "open_no_auth"},
+        SimpleNamespace(ui_base="http://qa", ui_http=object(), ui_cookie="", ui_vendor="kafbat"),
+        {"dump": True, "query_topic": "orders"},
+    )
+    assert len(calls) == 2
+    assert result["ui_dump_records"][0]["complete"] is True
+    assert result["ui_dump_partial"] is False
+
+
+@pytest.mark.parametrize("discover", [False, True])
+def test_ui_discovery_byte_budget_is_independent_of_ordinary_dump_cap(
+    monkeypatch: pytest.MonkeyPatch, discover: bool
+) -> None:
+    monkeypatch.setattr(ui, "_MAX_DUMP_BYTES", 8)
+    monkeypatch.setattr(
+        ui,
+        "_get",
+        lambda *_a, **_k: HttpResponse(status=200, body=b'[{"name":"qa","brokerCount":1,"topicCount":1}]', headers={}),
+    )
+    monkeypatch.setattr(
+        ui,
+        "_read_ui_messages",
+        lambda *_a, **_k: ([{"partition": 0, "offset": 0, "value": "safe"}], True, None, None, True),
+    )
+    result = ui.collect_ui(
+        SimpleNamespace(args=SimpleNamespace(discover=discover)),
+        {"status": "open_no_auth"},
+        SimpleNamespace(ui_base="http://qa", ui_http=object(), ui_cookie="", ui_vendor="kafbat"),
+        {"dump": True, "query_topic": "orders"},
+    )
+    assert result["ui_dump_records"][0]["complete"] is discover
+    assert result["ui_dump_partial"] is (not discover)
 
 
 def test_kafbat_message_cursor_follows_pages_without_repeating() -> None:
@@ -954,3 +1065,114 @@ def test_direct_ui_response_validation_rejects_malformed_content() -> None:
     assert ui._authorization({"rbacEnabled": False, "userInfo": {"username": "admin"}})
     assert not ui._authorization({"rbacEnabled": "false"})
     assert ui._info({"build": {"buildTime": "today", "commitId": "abc"}, "name": "Kafbat UI"}) == (True, None, "kafbat")
+
+
+@pytest.mark.parametrize("page_error", [None, "connection reset after completed message"])
+def test_full_ui_discover_scans_completed_messages_and_propagates_export_partial(monkeypatch, tmp_path, page_error):
+    from redposture_core.modules.kafka import ui
+
+    original_export = ui.UIExport
+    monkeypatch.setattr(ui, "UIExport", lambda _root, *args, **kw: original_export(str(tmp_path), *args, **kw))
+    monkeypatch.setattr(
+        ui, "_get", lambda *a, **kw: HttpResponse(200, b'[{"name":"local","brokerCount":1,"topicCount":1}]', {})
+    )
+    monkeypatch.setattr(ui, "_collect_cluster_inventory", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        ui,
+        "_read_ui_messages",
+        lambda *a, **kw: (
+            [{"partition": 0, "offset": 0, "value": '{"password":"DistinctSecret123"}', "key": None}],
+            page_error is None,
+            page_error,
+            None,
+            True,
+        ),
+    )
+    emitted = []
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(
+            discover=True, discover_time=30, username=None, password=None, _discover_implicit_dump=True
+        ),
+        host="qa",
+        port=8080,
+        discovery_started_at=time.monotonic(),
+        live_emit=emitted.append,
+    )
+    state = SimpleNamespace(ui_base="http://qa", ui_http=object(), ui_cookie="", ui_vendor="kafbat")
+    result = ui.collect_ui(ctx, {"status": "open_no_auth"}, state, {"ui_dump_all": True, "query_topic": "events"})
+    report = result["content_discovery"]
+    assert report["status"] == ("partial" if page_error else "complete")
+    assert [item["value"] for item in report["findings"]] == ["DistinctSecret123"]
+    assert len(emitted) == 1
+
+
+def test_discover_sse_streams_large_message_and_keeps_completed_before_broken_tail(monkeypatch):
+    import hashlib
+
+    from redposture_core.discovery_values import DiskBackedText
+
+    value = "A1b2c3" * 20000 + "\r\nконец"
+    body = (
+        "data:"
+        + json.dumps({"type": "MESSAGE", "message": {"partition": 0, "offset": 1, "value": value}}, ensure_ascii=False)
+        + "\n\n"
+    ).encode()
+
+    class Pool:
+        def request(self, *a, **kw):
+            pytest.fail("discovery must use streaming HTTP")
+
+        def request_stream(self, *a, on_chunk, on_response, **kw):
+            on_response(200, {"Content-Type": "text/event-stream"})
+            for start in range(0, len(body), 127):
+                on_chunk(body[start : start + 127])
+            on_chunk(b"data:{broken\n")
+            return HttpResponse(200, b"", {"Content-Type": "text/event-stream"})
+
+    page, done, error, _, _ = ui._read_ui_messages(
+        Pool(),
+        "http://qa",
+        "local",
+        "events",
+        vendor="kafbat",
+        cookie="",
+        limit=500,
+        budget=ui._UiDiscoveryBudget(2**63 - 1, time.monotonic() + 30),
+    )
+    assert not done and error
+    assert len(page) == 1
+    stored = page[0]["value"]
+    assert isinstance(stored, DiskBackedText)
+    assert stored.digest == hashlib.sha256(value.encode()).hexdigest()
+
+
+def test_full_ui_discovery_streams_large_catalog_and_preserves_selector(monkeypatch, tmp_path):
+    catalog = json.dumps(
+        [{"name": "local", "brokerCount": 1, "topicCount": 1, "description": "neutral " * 30000}]
+    ).encode()
+    requested = []
+
+    class Pool:
+        def request_stream(self, method, url, *, on_chunk, on_response=None, **kwargs):
+            requested.append(url)
+            if on_response is not None:
+                on_response(200, {"Content-Type": "application/json"})
+            for start in range(0, len(catalog), 65536):
+                on_chunk(catalog[start : start + 65536])
+            return HttpResponse(200, b"", {})
+
+    monkeypatch.setattr(ui, "_get", lambda *a, **kw: pytest.fail("full discovery catalog must stream"))
+    monkeypatch.setattr(ui, "_read_ui_messages", lambda *a, **kw: ([], True, None, None, True))
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(discover=True, discover_time=30, _discover_implicit_dump=True),
+        discovery_started_at=time.monotonic(),
+    )
+    result = ui.collect_ui(
+        ctx,
+        {"status": "open_no_auth"},
+        SimpleNamespace(ui_base="http://qa", ui_http=Pool(), ui_cookie="", ui_vendor="kafbat"),
+        {"ui_dump_all": True, "query_topic": "selected"},
+    )
+    assert result["content_discovery"]["status"] == "complete"
+    assert requested == ["http://qa/api/clusters"]
+    assert result["ui_clusters"][0]["name"] == "local"

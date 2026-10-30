@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -11,11 +12,16 @@ import pytest
 
 from redposture_core.cli_args import parse_args
 from redposture_core.clients.airflow_api import AirflowClient, AirflowResponse
+from redposture_core.discovery_spool import SpoolingFindings, SpoolingStrings
+from redposture_core.discovery_values import DiskBackedText
+from redposture_core.json_stream import SingleStringFieldStream
 from redposture_core.modules.airflow import actions, policy, render
 from redposture_core.modules.airflow.discover import (
     DiscoverConfig,
     _collection,
+    _NetworkBudget,
     _read_log,
+    _WrappedLogStream,
     discover_task_logs,
     dump_airflow,
     list_dag_ids,
@@ -43,6 +49,648 @@ class _FakeClient:
     def get(self, path: str, **kwargs: object) -> AirflowResponse:
         self.calls.append((path, kwargs))
         return self.responses.get(path, _response({"detail": "missing"}, 404))
+
+
+def test_discover_airflow_collection_limits_inflight_request_to_remaining_time() -> None:
+    path = "/api/v1/variables?limit=100&offset=0"
+    client = _FakeClient({path: _response({"variables": [], "total_entries": 0})})
+    deadline = time.monotonic() + 0.5
+    result = _collection(client, "/api/v1/variables", "variables", None, deadline, network_budget=_NetworkBudget(1024))
+
+    assert result.complete is True
+    timeout = client.calls[0][1]["timeout"]
+    assert isinstance(timeout, float) and 0 < timeout <= 0.5
+
+
+def test_single_oversized_variable_page_streams_full_value() -> None:
+    token = "tok_" + "Ab0" * 800_000
+    body = json.dumps({"variables": [{"key": "api_token", "value": token}], "total_entries": 1}).encode()
+    assert len(body) > 2 * 1024 * 1024
+
+    class Client:
+        def get(self, _path: str, **kwargs: object) -> AirflowResponse:
+            cap = int(kwargs["response_size_cap"])
+            return AirflowResponse(200, {}, body[:cap], truncated=True)
+
+        def get_stream(self, _path: str, **kwargs: object) -> AirflowResponse:
+            on_chunk = kwargs["on_chunk"]
+            for offset in range(0, len(body), 8192):
+                on_chunk(body[offset : offset + 8192])
+            return AirflowResponse(200, {}, b"")
+
+    result = _collection(
+        Client(),
+        "/api/v1/variables",
+        "variables",
+        1,
+        time.monotonic() + 20,
+        network_budget=_NetworkBudget(300_000_000),
+    )
+    assert result.complete is True
+    assert result.error is None
+    value = result.items[0]["value"]
+    assert isinstance(value, DiskBackedText)
+    assert "".join(value.iter_text_chunks()) == token
+    value.close()
+
+
+def test_discover_oversized_variable_keeps_complete_full_finding() -> None:
+    token = "tok_" + "Ab0" * 800_000
+    body = json.dumps({"variables": [{"key": "api_token", "value": token}], "total_entries": 1}).encode()
+
+    class Client:
+        def get(self, path: str, **kwargs: object) -> AirflowResponse:
+            if "/dags?" in path:
+                return _response({"dags": [], "total_entries": 0})
+            cap = int(kwargs["response_size_cap"])
+            return AirflowResponse(200, {}, body[:cap], truncated=True)
+
+        def get_stream(self, _path: str, **kwargs: object) -> AirflowResponse:
+            on_chunk = kwargs["on_chunk"]
+            for offset in range(0, len(body), 8192):
+                on_chunk(body[offset : offset + 8192])
+            return AirflowResponse(200, {}, b"")
+
+    result = discover_task_logs(Client(), "v1", DiscoverConfig(include_variables=True))
+    assert result["status"] == "complete", result["partial_reasons"]
+    assert result["variables_scanned"] == 1
+    assert len(result["findings"]) == 1
+    finding = result["findings"][0]
+    assert finding["place"].startswith("variable:api_token")
+    assert isinstance(finding["value"], DiskBackedText)
+    assert "".join(finding["value"].iter_text_chunks()) == token
+    finding["value"].close()
+
+
+@pytest.mark.parametrize("delivered", [True, False])
+def test_live_findings_are_not_replayed_after_airflow_spools_large_value(delivered: bool) -> None:
+    token = "qa-airflow-value-" + "v" * 2_400_000
+    early = {"key": "password", "value": "early-secret-123"}
+    large = {"key": "qa_volume_password", "value": token}
+    bodies = {
+        0: json.dumps({"variables": [early], "total_entries": 2}).encode(),
+        1: json.dumps({"variables": [large], "total_entries": 2}).encode(),
+    }
+
+    class Client:
+        def get(self, path: str, **kwargs: object) -> AirflowResponse:
+            if "/dags?" in path:
+                return _response({"dags": [], "total_entries": 0})
+            from urllib.parse import parse_qs, urlsplit
+
+            query = parse_qs(urlsplit(path).query)
+            offset = int(query["offset"][0])
+            limit = int(query["limit"][0])
+            body = (
+                json.dumps({"variables": [early, large], "total_entries": 2}).encode() if limit > 1 else bodies[offset]
+            )
+            cap = int(kwargs["response_size_cap"])
+            return AirflowResponse(200, {}, body[:cap], truncated=len(body) > cap)
+
+        def get_stream(self, path: str, **kwargs: object) -> AirflowResponse:
+            from urllib.parse import parse_qs, urlsplit
+
+            assert int(parse_qs(urlsplit(path).query)["offset"][0]) == 1
+            body = bodies[1]
+            on_chunk = kwargs["on_chunk"]
+            for offset in range(0, len(body), 8192):
+                on_chunk(body[offset : offset + 8192])
+            return AirflowResponse(200, {}, b"")
+
+    emitted: list[dict[str, object]] = []
+    report = discover_task_logs(
+        Client(),
+        "v1",
+        DiscoverConfig(include_variables=True),
+        on_finding=lambda finding: emitted.append(finding) or delivered,
+    )
+    findings = report["findings"]
+    assert report["status"] == "complete"
+    assert isinstance(findings, SpoolingFindings), (
+        report["variables_scanned"],
+        report["variable_bytes_scanned"],
+        report["partial_reasons"],
+        [(finding["type"], len(finding["value"])) for finding in findings],
+    )
+    assert len(findings) == len(emitted) == 2
+    assert len(list(findings.iter_unemitted())) == (0 if delivered else 2)
+
+
+def test_discover_airflow_stops_encoded_variable_expansion_at_target_deadline(monkeypatch) -> None:
+    import base64
+    import gzip
+
+    now = [0.0]
+    encoded = base64.b64encode(gzip.compress(b'password="' + b"Ab0" * 100000 + b'"', mtime=0)).decode()
+    original = DiskBackedText.append_text
+
+    def append(self, text):
+        original(self, text)
+        if text.startswith('password="'):
+            now[0] = 2.0
+
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(DiskBackedText, "append_text", append)
+    client = _FakeClient(
+        {
+            "/api/v1/variables?limit=100&offset=0": _response(
+                {"variables": [{"key": "config", "value": encoded}], "total_entries": 1}
+            ),
+            "/api/v1/dags?limit=100&offset=0": _response({"dags": [], "total_entries": 0}),
+        }
+    )
+    result = discover_task_logs(client, "v1", DiscoverConfig(include_variables=True, max_seconds=1))
+    assert result["status"] == "partial"
+    assert "discover_time" in result["partial_reasons"]
+    assert not result["findings"]
+
+
+def test_oversized_variable_with_invalid_stream_is_partial() -> None:
+    class Client:
+        def get(self, _path: str, **kwargs: object) -> AirflowResponse:
+            return AirflowResponse(200, {}, b"{" * int(kwargs["response_size_cap"]), truncated=True)
+
+        def get_stream(self, _path: str, **kwargs: object) -> AirflowResponse:
+            kwargs["on_chunk"](b'{"variables":[{"key":"api_token","value":"incomplete')
+            return AirflowResponse(200, {}, b"")
+
+    result = _collection(
+        Client(),
+        "/api/v1/variables",
+        "variables",
+        1,
+        time.monotonic() + 1,
+        network_budget=_NetworkBudget(300_000_000),
+    )
+    assert result.complete is False
+    assert result.error == "invalid_collection"
+    assert result.items == ()
+
+
+def test_oversized_variable_streamed_denial_keeps_http_reason() -> None:
+    class Client:
+        def get(self, _path: str, **kwargs: object) -> AirflowResponse:
+            return AirflowResponse(200, {}, b"{" * int(kwargs["response_size_cap"]), truncated=True)
+
+        def get_stream(self, _path: str, **_kwargs: object) -> AirflowResponse:
+            return AirflowResponse(403, {}, b"")
+
+    result = _collection(
+        Client(),
+        "/api/v1/variables",
+        "variables",
+        1,
+        time.monotonic() + 1,
+        network_budget=_NetworkBudget(300_000_000),
+    )
+    assert result.complete is False
+    assert result.error == "http_403"
+    assert result.items == ()
+
+
+@pytest.mark.parametrize(
+    ("stream_result", "expected_error"),
+    [
+        (AirflowResponse(0, {}, b"", transport_error="connection closed"), "transport_error"),
+        (AirflowResponse(200, {}, b"", truncated=True), "response_truncated"),
+    ],
+)
+def test_oversized_variable_stream_failure_stays_partial(stream_result: AirflowResponse, expected_error: str) -> None:
+    class Client:
+        def get(self, _path: str, **kwargs: object) -> AirflowResponse:
+            return AirflowResponse(200, {}, b"{" * int(kwargs["response_size_cap"]), truncated=True)
+
+        def get_stream(self, _path: str, **_kwargs: object) -> AirflowResponse:
+            return stream_result
+
+    result = _collection(
+        Client(),
+        "/api/v1/variables",
+        "variables",
+        1,
+        time.monotonic() + 1,
+        network_budget=_NetworkBudget(300_000_000),
+    )
+    assert result.complete is False
+    assert result.error == expected_error
+    assert result.items == ()
+
+
+def test_oversized_variable_stream_respects_cancellation() -> None:
+    calls = 0
+
+    def cancelled() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls > 1
+
+    class Client:
+        def get(self, _path: str, **kwargs: object) -> AirflowResponse:
+            return AirflowResponse(200, {}, b"{" * int(kwargs["response_size_cap"]), truncated=True)
+
+        def get_stream(self, _path: str, **kwargs: object) -> AirflowResponse:
+            kwargs["on_chunk"](b'{"variables":[')
+            return AirflowResponse(200, {}, b"")
+
+    with pytest.raises(NestedSchedulerCancelled):
+        _collection(
+            Client(),
+            "/api/v1/variables",
+            "variables",
+            1,
+            time.monotonic() + 1,
+            cancelled=cancelled,
+            network_budget=_NetworkBudget(300_000_000),
+        )
+
+
+def test_discover_collection_retries_oversized_page_without_skipping_items() -> None:
+    base = "/api/v1/variables"
+    client = _FakeClient(
+        {
+            f"{base}?limit=100&offset=0": _response({"variables": []}, truncated=True),
+            f"{base}?limit=50&offset=0": _response({"variables": [{"key": "first"}], "total_entries": 2}),
+            f"{base}?limit=50&offset=1": _response({"variables": [{"key": "second"}], "total_entries": 2}),
+        }
+    )
+
+    result = _collection(
+        client, base, "variables", None, time.monotonic() + 1, network_budget=_NetworkBudget(4 * 1024 * 1024)
+    )
+
+    assert result.complete is True
+    assert result.error is None
+    assert [item["key"] for item in result.items] == ["first", "second"]
+    assert [path for path, _kwargs in client.calls] == [
+        f"{base}?limit=100&offset=0",
+        f"{base}?limit=50&offset=0",
+        f"{base}?limit=50&offset=1",
+    ]
+
+
+def test_discover_collection_does_not_retry_a_denied_large_response() -> None:
+    path = "/api/v1/variables?limit=100&offset=0"
+    client = _FakeClient({path: _response({"detail": "denied"}, status=403, truncated=True)})
+
+    result = _collection(
+        client,
+        "/api/v1/variables",
+        "variables",
+        None,
+        time.monotonic() + 1,
+        network_budget=_NetworkBudget(4 * 1024 * 1024),
+    )
+
+    assert result.complete is False
+    assert result.error == "http_403"
+    assert len(client.calls) == 1
+
+
+def test_wrapped_log_stream_handles_fragmented_python_escapes_and_rejects_incomplete_input() -> None:
+    emitted: list[str] = []
+    wrapped = repr([("host-password=ignoreMe123", "line\\two\npassword=validSecret123")])
+    parser = _WrappedLogStream(emitted.append)
+    for char in wrapped:
+        parser.feed(char)
+    assert parser.finish() is True
+    assert "".join(emitted) == "line\\two\npassword=validSecret123\n"
+
+    incomplete = _WrappedLogStream(lambda _text: None)
+    incomplete.feed("[('host', 'password=unverifiedSecret123')")
+    assert incomplete.finish() is False
+
+
+def test_wrapped_log_stream_matches_python_repr_for_seeded_text() -> None:
+    rng = random.Random(20261026)
+    alphabet = "abcXYZ0123'\"\\\n\t\r\x00é🔥"
+    for _case in range(100):
+        contents = ["".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 200))) for _ in range(3)]
+        wrapped = repr([(f"host-{index}", content) for index, content in enumerate(contents)])
+        emitted: list[str] = []
+        parser = _WrappedLogStream(emitted.append)
+        for offset in range(0, len(wrapped), 7):
+            parser.feed(wrapped[offset : offset + 7])
+        assert parser.finish() is True
+        assert "".join(emitted) == "\n".join(contents) + "\n"
+
+
+def test_wrapped_log_stream_decodes_python_octal_and_unicode_escapes() -> None:
+    emitted: list[str] = []
+    parser = _WrappedLogStream(emitted.append)
+    parser.feed(r"[('host', 'pass\167ord=validSecret123\040\x41\u00e9\U0001f525'),]")
+    assert parser.finish() is True
+    assert "".join(emitted) == "password=validSecret123 Aé🔥\n"
+
+
+@pytest.mark.parametrize(
+    "wrapped",
+    [
+        r"[('host', 'bad\q')]",
+        r"[('host', 'bad\xG0')]",
+        "[('host', 'bad') junk]",
+    ],
+)
+def test_wrapped_log_stream_rejects_invalid_python_repr(wrapped: str) -> None:
+    parser = _WrappedLogStream(lambda _text: None)
+    with pytest.raises(ValueError):
+        parser.feed(wrapped)
+
+
+def test_discover_airflow_reads_next_collection_after_one_portion() -> None:
+    variable_path = "/api/v1/variables?limit=100&offset=0"
+    connection_path = "/api/v1/connections?limit=100&offset=0"
+    variable_response = _response(
+        {"variables": [{"key": "api_token", "value": "glpat-abcdefghijklmnopqrst"}], "total_entries": 1}
+    )
+    connection_response = _response(
+        {"connections": [{"connection_id": "backup", "password": "backup-lab-password"}], "total_entries": 1}
+    )
+    portion = max(len(variable_response.body), len(connection_response.body))
+    assert len(variable_response.body) + len(connection_response.body) > portion
+    client = _FakeClient(
+        {
+            variable_path: variable_response,
+            connection_path: connection_response,
+            "/api/v1/dags?limit=100&offset=0": _response({"dags": [], "total_entries": 0}),
+        }
+    )
+    report = discover_task_logs(
+        client,
+        "v1",
+        DiscoverConfig(max_bytes=portion, include_variables=True, include_connections=True),
+    )
+    assert report["status"] == "complete", report
+    assert {finding["source_kind"] for finding in report["findings"]} == {"variable", "connection"}
+    assert client.calls[1][1]["response_size_cap"] == portion
+
+
+def test_many_airflow_findings_spool_without_losing_places(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core.modules.airflow import discover
+
+    monkeypatch.setattr(discover, "AIRFLOW_FINDING_SPOOL_THRESHOLD", 2)
+    client = _FakeClient(
+        {
+            "/api/v1/variables?limit=100&offset=0": _response(
+                {
+                    "variables": [{"key": f"api_token_{index}", "value": f"glpat-{index:020d}"} for index in range(4)],
+                    "total_entries": 4,
+                }
+            ),
+            "/api/v1/dags?limit=100&offset=0": _response({"dags": [], "total_entries": 0}),
+        }
+    )
+    result = discover_task_logs(client, "v1", DiscoverConfig(include_variables=True))
+    assert result["status"] == "complete"
+    assert isinstance(result["findings"], SpoolingFindings)
+    assert len(result["findings"]) == 4
+    assert len({finding["place"] for finding in result["findings"]}) == 4
+    assert isinstance(result["variable_keys"], SpoolingStrings)
+    assert result["variable_keys"] == [f"api_token_{index}" for index in range(4)]
+
+
+def test_discover_airflow_collection_network_budget_preserves_early_finding() -> None:
+    variable_path = "/api/v1/variables?limit=100&offset=0"
+    connection_path = "/api/v1/connections?limit=100&offset=0"
+    variable_response = _response(
+        {"variables": [{"key": "api_token", "value": "glpat-abcdefghijklmnopqrst"}], "total_entries": 1}
+    )
+    client = _FakeClient(
+        {
+            variable_path: variable_response,
+            connection_path: _response(
+                {"connections": [{"connection_id": "large", "description": "x" * 1000}], "total_entries": 1}
+            ),
+        }
+    )
+    result = discover_task_logs(
+        client,
+        "v1",
+        DiscoverConfig(
+            max_bytes=len(variable_response.body) + 20,
+            include_variables=True,
+            include_connections=True,
+        ),
+    )
+    assert result["status"] == "partial"
+    assert result["findings"]
+    assert any("connections:max_bytes" in reason for reason in result["partial_reasons"])
+    assert (
+        next(kwargs for path, kwargs in client.calls if path == connection_path)["response_size_cap"]
+        == len(variable_response.body) + 20
+    )
+
+
+def test_discover_airflow_log_uses_fresh_network_portion_after_catalog() -> None:
+    dag_path, run_path, task_path = _paths("/api/v1")
+    dag_query = f"{dag_path}?limit=1&offset=0"
+    run_query = f"{run_path}?limit=1&offset=0&order_by=-execution_date"
+    task_query = f"{task_path}?limit=1&offset=0"
+    log_query = f"{task_path}/extract/logs/1?full_content=false"
+    catalog = {
+        dag_query: _response({"dags": [{"dag_id": "example"}], "total_entries": 1}),
+        run_query: _response({"dag_runs": [{"dag_run_id": "manual__2026-09-13"}], "total_entries": 1}),
+        task_query: _response({"task_instances": [{"task_id": "extract", "try_number": 1}], "total_entries": 1}),
+    }
+    client = _FakeClient({**catalog, log_query: _response({"content": "password=lab-value" * 10})})
+    total_budget = sum(len(response.body) for response in catalog.values()) + 10
+    result = discover_task_logs(
+        client,
+        "v1",
+        DiscoverConfig(max_dags=1, max_runs=1, max_tasks=1, max_logs=1, max_bytes=total_budget),
+    )
+    assert result["status"] == "complete", result
+    assert next(kwargs for path, kwargs in client.calls if path == log_query)["response_size_cap"] == total_budget
+
+
+def test_discover_airflow_dag_source_uses_independent_network_portion() -> None:
+    dag_query = "/api/v1/dags?limit=1&offset=0"
+    source_path = "/api/v1/dagSources/source-token"
+    dag_response = _response({"dags": [{"dag_id": "example", "file_token": "source-token"}], "total_entries": 1})
+    client = _FakeClient({dag_query: dag_response, source_path: _response({"content": "api_token=lab" * 100})})
+    result = discover_task_logs(
+        client,
+        "v1",
+        DiscoverConfig(max_dags=1, max_bytes=len(dag_response.body) + 15, include_dag_sources=True),
+    )
+    assert result["status"] == "partial"
+    assert "max_bytes" in result["partial_reasons"]
+    assert (
+        next(kwargs for path, kwargs in client.calls if path == source_path)["response_size_cap"]
+        == len(dag_response.body) + 15
+    )
+
+
+def test_v1_dag_source_streams_past_one_portion_and_emits_before_eof() -> None:
+    dag_query = "/api/v1/dags?limit=1&offset=0"
+    source_path = "/api/v1/dagSources/source-token"
+    runs_query = "/api/v1/dags/example/dagRuns?limit=100&offset=0&order_by=-execution_date"
+    source = (b"ordinary DAG source line\n" * 40) + b"api_token=glpat-abcdefghijklmnopqrst\n" + b"more source\n"
+
+    class StreamingClient(_FakeClient):
+        stream_calls: list[tuple[str, dict[str, object]]]
+        delivered = 0
+
+        def get_stream(self, path: str, *, on_chunk, **kwargs: object) -> AirflowResponse:
+            self.stream_calls.append((path, kwargs))
+            for offset in range(0, len(source), 9):
+                part = source[offset : offset + 9]
+                self.delivered += len(part)
+                on_chunk(part)
+            return AirflowResponse(200, {"Content-Type": "text/plain"}, b"")
+
+    client = StreamingClient(
+        {
+            dag_query: _response({"dags": [{"dag_id": "example", "file_token": "source-token"}], "total_entries": 1}),
+            runs_query: _response({"dag_runs": [], "total_entries": 0}),
+        }
+    )
+    client.stream_calls = []
+    emitted_at: list[int] = []
+    report = discover_task_logs(
+        client,
+        "v1",
+        DiscoverConfig(max_dags=1, max_bytes=128, include_dag_sources=True),
+        on_finding=lambda finding: emitted_at.append(client.delivered),
+    )
+
+    assert report["status"] == "complete", report
+    assert report["dag_source_bytes_scanned"] == len(source)
+    assert [finding["source_kind"] for finding in report["findings"]] == ["dag_source"]
+    assert emitted_at and emitted_at[0] < len(source)
+    assert client.stream_calls[0][0] == source_path
+    assert all(path != source_path for path, _ in client.calls)
+
+
+def test_v1_dag_source_stream_interruption_preserves_only_complete_findings() -> None:
+    dag_query = "/api/v1/dags?limit=1&offset=0"
+    source_path = "/api/v1/dagSources/source-token"
+
+    class InterruptedClient(_FakeClient):
+        def get_stream(self, path: str, *, on_chunk, **kwargs: object) -> AirflowResponse:
+            assert path == source_path
+            on_chunk(b"api_token=glpat-abcdefghijklmnopqrst\napi_token=glpat-incomplete")
+            return AirflowResponse(200, {}, b"", transport_error="unexpected EOF", truncated=True)
+
+    client = InterruptedClient(
+        {dag_query: _response({"dags": [{"dag_id": "example", "file_token": "source-token"}], "total_entries": 1})}
+    )
+    report = discover_task_logs(client, "v1", DiscoverConfig(max_dags=1, max_bytes=128, include_dag_sources=True))
+
+    assert report["status"] == "partial"
+    assert len(report["findings"]) == 1
+    assert "dag_sources:transport_error" in report["partial_reasons"]
+
+
+def test_dag_source_stream_keeps_full_indivisible_assignment() -> None:
+    from redposture_core.discovery_values import DiskBackedText
+
+    dag_query = "/api/v1/dags?limit=1&offset=0"
+    source_path = "/api/v1/dagSources/source-token"
+    token = "glpat-" + "Ab0" * 400_000
+    source = ("API_TOKEN=" + token).encode()
+
+    class StreamingClient(_FakeClient):
+        def get_stream(self, path: str, *, on_chunk, on_response, **_kwargs: object) -> AirflowResponse:
+            assert path == source_path
+            on_response(200, {"Content-Type": "text/plain"})
+            for position in range(0, len(source), 32_768):
+                on_chunk(source[position : position + 32_768])
+            return AirflowResponse(200, {"Content-Type": "text/plain"}, b"")
+
+    client = StreamingClient(
+        {
+            dag_query: _response({"dags": [{"dag_id": "example", "file_token": "source-token"}], "total_entries": 1}),
+            "/api/v1/dags/example/dagRuns?limit=100&offset=0&order_by=-execution_date": _response(
+                {"dag_runs": [], "total_entries": 0}
+            ),
+        }
+    )
+    report = discover_task_logs(client, "v1", DiscoverConfig(max_dags=1, max_bytes=1024, include_dag_sources=True))
+    assert report["status"] == "complete", report["partial_reasons"]
+    assert len(report["findings"]) == 1
+    value = report["findings"][0]["value"]
+    assert isinstance(value, DiskBackedText)
+    assert "".join(value.iter_text_chunks()) == token
+
+
+def test_task_log_stream_keeps_full_indivisible_assignment() -> None:
+    from redposture_core.discovery_values import DiskBackedText
+
+    dag_path, run_path, task_path = _paths("/api/v1")
+    log_path = f"{task_path}/extract/logs/1?full_content=false"
+    token = "glpat-" + "Ab0" * 400_000
+    payload = json.dumps({"content": "API_TOKEN=" + token, "continuation_token": None}).encode()
+
+    class StreamingClient(_FakeClient):
+        def get_stream(self, path: str, *, on_chunk, on_response, **_kwargs: object) -> AirflowResponse:
+            assert path == log_path
+            on_response(200, {"Content-Type": "application/json"})
+            for position in range(0, len(payload), 32_768):
+                on_chunk(payload[position : position + 32_768])
+            return AirflowResponse(200, {"Content-Type": "application/json"}, b"")
+
+    client = StreamingClient(
+        {
+            f"{dag_path}?limit=1&offset=0": _response({"dags": [{"dag_id": "example"}], "total_entries": 1}),
+            f"{run_path}?limit=1&offset=0&order_by=-execution_date": _response(
+                {"dag_runs": [{"dag_run_id": "manual__2026-09-13"}], "total_entries": 1}
+            ),
+            f"{task_path}?limit=1&offset=0": _response(
+                {"task_instances": [{"task_id": "extract", "try_number": 1}], "total_entries": 1}
+            ),
+            log_path: _response({"content": "API_TOKEN=prefix"}, truncated=True),
+        }
+    )
+    report = discover_task_logs(client, "v1", DiscoverConfig(max_dags=1, max_runs=1, max_tasks=1, max_logs=1))
+    assert report["status"] == "complete", report["partial_reasons"]
+    assert len(report["findings"]) == 1
+    value = report["findings"][0]["value"]
+    assert isinstance(value, DiskBackedText)
+    assert "".join(value.iter_text_chunks()) == token
+
+
+def test_v1_dag_source_reads_uniform_line_and_keeps_later_finding() -> None:
+    dag_query = "/api/v1/dags?limit=1&offset=0"
+    runs_query = "/api/v1/dags/example/dagRuns?limit=100&offset=0&order_by=-execution_date"
+    source = b"A" * 160 + b"\napi_token=glpat-abcdefghijklmnopqrst\n"
+
+    class StreamingClient(_FakeClient):
+        def get_stream(self, _path: str, *, on_chunk, **_kwargs: object) -> AirflowResponse:
+            for offset in range(0, len(source), 9):
+                on_chunk(source[offset : offset + 9])
+            return AirflowResponse(200, {"Content-Type": "text/plain"}, b"")
+
+    client = StreamingClient(
+        {
+            dag_query: _response({"dags": [{"dag_id": "example", "file_token": "source-token"}], "total_entries": 1}),
+            runs_query: _response({"dag_runs": [], "total_entries": 0}),
+        }
+    )
+    result = discover_task_logs(client, "v1", DiscoverConfig(max_dags=1, max_bytes=128, include_dag_sources=True))
+    assert result["status"] == "complete"
+    assert result["partial_reasons"] == []
+    assert [finding["source_kind"] for finding in result["findings"]] == ["dag_source"]
+
+
+def test_dag_source_json_stream_decodes_escapes_split_across_chunks() -> None:
+    source = 'api_token=glpat-abcdefghijklmnopqrst\n# smile 🙂 and quote "'
+    payload = json.dumps({"content": source}, ensure_ascii=True).encode()
+    parts: list[str] = []
+    decoder = SingleStringFieldStream("content", parts.append)
+    for byte in payload:
+        decoder.feed(bytes((byte,)))
+    decoder.finish()
+    assert "".join(parts) == source
+
+
+@pytest.mark.parametrize("payload", [b'{"detail":"api_token=glpat-abcdefghijklmnopqrst"}', b'{"content":"x"}garbage'])
+def test_dag_source_json_stream_rejects_non_source_and_trailing_data(payload: bytes) -> None:
+    parts: list[str] = []
+    decoder = SingleStringFieldStream("content", parts.append)
+    with pytest.raises(ValueError):
+        decoder.feed(payload)
+        decoder.finish()
+    assert "api_token" not in "".join(parts)
 
 
 def test_show_dags_lists_ids_without_exposing_other_fields() -> None:
@@ -219,6 +867,37 @@ def test_default_discovery_walks_more_than_one_hundred_dags_without_count_limit(
     assert report["partial_reasons"] == []
 
 
+def test_v1_discover_reassembles_token_across_log_portions() -> None:
+    dag_path, run_path, task_path = _paths("/api/v1")
+    log_path = f"{task_path}/extract/logs/1"
+    client = _FakeClient(
+        {
+            f"{dag_path}?limit=1&offset=0": _response({"dags": [{"dag_id": "example"}], "total_entries": 1}),
+            f"{run_path}?limit=1&offset=0&order_by=-execution_date": _response(
+                {"dag_runs": [{"dag_run_id": "manual__2026-09-13"}], "total_entries": 1}
+            ),
+            f"{task_path}?limit=1&offset=0": _response(
+                {"task_instances": [{"task_id": "extract", "try_number": 1}], "total_entries": 1}
+            ),
+            f"{log_path}?full_content=false": _response(
+                {"content": "safe " * 10 + "glpat-abc", "continuation_token": "next"}
+            ),
+            f"{log_path}?full_content=false&token=next": _response(
+                {"content": "defghijklmnopqrst\n", "continuation_token": None}
+            ),
+        }
+    )
+    result = discover_task_logs(
+        client, "v1", DiscoverConfig(max_dags=1, max_runs=1, max_tasks=1, max_logs=1, max_bytes=128)
+    )
+    assert result["status"] == "complete", result
+    assert any(finding["value"] == "glpat-abcdefghijklmnopqrst" for finding in result["findings"])
+    assert all(
+        not finding["value"].startswith("glpat-") or finding["value"] == "glpat-abcdefghijklmnopqrst"
+        for finding in result["findings"]
+    )
+
+
 def test_v1_discover_reads_continuation_and_finds_secrets() -> None:
     dag_path, run_path, task_path = _paths("/api/v1")
     log_path = f"{task_path}/extract/logs/1"
@@ -318,7 +997,10 @@ def test_discover_scans_dag_sources_variables_connections_and_logs() -> None:
     assert any(finding["place"].startswith("connection:warehouse") for finding in report["findings"])
     assert any(finding["place"].startswith("log:example/") for finding in report["findings"])
     source_calls = [(path, kwargs) for path, kwargs in client.calls if "/dagSources/" in path]
-    assert source_calls == [
+    assert all(0 < kwargs.get("timeout", 0) <= 900 for _path, kwargs in source_calls)
+    assert [
+        (path, {key: value for key, value in kwargs.items() if key != "timeout"}) for path, kwargs in source_calls
+    ] == [
         (
             "/api/v1/dagSources/token%2Fone",
             {
@@ -488,10 +1170,13 @@ def test_discovery_byte_budget_is_shared_across_configuration_and_logs() -> None
     )
 
     assert report["status"] == "partial"
-    assert report["bytes_scanned"] == 32
-    assert report["variable_bytes_scanned"] == 32
+    assert report["bytes_scanned"] == 0
+    assert report["findings"] == []
+    assert "variables:max_bytes" in report["partial_reasons"]
+    assert client.calls[0][1]["response_size_cap"] == 32
+    assert report["variable_bytes_scanned"] == 0
     assert report["connections_scanned"] == report["dags_scanned"] == report["logs_scanned"] == 0
-    assert "max_bytes" in report["partial_reasons"]
+    assert any("max_bytes" in reason for reason in report["partial_reasons"])
     assert [path for path, _kwargs in client.calls] == ["/api/v1/variables?limit=100&offset=0"]
 
 
@@ -572,6 +1257,33 @@ def test_log_reader_detects_repeated_continuation_token() -> None:
     assert (text, used, error) == ("firstsecond", 11, "continuation_loop")
 
 
+def test_log_reader_follows_more_than_sixty_four_pages() -> None:
+    path = "/api/v1/dags/d/dagRuns/r/taskInstances/t/logs/1"
+    responses = {}
+    for index in range(65):
+        suffix = "" if index == 0 else f"&token={index}"
+        responses[f"{path}?full_content=false{suffix}"] = _response(
+            {
+                "content": "safe\n" if index < 64 else "glpat-abcdefghijklmnopqrst\n",
+                "continuation_token": str(index + 1) if index < 64 else None,
+            }
+        )
+    client = _FakeClient(responses)
+    chunks: list[str] = []
+    text, used, error = _read_log(
+        client,
+        path,
+        max_log_bytes=96,
+        max_total_bytes=96,
+        deadline=time.monotonic() + 5,
+        on_chunk=lambda part: chunks.append(part) or True,
+    )
+    assert error is None
+    assert text == ""
+    assert chunks[-1] == "glpat-abcdefghijklmnopqrst\n"
+    assert used > 96
+
+
 def test_log_reader_unwraps_airflow2_host_payload_and_stops_at_end_token() -> None:
     path = "/api/v1/dags/d/dagRuns/r/taskInstances/t/logs/1"
     wrapped = '[("worker-1", "*** Found local files:\\n***   * /opt/airflow/logs/task.log\\npassword=taskSecret123") ]'
@@ -602,11 +1314,11 @@ def test_log_reader_accepts_plain_text_and_reports_truncation() -> None:
     assert (text, used, error) == ("password=from_plain_log", 23, "response_truncated")
 
 
-def test_log_reader_respects_total_byte_budget() -> None:
+def test_log_reader_does_not_apply_target_total_to_single_log() -> None:
     path = "/api/v1/dags/d/dagRuns/r/taskInstances/t/logs/1"
     client = _FakeClient({f"{path}?full_content=false": _response({"content": "password=longsecret"})})
     text, used, error = _read_log(client, path, max_log_bytes=100, max_total_bytes=10, deadline=time.monotonic() + 1)
-    assert (text, used, error) == ("password=l", 10, "max_bytes")
+    assert (text, used, error) == ("password=longsecret", 19, None)
 
 
 def test_log_reader_skips_requests_after_deadline() -> None:
@@ -701,12 +1413,12 @@ def test_discover_enforces_per_log_byte_limit() -> None:
     report = discover_task_logs(
         client,
         "v1",
-        DiscoverConfig(max_dags=1, max_runs=1, max_tasks=1, max_logs=1, max_log_bytes=20, max_bytes=100),
+        DiscoverConfig(max_dags=1, max_runs=1, max_tasks=1, max_logs=1, max_log_bytes=21, max_bytes=1000),
     )
 
     assert report["status"] == "partial"
     assert "logs:max_log_bytes" in report["partial_reasons"]
-    assert report["bytes_scanned"] == 20
+    assert report["bytes_scanned"] == 21
     assert [finding["value"] for finding in report["findings"]] == ["firstsecret"]
 
 
@@ -783,6 +1495,42 @@ def test_live_discovery_emits_header_before_progressive_findings(monkeypatch: py
     assert result["_discover_findings_streamed"] is True
 
 
+def test_airflow_action_retains_full_spooled_findings_without_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    findings = SpoolingFindings()
+    for index in range(3):
+        findings.add(
+            {
+                "type": "token",
+                "fingerprint": f"fp-{index}",
+                "place": f"variable:{index}",
+                "value": "raw-secret",
+                "masked_value": "raw-***",
+            },
+            identity=(f"fp-{index}", f"variable:{index}"),
+        )
+    context = SimpleNamespace(
+        host="127.0.0.1",
+        port=8080,
+        args=SimpleNamespace(discover=True, show_keys=False, discover_time=None),
+        credential=SimpleNamespace(username="airflow", password="airflow"),
+        lifecycle_state=None,
+    )
+    monkeypatch.setattr(actions, "_client_for", lambda _ctx, **_kwargs: _FakeClient({}))
+    monkeypatch.setattr(
+        actions,
+        "discover_task_logs",
+        lambda _client, _generation, _config: {"status": "complete", "findings": findings, "finding_count": 3},
+    )
+    result = actions.discover_record(
+        context,
+        {"detection_status": "confirmed", "api_generation": "v1", "provided_credentials_ok": True},
+    )
+    saved = result["discover_report"]["findings"]
+    assert saved is findings
+    assert len(saved) == 3
+    assert all(item["value"] == "raw-secret" for item in saved)
+
+
 def test_discover_flows_through_airflow_audit_lifecycle_and_json(monkeypatch: pytest.MonkeyPatch) -> None:
     dag_path, run_path, task_path = _paths("/api/v1")
     client = _FakeClient(
@@ -825,13 +1573,58 @@ def test_discover_flows_through_airflow_audit_lifecycle_and_json(monkeypatch: py
     record = next(json.loads(line) for line in lines if line.startswith("{") and '"host"' in line)
     assert "discover_report" in record, record
     assert record["discover_report"]["status"] == "complete"
-    assert record["discover_report"]["findings"][0]["value"] == "secret123"
+    finding = record["discover_report"]["findings"][0]
+    assert finding["value"] == "secret123"
+    assert "masked_value" not in finding
+    assert "secret123" in json.dumps(record)
     assert any("/logs/1" in path for path, _kwargs in client.calls)
 
 
+def test_discover_deadline_includes_time_spent_before_airflow_collector() -> None:
+    client = _FakeClient({"/api/v1/dags?limit=100&offset=0": _response({"dags": [], "total_entries": 0})})
+    report = discover_task_logs(
+        client,
+        "v1",
+        DiscoverConfig(max_seconds=0.01),
+        started_at=time.monotonic() - 1,
+    )
+    assert report["status"] == "partial"
+    assert any(reason.endswith("discover_time") for reason in report["partial_reasons"])
+    assert client.calls == []
+
+
+def test_airflow_runtime_does_not_read_discovery_sources_after_detect_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SlowDetectClient(_FakeClient):
+        def get(self, path: str, **kwargs: object) -> AirflowResponse:
+            if path == "/api/v1/version":
+                time.sleep(0.025)
+            return super().get(path, **kwargs)
+
+    client = SlowDetectClient(
+        {
+            "/api/v1/version": _response({"version": "2.10.5"}),
+            "/api/v1/dags": _response({"dags": [{"dag_id": "example"}], "total_entries": 1}),
+            "/api/v1/pools": _response({"detail": "forbidden"}, 403),
+            "/api/v1/eventLogs": _response({"detail": "forbidden"}, 403),
+        }
+    )
+    monkeypatch.setattr(actions, "_client_for", lambda _ctx, **_kwargs: client)
+    lines: list[str] = []
+    args = parse_args(["airflow", "-t", "127.0.0.1:8080", "--discover", "--discover-time", "0.01", "-f", "json"])
+    runner = AuditCommandRunner(args=args, spec=build_airflow_spec(args), emit_line=lines.append)
+    runner.run_plan(build_airflow_plan(args))
+
+    record = next(json.loads(line) for line in lines if line.startswith("{") and '"host"' in line)
+    assert record["discover_report"]["status"] == "partial", record
+    assert any(reason.endswith("discover_time") for reason in record["discover_report"]["partial_reasons"])
+    assert not any("?limit=100" in path for path, _kwargs in client.calls), client.calls
+
+
 def test_discover_cli_spec_policy_and_txt_render() -> None:
-    args = parse_args(["airflow", "-t", "127.0.0.1", "--discover", "--discover-max-bytes", "7000"])
-    assert args.discover is True and args.discover_max_bytes == 7000
+    args = parse_args(["airflow", "-t", "127.0.0.1", "--discover"])
+    assert args.discover is True and not hasattr(args, "discover_max_bytes")
     assert build_airflow_spec(args).data is not None
     record = {
         "host": "127.0.0.1",
@@ -865,20 +1658,153 @@ def test_discover_cli_spec_policy_and_txt_render() -> None:
     assert render._format_discover_records(record, "json") == []
 
 
-@pytest.mark.parametrize(
-    "flag",
-    ["--discover-max-bytes"],
-)
-def test_discover_rejects_nonpositive_limits(flag: str) -> None:
-    args = parse_args(["airflow", "-t", "127.0.0.1", "--discover", flag, "0"])
-    errors: list[str] = []
-    console = SimpleNamespace(error=errors.append)
-    assert policy.validate_args(args, console) == 2
-    assert flag in errors[0]
-
-
 def test_discover_rejects_nonfinite_time() -> None:
     args = parse_args(["airflow", "-t", "127.0.0.1", "--discover", "--discover-time", "nan"])
     errors: list[str] = []
     assert policy.validate_args(args, SimpleNamespace(error=errors.append)) == 2
     assert "--discover-time" in errors[0]
+
+
+def test_airflow_spools_large_total_values_before_count_threshold() -> None:
+    values = [f"qa-variable-{index}-" + "Ab0" * 40000 for index in range(3)]
+    client = _FakeClient(
+        {
+            "/api/v1/variables?limit=100&offset=0": _response(
+                {
+                    "variables": [{"key": f"password_{index}", "value": value} for index, value in enumerate(values)],
+                    "total_entries": 3,
+                }
+            ),
+            "/api/v1/dags?limit=100&offset=0": _response({"dags": [], "total_entries": 0}),
+        }
+    )
+    report = discover_task_logs(client, "v1", DiscoverConfig(include_variables=True))
+    assert report["status"] == "complete"
+    assert isinstance(report["findings"], SpoolingFindings)
+    actual = [finding["value"] for finding in report["findings"]]
+    assert all(isinstance(value, DiskBackedText) for value in actual)
+    assert ["".join(value.iter_text_chunks()) for value in actual] == values
+
+
+@pytest.mark.parametrize("source_kind", ["dag_source", "task_log"])
+def test_bare_jwt_in_large_airflow_source_keeps_full_value(source_kind) -> None:
+    from redposture_core.discovery_values import DiskBackedText
+
+    token = "eyJhbGciOiJIUzI1NiJ9." + "YWJj" * 80_000 + ".c2ln"
+    dag_path, run_path, task_path = _paths("/api/v1")
+    path = (
+        "/api/v1/dagSources/source-token"
+        if source_kind == "dag_source"
+        else f"{task_path}/extract/logs/1?full_content=false"
+    )
+    text = token + "\npassword=qa-later-password\n"
+    payload = (
+        text.encode()
+        if source_kind == "dag_source"
+        else json.dumps({"content": text, "continuation_token": None}).encode()
+    )
+
+    class StreamingClient(_FakeClient):
+        def get_stream(self, requested, *, on_chunk, on_response, **kwargs):
+            assert requested == path
+            on_response(200, {"Content-Type": "text/plain" if source_kind == "dag_source" else "application/json"})
+            for pos in range(0, len(payload), 511):
+                on_chunk(payload[pos : pos + 511])
+            return AirflowResponse(200, {}, b"")
+
+    responses = {
+        f"{dag_path}?limit=1&offset=0": _response(
+            {"dags": [{"dag_id": "example", "file_token": "source-token"}], "total_entries": 1}
+        ),
+        f"{run_path}?limit=1&offset=0&order_by=-execution_date": _response(
+            {"dag_runs": [{"dag_run_id": "manual__2026-09-13"}], "total_entries": 1}
+        ),
+        f"{task_path}?limit=1&offset=0": _response(
+            {"task_instances": [{"task_id": "extract", "try_number": 1}], "total_entries": 1}
+        ),
+    }
+    if source_kind == "dag_source":
+        responses[f"{run_path}?limit=1&offset=0&order_by=-execution_date"] = _response(
+            {"dag_runs": [], "total_entries": 0}
+        )
+    else:
+        responses[path] = _response({"content": "prefix"}, truncated=True)
+    result = discover_task_logs(
+        StreamingClient(responses),
+        "v1",
+        DiscoverConfig(
+            max_dags=1,
+            max_runs=1,
+            max_tasks=1,
+            max_logs=1,
+            max_bytes=1024,
+            include_dag_sources=source_kind == "dag_source",
+        ),
+    )
+    assert result["status"] == "complete", result["partial_reasons"]
+    jwt = [finding["value"] for finding in result["findings"] if finding["type"] == "jwt"]
+    assert len(jwt) == 1 and isinstance(jwt[0], DiskBackedText)
+    assert "".join(jwt[0].iter_text_chunks()) == token
+    assert any(finding["value"] == "qa-later-password" for finding in result["findings"])
+
+
+@pytest.mark.parametrize("source_kind", ["dag_source", "task_log"])
+def test_large_quoted_password_keeps_exact_value_in_airflow(source_kind) -> None:
+    from redposture_core.discovery_values import DiskBackedText
+
+    password = "Ab0λ " * 40000 + "-tail"
+    dag_path, run_path, task_path = _paths("/api/v1")
+    path = (
+        "/api/v1/dagSources/source-token"
+        if source_kind == "dag_source"
+        else f"{task_path}/extract/logs/1?full_content=false"
+    )
+    content = 'password="' + password + '"\n'
+    payload = (
+        content.encode()
+        if source_kind == "dag_source"
+        else json.dumps({"content": content, "continuation_token": None}).encode()
+    )
+
+    class StreamingClient(_FakeClient):
+        def get_stream(self, requested, *, on_chunk, on_response, **kwargs):
+            assert requested == path
+            on_response(200, {"Content-Type": "text/plain" if source_kind == "dag_source" else "application/json"})
+            for pos in range(0, len(payload), 511):
+                on_chunk(payload[pos : pos + 511])
+            return AirflowResponse(200, {}, b"")
+
+    responses = {
+        f"{dag_path}?limit=1&offset=0": _response(
+            {"dags": [{"dag_id": "example", "file_token": "source-token"}], "total_entries": 1}
+        ),
+        f"{run_path}?limit=1&offset=0&order_by=-execution_date": _response(
+            {"dag_runs": [{"dag_run_id": "manual__2026-09-13"}], "total_entries": 1}
+        ),
+        f"{task_path}?limit=1&offset=0": _response(
+            {"task_instances": [{"task_id": "extract", "try_number": 1}], "total_entries": 1}
+        ),
+    }
+    if source_kind == "dag_source":
+        responses[f"{run_path}?limit=1&offset=0&order_by=-execution_date"] = _response(
+            {"dag_runs": [], "total_entries": 0}
+        )
+    else:
+        responses[path] = _response({"content": "prefix"}, truncated=True)
+    result = discover_task_logs(
+        StreamingClient(responses),
+        "v1",
+        DiscoverConfig(
+            max_dags=1,
+            max_runs=1,
+            max_tasks=1,
+            max_logs=1,
+            max_bytes=1024,
+            include_dag_sources=source_kind == "dag_source",
+        ),
+    )
+    assert result["status"] == "complete", result["partial_reasons"]
+    assert len(result["findings"]) == 1
+    value = result["findings"][0]["value"]
+    assert isinstance(value, DiskBackedText)
+    assert "".join(value.iter_text_chunks()) == password

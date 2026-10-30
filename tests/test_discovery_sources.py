@@ -46,6 +46,21 @@ def test_kubeapi_configmap_read_uses_product_api_and_field_name(monkeypatch: pyt
     assert any("configmaps.qa.settings.api_token" in item["object_path"] for item in findings)
 
 
+def test_kubeapi_discover_ignores_public_kubernetes_root_ca_configmap() -> None:
+    cert = "-----BEGIN CERTIFICATE-----\nMIICjTCCAXWgAwIBAgIUc05OQ2FJbWFnZUJ5dGVzTm90QVNlY3JldDAKBggq\n-----END CERTIFICATE-----"
+    record = {
+        "status": "auth_valid",
+        "configmaps": [
+            {"namespace": "qa", "name": "kube-root-ca.crt", "data": {"ca.crt": cert}},
+            {"namespace": "qa", "name": "settings", "data": {"api_token": "glpat-abcdefghijklmnopqrstuv"}},
+        ],
+    }
+    findings = inspect_record("kubeapi", record)["findings"]
+    assert findings
+    assert all("kube-root-ca.crt" not in item["object_path"] for item in findings)
+    assert any("settings.api_token" in item["object_path"] for item in findings)
+
+
 def test_qdrant_scroll_reads_payload_pages_and_stops_on_repeated_offset(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 

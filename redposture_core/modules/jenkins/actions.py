@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
+import time
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import closing
+from dataclasses import replace
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -18,6 +23,9 @@ from ...clients.http_api import (
 from ...clients.http_session import HttpSessionPool
 from ...clients.scoped_http import ScopedHttpClient
 from ...detection_steps import DetectionRequests, run_requests
+from ...discovery_frontier import DiscoveryFrontier
+from ...discovery_spool import SpoolingFindings, SpoolingRecords
+from ...storage_discovery import DiscoveryCollector
 
 _VERSION = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
 _MAX_JOBS = 200
@@ -91,6 +99,46 @@ def _get(client: HttpApiClient | ScopedHttpClient, base: str, path: str, basic: 
     if basic:
         headers["Authorization"] = basic
     return client.get(base + path, headers=headers)
+
+
+def _get_discovery(
+    client: HttpApiClient | ScopedHttpClient,
+    base: str,
+    path: str,
+    basic: str | None,
+    collector: DiscoveryCollector,
+    *,
+    allow_truncated: bool = False,
+) -> HttpResponse | None:
+    cap = collector.cap(_JSON_CAP)
+    if not cap:
+        return None
+    if isinstance(client, ScopedHttpClient):
+        bounded: HttpApiClient | ScopedHttpClient = ScopedHttpClient(
+            client.pool, cap, client.allow_cross_origin_redirects
+        )
+    elif isinstance(client, HttpApiClient):
+        bounded = HttpApiClient(replace(client.config, response_size_cap=cap))
+    else:
+        bounded = client
+    if isinstance(bounded, (ScopedHttpClient, HttpApiClient)):
+        headers = {"Accept": "application/json"}
+        if basic:
+            headers["Authorization"] = basic
+        timeout = max(0.001, collector.deadline - time.monotonic())
+        response = bounded.get(base + path, headers=headers, timeout=timeout)
+    else:
+        response = _get(bounded, base, path, basic)
+    if response.truncated or len(response.body) > cap:
+        if not collector.charge(min(len(response.body), cap)):
+            return None
+        if not allow_truncated:
+            collector.partial(path, "byte_budget")
+            return None
+        return response
+    if not collector.charge(len(response.body)):
+        return None
+    return response
 
 
 def _basic(username: str, secret: str) -> str:
@@ -220,45 +268,63 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     base = str(prior.get("api_endpoint") or "")
     client = _client(ctx)
     identity = _get(client, base, "/whoAmI/api/json", _basic(username, secret))
+    evidence = identity
+    safety_reason = _auth_stop_reason(identity)
     data = _json_object(identity)
     identity_observed = (
         _whoami(data) and data is not None and data.get("authenticated") is True and data.get("name") != "anonymous"
     )
     verified = False
-    if identity_observed and data is not None:
+    if identity_observed and data is not None and not safety_reason:
         state = getattr(ctx, "lifecycle_state", None)
         anonymous = getattr(state, "jenkins_anonymous_whoami", None)
         if anonymous is None:
             anonymous = _get(client, base, "/whoAmI/api/json")
             if state is not None:
                 state.jenkins_anonymous_whoami = anonymous
+        if _auth_stop_reason(anonymous):
+            evidence = anonymous
+            safety_reason = _auth_stop_reason(anonymous)
         anonymous_data = _json_object(anonymous)
         verified = anonymous.status in {401, 403} or (
             _whoami(anonymous_data)
             and anonymous_data is not None
             and (anonymous_data.get("authenticated") is False or anonymous_data.get("name") != data.get("name"))
         )
-    result["credential_state"] = "valid" if verified else "invalid" if identity.status == 401 else "unknown"
-    result["provided_credentials_ok"] = True if verified else False if identity.status == 401 else None
+    rejected = identity.status == 401 and not safety_reason and not identity.error
+    verified = verified and not safety_reason
+    result["credential_state"] = "valid" if verified else "invalid" if rejected else "unknown"
+    result["provided_credentials_ok"] = True if verified else False if rejected else None
     result["status"] = (
         "valid_credentials"
         if verified
         else "invalid_credentials"
-        if identity.status == 401
-        else "rate_limited"
-        if identity.status == 429
+        if rejected
+        else safety_reason
+        if safety_reason
         else "auth_required"
     )
-    result["auth_http_status"] = identity.status
+    result["auth_http_status"] = evidence.status
+    result["auth_error_detail"] = evidence.error
+    result["auth_response_body"] = evidence.text
+    result["auth_retry_after"] = _header(evidence, "Retry-After") or None
+    if safety_reason:
+        result["credential_stop_reason"] = safety_reason
     result["credential_results"] = [{"username": username}]
-    result["credential_password"] = "API token" if getattr(credential, "source", "") == "api_token" else secret
+    result["credential_password"] = secret
+    result["credential_source"] = getattr(credential, "source", "provided")
     if identity_observed and data is not None:
         result["authenticated_identity"] = data["name"]
     result["credential_verification_reason"] = (
         "Jenkins whoAmI authenticated identity"
         if verified
         else "Jenkins rejected Basic credentials"
-        if identity.status == 401
+        if rejected
+        else f"{safety_reason}: HTTP {evidence.status}"
+        + (f"; Retry-After={result['auth_retry_after']}" if result["auth_retry_after"] else "")
+        if safety_reason
+        else evidence.error
+        if evidence.error
         else "observed identity does not establish credential-specific access"
         if identity_observed
         else "identity unavailable or Basic authentication not supported"
@@ -267,6 +333,12 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         if not result.get("version") and _VERSION.fullmatch(version := _header(identity, "X-Jenkins")):
             result["version"] = version
         jobs_response = _get(client, base, "/api/json?tree=jobs[name]", _basic(username, secret))
+        jobs_stop = _auth_stop_reason(jobs_response)
+        if jobs_stop:
+            result["credential_stop_reason"] = jobs_stop
+            result["auth_retry_after"] = _header(jobs_response, "Retry-After") or None
+            result["auth_error_detail"] = jobs_response.error
+            result["auth_response_body"] = jobs_response.text
         jobs = _entries(_json_object(jobs_response), "jobs")
         result["credential_jobs_access"] = (
             "allowed" if jobs is not None else "denied" if jobs_response.status in {401, 403} else "unknown"
@@ -274,6 +346,27 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         if jobs is not None:
             result["credential_jobs_count"] = len(jobs)
     return result
+
+
+def _auth_stop_reason(response: HttpResponse) -> str | None:
+    """Recognize explicit throttling/lockout evidence before judging a pair."""
+    if response.status == 429:
+        return "rate_limited"
+    message = (str(response.error or "") + " " + response.text).lower()
+    if any(
+        marker in message
+        for marker in (
+            "account locked",
+            "account has been locked",
+            "account is locked",
+            "locked out",
+            "too many login attempts",
+        )
+    ):
+        return "account_locked"
+    if any(marker in message for marker in ("too many requests", "rate limit exceeded", "rate limited")):
+        return "rate_limited"
+    return None
 
 
 def _limit(value: Any, default: int, cap: int) -> int:
@@ -287,6 +380,96 @@ def _entries(data: dict[str, Any] | None, key: str) -> list[dict[str, Any]] | No
     if not isinstance(items, list):
         return None
     return [item for item in items if isinstance(item, dict)]
+
+
+def _discovery_jobs(
+    client: HttpApiClient | ScopedHttpClient,
+    base: str,
+    path: str,
+    basic: str | None,
+    collector: DiscoveryCollector,
+) -> tuple[list[dict[str, Any]] | None, HttpResponse | None]:
+    """Retry an oversized Jenkins tree response in verified index ranges."""
+    response = _get_discovery(client, base, path, basic, collector, allow_truncated=True)
+    jobs = _entries(_json_object(response) if response is not None else None, "jobs")
+    if jobs is not None or response is None or response.status != 200 or response.error or not response.truncated:
+        return _job_catalog(jobs) if jobs is not None else None, response
+    page_size = 100
+    offset = 0
+    collected = SpoolingRecords()
+
+    def retained_jobs() -> SpoolingRecords | None:
+        collected.finish()
+        return collected if collected else None
+
+    with DiscoveryFrontier() as seen_pages:
+        while collector.allowed():
+            page_path = f"{path}{{{offset},{offset + page_size}}}"
+            response = _get_discovery(client, base, page_path, basic, collector, allow_truncated=True)
+            if response is None:
+                return retained_jobs(), response
+            if response.truncated:
+                if page_size == 1:
+                    collector.partial(page_path, "oversized_single_job")
+                    return retained_jobs(), response
+                page_size = max(1, page_size // 2)
+                continue
+            page = _entries(_json_object(response), "jobs")
+            if page is None:
+                collector.partial(page_path, "invalid_job_page")
+                return retained_jobs(), response
+            signature = json.dumps([str(item.get("name") or "") for item in page])
+            if page and not seen_pages.claim(signature):
+                collector.partial(page_path, "repeated_job_page")
+                return retained_jobs(), response
+            for item in page:
+                collected.append(item, sort_key=str(item.get("name") or ""))
+            if len(page) < page_size:
+                collected.finish()
+                return collected, response
+            offset += len(page)
+    collector.partial(path, "discover_time")
+    return retained_jobs(), response
+
+
+def _job_catalog(jobs: Iterable[dict[str, Any]]) -> SpoolingRecords:
+    catalog = SpoolingRecords()
+    for item in jobs:
+        catalog.append(item, sort_key=str(item.get("name") or ""))
+    catalog.finish()
+    return catalog
+
+
+def _select_discovery_jobs(jobs: Iterable[dict[str, Any]], limit: int) -> SpoolingRecords:
+    """Keep last duplicate and name order without a second full in-memory catalog."""
+    selected = SpoolingRecords()
+    previous: dict[str, Any] | None = None
+    for item in jobs:
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if previous is not None and previous["name"] != name:
+            selected.append(previous)
+            if len(selected) >= limit:
+                previous = None
+                break
+        previous = item
+    if previous is not None and len(selected) < limit:
+        selected.append(previous)
+    selected.finish()
+    return selected
+
+
+def _iter_discovery_queue(pending: SpoolingRecords) -> Iterator[Mapping[str, Any]]:
+    """Read one queued job while permitting nested folders to append more jobs."""
+    ordinal = 0
+    while True:
+        with closing(pending.iter_appended(ordinal)) as records:
+            item = next(records, None)
+        if item is None:
+            return
+        ordinal += 1
+        yield item
 
 
 def _artifact_url(base: str, job_path: str, number: int, relative_path: str) -> str | None:
@@ -320,13 +503,16 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     result = dict(prior)
     args = ctx.args
     discover = bool(getattr(args, "discover", False))
+    collector = DiscoveryCollector("jenkins", ctx, prior) if discover else None
 
-    def incomplete(reason: str, resource: str = "jobs") -> None:
+    def incomplete(reason: str, resource: str = "jobs", *, collector_reason: str | None = None) -> None:
         result[resource + "_partial"] = True
         result.setdefault(resource + "_errors", []).append(reason)
         if discover:
             result["job_discovery_partial"] = True
             result.setdefault("discovery_errors", []).append(reason)
+            if collector is not None:
+                collector.partial(resource, collector_reason or reason)
 
     show_artifacts = bool(getattr(args, "show_artifacts", False))
     show_builds = bool(getattr(args, "show_builds", False) or show_artifacts)
@@ -345,60 +531,206 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         if authenticated and credential is not None and credential.username and credential.password is not None
         else None
     )
+
+    def stream_discovery_text(path: str, source: str) -> bool | None:
+        if collector is None or not isinstance(client, ScopedHttpClient):
+            return None
+        pool = client.pool
+        if not callable(getattr(pool, "request_stream", None)):
+            return None
+        headers = {"Accept": "text/plain, application/xml"}
+        if basic:
+            headers["Authorization"] = basic
+        return collector.stream_http_content(
+            pool,
+            base + path,
+            source,
+            headers=headers,
+            timeout=float(getattr(args, "timeout", 5.0) or 5.0),
+            allow_cross_origin_redirects=False,
+            prefer_specific=True,
+        )
+
     if show_jobs:
         result["jobs_requested"] = show_jobs
         result["builds_requested"] = show_builds
-        response = _get(client, base, "/api/json?tree=jobs[name,url,color,lastBuild[number,result]]", basic)
-        jobs = _entries(_json_object(response), "jobs")
-        if jobs is None:
-            result["jobs_access"] = "denied" if response.status in {401, 403} else "unknown"
-            incomplete("jobs list unavailable")
+        job_tree = (
+            "jobs[name,url,color,_class,firstBuild[number],lastBuild[number,result]]"
+            if discover
+            else "jobs[name,url,color,lastBuild[number,result]]"
+        )
+        if collector is not None:
+            jobs, response = _discovery_jobs(client, base, "/api/json?tree=" + job_tree, basic, collector)
         else:
-            selected = sorted(
-                {
-                    str(item["name"]): item for item in jobs if isinstance(item.get("name"), str) and item["name"]
-                }.values(),
-                key=lambda item: str(item["name"]),
-            )[: _limit(getattr(args, "show_jobs", None), _MAX_JOBS, _MAX_JOBS)]
-            result["jobs"] = [{"name": item["name"], "color": item.get("color")} for item in selected]
+            response = _get(client, base, "/api/json?tree=" + job_tree, basic)
+            jobs = _entries(_json_object(response), "jobs")
+        if jobs is None:
+            result["jobs_access"] = "denied" if response is not None and response.status in {401, 403} else "unknown"
+            incomplete(
+                "jobs list unavailable",
+                collector_reason="access_denied" if response is not None and response.status in {401, 403} else None,
+            )
+        else:
+            discovery_job_limit = (
+                len(jobs)
+                if discover and type(getattr(args, "show_jobs", None)) is not int
+                else _limit(getattr(args, "show_jobs", None), _MAX_JOBS, _MAX_JOBS)
+            )
+            selected = (
+                _select_discovery_jobs(jobs, discovery_job_limit)
+                if discover
+                else sorted(
+                    {
+                        str(item["name"]): item for item in jobs if isinstance(item.get("name"), str) and item["name"]
+                    }.values(),
+                    key=lambda item: str(item["name"]),
+                )[:discovery_job_limit]
+            )
+            result["jobs"] = SpoolingRecords() if discover else []
+            for item in selected:
+                result["jobs"].append({"name": item["name"], "color": item.get("color")})
             result["jobs_access"] = "allowed"
             result["jobs_count"] = len(jobs)
             if discover:
-                if len(jobs) > len(selected) or len(selected) > 20:
+                assert collector is not None
+                collector.mark_accessible_source()
+                if len(jobs) > len(selected):
                     incomplete("job discovery item limit reached")
-                job_configs: list[dict[str, Any]] = []
-                build_logs: list[dict[str, Any]] = []
-                build_envs: list[dict[str, Any]] = []
-                for item in selected[:20]:
-                    job_name = str(item["name"])
-                    path = "/job/" + quote(job_name, safe="")
-                    config_response = _get(client, base, path + "/config.xml", basic)
-                    if config_response.status == 200 and not config_response.error and not config_response.truncated:
-                        job_configs.append({"job": job_name, "config": config_response.text[:65536]})
-                        if len(config_response.text) > 65536:
-                            incomplete(f"{job_name}: config text truncated at 65536 characters")
+                job_configs = SpoolingRecords()
+                build_logs = SpoolingRecords()
+                build_envs = SpoolingRecords()
+                pending = SpoolingRecords()
+                for item in selected:
+                    pending.append(
+                        {"name": str(item["name"]), "path": "/job/" + quote(str(item["name"]), safe=""), "item": item}
+                    )
+                visited = SpoolingFindings()
+                for queued in _iter_discovery_queue(pending):
+                    job_name, path, item = queued["name"], queued["path"], queued["item"]
+                    if not visited.add({"path": path}, identity=("job", path)):
+                        incomplete(f"{job_name}: duplicate job path")
+                        continue
+                    if not collector.allowed():
+                        incomplete("discover budget exhausted")
+                        break
+                    config_source = f"job.{job_name}.config"
+                    config_streamed = stream_discovery_text(path + "/config.xml", config_source)
+                    config_response = (
+                        _get_discovery(client, base, path + "/config.xml", basic, collector)
+                        if config_streamed is None
+                        else None
+                    )
+                    if config_streamed is True:
+                        pass
+                    elif config_response is not None and config_response.status == 200 and not config_response.error:
+                        job_configs.append({"job": job_name, "config": config_response.text})
+                        collector.add(config_source, config_response.text, charge=False, prefer_specific=True)
                     else:
-                        incomplete(f"{job_name}: config unavailable (HTTP {config_response.status})")
-                    last = item.get("lastBuild")
-                    number = last.get("number") if isinstance(last, dict) else None
-                    if isinstance(number, int) and not isinstance(number, bool):
-                        log_response = _get(client, base, path + f"/{number}/consoleText", basic)
-                        if log_response.status == 200 and not log_response.error and not log_response.truncated:
-                            build_logs.append({"job": job_name, "build": number, "log": log_response.text[:65536]})
-                            if len(log_response.text) > 65536:
-                                incomplete(f"{job_name}/{number}: console text truncated at 65536 characters")
+                        incomplete(
+                            f"{job_name}: config unavailable (HTTP {config_response.status if config_response else 'budget'})"
+                        )
+                    if not collector.allowed():
+                        break
+                    job_class = str(item.get("_class") or "").lower()
+                    if "folder" in job_class or "multibranch" in job_class:
+                        children, children_response = _discovery_jobs(
+                            client, base, path + "/api/json?tree=" + job_tree, basic, collector
+                        )
+                        if children is None:
+                            incomplete(f"{job_name}: nested jobs unavailable")
                         else:
-                            incomplete(f"{job_name}/{number}: console unavailable (HTTP {log_response.status})")
-                        env_response = _get(client, base, path + f"/{number}/injectedEnvVars/api/json", basic)
-                        env_data = _json_object(env_response)
+                            for child in children:
+                                child_name = child.get("name")
+                                if not isinstance(child_name, str) or not child_name:
+                                    incomplete(f"{job_name}: invalid nested job")
+                                    continue
+                                full_name = job_name + "/" + child_name
+                                pending.append(
+                                    {
+                                        "name": full_name,
+                                        "path": path + "/job/" + quote(child_name, safe=""),
+                                        "item": child,
+                                    }
+                                )
+                                result["jobs"].append({"name": full_name, "color": child.get("color")})
+                        continue
+                    last = item.get("lastBuild")
+                    last_number = last.get("number") if isinstance(last, dict) else None
+                    first = item.get("firstBuild")
+                    first_number = first.get("number") if isinstance(first, dict) else None
+                    if not isinstance(last_number, int) or isinstance(last_number, bool):
+                        continue
+                    if not isinstance(first_number, int) or isinstance(first_number, bool):
+                        incomplete(f"{job_name}: first build unavailable; older logs unverified")
+                        first_number = last_number
+                    if first_number < 1 or last_number < first_number:
+                        incomplete(f"{job_name}: invalid build range")
+                        continue
+                    raw_build_limit = getattr(args, "show_builds", None)
+                    explicit_build_limit = (
+                        raw_build_limit
+                        if type(raw_build_limit) is int and not bool(getattr(args, "_discover_implicit_builds", False))
+                        else None
+                    )
+                    for build_index, number in enumerate(range(last_number, first_number - 1, -1)):
+                        if explicit_build_limit is not None and build_index >= explicit_build_limit:
+                            incomplete(f"{job_name}: build discovery item limit reached")
+                            break
+                        if not collector.allowed():
+                            incomplete("discover budget exhausted")
+                            break
+                        log_source = f"job.{job_name}.build.{number}.log"
+                        log_streamed = stream_discovery_text(path + f"/{number}/consoleText", log_source)
+                        log_response = (
+                            _get_discovery(client, base, path + f"/{number}/consoleText", basic, collector)
+                            if log_streamed is None
+                            else None
+                        )
+                        if log_streamed is True:
+                            pass
+                        elif log_response is not None and log_response.status == 200 and not log_response.error:
+                            build_logs.append({"job": job_name, "build": number, "log": log_response.text})
+                            collector.add(log_source, log_response.text, charge=False, prefer_specific=True)
+                        else:
+                            incomplete(
+                                f"{job_name}/{number}: console unavailable (HTTP {log_response.status if log_response else 'budget'})"
+                            )
+                        if not collector.allowed():
+                            break
+                        env_path = path + f"/{number}/injectedEnvVars/api/json"
+                        env_response = _get_discovery(client, base, env_path, basic, collector, allow_truncated=True)
+                        if env_response is not None and env_response.truncated:
+                            if isinstance(client, ScopedHttpClient) and collector.stream_json_scalars(
+                                client.pool,
+                                base + env_path,
+                                f"job.{job_name}.build.{number}.env",
+                                headers={"Accept": "application/json", **({"Authorization": basic} if basic else {})},
+                                timeout=float(getattr(args, "timeout", 5.0) or 5.0),
+                                root_kind="object",
+                                exclude=lambda source_path: not source_path or source_path[0] != "envMap",
+                                required_containers={(): "object", ("envMap",): "object"},
+                                prefer_specific=True,
+                            ):
+                                continue
+                            incomplete(f"{job_name}/{number}: environment stream unavailable")
+                            continue
+                        env_data = _json_object(env_response) if env_response is not None else None
                         if env_data is not None:
                             env_map = env_data.get("envMap")
                             if isinstance(env_map, dict):
                                 build_envs.append({"job": job_name, "build": number, "env": env_map})
+                                collector.add(
+                                    f"job.{job_name}.build.{number}.env", env_map, charge=False, prefer_specific=True
+                                )
                             else:
                                 incomplete(f"{job_name}/{number}: invalid environment map")
-                        else:
-                            incomplete(f"{job_name}/{number}: environment unavailable (HTTP {env_response.status})")
+                        elif env_response is None or env_response.status != 404:
+                            incomplete(
+                                f"{job_name}/{number}: environment unavailable (HTTP {env_response.status if env_response else 'budget'})"
+                            )
+                result["jobs_count"] = len(result["jobs"])
+                for spool in (result["jobs"], job_configs, build_logs, build_envs, pending, visited):
+                    spool.finish()
                 result["job_configs"] = job_configs
                 result["build_logs"] = build_logs
                 result["build_envs"] = build_envs
@@ -520,6 +852,8 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             ]
             result["queue_count"] = len(queue)
             result["queue_access"] = "allowed"
+    if collector is not None:
+        result["content_discovery"] = collector.result()
     return result
 
 

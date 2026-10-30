@@ -10,6 +10,7 @@ import pytest
 
 from redposture_core import stage_qdrant as qdrant
 from redposture_core.audit_models import AuditRecord
+from redposture_core.clients.http_api import HttpResponse
 from redposture_core.modules.qdrant import actions as qdrant_actions
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
@@ -630,6 +631,28 @@ def test_http_json_request_handles_success_http_error_and_transport(monkeypatch:
     assert status == 0
     assert payload is None
     assert "connection timeout" in str(error)
+
+
+def test_qdrant_discover_http_cap_rejects_truncated_body_before_json_parse(monkeypatch: pytest.MonkeyPatch) -> None:
+    caps: list[int] = []
+
+    class FakePool:
+        def request(self, _method: str, _url: str, **kwargs: object) -> HttpResponse:
+            caps.append(int(kwargs["response_size_cap"]))
+            return HttpResponse(
+                status=200,
+                body=b'{"result":{"points":[{"payload":{"token":"glpat-abcdefghijklmnopqrst"}}]',
+                headers={},
+                truncated=True,
+            )
+
+    state = qdrant_actions.QdrantLifecycleState(http=FakePool(), scheme="http", host="qa", port=6333)
+    monkeypatch.setattr(qdrant_actions._THREAD_LOCAL_TRANSPORT, "state", state, raising=False)
+    status, payload, error = qdrant_actions._http_json_request(
+        "qa", 6333, "POST", "/collections/app/points/scroll", 1.0, response_size_cap=32
+    )
+    assert (status, payload, error) == (0, None, "byte_budget")
+    assert caps == [32]
 
 
 def test_qdrant_probe_helpers_and_root_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

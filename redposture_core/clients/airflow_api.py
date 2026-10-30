@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import zlib
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from http.cookies import SimpleCookie
@@ -152,6 +153,7 @@ class AirflowClient:
         body: bytes | None = None,
         extra_headers: dict[str, str] | None = None,
         response_size_cap: int = _RESPONSE_CAP,
+        timeout: float | None = None,
     ) -> AirflowResponse:
         return run_sync(
             AirflowClient._detect_request_steps(
@@ -162,6 +164,7 @@ class AirflowClient:
                 body=body,
                 extra_headers=extra_headers,
                 response_size_cap=response_size_cap,
+                timeout=timeout,
             )
         )
 
@@ -174,16 +177,20 @@ class AirflowClient:
         body: bytes | None = None,
         extra_headers: dict[str, str] | None = None,
         response_size_cap: int = _RESPONSE_CAP,
+        timeout: float | None = None,
     ) -> Any:
         headers: dict[str, str] = dict(extra_headers or {})
         if authed:
             headers.update(self._auth_header())
         try:
+            request_options: dict[str, Any] = {"headers": headers, "body": body, "response_size_cap": response_size_cap}
+            if timeout is not None:
+                request_options.update({"timeout": timeout, "retries": 0})
             resp = yield HttpRead(
                 self._pool,
                 method,
                 f"{self.base_url}{self.base_path}{path}",
-                {"headers": headers, "body": body, "response_size_cap": response_size_cap},
+                request_options,
             )
         except Exception as exc:  # noqa: BLE001 - transport errors normalized for callers
             return AirflowResponse(http_status=0, headers={}, body=b"", transport_error=str(exc))
@@ -214,11 +221,53 @@ class AirflowClient:
         authed: bool = True,
         extra_headers: dict[str, str] | None = None,
         response_size_cap: int = _RESPONSE_CAP,
+        timeout: float | None = None,
     ) -> AirflowResponse:
         return run_sync(
             AirflowClient._detect_get_steps(
-                self, path, authed=authed, extra_headers=extra_headers, response_size_cap=response_size_cap
+                self,
+                path,
+                authed=authed,
+                extra_headers=extra_headers,
+                response_size_cap=response_size_cap,
+                timeout=timeout,
             )
+        )
+
+    def get_stream(
+        self,
+        path: str,
+        *,
+        on_chunk: Callable[[bytes], Any],
+        on_response: Callable[[int, Mapping[str, str]], Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        chunk_size: int = 64 * 1024,
+        timeout: float | None = None,
+        deadline: float | None = None,
+    ) -> AirflowResponse:
+        """Read a DAG source through the shared transport without buffering its body."""
+        headers = {"Accept": "text/plain, application/json", **(extra_headers or {}), **self._auth_header()}
+        response = self._pool.request_stream(
+            "GET",
+            f"{self.base_url}{self.base_path}{path}",
+            on_chunk=on_chunk,
+            on_response=on_response,
+            chunk_size=chunk_size,
+            headers=headers,
+            timeout=timeout,
+            deadline=deadline,
+            allow_cross_origin_redirects=True,
+            preserve_authorization_on_cross_origin=False,
+        )
+        return AirflowResponse(
+            http_status=int(response.status),
+            headers=dict(response.headers or {}),
+            body=b"",
+            transport_error=response.error,
+            request_url=response.request_url,
+            final_url=response.final_url,
+            redirect_history=tuple(response.redirect_history or ()),
+            truncated=bool(response.truncated),
         )
 
     def _detect_get_steps(
@@ -228,12 +277,18 @@ class AirflowClient:
         authed: bool = True,
         extra_headers: dict[str, str] | None = None,
         response_size_cap: int = _RESPONSE_CAP,
+        timeout: float | None = None,
     ) -> Any:
         return (
             yield DetectCall(
                 self._request,
                 ("GET", path),
-                {"authed": authed, "extra_headers": extra_headers, "response_size_cap": response_size_cap},
+                {
+                    "authed": authed,
+                    "extra_headers": extra_headers,
+                    "response_size_cap": response_size_cap,
+                    **({"timeout": timeout} if timeout is not None else {}),
+                },
             )
         )
 

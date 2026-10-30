@@ -15,10 +15,132 @@
     "connect_service": "FREEPDB1",
     "connect_sid": null,
     "content_discovery": {
-      "bytes_inspected": 2,
-      "findings": [],
+      "bytes_inspected": 1039122,
+      "bytes_read": 1039122,
+      "emitted_fingerprints": [],
+      "findings": [
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
+          "source": "authenticated",
+          "type": "api_key",
+          "value": "ora-api-key-prod-2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
+          "source": "authenticated",
+          "type": "api_key",
+          "value": "ora-billing-key-2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
+          "source": "authenticated",
+          "type": "api_key",
+          "value": "ora-read-key-2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.REDPOSTURE.ACCOUNTS.password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "BillingOracle!2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.REDPOSTURE.ACCOUNTS.password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "OracleAdmin!2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.REDPOSTURE.ACCOUNTS.password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "ReadOnlyOracle!2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "RemoteLink!2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "WalletPass!2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "oracle-jwt-secret-lab-2026"
+        },
+        {
+          "confidence": "low",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.XDB.XDB$H_INDEX.children",
+          "source": "authenticated",
+          "type": "high_entropy",
+          "value": "OLAP_XS_ADMIN562039e330f7516e06317bf6b642ea1_acl"
+        },
+        {
+          "confidence": "low",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.XDB.XDB$H_INDEX.children",
+          "source": "authenticated",
+          "type": "high_entropy",
+          "value": "OLAP_XS_ADMIN562039e330fd516e06317bf6b642ea1_acl"
+        },
+        {
+          "confidence": "low",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.XDB.XDB$H_INDEX.children",
+          "source": "authenticated",
+          "type": "high_entropy",
+          "value": "OLAP_XS_ADMIN562039e3311516e06317bf6b642ea1_acl"
+        },
+        {
+          "confidence": "low",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.XDB.XDB$H_INDEX.children",
+          "source": "authenticated",
+          "type": "high_entropy",
+          "value": "OLAP_XS_ADMIN562039e3315516e06317bf6b642ea1_acl"
+        },
+        {
+          "confidence": "low",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.XDB.XDB$H_INDEX.children",
+          "source": "authenticated",
+          "type": "high_entropy",
+          "value": "OLAP_XS_ADMIN562039e3319516e06317bf6b642ea1_acl"
+        }
+      ],
+      "live_emitted": false,
+      "partial_reasons": [
+        "oracle: SYS.COMMIT_SCN_LOG$: read failed",
+        "oracle: SYS.FINALHIST$: read failed",
+        "table.SYSTEM.HELP: invalid_json",
+        "oracle: XDB.XDB$COLUMN_INFO: read failed"
+      ],
       "source": "authenticated",
-      "status": "complete"
+      "status": "partial"
     },
     "credential_attempts": [
       {
@@ -31,6 +153,12 @@
     ],
     "db_links": [],
     "defcreds_enabled": false,
+    "discover_partial": true,
+    "discover_reasons": [
+      "SYS.COMMIT_SCN_LOG$: read failed",
+      "SYS.FINALHIST$: read failed",
+      "XDB.XDB$COLUMN_INFO: read failed"
+    ],
     "effective_username": "redposture",
     "error": null,
     "exec_result": null,

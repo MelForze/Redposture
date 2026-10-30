@@ -77,8 +77,8 @@ def test_vault_recovers_version_from_valid_seal_status_without_claiming_auth(mon
 
 def test_vault_discover_keeps_known_mount_count_without_verbose_inventory(monkeypatch):
     monkeypatch.setattr(vault, "_client", lambda c: object())
-    monkeypatch.setattr(vault, "_inventory_section", lambda *a: ([{"path": "secret/", "type": "kv"}], "allowed"))
-    monkeypatch.setattr(vault, "_discover_kv", lambda *a: ([], False, []))
+    monkeypatch.setattr(vault, "_inventory_section", lambda *a, **_kw: ([{"path": "secret/", "type": "kv"}], "allowed"))
+    monkeypatch.setattr(vault, "_discover_kv", lambda *a: ([], 0, False, False, []))
     context = ctx()
     context.args.discover = True
     result = vault.data_record(context, {"host": "qa", "port": 8200, "api_endpoint": "http://qa", "token_valid": True})

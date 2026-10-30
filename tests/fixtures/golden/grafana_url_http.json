@@ -19,6 +19,8 @@
         "username": "admin"
       }
     ],
+    "auth_error_detail": null,
+    "auth_http_status": null,
     "auth_method": null,
     "auth_required": true,
     "check_results": [],

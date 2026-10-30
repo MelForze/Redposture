@@ -16,7 +16,9 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...detection_io import DetectCall, run_sync
+from ...discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
 from ...discovery_rendering import format_discovery_finding_line
+from ...discovery_values import DiskBackedText
 from .discover import (
     DiscoverConfig,
     discover_task_logs,
@@ -872,7 +874,7 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 client,
                 generation,
                 source_ids=getattr(ctx.args, "dagsource", None),
-                max_seconds=float(getattr(ctx.args, "discover_time", None) or 300.0),
+                max_seconds=float(getattr(ctx.args, "discover_time", None) or DEFAULT_DISCOVER_TIME),
                 cancelled=(lambda: bool(getattr(nested_scheduler, "cancelled", False)))
                 if nested_scheduler is not None
                 else None,
@@ -918,8 +920,8 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 sources=getattr(ctx.args, "dagsource", None),
                 all_sources=show_dagsources_requested,
                 source_inventory=source_inventory,
-                max_bytes=int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024)),
-                max_seconds=float(getattr(ctx.args, "discover_time", None) or 300.0),
+                max_bytes=int(getattr(ctx.args, "discover_max_bytes", DEFAULT_DISCOVER_MAX_BYTES)),
+                max_seconds=float(getattr(ctx.args, "discover_time", None) or DEFAULT_DISCOVER_TIME),
                 cancelled=(lambda: bool(getattr(nested_scheduler, "cancelled", False)))
                 if nested_scheduler is not None
                 else None,
@@ -935,8 +937,8 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         return merged
 
     config = DiscoverConfig(
-        max_bytes=int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024)),
-        max_seconds=getattr(ctx.args, "discover_time", None),
+        max_bytes=int(getattr(ctx.args, "discover_max_bytes", UNLIMITED_DISCOVER_BYTES)),
+        max_seconds=float(getattr(ctx.args, "discover_time", None) or DEFAULT_DISCOVER_TIME),
         include_dag_sources=True,
         include_variables=True,
         include_connections=True,
@@ -954,10 +956,17 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             merged["_show_connections_streamed"] = bool(show_connections_requested)
         live_emit([f"AIRFLOW\t{ctx.host}\t{int(ctx.port)}\t [*] Discover Secrets"])
 
-    def _on_finding(finding: dict[str, Any]) -> None:
+    def _on_finding(finding: dict[str, Any]) -> bool:
         if not callable(live_emit):
-            return
-        place = str(finding.get("place") or _legacy_discovery_place(finding))
+            return False
+        place = finding.get("place") or _legacy_discovery_place(finding)
+        value = finding.get("value")
+        if isinstance(value, DiskBackedText):
+            disk_emit = getattr(ctx, "live_discovery_value", None)
+            if not callable(disk_emit):
+                return False
+            disk_emit("AIRFLOW", ctx.host, ctx.port, finding_type=finding.get("type"), value=value, place=place)
+            return True
         live_emit(
             [
                 format_discovery_finding_line(
@@ -966,11 +975,12 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                     ctx.port,
                     severity=finding.get("confidence"),
                     finding_type=finding.get("type"),
-                    value=finding.get("value") or finding.get("masked_value"),
+                    value=value,
                     place=place,
                 )
             ]
         )
+        return True
 
     nested_scheduler = getattr(ctx, "nested_scheduler", None)
     discover_kwargs: dict[str, Any] = {}
@@ -978,6 +988,9 @@ def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         discover_kwargs["cancelled"] = lambda: bool(getattr(nested_scheduler, "cancelled", False))
     if callable(live_emit):
         discover_kwargs["on_finding"] = _on_finding
+    discovery_started_at = getattr(ctx, "discovery_started_at", None)
+    if discovery_started_at is not None:
+        discover_kwargs["started_at"] = discovery_started_at
     report = discover_task_logs(client, generation, config, **discover_kwargs)
     merged["discover_report"] = report
     if callable(live_emit):

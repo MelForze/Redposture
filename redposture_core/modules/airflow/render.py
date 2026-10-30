@@ -15,6 +15,7 @@ from typing import Any
 from ...auth_detection import auth_required_text
 from ...console import Console
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
+from ...discovery_spool import SpoolingFindings
 from ...rendering import (
     BooleanColorRule,
     LiteralColorRule,
@@ -151,7 +152,7 @@ def _format_discover_records(record: dict[str, Any], output_format: str) -> list
     prefix = _prefix(record)
     summary_label = "Discover Complete" if record.get("_discover_findings_streamed") else "Discover Secrets"
     lines: list[str] = []
-    if record.get("_discover_findings_streamed"):
+    if record.get("_discover_findings_streamed") or isinstance(raw_findings, SpoolingFindings):
         findings = []
     for finding in findings:
         if not isinstance(finding, dict):
@@ -164,7 +165,7 @@ def _format_discover_records(record: dict[str, Any], output_format: str) -> list
                 record.get("port"),
                 severity=finding.get("confidence"),
                 finding_type=finding.get("type"),
-                value=finding.get("value") or finding.get("masked_value"),
+                value=finding.get("value"),
                 place=place,
             )
         )

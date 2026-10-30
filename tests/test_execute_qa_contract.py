@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+
+from scripts import run_execute_qa
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "tests/fixtures/execute/docker-compose.yml"
@@ -52,3 +55,37 @@ def test_execute_qa_docs_keep_kafka_broker_and_ui_separate() -> None:
     assert "real single-node Kafka broker" in text
     assert "configured broker" in text
     assert "Docker-in-Docker" in text
+
+
+def test_execute_runner_reports_failed_cleanup(monkeypatch, tmp_path: Path) -> None:
+    def compose(_project, _profile, command, *args, output=None):
+        return subprocess.CompletedProcess([], 1 if command == "down" else 0, "", "cleanup failed")
+
+    monkeypatch.setattr(run_execute_qa, "_compose", compose)
+    monkeypatch.setattr(run_execute_qa, "_wait_http", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(run_execute_qa, "_cli_command", lambda *_args: ["true"])
+    monkeypatch.setattr(run_execute_qa, "_validate_result", lambda *_args: {"execution": {"executed": True}})
+    monkeypatch.setattr(
+        run_execute_qa.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, "", ""),
+    )
+    result = run_execute_qa.run_module("kafka", "qa-test", tmp_path)
+    assert result["status"] == "failed"
+    assert result["cleaned"] is False
+    assert "cleanup" in result["error"]
+
+
+def test_execute_report_never_claims_clean_when_module_cleanup_failed(monkeypatch, tmp_path: Path) -> None:
+    import json
+    import sys
+
+    monkeypatch.setattr(sys, "argv", ["run_execute_qa.py", str(tmp_path), "kafka"])
+    monkeypatch.setattr(
+        run_execute_qa,
+        "run_module",
+        lambda *_args: {"module": "kafka", "status": "failed", "cleaned": False, "error": "cleanup failed"},
+    )
+    assert run_execute_qa.main() == 1
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["cleaned"] is False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -37,6 +38,77 @@ def collect(monkeypatch: pytest.MonkeyPatch, *, size: int, count: int | bool) ->
         return actions.collect_kafka_data(ctx, {"status": "open_no_auth"}, options), dataset
     finally:
         state.close()
+
+
+def test_native_discover_forwards_target_deadline_to_message_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    args = SimpleNamespace(dump=True, max_messages=None, timeout=1, debug=False, discover=True, discover_time=10)
+    options = stage._build_kafka_lifecycle_options(args)
+    state = actions.KafkaLifecycleState(
+        is_kafka=True, auth_required=False, transport_mode="plaintext", anonymous_metadata={"topic_map": {"events": 1}}
+    )
+    started_at = time.monotonic() - 3
+    ctx = SimpleNamespace(
+        host="kafka-fixture.invalid",
+        port=9092,
+        args=args,
+        lifecycle_state=state,
+        credential=AuditCredentialRun(source="anonymous"),
+        discovery_started_at=started_at,
+    )
+    deadlines: list[float | None] = []
+
+    def read(**kwargs: Any) -> tuple[dict[str, list[str]], dict[str, str]]:
+        deadlines.append(kwargs.get("deadline"))
+        return {"events": ["p0@0 harmless"]}, {}
+
+    monkeypatch.setattr(actions, "_read_dump_topics", read)
+    monkeypatch.setattr(actions, "_probe_kafka_acl_state", lambda **_kwargs: ({"events": {"read": True}}, {}))
+    try:
+        record = actions.collect_kafka_data(ctx, {"status": "open_no_auth"}, options)
+    finally:
+        state.close()
+    assert record["dump_results"] == {"events": ["p0@0 harmless"]}
+    assert deadlines == [started_at + 10]
+
+
+@pytest.mark.parametrize(
+    ("read_error", "expected_error"),
+    [
+        ("discover_time", None),
+        ("partial partition failures: p0: discover_time", None),
+        ("byte_budget", None),
+        ("partial partition failures: p0: byte_budget; p1: byte_budget", None),
+        (
+            "partial partition failures: p0: discover_time; p1: access denied",
+            "partial partition failures: p0: discover_time; p1: access denied",
+        ),
+    ],
+)
+def test_native_discover_timeout_is_partial_without_data_stage_error(
+    monkeypatch: pytest.MonkeyPatch, read_error: str, expected_error: str | None
+) -> None:
+    args = SimpleNamespace(dump=True, max_messages=None, timeout=1, debug=False, discover=True, discover_time=0.01)
+    options = stage._build_kafka_lifecycle_options(args)
+    state = actions.KafkaLifecycleState(
+        is_kafka=True, auth_required=False, transport_mode="plaintext", anonymous_metadata={"topic_map": {"events": 1}}
+    )
+    ctx = SimpleNamespace(
+        host="kafka-fixture.invalid",
+        port=9092,
+        args=args,
+        lifecycle_state=state,
+        credential=AuditCredentialRun(source="anonymous"),
+        discovery_started_at=time.monotonic() - 1,
+    )
+    monkeypatch.setattr(actions, "_read_dump_topics", lambda **_kwargs: ({}, {"events": read_error}))
+    monkeypatch.setattr(actions, "_probe_kafka_acl_state", lambda **_kwargs: ({}, {}))
+    try:
+        record = actions.collect_kafka_data(ctx, {"status": "open_no_auth"}, options)
+    finally:
+        state.close()
+    assert record["dump_partial"] is True
+    assert record["dump_errors"] == {"events": read_error}
+    assert record["error"] == expected_error
 
 
 @pytest.mark.parametrize("count", [1, 10, 1205])

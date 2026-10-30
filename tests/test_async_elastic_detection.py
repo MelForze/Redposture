@@ -127,7 +127,9 @@ def test_full_native_record_and_request_parity(monkeypatch, case):
         pin_http_redirect_path(response, method="GET")
         return response
 
-    def sync_request(session, scheme, method, path, headers=None, data=None):
+    def sync_request(session, scheme, method, path, headers=None, data=None, **kwargs):
+        if "response_size_cap" in kwargs:
+            assert 0 < kwargs["response_size_cap"] <= 10 * 1024 * 1024
         url = f"{scheme}://{session._authority(scheme)}{join_http_target_path(path)}"
         return respond(url, headers)
 

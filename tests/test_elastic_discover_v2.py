@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from redposture_core.discovery_values import DiskBackedText
 from redposture_core.modules.elastic import actions as elastic_actions
 from redposture_core.modules.elastic import discover as elastic_discover
 from redposture_core.modules.elastic.discover import (
@@ -16,6 +17,7 @@ from redposture_core.modules.elastic.discover import (
     DiscoverCoverage,
     DiscoverEngine,
     DiscoverOptions,
+    DiscoverReport,
     DiscoverRequest,
     DiscoverResponse,
     DiscoveryBudget,
@@ -54,9 +56,99 @@ def test_elastic_discovery_adapter_forwards_shared_budget(monkeypatch: pytest.Mo
         ca_file=None,
         auth_headers={},
         options=supplied,
+        started_at=42.0,
     )
     assert result is sentinel
     assert captured["options"] is supplied
+    assert captured["started_at"] == 42.0
+
+
+def test_elastic_discovery_adapter_caps_successive_http_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[int, float]] = []
+
+    class Pool:
+        def request(self, _method: str, _url: str, **kwargs: Any) -> Any:
+            assert kwargs.get("retries") == 0
+            cap = int(kwargs["response_size_cap"])
+            calls.append((cap, float(kwargs["timeout"])))
+            return type(
+                "Response",
+                (),
+                {"status": 200, "body": b"x" * min(cap, 60), "headers": {}, "error": None, "truncated": False},
+            )()
+
+    def fake_discovery(requester: Any, **_kwargs: Any) -> Any:
+        first = requester(DiscoverRequest(method="GET", path="/one"))
+        second = requester(DiscoverRequest(method="GET", path="/two"))
+        third = requester(DiscoverRequest(method="GET", path="/three"))
+        return first, second, third
+
+    monkeypatch.setattr(elastic_actions, "run_discovery", fake_discovery)
+    responses: Any = elastic_actions._collect_discover_report(
+        "127.0.0.1",
+        9200,
+        3.0,
+        scheme="http",
+        insecure=False,
+        ca_file=None,
+        auth_headers={},
+        http_pool=Pool(),
+        options=DiscoverOptions(max_source_bytes=100, max_seconds=10.0),
+        started_at=time.monotonic(),
+    )
+    first, second, third = responses
+    assert [cap for cap, _ in calls] == [100, 100, 100]
+    assert all(0 < request_timeout <= 3.0 for _, request_timeout in calls)
+    assert len(first.payload) == len(second.payload) == len(third.payload) == 60
+    assert third.truncated is False
+
+
+def test_elastic_discovery_exposes_one_truncated_response_to_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Pool:
+        def request(self, _method: str, _url: str, **kwargs: Any) -> Any:
+            cap = int(kwargs["response_size_cap"])
+            return type(
+                "Response", (), {"status": 200, "body": b"x" * cap, "headers": {}, "error": None, "truncated": True}
+            )()
+
+    def fake_discovery(requester: Any, **_kwargs: Any) -> DiscoverReport:
+        first = requester(DiscoverRequest(method="GET", path="/one"))
+        assert first.truncated is True
+        coverage = DiscoverCoverage()
+        coverage.mark_truncated("max_source_bytes")
+        return DiscoverReport(findings=[], coverage=coverage, legacy_results=[], error=None)
+
+    monkeypatch.setattr(elastic_actions, "run_discovery", fake_discovery)
+    report = elastic_actions._collect_discover_report(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="http",
+        insecure=False,
+        ca_file=None,
+        auth_headers={},
+        http_pool=Pool(),
+        options=DiscoverOptions(max_source_bytes=100),
+    )
+    assert report.coverage.truncated is True
+    assert "max_source_bytes" in report.coverage.truncated_reasons
+    assert report.error is None
+
+
+def test_elastic_discover_deadline_includes_time_before_collector() -> None:
+    requests: list[DiscoverRequest] = []
+
+    def request(item: DiscoverRequest) -> DiscoverResponse:
+        requests.append(item)
+        return DiscoverResponse(status=200, payload=b"{}")
+
+    report = run_discovery(
+        request,
+        options=DiscoverOptions(max_seconds=0.01),
+        started_at=time.monotonic() - 1,
+    )
+    assert requests == []
+    assert "max_seconds" in report.coverage.truncated_reasons
 
 
 def _walk_strings(value: Any) -> list[str]:
@@ -512,7 +604,21 @@ def test_recursive_scanner_reports_each_traversal_limit() -> None:
         options=options,
     )
 
-    assert {"max_depth", "max_array_items", "max_scalar_bytes"} <= set(result.truncated_reasons)
+    assert {"max_depth", "max_array_items"} <= set(result.truncated_reasons)
+    assert "max_scalar_bytes" not in result.truncated_reasons
+    assert any(item.value == "a-very-long-secret" for item, _location in result.detections)
+
+
+def test_long_scalar_scans_late_token_without_classifying_cut_prefix() -> None:
+    token = "glpat-abcdefghijklmnopqrst"
+    result = scan_value_tree(
+        {"message": "safe " * 30 + token + "\n"},
+        source_kind="document",
+        object_name="logs/late-token",
+        options=DiscoverOptions(max_scalar_bytes=64),
+    )
+    assert any(item.value == token for item, _location in result.detections)
+    assert all(not item.value.startswith("glpat-") or item.value == token for item, _location in result.detections)
 
 
 def test_finding_accumulator_deduplicates_by_secret_and_merges_locations() -> None:
@@ -598,6 +704,200 @@ def test_finding_accumulator_enforces_finding_and_location_caps() -> None:
     assert len(accumulator.findings()[0].locations) == 2
 
 
+def test_finding_accumulator_spills_many_unique_findings_and_keeps_duplicate_merge() -> None:
+    accumulator = FindingAccumulator(max_findings=None, spill_threshold=2)
+    for value in ("a", "b", "c"):
+        assert accumulator.add(
+            DetectedSecret(value, "password", 85, ("field",)),
+            FindingLocation("document", f"logs/{value}", "/password"),
+        )
+    assert accumulator.add(
+        DetectedSecret("a", "password", 95, ("strong",)),
+        FindingLocation("document", "logs/a2", "/password"),
+    )
+    findings = accumulator.findings()
+    assert len(findings) == 3
+    assert [finding.value for finding in findings] == ["a", "b", "c"]
+    assert findings[0].score == 95
+    assert findings[0].occurrence_count == 2
+    assert findings[0].detectors == ["field", "strong"]
+    report = DiscoverReport(findings=findings, coverage=DiscoverCoverage(), legacy_results=[])
+    serialized = report.to_dict()
+    assert len(serialized["discover_findings"]) == 3
+    assert [item["value"] for item in serialized["discover_findings"]] == ["a", "b", "c"]
+    assert [item["value"] for item in json.loads(json.dumps(serialized))["discover_findings"]] == ["a", "b", "c"]
+
+
+def test_default_elastic_discover_has_no_count_cap() -> None:
+    defaults = DiscoverOptions()
+    assert defaults.max_documents is None
+    assert defaults.max_findings is None
+    budget = DiscoveryBudget(defaults)
+    budget.documents = 50_000
+    assert budget.consume_document(1)
+
+
+def test_default_elastic_discover_scans_array_item_after_256() -> None:
+    values = ["ordinary" for _ in range(300)]
+    values[-1] = "glpat-abcdefghijklmnopqrst"
+    result = scan_value_tree(values, source_kind="document", object_name="logs/one", path="/events")
+    assert any(location.path == "/events/299" for _finding, location in result.detections)
+    assert "max_array_items" not in result.truncated_reasons
+
+
+def test_elastic_pit_retries_oversized_page_without_advancing_cursor() -> None:
+    sizes: list[int] = []
+
+    def request(call: DiscoverRequest) -> DiscoverResponse:
+        if call.method == "DELETE":
+            return DiscoverResponse(status=200, payload=b"{}")
+        assert call.body is not None
+        body = json.loads(call.body)
+        sizes.append(body["size"])
+        if body["size"] > 1:
+            return DiscoverResponse(status=200, payload=b"", truncated=True)
+        hits = [] if body.get("search_after") else [{"_index": "logs", "_id": "1", "_source": {}, "sort": [1]}]
+        return DiscoverResponse(status=200, payload=json.dumps({"hits": {"hits": hits}}).encode())
+
+    engine = DiscoverEngine(request, options=DiscoverOptions(page_size=4))
+    assert engine._paginate_pit(
+        "logs", {"query": {"match_all": {}}}, candidate=False, pit_id="pit", payload_complete=True
+    )
+    assert sizes == [4, 2, 1, 1]
+    assert engine.coverage.pages_scanned == 2
+    assert engine.coverage.truncated is False
+
+
+def test_elastic_pit_retries_closed_large_ui_page_without_advancing_cursor() -> None:
+    sizes: list[int] = []
+
+    def request(call: DiscoverRequest) -> DiscoverResponse:
+        if call.method == "DELETE":
+            return DiscoverResponse(status=200, payload=b"{}")
+        assert call.body is not None
+        body = json.loads(call.body)
+        sizes.append(body["size"])
+        if body["size"] > 1:
+            return DiscoverResponse(status=0, payload=b"", error="Remote end closed connection without response")
+        hits = [] if body.get("search_after") else [{"_index": "logs", "_id": "1", "_source": {}, "sort": [1]}]
+        return DiscoverResponse(status=200, payload=json.dumps({"hits": {"hits": hits}}).encode())
+
+    engine = DiscoverEngine(request, options=DiscoverOptions(page_size=4))
+    assert engine._paginate_pit(
+        "logs", {"query": {"match_all": {}}}, candidate=False, pit_id="pit", payload_complete=True
+    )
+    assert sizes == [4, 2, 1, 1]
+    assert engine.coverage.pages_scanned == 2
+    assert engine.coverage.truncated is False
+
+
+def test_elastic_embedded_xml_password_is_found_below_disk_threshold() -> None:
+    value = "qa-dashboard-secret-000-" + "q" * (33_223 - len("qa-dashboard-secret-000-"))
+    result = scan_value_tree(
+        {"message": f"<config><password>{value}</password></config>"},
+        source_kind="document",
+        object_name="qa/one",
+    )
+    assert any(
+        finding.secret_type == "password"
+        and ("".join(finding.value.iter_text_chunks()) if isinstance(finding.value, DiskBackedText) else finding.value)
+        == value
+        and location.path == "/message"
+        for finding, location in result.detections
+    )
+
+
+def test_elastic_scroll_restarts_with_smaller_page_after_truncation() -> None:
+    sizes: list[int] = []
+
+    def request(call: DiscoverRequest) -> DiscoverResponse:
+        if call.method == "DELETE":
+            return DiscoverResponse(status=200, payload=b"{}")
+        if call.path.startswith("/_search/scroll"):
+            return DiscoverResponse(status=200, payload=b'{"_scroll_id":"scroll","hits":{"hits":[]}}')
+        assert call.body is not None
+        body = json.loads(call.body)
+        sizes.append(body["size"])
+        if body["size"] > 1:
+            return DiscoverResponse(status=200, payload=b"", truncated=True)
+        return DiscoverResponse(
+            status=200,
+            payload=b'{"_scroll_id":"scroll","hits":{"hits":[{"_index":"logs","_id":"1","_source":{}}]}}',
+        )
+
+    engine = DiscoverEngine(request, options=DiscoverOptions(page_size=4))
+    assert engine._paginate_scroll("logs", {"query": {"match_all": {}}}, candidate=False, payload_complete=True)
+    assert sizes == [4, 2, 1]
+    assert engine.coverage.pages_scanned == 2
+    assert engine.coverage.truncated is False
+
+
+def test_elastic_scroll_later_oversized_page_restarts_and_deduplicates() -> None:
+    sizes: list[int] = []
+    scroll_reads = 0
+
+    def request(call: DiscoverRequest) -> DiscoverResponse:
+        nonlocal scroll_reads
+        if call.method == "DELETE":
+            return DiscoverResponse(status=200, payload=b"{}")
+        if call.path.startswith("/_search/scroll"):
+            scroll_reads += 1
+            if scroll_reads == 1:
+                return DiscoverResponse(status=200, payload=b"", truncated=True)
+            return DiscoverResponse(status=200, payload=b'{"_scroll_id":"scroll","hits":{"hits":[]}}')
+        assert call.body is not None
+        body = json.loads(call.body)
+        sizes.append(body["size"])
+        return DiscoverResponse(
+            status=200,
+            payload=b'{"_scroll_id":"scroll","hits":{"hits":[{"_index":"logs","_id":"1","_source":{}}]}}',
+        )
+
+    engine = DiscoverEngine(request, options=DiscoverOptions(page_size=4))
+    assert engine._paginate_scroll("logs", {"query": {"match_all": {}}}, candidate=False, payload_complete=True)
+    assert sizes == [4, 2]
+    assert engine.budget.documents == 1
+    assert engine.coverage.duplicate_documents == 1
+    assert engine.coverage.truncated is False
+
+
+def test_elastic_single_page_fallback_shrinks_oversized_response() -> None:
+    sizes: list[int] = []
+
+    def request(call: DiscoverRequest) -> DiscoverResponse:
+        assert call.body is not None
+        size = json.loads(call.body)["size"]
+        sizes.append(size)
+        if size > 1:
+            return DiscoverResponse(status=200, payload=b"", truncated=True)
+        return DiscoverResponse(status=200, payload=b'{"hits":{"hits":[{"_index":"logs","_id":"1","_source":{}}]}}')
+
+    engine = DiscoverEngine(request, options=DiscoverOptions(page_size=4))
+    engine._single_page("logs", {"query": {"match_all": {}}}, candidate=False, payload_complete=True)
+    assert sizes == [4, 2, 1]
+    assert engine.budget.documents == 1
+    assert "search:logs:response_size_cap" not in engine.coverage.truncated_reasons
+
+
+def test_elastic_document_ledger_spill_preserves_duplicate_and_candidate_counts() -> None:
+    ledger = elastic_discover._DocumentLedger(spill_threshold=2)
+    first = ("logs", "one")
+    assert ledger.add_candidate(first)
+    assert not ledger.add_candidate(first)
+    ledger.mark_seen(first, False)
+    ledger.add_payload(first, "payload-one")
+    assert ledger.add_missing(first)
+    ledger.mark_seen(("logs", "two"), True)
+    ledger.mark_seen(("logs", "three"), True)
+    assert ledger.seen(first) is False
+    assert ledger.has_payload(first, "payload-one")
+    assert not ledger.add_missing(first)
+    assert ledger.add_candidate(("logs", "four"))
+    assert ledger.candidate_count("logs") == 2
+    ledger.mark_seen(first, True)
+    assert ledger.seen(first) is True
+
+
 def test_discovery_budget_stops_before_exceeding_document_and_byte_limits() -> None:
     document_budget = DiscoveryBudget(DiscoverOptions(max_documents=2, max_source_bytes=100, max_seconds=300))
 
@@ -611,9 +911,11 @@ def test_discovery_budget_stops_before_exceeding_document_and_byte_limits() -> N
 
     byte_budget = DiscoveryBudget(DiscoverOptions(max_documents=10, max_source_bytes=10, max_seconds=300))
     assert byte_budget.consume_document(10)
-    assert byte_budget.consume_document(1) is False
-    assert byte_budget.documents == 1
-    assert byte_budget.source_bytes == 10
+    assert byte_budget.consume_document(1) is True
+    assert byte_budget.documents == 2
+    assert byte_budget.source_bytes == 11
+    assert byte_budget.reasons == []
+    assert byte_budget.consume_document(11) is False
     assert byte_budget.reasons == ["max_source_bytes"]
 
 

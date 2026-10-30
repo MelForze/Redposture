@@ -7,7 +7,7 @@ import tomlkit
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-from redposture_core.module_registry import AUDIT_MODULE_NAMES
+from redposture_core.module_registry import AUDIT_MODULE_NAMES, EXPORTERS_ACTION_SPECS_BY_NAME
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_FILES = (
@@ -110,7 +110,7 @@ def test_release_smoke_checks_every_installed_cli_surface() -> None:
     listed = set(command_loop.partition("for command in ")[2].partition("; do")[0].split())
 
     assert listed == set(AUDIT_MODULE_NAMES)
-    for action in ("scan", "collect", "trigger"):
+    for action in EXPORTERS_ACTION_SPECS_BY_NAME:
         assert f"redposture exporters {action} -h" in workflow
 
 

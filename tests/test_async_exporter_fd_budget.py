@@ -75,8 +75,10 @@ def _client() -> None:
                 if fields.get("error") and len(errors) < 5:
                     errors.append(str(fields["error"]))
 
-        # 10k deliberate repeated attempts over 600 distinct origins exercise
-        # growth past the pool's 512 idle slots while detection remains busy.
+        # Three attempts over each of 600 distinct origins exercise growth
+        # past the pool's 512 idle slots. Keep this CI corpus below the local
+        # ephemeral-port range so it does not exhaust ports for later tests.
+        total = 1800
         result = collect_exporter_debug_data(
             Log(),
             [],
@@ -87,15 +89,15 @@ def _client() -> None:
             collect_exporters=exporters,
             collect_debug_endpoints=("/debug/vars",),
             adaptive_collect=False,
-            scan_work_items=(("127.0.0.1", ports[i % 600], "http") for i in range(10000)),
-            scan_work_items_count=10000,
+            scan_work_items=(("127.0.0.1", ports[i % 600], "http") for i in range(total)),
+            scan_work_items_count=total,
             discovery_exporters=exporters,
             stats_sink=stats,
             emit_line=lambda _: None,
         )
         print(json.dumps({"result": result, "stats": stats, "errors": errors}), flush=True)
-        assert result == (10000, 10000)
-        assert stats["discovery_checks"] == stats["discovery_found"] == 10000
+        assert result == (total, total)
+        assert stats["discovery_checks"] == stats["discovery_found"] == total
         assert stats["discovery_errors"] == 0
     finally:
         server.terminate()

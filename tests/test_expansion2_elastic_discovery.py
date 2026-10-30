@@ -159,6 +159,37 @@ def test_search_partial_responses_keep_confirmed_secrets_and_explain_incompleten
     assert any(request.method == "DELETE" and request.path == "/_pit" for request in api.requests)
 
 
+@pytest.mark.parametrize("mode", ["scroll", "single"])
+def test_truncated_search_evidence_survives_an_empty_smaller_page(mode: str) -> None:
+    api = DiscoveryAPI()
+    calls = 0
+
+    def search(_request: DiscoverRequest) -> DiscoverResponse:
+        nonlocal calls
+        calls += 1
+        extras = {"_scroll_id": "scroll-1"} if mode == "scroll" else {}
+        if calls > 1:
+            return page([], **extras)
+        response = page(
+            [{"_index": "logs", "_id": "1", "_source": {"password": "partial-evidence"}, "sort": [1]}],
+            **extras,
+        )
+        return DiscoverResponse(response.status, response.payload, truncated=True)
+
+    api.search = search
+
+    def requester(request: DiscoverRequest) -> DiscoverResponse:
+        if "/_pit?" in request.path:
+            return reply({}, 404)
+        if mode == "single" and "scroll=" in request.path:
+            return reply({}, 404)
+        return api(request)
+
+    report = DiscoverEngine(requester).run()
+    assert [finding.value for finding in report.findings] == ["partial-evidence"]
+    assert "search:logs:response_size_cap" in report.coverage.truncated_reasons
+
+
 @pytest.mark.parametrize("sort_values", [[None], [[1], [1]]], ids=["missing-sort", "repeated-sort"])
 def test_unstable_pagination_stops_without_replaying_or_discarding_findings(sort_values: list[Any]) -> None:
     api = DiscoveryAPI()
@@ -281,7 +312,7 @@ def test_independent_configuration_failure_does_not_suppress_other_surface_findi
 
 
 @pytest.mark.parametrize("limit", ["findings", "locations", "scalar"])
-def test_configuration_limits_are_visible_and_do_not_claim_complete_coverage(limit: str) -> None:
+def test_configuration_limits_are_visible_without_clipping_materialized_values(limit: str) -> None:
     api = DiscoveryAPI()
     api.inventory = {"indices": []}
     api.remote["/_cluster/settings"] = {"persistent": {"password": "first-configuration-value"}}
@@ -295,7 +326,7 @@ def test_configuration_limits_are_visible_and_do_not_claim_complete_coverage(lim
         "scalar": DiscoverOptions(max_scalar_bytes=8),
     }[limit]
     report = DiscoverEngine(api, options=supplied).run()
-    assert report.coverage.to_dict()["complete"] is False
+    assert report.coverage.to_dict()["complete"] is (limit == "scalar")
     if limit == "findings":
         assert [finding.value for finding in report.findings] == ["first-configuration-value"]
         assert "max_findings" in report.coverage.truncated_reasons
@@ -304,8 +335,26 @@ def test_configuration_limits_are_visible_and_do_not_claim_complete_coverage(lim
         assert report.coverage.locations_dropped == 1
         assert "max_locations" in report.coverage.truncated_reasons
     else:
-        assert report.coverage.surfaces["cluster_settings"].status == "partial"
-        assert "cluster_settings:max_scalar_bytes" in report.coverage.truncated_reasons
+        assert report.coverage.surfaces["cluster_settings"].status == "complete"
+        assert "cluster_settings:max_scalar_bytes" not in report.coverage.truncated_reasons
+        assert {finding.value for finding in report.findings} == {
+            "first-configuration-value",
+            "second-configuration-value",
+        }
+
+
+def test_opensearch_empty_ingest_inventory_404_is_complete_but_other_404_is_not() -> None:
+    def empty_ingest(_request: DiscoverRequest) -> DiscoverResponse:
+        return reply({}, status=404)
+
+    opensearch = DiscoverEngine(empty_ingest, vendor="opensearch")
+    opensearch._scan_remote_surface("ingest_pipelines", "/_ingest/pipeline")
+    assert opensearch.coverage.surfaces["ingest_pipelines"].status == "complete"
+    assert opensearch.coverage.surfaces["ingest_pipelines"].objects_scanned == 1
+
+    unknown = DiscoverEngine(empty_ingest, vendor="compatible")
+    unknown._scan_remote_surface("ingest_pipelines", "/_ingest/pipeline")
+    assert unknown.coverage.surfaces["ingest_pipelines"].status == "unsupported"
 
 
 def test_debug_discovery_renders_bounded_candidates_and_recovery_details_from_real_report() -> None:

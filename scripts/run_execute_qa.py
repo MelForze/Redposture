@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.qa_owned_volumes import guarded_command  # noqa: E402
+
 COMPOSE = ROOT / "tests" / "fixtures" / "execute" / "docker-compose.yml"
 MODULES = ("kafka", "portainer", "jenkins", "consul")
 PORTAINER_BASE = "https://127.0.0.1:19443"
@@ -77,7 +82,20 @@ def _compose(project: str, profile: str, *args: str, output: Path | None = None)
         str(COMPOSE),
         *args,
     ]
-    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    command = guarded_command(command, output.parent if output is not None else ROOT / ".redposture/qa/execute-volumes")
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=600 if args and args[0] == "up" else 180,
+        )
+    except subprocess.TimeoutExpired as exc:
+        result = subprocess.CompletedProcess(
+            command, 124, "", f"compose {args[0] if args else 'command'} timed out: {exc}"
+        )
     if output is not None:
         output.write_text(result.stdout + result.stderr, encoding="utf-8")
     return result
@@ -230,6 +248,7 @@ def run_module(module: str, project: str, out_dir: Path) -> dict[str, Any]:
     module_dir.mkdir(parents=True, exist_ok=True)
     compose_log = module_dir / "compose-up.log"
     result_path = module_dir / "result.jsonl"
+    outcome: dict[str, Any] = {"module": module, "status": "failed", "cleaned": False}
     try:
         result = _compose(project, module, "up", "-d", "--build", "--wait", output=compose_log)
         if result.returncode:
@@ -249,16 +268,29 @@ def run_module(module: str, project: str, out_dir: Path) -> dict[str, Any]:
         if cli.returncode != 0:
             raise RuntimeError(f"CLI exited {cli.returncode}; inspect {module_dir / 'cli.stderr.log'}")
         record = _validate_result(module, result_path)
-        return {"module": module, "status": "passed", "record": record}
+        outcome.update(status="passed", record=record)
     except Exception as exc:  # noqa: BLE001 - report and clean every profile
-        return {"module": module, "status": "failed", "error": str(exc)}
+        outcome["error"] = str(exc)
     finally:
-        logs = _compose(project, module, "logs", "--no-color", output=module_dir / "compose.log")
-        down = _compose(project, module, "down", "-v", "--remove-orphans", output=module_dir / "compose-down.log")
-        if logs.returncode or down.returncode:
-            (module_dir / "cleanup-warning.txt").write_text(
-                f"logs_rc={logs.returncode} down_rc={down.returncode}\n", encoding="utf-8"
-            )
+        cleanup_errors: list[str] = []
+        try:
+            logs = _compose(project, module, "logs", "--no-color", output=module_dir / "compose.log")
+            if logs.returncode:
+                cleanup_errors.append(f"logs_rc={logs.returncode}")
+        except Exception as exc:  # noqa: BLE001 - down must still run
+            cleanup_errors.append(f"logs_error={exc}")
+        try:
+            down = _compose(project, module, "down", "-v", "--remove-orphans", output=module_dir / "compose-down.log")
+            outcome["cleaned"] = down.returncode == 0
+            if down.returncode:
+                cleanup_errors.append(f"down_rc={down.returncode}")
+        except Exception as exc:  # noqa: BLE001 - preserve the original test result
+            cleanup_errors.append(f"down_error={exc}")
+        if cleanup_errors:
+            (module_dir / "cleanup-warning.txt").write_text(" ".join(cleanup_errors) + "\n", encoding="utf-8")
+            outcome["status"] = "failed"
+            outcome["error"] = "; ".join(filter(None, [outcome.get("error"), "cleanup: " + ", ".join(cleanup_errors)]))
+    return outcome
 
 
 def main() -> int:
@@ -272,7 +304,12 @@ def main() -> int:
     modules = MODULES if args.module == "all" else (args.module,)
     project = f"redposture-execute-{os.getpid()}"
     results = [run_module(module, project, args.out_dir) for module in modules]
-    report = {"project": project, "results": results, "sequential": True, "cleaned": True}
+    report = {
+        "project": project,
+        "results": results,
+        "sequential": True,
+        "cleaned": all(item.get("cleaned") for item in results),
+    }
     (args.out_dir / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     for item in results:
         print(f"{item['module']}: {item['status']}")

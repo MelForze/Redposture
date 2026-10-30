@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
 from ...clients.http_api import http_response_requires_https
 from ...detection_steps import DetectionRequests, run_requests
+from ...discovery_json import DiskJSONDocument
+from ...discovery_values import DiskBackedText
+from ...storage_discovery import DiscoveryCollector
 from ..token_api import CAP, ReadBudget, access, bases, json_value, request
 
 _STATUS_PATH = "/v1/submissions/status/redposture-probe"
@@ -16,8 +20,8 @@ _VERSION = r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9][A-Za-z0-9.\-]*)?"
 host_stage = None
 
 
-def _get(ctx: Any, base: str, path: str) -> Any:
-    return request(ctx, base, path, header="Authorization")
+def _get(ctx: Any, base: str, path: str, *, budget: ReadBudget | None = None) -> Any:
+    return request(ctx, base, path, header="Authorization", budget=budget)
 
 
 def _integer(value: Any) -> bool:
@@ -30,7 +34,7 @@ def _text(value: Any) -> bool:
 
 def _worker(value: Any) -> bool:
     return (
-        isinstance(value, dict)
+        isinstance(value, Mapping)
         and all(_text(value.get(key)) for key in ("id", "host", "state"))
         and type(value.get("port")) is int
         and 0 < value["port"] <= 65535
@@ -38,16 +42,27 @@ def _worker(value: Any) -> bool:
     )
 
 
+def _app_name(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value) and not any(ord(char) < 32 for char in value)
+    if isinstance(value, DiskBackedText):
+        if not value.byte_length:
+            return False
+        return all(ord(char) >= 32 for chunk in value.iter_text_chunks() for char in chunk)
+    return False
+
+
 def _app(value: Any) -> bool:
     return (
-        isinstance(value, dict)
-        and all(_text(value.get(key)) for key in ("id", "name", "user", "state"))
+        isinstance(value, Mapping)
+        and all(_text(value.get(key)) for key in ("id", "user", "state"))
+        and _app_name(value.get("name"))
         and _integer(value.get("cores"))
     )
 
 
 def _master(data: Any) -> bool:
-    if not isinstance(data, dict) or not _text(data.get("url")):
+    if not isinstance(data, Mapping) or not _text(data.get("url")):
         return False
     try:
         url = urlsplit(data["url"])
@@ -90,8 +105,71 @@ def _ui_version(response: Any) -> str | None:
     return match.group(1) if match else None
 
 
+def _streamed_master_url(ctx: Any, base: str) -> str | None:
+    pool = getattr(getattr(ctx, "lifecycle_state", None), "http", None)
+    if pool is None or not callable(getattr(pool, "request_stream", None)):
+        return None
+    document = DiskJSONDocument()
+    media_type = ""
+
+    def on_response(_status: int, headers: Mapping[str, str]) -> None:
+        nonlocal media_type
+        media_type = next(
+            (str(value).lower() for key, value in headers.items() if str(key).lower() == "content-type"), ""
+        )
+
+    try:
+        response = pool.request_stream(
+            "GET",
+            base + "/json/",
+            on_chunk=document.feed,
+            on_response=on_response,
+            headers={"Accept": "application/json"},
+            allow_cross_origin_redirects=False,
+        )
+        if response.status != 200 or response.error or response.truncated or "json" not in media_type:
+            return None
+        data = document.finish()
+        return data["url"] if _master(data) else None
+    except (OSError, TimeoutError, UnicodeError, ValueError, RecursionError):
+        return None
+    finally:
+        document.close()
+
+
 def detect_record(ctx: Any) -> dict[str, Any]:
-    return run_requests(detect_requests(ctx), lambda base, path: _get(ctx, base, path))
+    truncated: list[str] = []
+
+    def send(base: str, path: str) -> Any:
+        response = _get(ctx, base, path)
+        if path == "/json/" and response.status == 200 and response.truncated:
+            truncated.append(base)
+        return response
+
+    result = run_requests(detect_requests(ctx), send)
+    if result.get("is_spark"):
+        return result
+    for base in truncated:
+        master_url = _streamed_master_url(ctx, base)
+        if master_url is None:
+            continue
+        ui = _get(ctx, base, "/")
+        return {
+            **result,
+            "is_spark": True,
+            "status": "open_no_auth",
+            "detection_status": "confirmed",
+            "detection_signals": ["spark.master_json"],
+            "surface": "master_ui",
+            "api_endpoint": base,
+            "version": _ui_version(ui),
+            "master_url": master_url,
+            "auth_required": False,
+            "anonymous_access": True,
+            "master_ui_access": "allowed",
+            "rce_potential": False,
+        }
+    return result
 
 
 def detect_requests(ctx: Any) -> DetectionRequests:
@@ -226,13 +304,43 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     discover = bool(getattr(ctx.args, "discover", False))
     result["inventory_requested"] = requested
     if requested or discover:
-        budget = ReadBudget(ctx.args)
+        budget = ReadBudget(ctx.args, started_at=getattr(ctx, "discovery_started_at", None))
         state = "unavailable"
         data = None
+        streamed_discovery: dict[str, Any] | None = None
         error = "Master UI metadata unavailable on submission REST endpoint"
         if prior.get("surface") == "master_ui" and budget.allowed():
-            response = _get(ctx, prior["api_endpoint"], "/json/")
-            consumed = budget.consume(response)
+            response = _get(ctx, prior["api_endpoint"], "/json/", budget=budget)
+            pool = getattr(ctx.lifecycle_state, "http", None)
+            if (
+                discover
+                and response.status == 200
+                and response.truncated
+                and not response.error
+                and callable(getattr(pool, "request_stream", None))
+            ):
+                collector = DiscoveryCollector("spark", ctx, prior)
+                collector.stream_json_scalars(
+                    pool,
+                    prior["api_endpoint"] + "/json/",
+                    "spark_metadata",
+                    headers={"Accept": "application/json"},
+                    timeout=budget.timeout(),
+                    root_kind="object",
+                    exclude=lambda path: not path or path[0] not in {"workers", "activeapps"},
+                    expected_string=(("url",), str(prior.get("master_url") or "")),
+                    required_containers={("workers",): "array", ("activeapps",): "array"},
+                    row_validators={
+                        ("workers",): (
+                            frozenset({"id", "host", "state", "port", "cores", "coresused", "memory", "memoryused"}),
+                            _worker,
+                        ),
+                        ("activeapps",): (frozenset({"id", "name", "user", "state", "cores"}), _app),
+                    },
+                    row_streamed_strings={("activeapps",): frozenset({"name"})},
+                )
+                streamed_discovery = collector.result()
+            consumed = budget.consume(response) if streamed_discovery is None else False
             data = json_value(response) if consumed else None
             state = access(response, _master(data))
             if not consumed:
@@ -246,6 +354,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             )
         valid = state == "allowed"
         partial = not valid or budget.partial
+        discover_partial = partial
         metadata: dict[str, Any] = {}
         for name, key in (("workers", "workers"), ("apps", "activeapps")):
             collection = data[key] if valid and isinstance(data, dict) else []
@@ -263,9 +372,35 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                     result[name + "_error"] = "item limit" if limited else error
         result["inventory_status"] = "partial" if valid and partial else "complete" if valid else "unavailable"
         if discover:
-            result["content_discovery_partial"] = partial
+            if valid and isinstance(data, dict):
+                collector = DiscoveryCollector("spark", ctx, prior)
+                collector.mark_accessible_source()
+                for name, key in (("workers", "workers"), ("apps", "activeapps")):
+                    if not collector.add("spark_metadata." + name, data[key]):
+                        collector.partial("spark_metadata." + name, "discover_time")
+                        break
+                result["content_discovery"] = collector.result()
+                discover_partial |= result["content_discovery"]["status"] != "complete"
+            if streamed_discovery is not None:
+                result["content_discovery"] = streamed_discovery
+                discover_partial = streamed_discovery["status"] != "complete"
+            result["content_discovery_partial"] = discover_partial
+            if budget.reason is not None:
+                result["discovery_budget_reason"] = budget.reason
             if valid:
                 result["spark_metadata"] = metadata
+        if streamed_discovery is not None:
+            result["inventory_status"] = (
+                "partial"
+                if requested and streamed_discovery["status"] == "complete"
+                else "unavailable"
+                if requested
+                else "not_requested"
+            )
+            if requested and streamed_discovery["status"] == "complete":
+                for name in requested:
+                    result[name + "_access"] = "allowed"
+                    result[name + "_error"] = "streamed response; inventory snapshot unavailable"
     if getattr(ctx.args, "probe_submit", False):
         probe = _probe_submit(ctx, prior)
         result["submit_probe"] = probe

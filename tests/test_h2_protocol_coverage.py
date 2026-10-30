@@ -672,9 +672,8 @@ def test_elastic_detect_auth_and_full_data_collection_use_cached_headers(
         },
     )
 
-    # Security-user access is checked once for the compact credential
-    # capability line and once for the explicitly requested users dump.
-    assert len(seen_headers) == 9
+    # Credential capability checks belong to auth; collect reads users once.
+    assert len(seen_headers) == 8
     assert all(headers is cached_headers for headers in seen_headers)
     assert result["access_level"] == "more_than_read"
     assert result["api_key_probe_status"] == "valid"

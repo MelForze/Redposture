@@ -228,8 +228,6 @@ def _run_checks(output: Path, password: str, checks: list[dict[str, Any]]) -> No
                         "--discover",
                         "--discover-time",
                         "30",
-                        "--discover-max-bytes",
-                        "5242880",
                         "--enum-cve",
                     ],
                     output,

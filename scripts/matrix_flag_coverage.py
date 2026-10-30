@@ -32,6 +32,7 @@ _COMMON_EXCLUDED_DESTS: dict[str, str] = {
     "help": "argparse built-in help is covered by CLI smoke tests, not by live lab cases.",
     "hosts": "target string aliases are unit-tested; live matrix uses -t/--targets target values.",
     "hosts_file": "target file ingestion is unit-tested; live matrix keeps targets inline for reproducibility.",
+    "http_headers": "custom headers are covered by shared transport tests and a full Qdrant CLI loopback case; the vendor matrix uses default headers.",
     "log": "log mirroring is unit-tested; matrix already captures stdout/stderr per label.",
     "no_color": "color/no-color rendering is unit-tested; JSON matrix artifacts do not need ANSI controls.",
     "profiles_file": "custom profile file parsing is covered by unit tests; live matrix uses built-in profiles.",
@@ -57,12 +58,6 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "account_interval": "per-account pacing is covered by focused spray tests.",
         "checkpoint": "private journal creation is covered by focused spray tests.",
         "resume": "interrupted-attempt and duplicate-free replay are covered by focused spray tests.",
-    },
-    "exporters scan": {
-        "tls_ca": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",
-        "tls_cert": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",
-        "tls_key": "this matrix has no client-certificate exporter; parser and shared TLS paths are tested separately.",
-        "insecure": "this matrix has no untrusted-certificate exporter; shared transport tests cover verification policy.",
     },
     "exporters collect": {
         "insecure": "verified HTTPS override is covered by parser and shared transport tests; the live exporter matrix uses HTTP.",
@@ -206,6 +201,13 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "execute": "Nexus execute is covered by focused script API regression tests and the isolated execution stand; the regular matrix stays read-only.",
         "execute_timeout": "Nexus execute timeout handling is covered by focused script API regression tests.",
         "execute_max_bytes": "Nexus execute output bounds are covered by focused script API regression tests.",
+    },
+    "proxmox": {
+        "vm": "The sequential API fixture has no running guest; guest selection is covered by focused Proxmox execution tests.",
+        "node": "Guest node selection is covered by focused Proxmox execution tests; the sequential fixture has no running guest.",
+        "execute": "Guest command execution requires a running QEMU or LXC guest and is covered by focused execution tests outside the API matrix.",
+        "execute_timeout": "Guest execution timeout is covered by focused Proxmox execution tests.",
+        "execute_max_bytes": "Guest output bounds are covered by focused Proxmox execution tests.",
     },
 }
 

@@ -14,6 +14,7 @@ import ssl
 from typing import Any, cast
 from urllib.parse import urlsplit
 
+from ..http_headers import merge_custom_http_headers
 from . import transport
 from .http_api import HttpResponse, decode_http_content, normalize_http_error
 from .tls_cache import shared_client_ssl_context
@@ -93,6 +94,7 @@ class AsyncDetectionHttp:
         replay_safe: bool = False,
     ) -> HttpResponse:
         method = method.upper()
+        request_headers = merge_custom_http_headers(headers)
         if method not in {"GET", "HEAD", "POST"}:
             raise AsyncHttpFallback("unsupported detection HTTP method")
         retries = self.retries if method in {"GET", "HEAD"} or replay_safe else 0
@@ -101,8 +103,8 @@ class AsyncDetectionHttp:
             timeout = transport.escalating_timeout(self.timeout, attempt) if self.escalate_timeouts else self.timeout
             try:
                 if method == "GET" and body is None:
-                    return await self._once(url, timeout, headers or {})
-                return await self._once(url, timeout, headers or {}, method=method, body=body)
+                    return await self._once(url, timeout, request_headers)
+                return await self._once(url, timeout, request_headers, method=method, body=body)
             except AsyncHttpFallback:
                 await self.close()
                 raise

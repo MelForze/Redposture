@@ -123,7 +123,7 @@ def configure_minio_parser(
         action="store_true",
         help="Secret discovery: bounded content inspection of candidate objects.",
     )
-    add_discovery_budget_flags(enum, default_time=None, default_bytes=50 * 1024 * 1024)
+    add_discovery_budget_flags(enum)
 
 
 __all__ = ["configure_minio_parser"]

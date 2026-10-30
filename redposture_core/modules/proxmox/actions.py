@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import html
+import inspect
 import json
 import re
 import secrets
@@ -117,16 +118,18 @@ _NON_SECRET_LITERALS = {
 }
 
 _TEXT_SECRET_RE = re.compile(
-    r"(?i)([A-Za-z_][A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|credential))\s*[:=]\s*(?:\"([^\"]{1,512})\"|'([^']{1,512})'|([^\s,;{}\[\]\"']{1,512}))"
+    r"(?i)([A-Za-z_][A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|credential))\s*[:=]\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s,;{}\[\]\"']+))"
 )
-_XML_SECRET_RE = re.compile(r"(?is)<([A-Za-z][\w:.-]{0,79})\b[^>]{0,2048}>([^<>]{4,4096})</\1\s*>")
+_XML_SECRET_RE = re.compile(r"(?is)<([A-Za-z][\w:.-]{0,79})\b[^>]{0,2048}>([^<>]{4,})</\1\s*>")
 _URL_BASIC_AUTH_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]+:([^@\s/]+)@")
 _AUTH_BASIC_RE = re.compile(r"(?i)\bauthorization\s*[:=]\s*basic\s+[A-Za-z0-9+/=]{8,}")
 _AUTH_BEARER_RE = re.compile(r"(?i)\bauthorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/-]{10,}")
-_URI_WITH_AUTH_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]{1,128}:[^@\s/]{4,256}@[^ \t\r\n\"'<>]{1,512}")
+_URI_WITH_AUTH_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]{1,128}:[^@\s/]{4,}@[^ \t\r\n\"'<>]+")
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
 _OPAQUE_TOKEN_RE = re.compile(
-    r"\b(?:glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|ya29\.[A-Za-z0-9._-]{20,}|[A-Fa-f0-9]{32,64})\b"
+    # Unlabelled hex also matches machine IDs and content digests in pvereport.
+    # A labelled hex credential is still captured by _TEXT_SECRET_RE above.
+    r"\b(?:glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|ya29\.[A-Za-z0-9._-]{20,})\b"
 )
 _PVE_VM_CONFIG_PATH_RE = re.compile(r"^/nodes/[^/]+/(?:qemu|lxc)/\d+/config(?:\?.*)?$")
 _PVE_CONFIG_DIGEST_RE = re.compile(r"^[A-Fa-f0-9]{40}$")
@@ -227,6 +230,7 @@ def _proxmox_request_once(
     method: str = "GET",
     form: dict[str, Any] | None = None,
     auth_headers: dict[str, str] | None = None,
+    response_size_cap: int = _MAX_HTTP_BODY_BYTES,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     return run_sync(
         _detect_proxmox_request_once_steps(
@@ -241,6 +245,7 @@ def _proxmox_request_once(
             method=method,
             form=form,
             auth_headers=auth_headers,
+            response_size_cap=response_size_cap,
         )
     )
 
@@ -258,6 +263,7 @@ def _detect_proxmox_request_once_steps(
     method: str = "GET",
     form: dict[str, Any] | None = None,
     auth_headers: dict[str, str] | None = None,
+    response_size_cap: int = _MAX_HTTP_BODY_BYTES,
 ) -> Any:
     request_method = str(method or "GET").upper()
     request_body = urllib.parse.urlencode(form or {}, doseq=True).encode("utf-8") if form else None
@@ -297,7 +303,7 @@ def _detect_proxmox_request_once_steps(
                     "headers": request_headers,
                     "body": request_body,
                     "timeout": timeout,
-                    "response_size_cap": _MAX_HTTP_BODY_BYTES,
+                    "response_size_cap": response_size_cap,
                     "replay_safe": request_method in {"GET", "HEAD"},
                 },
             )
@@ -327,7 +333,7 @@ def _detect_proxmox_request_once_steps(
                 timeout=timeout,
                 insecure=bool(use_https and insecure),
                 proxy=proxy,
-                response_size_cap=_MAX_HTTP_BODY_BYTES,
+                response_size_cap=response_size_cap,
             )
         ).request(
             request_method,
@@ -358,6 +364,7 @@ def _proxmox_request(
     method: str = "GET",
     form: dict[str, Any] | None = None,
     auth_headers: dict[str, str] | None = None,
+    response_size_cap: int = _MAX_HTTP_BODY_BYTES,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     return run_sync(
         _detect_proxmox_request_steps(
@@ -373,6 +380,7 @@ def _proxmox_request(
             method=method,
             form=form,
             auth_headers=auth_headers,
+            response_size_cap=response_size_cap,
         )
     )
 
@@ -391,6 +399,7 @@ def _detect_proxmox_request_steps(
     method: str = "GET",
     form: dict[str, Any] | None = None,
     auth_headers: dict[str, str] | None = None,
+    response_size_cap: int = _MAX_HTTP_BODY_BYTES,
 ) -> Any:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -406,6 +415,7 @@ def _detect_proxmox_request_steps(
                 "method": method,
                 "form": form,
                 "auth_headers": auth_headers,
+                **({"response_size_cap": response_size_cap} if response_size_cap != _MAX_HTTP_BODY_BYTES else {}),
             },
         )
         if error is None:
@@ -429,6 +439,10 @@ def _decode_body_text(payload: bytes) -> str:
 
 
 def _parse_json_payload(payload: bytes) -> Any | None:
+    from .discovery import StreamedPayload
+
+    if isinstance(payload, StreamedPayload):
+        return payload.snapshot
     try:
         return json.loads(_decode_body_text(payload))
     except json.JSONDecodeError:
@@ -563,6 +577,10 @@ def _unwrap_api_data(payload: Any) -> Any:
 
 
 def _collect_nodes(payload: bytes) -> list[str]:
+    from .discovery import StreamedPayload
+
+    if isinstance(payload, StreamedPayload):
+        return payload.ids("node")
     parsed = _parse_json_payload(payload)
     data = _unwrap_api_data(parsed)
     if not isinstance(data, list):
@@ -581,6 +599,10 @@ def _collect_nodes(payload: bytes) -> list[str]:
 
 
 def _collect_vmids(payload: bytes) -> list[str]:
+    from .discovery import StreamedPayload
+
+    if isinstance(payload, StreamedPayload):
+        return payload.ids("vmid")
     parsed = _parse_json_payload(payload)
     data = _unwrap_api_data(parsed)
     if not isinstance(data, list):
@@ -599,6 +621,10 @@ def _collect_vmids(payload: bytes) -> list[str]:
 
 
 def _collect_storage_ids(payload: bytes) -> list[str]:
+    from .discovery import StreamedPayload
+
+    if isinstance(payload, StreamedPayload):
+        return payload.ids("storage")
     parsed = _parse_json_payload(payload)
     data = _unwrap_api_data(parsed)
     if not isinstance(data, list):
@@ -617,6 +643,10 @@ def _collect_storage_ids(payload: bytes) -> list[str]:
 
 
 def _collect_volids(payload: bytes) -> list[str]:
+    from .discovery import StreamedPayload
+
+    if isinstance(payload, StreamedPayload):
+        return payload.ids("volid")
     parsed = _parse_json_payload(payload)
     data = _unwrap_api_data(parsed)
     if not isinstance(data, list):
@@ -635,6 +665,10 @@ def _collect_volids(payload: bytes) -> list[str]:
 
 
 def _collect_user_ids(payload: bytes) -> list[str]:
+    from .discovery import StreamedPayload
+
+    if isinstance(payload, StreamedPayload):
+        return payload.ids("userid") or payload.ids("user")
     parsed = _parse_json_payload(payload)
     data = _unwrap_api_data(parsed)
     if not isinstance(data, list):
@@ -958,15 +992,21 @@ def _looks_like_cloud_init_secret_blob(value: str) -> bool:
 
 def _add_finding(
     findings: list[dict[str, str]],
-    seen: set[tuple[str, str, str, str]],
+    seen: set[tuple[str, str, str]],
     *,
     endpoint: str,
     reason: str,
     path: str,
     sample: str,
 ) -> None:
-    sample_text = _clip(_clean_value_text(sample), 100)
-    key = (endpoint, reason, path, sample_text)
+    cleaned_sample = _clean_value_text(sample)
+    sample_text = cleaned_sample
+    normalized_value = (
+        cleaned_sample.split("=", 1)[1]
+        if reason.startswith(("text_", "xml_")) and "=" in cleaned_sample
+        else cleaned_sample
+    )
+    key = (endpoint, path, normalized_value)
     if key in seen:
         return
     seen.add(key)
@@ -984,7 +1024,7 @@ def _collect_text_findings(
     text: str,
     endpoint: str,
     findings: list[dict[str, str]],
-    seen: set[tuple[str, str, str, str]],
+    seen: set[tuple[str, str, str]],
     *,
     path: str,
     limit: int | None,
@@ -1116,7 +1156,7 @@ def _collect_json_findings(
     payload: Any,
     endpoint: str,
     findings: list[dict[str, str]],
-    seen: set[tuple[str, str, str, str]],
+    seen: set[tuple[str, str, str]],
     *,
     path: str = "$",
 ) -> None:
@@ -1166,7 +1206,7 @@ def _scan_endpoint_payload(
     endpoint: str,
     payload: bytes,
     findings: list[dict[str, str]],
-    seen: set[tuple[str, str, str, str]],
+    seen: set[tuple[str, str, str]],
 ) -> None:
     text = _decode_body_text(payload)
     parsed = _parse_json_payload(payload)
@@ -1177,18 +1217,11 @@ def _scan_endpoint_payload(
             # pmxcfs inserts this SHA1 checksum into every VM/LXC config. Scan
             # the remaining JSON for both text and structured secrets.
             data = {key: value for key, value in data.items() if key != "digest"}
-            text = json.dumps(data, ensure_ascii=False)
-    _collect_text_findings(
-        text,
-        endpoint,
-        findings,
-        seen,
-        path="$text",
-        limit=None,
-    )
-
     if parsed is None:
+        _collect_text_findings(text, endpoint, findings, seen, path="$text", limit=None)
         return
+    if isinstance(data, str):
+        _collect_text_findings(data, endpoint, findings, seen, path="$", limit=None)
     _collect_json_findings(data, endpoint, findings, seen)
 
 
@@ -1222,10 +1255,14 @@ def _audit_proxmox_host(
     _debug_emit: Callable[[str], None] | None = None,
     _discover_time: float | None = None,
     _discover_max_bytes: int | None = None,
+    _discovery_started_at: float | None = None,
 ) -> dict[str, Any]:
-    endpoint_results: list[dict[str, Any]] = []
-    findings: list[dict[str, str]] = []
-    findings_seen: set[tuple[str, str, str, str]] = set()
+    from ...discovery_spool import SpoolingRecords
+    from .discovery import FindingIndex
+
+    endpoint_results: list[dict[str, Any]] = SpoolingRecords() if discover_creds else []
+    findings: list[dict[str, Any]] = SpoolingRecords() if discover_creds else []
+    findings_seen: Any = FindingIndex() if discover_creds else set()
     stream_started = False
     streamed_url_count = 0
     streamed_finding_count = 0
@@ -1234,7 +1271,8 @@ def _audit_proxmox_host(
     requested_grant_path = str(grant_path or "/").strip() or "/"
     result_lock = threading.RLock()
     started = time.monotonic()
-    discover_deadline = started + _discover_time if _discover_time is not None else None
+    discover_started = started if _discovery_started_at is None else _discovery_started_at
+    discover_deadline = discover_started + _discover_time if _discover_time is not None else None
     discover_bytes_scanned = 0
     discover_limit_reason: str | None = None
     if _resolved_auth is None:
@@ -1262,15 +1300,23 @@ def _audit_proxmox_host(
         if not stream_started:
             return
         if discover_creds and on_discovered_url is not None:
-            while streamed_url_count < len(endpoint_results):
-                item = endpoint_results[streamed_url_count]
+            new_endpoints = (
+                endpoint_results.iter_appended(streamed_url_count)
+                if isinstance(endpoint_results, SpoolingRecords)
+                else iter(endpoint_results[streamed_url_count:])
+            )
+            for item in new_endpoints:
                 streamed_url_count += 1
                 path = str(item.get("path") or "").strip()
                 if path.startswith("/"):
                     on_discovered_url(path)
         if discover_creds and on_credential_finding is not None:
-            while streamed_finding_count < len(findings):
-                finding = findings[streamed_finding_count]
+            new_findings = (
+                findings.iter_appended(streamed_finding_count)
+                if isinstance(findings, SpoolingRecords)
+                else iter(findings[streamed_finding_count:])
+            )
+            for finding in new_findings:
                 streamed_finding_count += 1
                 if isinstance(finding, dict):
                     on_credential_finding(finding)
@@ -1289,6 +1335,16 @@ def _audit_proxmox_host(
             "proxy": proxy,
             "auth_headers": auth_headers,
         }
+        request_timeout = timeout
+        if discover_creds and request_method == "GET":
+            if discover_deadline is not None:
+                request_timeout = min(timeout, max(0.001, discover_deadline - time.monotonic()))
+            if _discover_max_bytes is not None:
+                parameters = inspect.signature(_proxmox_request).parameters
+                if "response_size_cap" in parameters or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+                ):
+                    request_kwargs["response_size_cap"] = min(_MAX_HTTP_BODY_BYTES, max(1, _discover_max_bytes))
         if request_method != "GET" or form:
             request_kwargs["method"] = request_method
             request_kwargs["form"] = form
@@ -1297,7 +1353,7 @@ def _audit_proxmox_host(
                 host,
                 port,
                 path,
-                timeout,
+                request_timeout,
                 retries,
                 **request_kwargs,
             )
@@ -1309,9 +1365,36 @@ def _audit_proxmox_host(
                 host,
                 port,
                 path,
-                timeout,
+                request_timeout,
                 retries,
                 **request_kwargs,
+            )
+        stream_pool = _transport_pool or getattr(_THREAD_LOCAL_HTTP, "pool", None)
+        if (
+            discover_creds
+            and request_method == "GET"
+            and status == 200
+            and response_headers.get("x-redposture-truncated") == "true"
+            and callable(getattr(stream_pool, "request_stream", None))
+        ):
+            from .discovery import stream_proxmox_response
+
+            scheme = str(getattr(_origin_state, "scheme", None) or ("https" if use_https else "http"))
+            url = build_http_target_url(
+                str(getattr(_origin_state, "host", None) or host),
+                int(getattr(_origin_state, "port", None) or port),
+                f"{_PROXMOX_API_PREFIX}{path}",
+                default_scheme=scheme,
+                override_bound_scheme=True,
+            )
+            return stream_proxmox_response(
+                stream_pool,
+                url,
+                path,
+                headers={"User-Agent": "RedPosture/1.0", "Accept": "application/json,text/plain,*/*", **auth_headers},
+                timeout=request_timeout,
+                deadline=discover_deadline if discover_deadline is not None else discover_started + 900,
+                on_finding=on_credential_finding if stream_started else None,
             )
         return status, payload, response_headers, error
 
@@ -1324,30 +1407,43 @@ def _audit_proxmox_host(
         response_headers: dict[str, str],
         error: str | None,
     ) -> None:
-        nonlocal discover_bytes_scanned, discover_limit_reason
+        nonlocal discover_bytes_scanned, discover_limit_reason, streamed_finding_count
+        from ...secret_detection import fingerprint
+        from .discovery import StreamedPayload
+
         request_method = str(method or "GET").upper()
         with result_lock:
             endpoint_results.append(
                 {
                     "path": path,
                     "status": status,
-                    "error": error,
+                    "error": error or response_headers.get("x-redposture-discovery-error"),
                     "method": request_method,
                     "truncated": response_headers.get("x-redposture-truncated") == "true",
                 }
             )
             if discover_creds and request_method == "GET" and status == 200 and payload:
-                if discover_deadline is not None and time.monotonic() >= discover_deadline:
-                    discover_limit_reason = "discover_time"
-                elif _discover_max_bytes is not None and discover_bytes_scanned >= _discover_max_bytes:
-                    discover_limit_reason = "discover_max_bytes"
-                elif discover_limit_reason is None:
-                    remaining = (
-                        _discover_max_bytes - discover_bytes_scanned
-                        if _discover_max_bytes is not None
-                        else len(payload)
+                if isinstance(payload, StreamedPayload):
+                    discover_bytes_scanned += payload.bytes_read
+                    for finding in payload.findings:
+                        identity = (path, finding["path"], fingerprint(finding["sample"]))
+                        if identity not in findings_seen:
+                            findings_seen.add(identity)
+                            findings.append(dict(finding))
+                    if stream_started and on_credential_finding is not None:
+                        streamed_finding_count = len(findings)
+                    if any("discover_time" in reason for reason in payload.partial_reasons):
+                        discover_limit_reason = "discover_time"
+                elif response_headers.get("x-redposture-truncated") == "true":
+                    discover_limit_reason = (
+                        "discover_max_bytes"
+                        if _discover_max_bytes is not None and _discover_max_bytes <= _MAX_HTTP_BODY_BYTES
+                        else "response_truncated"
                     )
-                    inspected = payload[:remaining]
+                elif discover_deadline is not None and time.monotonic() >= discover_deadline:
+                    discover_limit_reason = "discover_time"
+                elif discover_limit_reason is None:
+                    inspected = payload[:_discover_max_bytes] if _discover_max_bytes is not None else payload
                     discover_bytes_scanned += len(inspected)
                     _scan_endpoint_payload(path, inspected, findings, findings_seen)
                     if len(payload) > len(inspected):
@@ -1360,6 +1456,12 @@ def _audit_proxmox_host(
         method: str = "GET",
         form: dict[str, Any] | None = None,
     ) -> tuple[int, bytes, str | None]:
+        nonlocal discover_limit_reason
+        if discover_creds and method == "GET":
+            if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                discover_limit_reason = "discover_time"
+            if discover_limit_reason is not None:
+                return 0, b"", "discover budget reached"
         status, payload, response_headers, error = perform_request(path, method=method, form=form)
         record_response(
             path,
@@ -1371,10 +1473,8 @@ def _audit_proxmox_host(
         )
         return status, payload, error
 
-    def fetch_paths(paths: Iterable[str]) -> list[tuple[str, tuple[int, bytes, str | None]]]:
-        path_list = list(dict.fromkeys(paths))
-        if not path_list:
-            return []
+    def fetch_paths(paths: Iterable[str]) -> Iterable[tuple[str, tuple[int, bytes, str | None]]]:
+        from ...discovery_frontier import DiscoveryFrontier
 
         def fetch_nested(path: str) -> tuple[int, bytes, dict[str, str], str | None]:
             nonlocal discover_limit_reason
@@ -1386,69 +1486,79 @@ def _audit_proxmox_host(
                 ):
                     discover_limit_reason = discover_limit_reason or "discover_time"
                     return 0, b"", {}, "discover budget reached"
-                if _discover_max_bytes is not None and discover_bytes_scanned >= _discover_max_bytes:
-                    discover_limit_reason = "discover_max_bytes"
-                    return 0, b"", {}, "discover budget reached"
             if _transport_pool is not None:
                 activate_proxmox_transport(_transport_pool, _origin_state)
             try:
-                if bool(getattr(_nested_scheduler, "cancelled", False)):
-                    raise NestedSchedulerCancelled("Proxmox discovery cancelled")
                 return perform_request(path)
             finally:
                 if _transport_pool is not None:
                     activate_proxmox_transport(None, None)
 
-        raw_results: dict[str, tuple[int, bytes, dict[str, str], str | None]] = {}
-
-        def accept(path: str, value: tuple[int, bytes, dict[str, str], str | None]) -> None:
+        def accept(path: str, value: tuple[int, bytes, dict[str, str], str | None]) -> tuple[int, bytes, str | None]:
             status, payload, response_headers, error = value
-            raw_results[path] = value
             if error != "discover budget reached":
                 record_response(
-                    path,
-                    method="GET",
-                    status=status,
-                    payload=payload,
-                    response_headers=response_headers,
-                    error=error,
+                    path, method="GET", status=status, payload=payload, response_headers=response_headers, error=error
                 )
+            return status, payload, error
 
-        if _nested_scheduler is None:
-            for path in path_list:
-                accept(path, fetch_nested(path))
-        else:
-            path_indices = {path: index for index, path in enumerate(path_list)}
-            pending: dict[int, tuple[str, tuple[int, bytes, dict[str, str], str | None]]] = {}
-            next_index = 0
-            for completed_path, value in _nested_scheduler.iter_completed(
-                path_list,
-                fetch_nested,
-                key=("proxmox-discover", host, port),
-                per_key_limit=8,
-            ):
-                pending[path_indices[completed_path]] = (completed_path, value)
-                while next_index in pending:
-                    ordered_path, ordered_value = pending.pop(next_index)
-                    accept(ordered_path, ordered_value)
-                    next_index += 1
-        ordered: list[tuple[str, tuple[int, bytes, str | None]]] = []
-        for path in path_list:
-            status, payload, response_headers, error = raw_results[path]
-            ordered.append((path, (status, payload, error)))
-        return ordered
+        with DiscoveryFrontier() as requested:
+
+            def unique_paths() -> Iterable[str]:
+                for path in paths:
+                    if requested.claim(path):
+                        yield path
+
+            if _nested_scheduler is None or (discover_creds and _discover_max_bytes is not None):
+                for path in unique_paths():
+                    yield path, accept(path, fetch_nested(path))
+            else:
+                from itertools import islice
+
+                iterator = iter(unique_paths())
+                while window := list(islice(iterator, 8)):
+                    completed = dict(
+                        _nested_scheduler.iter_completed(
+                            window,
+                            fetch_nested,
+                            key=("proxmox-discover", host, port),
+                            per_key_limit=8,
+                        )
+                    )
+                    for path in window:
+                        yield path, accept(path, completed[path])
 
     def attach_completeness(result: dict[str, Any]) -> dict[str, Any]:
         truncated_count = sum(bool(item.get("truncated")) for item in endpoint_results)
+        denied_count = (
+            sum(
+                item.get("method") == "GET"
+                and not str(item.get("path") or "").startswith("/access")
+                and (
+                    item.get("status") in {401, 403, 408, 429}
+                    or (isinstance(item.get("status"), int) and item["status"] >= 500 and item["status"] != 501)
+                    or bool(item.get("error"))
+                )
+                for item in endpoint_results
+            )
+            if discover_creds
+            else 0
+        )
         result["responses_truncated"] = truncated_count
         result["discover_bytes_scanned"] = discover_bytes_scanned
-        result["partial"] = truncated_count > 0 or discover_limit_reason is not None
+        result["partial"] = truncated_count > 0 or discover_limit_reason is not None or denied_count > 0
         if discover_limit_reason is not None:
             result["partial_error"] = discover_limit_reason
         elif truncated_count:
             result["partial_error"] = f"{truncated_count} endpoint response(s) exceeded the body limit"
+        elif denied_count:
+            result["partial_error"] = f"{denied_count} discovery endpoint(s) denied or unreadable"
         else:
             result["partial_error"] = None
+        if isinstance(findings_seen, FindingIndex):
+            findings_seen.close()
+        if isinstance(findings, SpoolingRecords):
+            findings.finish()
         return result
 
     access_status, access_payload, access_headers, access_error = perform_request("/access")
@@ -1758,9 +1868,9 @@ def _audit_proxmox_host(
     stream_started = True
     flush_stream_buffers()
 
-    discover_creds_crawl = discover_creds and (
-        cap_read is not False or cap_modify is not False or cap_backup is not False
-    )
+    # Root-level capabilities cannot rule out permissions granted on a node
+    # or individual VM. Let the API's filtered /nodes response decide scope.
+    discover_creds_crawl = discover_creds
 
     nodes: list[str] = []
     nodes_error: str | None = None
@@ -1778,55 +1888,66 @@ def _audit_proxmox_host(
     if discover_creds_crawl:
         if _debug_emit is not None:
             nested_budget = int(getattr(_nested_scheduler, "max_workers", 1) or 1)
-            _debug_emit(f"{host}:{port} proxmox discover workers={min(8, nested_budget)}")
+            discover_workers = 1 if _discover_max_bytes is not None else min(8, nested_budget)
+            _debug_emit(f"{host}:{port} proxmox discover workers={discover_workers}")
 
-        node_ids = [urllib.parse.quote(node, safe="") for node in nodes]
-        root_paths = [
-            f"/nodes/{node_id}/{suffix}"
-            for node_id in node_ids
-            for suffix in ("syslog", "report", "tasks", "qemu", "lxc", "storage")
-        ]
-        root_results = dict(fetch_paths(root_paths))
+        from itertools import islice
 
-        detail_paths: list[str] = []
-        storage_bases: list[str] = []
-        for node_id in node_ids:
-            qemu_status, qemu_payload, _error = root_results.get(f"/nodes/{node_id}/qemu", (0, b"", None))
-            if qemu_status == 200:
-                detail_paths.extend(
-                    f"/nodes/{node_id}/qemu/{urllib.parse.quote(vmid, safe='')}/config"
-                    for vmid in _collect_vmids(qemu_payload)
+        from ...discovery_frontier import DiscoveryFrontier
+
+        def node_groups() -> Iterable[list[str]]:
+            iterator = iter(nodes)
+            while group := list(islice(iterator, 2)):
+                yield group
+
+        for group in node_groups():
+            root_results = dict(
+                fetch_paths(
+                    f"/nodes/{urllib.parse.quote(node, safe='')}/{suffix}"
+                    for node in group
+                    for suffix in ("syslog", "report", "tasks", "qemu", "lxc", "storage")
                 )
-            lxc_status, lxc_payload, _error = root_results.get(f"/nodes/{node_id}/lxc", (0, b"", None))
-            if lxc_status == 200:
-                detail_paths.extend(
-                    f"/nodes/{node_id}/lxc/{urllib.parse.quote(vmid, safe='')}/config"
-                    for vmid in _collect_vmids(lxc_payload)
-                )
-            storage_status, storage_payload, _error = root_results.get(f"/nodes/{node_id}/storage", (0, b"", None))
-            if storage_status == 200:
-                storage_bases.extend(
-                    f"/nodes/{node_id}/storage/{urllib.parse.quote(storage_id, safe='')}"
-                    for storage_id in _collect_storage_ids(storage_payload)
-                )
+            )
+            for node in group:
+                node_id = urllib.parse.quote(node, safe="")
 
-        content_paths = [
-            path for base in storage_bases for path in (f"{base}/content", f"{base}/content?content=backup")
-        ]
-        content_results = dict(fetch_paths([*detail_paths, *content_paths]))
-        volume_paths: list[str] = []
-        for base in storage_bases:
-            volids: list[str] = []
-            for content_path in (f"{base}/content", f"{base}/content?content=backup"):
-                content_status, content_payload, _error = content_results.get(content_path, (0, b"", None))
-                if content_status == 200:
-                    volids.extend(_collect_volids(content_payload))
-            for volid in dict.fromkeys(volids):
-                volume_paths.append(f"{base}/content/{urllib.parse.quote(volid, safe='')}")
-                query = urllib.parse.urlencode({"volumeid": volid})
-                volume_paths.append(f"{base}/download?{query}")
+                def configurations(
+                    node_id: str, root_results: dict[str, tuple[int, bytes, str | None]]
+                ) -> Iterable[str]:
+                    for kind in ("qemu", "lxc"):
+                        status, payload, _error = root_results.get(f"/nodes/{node_id}/{kind}", (0, b"", None))
+                        if status == 200:
+                            for vmid in _collect_vmids(payload):
+                                yield f"/nodes/{node_id}/{kind}/{urllib.parse.quote(vmid, safe='')}/config"
 
-        fetch_paths([*volume_paths, "/sdn", "/cluster/backup"])
+                for _path, _value in fetch_paths(configurations(node_id, root_results)):
+                    pass
+                storage_status, storage_payload, _error = root_results.get(f"/nodes/{node_id}/storage", (0, b"", None))
+                if storage_status != 200:
+                    continue
+                for storage_id in _collect_storage_ids(storage_payload):
+                    base = f"/nodes/{node_id}/storage/{urllib.parse.quote(storage_id, safe='')}"
+                    content_results = dict(fetch_paths((f"{base}/content", f"{base}/content?content=backup")))
+                    with DiscoveryFrontier() as volumes:
+
+                        def volume_paths(
+                            base: str,
+                            content_results: dict[str, tuple[int, bytes, str | None]],
+                            volumes: DiscoveryFrontier,
+                        ) -> Iterable[str]:
+                            for content_status, content_payload, _error in content_results.values():
+                                if content_status != 200:
+                                    continue
+                                for volid in _collect_volids(content_payload):
+                                    if not volumes.claim(volid):
+                                        continue
+                                    yield f"{base}/content/{urllib.parse.quote(volid, safe='')}"
+                                    yield f"{base}/download?{urllib.parse.urlencode({'volumeid': volid})}"
+
+                        for _path, _value in fetch_paths(volume_paths(base, content_results, volumes)):
+                            pass
+        for _path, _value in fetch_paths(("/sdn", "/cluster/backup")):
+            pass
 
     successful_endpoints = sum(1 for item in endpoint_results if int(item.get("status") or 0) == 200)
     result = {
@@ -1993,6 +2114,8 @@ def _format_partial_detail_records(record: dict[str, Any], output_format: str) -
 
 
 def _format_findings_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format == "txt" and record.get("_proxmox_views_streamed"):
+        return []
     if output_format == "txt" and record.get("_discover_findings_streamed"):
         return []
     findings = record.get("findings")
@@ -2033,7 +2156,7 @@ def _format_findings_detail_records(record: dict[str, Any], output_format: str) 
 def _format_single_finding_detail_line(record: dict[str, Any], finding: dict[str, Any]) -> str:
     reason = str(finding.get("reason") or "credential")
     path = _clip(str(finding.get("path") or "-"), 100)
-    sample = _clip(str(finding.get("sample") or "-"), 100)
+    sample = str(finding.get("sample") or "-")
     endpoint = _clip(str(finding.get("endpoint") or "-"), 100)
     normalized_reason = reason.lower()
     if "password" in normalized_reason or "passwd" in normalized_reason:
@@ -2074,6 +2197,8 @@ def _credential_finding_endpoints(record: dict[str, Any]) -> set[str]:
 def _format_discovered_urls_detail_records(
     record: dict[str, Any], output_format: str, *, include_all_urls: bool = False
 ) -> list[str]:
+    if output_format == "txt" and record.get("_proxmox_views_streamed"):
+        return []
     if output_format != "txt":
         return []
     if not bool(record.get("discover_creds")):
@@ -2140,6 +2265,8 @@ def _format_discovered_urls_detail_records(
 
 
 def _format_nodes_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format == "txt" and record.get("_proxmox_views_streamed"):
+        return []
     if not bool(record.get("show_nodes")):
         return []
 
@@ -2177,6 +2304,8 @@ def _format_nodes_detail_records(record: dict[str, Any], output_format: str) -> 
 
 
 def _format_users_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format == "txt" and record.get("_proxmox_views_streamed"):
+        return []
     if not bool(record.get("show_users")):
         return []
 
@@ -2275,6 +2404,21 @@ def _format_add_user_detail_records(record: dict[str, Any], output_format: str) 
 def _render_colored_proxmox_line(console: Console, line: str) -> bool:
     def _extra_spans(marker: str, payload: str) -> list[tuple[int, int, str]]:
         spans = discovery_color_spans(marker, payload)
+        if marker == "[+]" and payload.startswith("token accepted"):
+            spans.append((0, len("token accepted"), "true_red"))
+        if marker == "[*]" and payload.startswith(("http://", "https://")):
+            spans.append((0, len(payload), "orange"))
+        if marker == "[*]" and payload.startswith("VM="):
+            spans.extend(
+                (match.start(), match.end(), "orange") for match in re.finditer(r"\b(?:VM|Name)=[^\s()]+", payload)
+            )
+            spans.extend(
+                (match.start(1), match.end(1), "orange")
+                for match in re.finditer(r"\((type:[^)]*|node:[^)]*|status:[^)]*)\)", payload)
+            )
+        if "(reason:" in payload:
+            start = payload.index("(reason:") + 8
+            spans.append((start, len(payload) - 1, "orange"))
         if "credential verification unavailable" in payload:
             spans.append((payload.index("unavailable"), payload.index("unavailable") + len("unavailable"), "orange"))
             reason = re.search(r"\(reason:([^)]*)\)", payload)
@@ -2288,10 +2432,31 @@ def _render_colored_proxmox_line(console: Console, line: str) -> bool:
         tag="PROXMOX",
         include_auth_required=False,
         booleans=(
+            BooleanColorRule(
+                "auth required", true_color="bright_green", false_color="true_red", unknown_color="orange"
+            ),
             BooleanColorRule("adduser", unknown_color="orange"),
             BooleanColorRule("modify", unknown_color="orange"),
             BooleanColorRule("backup", unknown_color="orange"),
             BooleanColorRule("read", unknown_color="orange"),
+            BooleanColorRule(
+                "execute",
+                false_color="orange"
+                if any(
+                    reason in line.lower()
+                    for reason in (
+                        "timed out",
+                        "deadline",
+                        "unconfirmed",
+                        "not confirmed",
+                        "invalid",
+                        "incomplete",
+                        "control marker",
+                    )
+                )
+                else "bright_green",
+                unknown_color="orange",
+            ),
         ),
         counts=(CountColorRule("Count", "true_red", unknown_color="orange", zero_color="bright_green"),),
         extra_spans=_extra_spans,

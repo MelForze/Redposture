@@ -24,7 +24,7 @@ def test_module_registry_contains_core_commands_and_exporter_actions() -> None:
     assert COMMAND_POSTGRES in COMMAND_SPECS_BY_NAME
     assert COMMAND_DOCKER in COMMAND_SPECS_BY_NAME
     assert COMMAND_ORACLE in COMMAND_SPECS_BY_NAME
-    assert set(EXPORTERS_ACTION_SPECS_BY_NAME) == {"scan", "collect", "trigger"}
+    assert set(EXPORTERS_ACTION_SPECS_BY_NAME) == {"collect", "trigger"}
 
 
 def test_module_registry_specs_have_parser_and_runner_contract() -> None:

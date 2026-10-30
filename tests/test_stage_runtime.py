@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from redposture_core import storage_discovery as storage
 from redposture_core.cli_args import parse_args
 from redposture_core.console import Console
+from redposture_core.discovery_spool import SpoolingFindings, SpoolingStrings
+from redposture_core.discovery_values import DiskBackedText
 from redposture_core.stage_runtime import (
     AuditCommandPlan,
     AuditCommandResult,
@@ -1071,6 +1075,429 @@ def test_line_output_sink_emit_stream_file_streams_in_bounded_batches(tmp_path) 
 def test_line_output_sink_emit_stream_file_missing_path_is_noop() -> None:
     sink = LineOutputSink(None, lambda _line: None)
     assert sink.emit_stream_file("/nonexistent/redposture-stream.txt") == 0
+
+
+def test_line_output_sink_emits_json_chunks_as_one_record(tmp_path, capsys) -> None:
+    output_path = tmp_path / "findings.jsonl"
+    sink = LineOutputSink(str(output_path), lambda _line: None)
+    sink.emit_json_chunks(iter(['{"findings":[', '"one","two"', "]}"]))
+    sink.close()
+    assert output_path.read_text(encoding="utf-8") == '{"findings":["one","two"]}\n'
+    assert capsys.readouterr().out == '{"findings":["one","two"]}\n'
+
+
+@pytest.mark.parametrize("spooled", [False, True])
+def test_runtime_json_streams_full_disk_backed_discovery_value(tmp_path, capsys, spooled: bool) -> None:
+    expected = "glpat-" + "x" * 1_200_000
+    with DiskBackedText(directory=tmp_path) as value:
+        for offset in range(0, len(expected), 4096):
+            value.append_text(expected[offset : offset + 4096])
+        value.finish()
+
+        def detect(ctx):
+            return AuditRecord(
+                host=ctx.host,
+                port=ctx.port,
+                service="gitlab",
+                module="gitlab",
+                status="open_no_auth",
+                extra={"is_gitlab": True, "detection_status": "confirmed", "detection_signals": ["gitlab.probe"]},
+            )
+
+        def data(_ctx, record):
+            finding = {"type": "token", "fingerprint": value.digest, "value": value}
+            findings = [finding]
+            if spooled:
+                findings = SpoolingFindings()
+                findings.add(finding)
+                findings.finish()
+            return AuditRecord.from_mapping(
+                {
+                    **record.to_dict(),
+                    "content_discovery": {"status": "complete", "findings": findings},
+                },
+                module="gitlab",
+            )
+
+        spec = ModuleAuditSpec(
+            module="gitlab", label="GITLAB", default_port=80, detect=detect, data=data, is_detected=lambda _r: True
+        )
+        output = tmp_path / "discover.jsonl"
+        plan = AuditCommandPlan(targets_by_port={80: ("qa",)}, output_path=str(output), output_format="json", workers=1)
+        AuditCommandRunner(args=SimpleNamespace(discover=True), spec=spec, emit_line=lambda _line: None).run_plan(plan)
+        saved = output.read_text(encoding="utf-8")
+        assert saved == capsys.readouterr().out
+        assert json.loads(saved)["content_discovery"]["findings"][0]["value"] == expected
+
+
+@pytest.mark.parametrize("no_color", [False, True])
+def test_runtime_txt_streams_full_disk_backed_discovery_value(tmp_path, capsys, monkeypatch, no_color: bool) -> None:
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    expected = "glpat-" + "x" * 1_200_000
+    with DiskBackedText(directory=tmp_path) as value:
+        for offset in range(0, len(expected), 4096):
+            value.append_text(expected[offset : offset + 4096])
+        value.finish()
+
+        def detect(ctx):
+            return AuditRecord(host=ctx.host, port=ctx.port, service="gitlab", module="gitlab", status="open_no_auth")
+
+        def data(_ctx, record):
+            findings = SpoolingFindings()
+            findings.add({"type": "token", "fingerprint": value.digest, "value": value, "object_path": "$.token"})
+            findings.finish()
+            return AuditRecord.from_mapping(
+                {**record.to_dict(), "content_discovery": {"status": "complete", "findings": findings}},
+                module="gitlab",
+            )
+
+        spec = ModuleAuditSpec(
+            module="gitlab",
+            label="GITLAB",
+            default_port=80,
+            detect=detect,
+            data=data,
+            render=lambda _record: [],
+            is_detected=lambda _r: True,
+        )
+        output = tmp_path / "discover.txt"
+        plan = AuditCommandPlan(targets_by_port={80: ("qa",)}, output_path=str(output), output_format="txt", workers=1)
+        result = AuditCommandRunner(
+            args=SimpleNamespace(discover=True), spec=spec, console=Console(no_color=no_color)
+        ).run_plan(plan)
+        assert isinstance(result.records[0]["content_discovery"]["findings"], SpoolingFindings)
+        saved = output.read_text(encoding="utf-8")
+        displayed = capsys.readouterr().out
+        assert f'Value="{expected}" Place="$.token"' in saved
+        assert expected in re.sub(r"\x1b\[[0-9;]*m", "", displayed)
+        assert "\x1b[" not in saved
+        assert ("\x1b[" in displayed) is not no_color
+
+
+def test_runtime_render_defers_spooled_discovery_lines() -> None:
+    findings = SpoolingFindings()
+    for index in range(3):
+        findings.add(
+            {
+                "type": "token",
+                "fingerprint": f"sha256:{index}",
+                "confidence": "high",
+                "value": "masked",
+                "object_path": f"$.{index}",
+            }
+        )
+    findings.finish()
+    spec = ModuleAuditSpec(
+        module="gitlab",
+        label="GITLAB",
+        default_port=80,
+        render=lambda _record: ["GITLAB\tqa\t80\t [*] GitLab"],
+    )
+    record = AuditRecord(
+        host="qa",
+        port=80,
+        service="gitlab",
+        status="open_no_auth",
+        extra={"content_discovery": {"status": "complete", "source": "anonymous", "findings": findings}},
+    )
+    runner = AuditCommandRunner(args=SimpleNamespace(), spec=spec, emit_line=lambda _line: None)
+    lines = runner._render_record(record, None, "txt", False)
+    assert len(lines) == 2
+    assert "findings:3" in lines[-1]
+
+
+def test_runtime_txt_streams_spooled_findings_before_summary(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(storage, "FINDING_SPOOL_THRESHOLD", 2)
+
+    def detect(ctx):
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            service="gitlab",
+            module="gitlab",
+            status="open_no_auth",
+            extra={"is_gitlab": True, "detection_status": "confirmed", "detection_signals": ["gitlab.probe"]},
+        )
+
+    def data(ctx, record):
+        collector = storage.DiscoveryCollector("gitlab", ctx, record.to_dict())
+        for index in range(3):
+            collector.add(f"object/{index}", f"glpat-{index:020d}")
+        return AuditRecord.from_mapping({**record.to_dict(), "content_discovery": collector.result()}, module="gitlab")
+
+    spec = ModuleAuditSpec(
+        module="gitlab",
+        label="GITLAB",
+        default_port=80,
+        detect=detect,
+        data=data,
+        render=lambda _record: ["GITLAB\tqa\t80\t [*] GitLab"],
+        defer_discovery_findings_until_final=True,
+    )
+    output = tmp_path / "discover.txt"
+    plan = AuditCommandPlan(targets_by_port={80: ("qa",)}, output_path=str(output), output_format="txt", workers=1)
+    result = AuditCommandRunner(args=SimpleNamespace(discover=True), spec=spec, emit_line=lambda _line: None).run_plan(
+        plan
+    )
+    assert result.records and result.records[0].get("content_discovery")
+    lines = output.read_text(encoding="utf-8").splitlines()
+    assert len([line for line in lines if "Token Value=" in line]) == 3
+    assert lines[-1].endswith("(findings:3) (source:anonymous)")
+
+
+def test_runtime_json_streams_spooled_findings_as_one_complete_record(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(storage, "FINDING_SPOOL_THRESHOLD", 2)
+    streamed: list[bool] = []
+    original = LineOutputSink.emit_json_chunks
+
+    def recording_emit(self, chunks):
+        streamed.append(True)
+        return original(self, chunks)
+
+    monkeypatch.setattr(LineOutputSink, "emit_json_chunks", recording_emit)
+
+    def detect(ctx):
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            service="gitlab",
+            module="gitlab",
+            status="open_no_auth",
+            extra={"is_gitlab": True, "detection_status": "confirmed", "detection_signals": ["gitlab.probe"]},
+        )
+
+    def data(ctx, record):
+        collector = storage.DiscoveryCollector("gitlab", ctx, record.to_dict())
+        for index in range(3):
+            collector.add(f"object/{index}", f"glpat-{index:020d}")
+        return AuditRecord.from_mapping({**record.to_dict(), "content_discovery": collector.result()}, module="gitlab")
+
+    spec = ModuleAuditSpec(
+        module="gitlab", label="GITLAB", default_port=80, detect=detect, data=data, render=lambda _record: []
+    )
+    output = tmp_path / "discover.jsonl"
+    plan = AuditCommandPlan(targets_by_port={80: ("qa",)}, output_path=str(output), output_format="json", workers=1)
+    AuditCommandRunner(args=SimpleNamespace(discover=True), spec=spec, emit_line=lambda _line: None).run_plan(plan)
+    assert streamed == [True]
+    saved = output.read_text(encoding="utf-8")
+    assert saved == capsys.readouterr().out
+    payload = json.loads(saved)
+    assert len(payload["content_discovery"]["findings"]) == 3
+    assert "\x1b" not in saved
+
+
+def test_runtime_json_streams_airflow_discover_report_spool(tmp_path, monkeypatch, capsys) -> None:
+    spool = SpoolingFindings()
+    for index in range(3):
+        spool.add(
+            {"type": "token", "fingerprint": f"fp-{index}", "place": f"variable:{index}", "masked_value": "masked"},
+            identity=(f"fp-{index}", f"variable:{index}"),
+        )
+    spool.finish()
+    streamed: list[bool] = []
+    original = LineOutputSink.emit_json_chunks
+
+    def recording_emit(self, chunks):
+        streamed.append(True)
+        return original(self, chunks)
+
+    monkeypatch.setattr(LineOutputSink, "emit_json_chunks", recording_emit)
+
+    def detect(ctx):
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            service="airflow",
+            module="airflow",
+            status="open_no_auth",
+            extra={"is_airflow": True, "detection_status": "confirmed", "detection_signals": ["airflow.probe"]},
+        )
+
+    def data(ctx, record):
+        return AuditRecord.from_mapping(
+            {**record.to_dict(), "discover_report": {"status": "complete", "findings": spool}},
+            module="airflow",
+        )
+
+    spec = ModuleAuditSpec(
+        module="airflow",
+        label="AIRFLOW",
+        default_port=8080,
+        detect=detect,
+        data=data,
+        is_detected=lambda record: record.extra.get("is_airflow") is True,
+    )
+    output = tmp_path / "airflow.jsonl"
+    plan = AuditCommandPlan(targets_by_port={8080: ("qa",)}, output_path=str(output), output_format="json", workers=1)
+    AuditCommandRunner(args=SimpleNamespace(discover=True), spec=spec, emit_line=lambda _line: None).run_plan(plan)
+    assert streamed == [True]
+    saved = output.read_text(encoding="utf-8")
+    assert saved == capsys.readouterr().out
+    assert len(json.loads(saved)["discover_report"]["findings"]) == 3
+
+
+def test_runtime_txt_streams_full_airflow_disk_value(tmp_path, capsys) -> None:
+    expected = "glpat-" + "Ab0" * 400_000
+    with DiskBackedText(directory=tmp_path) as value:
+        for offset in range(0, len(expected), 4096):
+            value.append_text(expected[offset : offset + 4096])
+        value.finish()
+
+        def detect(ctx):
+            return AuditRecord(host=ctx.host, port=ctx.port, service="airflow", module="airflow", status="open_no_auth")
+
+        def data(_ctx, record):
+            findings = SpoolingFindings()
+            findings.add(
+                {
+                    "type": "api_key",
+                    "fingerprint": value.digest,
+                    "value": value,
+                    "place": "dag_source:example$.API_TOKEN",
+                }
+            )
+            return AuditRecord.from_mapping(
+                {**record.to_dict(), "discover_report": {"status": "complete", "findings": findings}},
+                module="airflow",
+            )
+
+        def render(record):
+            if record.extra.get("discover_report"):
+                return ["AIRFLOW\tqa\t8080\t [*] Discover Secrets (status:complete) (findings:1)"]
+            return []
+
+        spec = ModuleAuditSpec(
+            module="airflow",
+            label="AIRFLOW",
+            default_port=8080,
+            detect=detect,
+            data=data,
+            render=render,
+            is_detected=lambda _record: True,
+        )
+        output = tmp_path / "airflow.txt"
+        AuditCommandRunner(args=SimpleNamespace(discover=True), spec=spec, emit_line=lambda _line: None).run_plan(
+            AuditCommandPlan(targets_by_port={8080: ("qa",)}, output_path=str(output), output_format="txt", workers=1)
+        )
+        saved = output.read_text(encoding="utf-8")
+        assert f'Value="{expected}" Place="dag_source:example$.API_TOKEN"' in saved
+        assert saved.find("Value=") < saved.find("Discover Secrets (status:"), saved[:200]
+        assert "\x1b" not in saved
+        assert expected in capsys.readouterr().out
+
+        json_output = tmp_path / "airflow.jsonl"
+        AuditCommandRunner(args=SimpleNamespace(discover=True), spec=spec, emit_line=lambda _line: None).run_plan(
+            AuditCommandPlan(
+                targets_by_port={8080: ("qa",)}, output_path=str(json_output), output_format="json", workers=1
+            )
+        )
+        assert (
+            json.loads(json_output.read_text(encoding="utf-8"))["discover_report"]["findings"][0]["value"] == expected
+        )
+        assert "\x1b" not in json_output.read_text(encoding="utf-8")
+
+
+def test_runtime_txt_and_json_stream_full_elastic_disk_value(tmp_path, capsys) -> None:
+    expected = "secret-" + "Ab0" * 400_000
+    with DiskBackedText(directory=tmp_path) as value:
+        for offset in range(0, len(expected), 4096):
+            value.append_text(expected[offset : offset + 4096])
+        value.finish()
+
+        def detect(ctx):
+            return AuditRecord(host=ctx.host, port=ctx.port, service="elastic", module="elastic", status="open_no_auth")
+
+        def data(_ctx, record):
+            findings = SpoolingFindings()
+            findings.add(
+                {
+                    "fingerprint": value.digest,
+                    "secret_type": "secret",
+                    "value": value,
+                    "locations": [{"source_kind": "document", "object": "logs/one", "path": "/api_token"}],
+                }
+            )
+            return AuditRecord.from_mapping(
+                {**record.to_dict(), "discover_findings": findings, "discover": True}, module="elastic"
+            )
+
+        def render(record):
+            if record.extra.get("discover_findings"):
+                return ["ELASTIC\tqa\t9200\t [*] Discover Complete (status:complete) (findings:1)"]
+            return []
+
+        spec = ModuleAuditSpec(
+            module="elastic",
+            label="ELASTIC",
+            default_port=9200,
+            detect=detect,
+            data=data,
+            render=render,
+            is_detected=lambda _record: True,
+        )
+        output = tmp_path / "elastic.txt"
+        AuditCommandRunner(args=SimpleNamespace(discover=True), spec=spec, emit_line=lambda _line: None).run_plan(
+            AuditCommandPlan(targets_by_port={9200: ("qa",)}, output_path=str(output), output_format="txt", workers=1)
+        )
+        saved = output.read_text(encoding="utf-8")
+        assert f'Value="{expected}" Place="source_kind:document/object:logs/one/path:/api_token"' in saved
+        assert saved.find("Value=") < saved.find("Discover Complete (status:"), saved[:200]
+        assert "\x1b" not in saved
+        assert expected in capsys.readouterr().out
+
+        json_output = tmp_path / "elastic.jsonl"
+        AuditCommandRunner(args=SimpleNamespace(discover=True), spec=spec, emit_line=lambda _line: None).run_plan(
+            AuditCommandPlan(
+                targets_by_port={9200: ("qa",)}, output_path=str(json_output), output_format="json", workers=1
+            )
+        )
+        assert json.loads(json_output.read_text(encoding="utf-8"))["discover_findings"][0]["value"] == expected
+        assert "\x1b" not in json_output.read_text(encoding="utf-8")
+
+
+def test_runtime_json_streams_airflow_name_spool_without_findings(tmp_path, monkeypatch, capsys) -> None:
+    streamed: list[bool] = []
+    original = LineOutputSink.emit_json_chunks
+
+    def recording_emit(self, chunks):
+        streamed.append(True)
+        return original(self, chunks)
+
+    monkeypatch.setattr(LineOutputSink, "emit_json_chunks", recording_emit)
+
+    def detect(ctx):
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            service="airflow",
+            module="airflow",
+            status="open_no_auth",
+            extra={"is_airflow": True, "detection_status": "confirmed"},
+        )
+
+    def data(_ctx, record):
+        names = SpoolingStrings(["a", "b"])
+        names.finish()
+        return AuditRecord.from_mapping(
+            {**record.to_dict(), "discover_report": {"status": "complete", "findings": [], "variable_keys": names}},
+            module="airflow",
+        )
+
+    spec = ModuleAuditSpec(
+        module="airflow",
+        label="AIRFLOW",
+        default_port=8080,
+        detect=detect,
+        data=data,
+        is_detected=lambda record: record.extra.get("is_airflow") is True,
+    )
+    output = tmp_path / "airflow-names.jsonl"
+    plan = AuditCommandPlan(targets_by_port={8080: ("qa",)}, output_path=str(output), output_format="json", workers=1)
+    AuditCommandRunner(args=SimpleNamespace(discover=True), spec=spec, emit_line=lambda _line: None).run_plan(plan)
+    assert streamed == [True]
+    saved = output.read_text(encoding="utf-8")
+    assert saved == capsys.readouterr().out
+    assert json.loads(saved)["discover_report"]["variable_keys"] == ["a", "b"]
 
 
 def test_audit_command_runner_streams_explicit_lifecycle_in_completion_order(tmp_path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,6 +17,8 @@ from redposture_core.data_discovery import (
     project_discovery_output,
     render_discovery,
 )
+from redposture_core.discovery_spool import SpoolingFindings
+from redposture_core.discovery_values import DiskBackedText
 from redposture_core.stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
@@ -25,6 +28,104 @@ from redposture_core.stage_runtime import (
     build_render_plan,
     render_with_plan,
 )
+
+
+def test_record_scanner_spools_large_values_before_many_findings() -> None:
+    expected = [f"real-{index}-" + "q" * 120_000 for index in range(3)]
+    record = {
+        "status": "open_no_auth",
+        "key_value_entries": [
+            {"key": f"service-{index}/password", "value": value} for index, value in enumerate(expected)
+        ],
+    }
+    result = inspect_record("redis", record)
+    assert isinstance(result["findings"], SpoolingFindings)
+    values = [finding["value"] for finding in result["findings"]]
+    assert all(isinstance(value, DiskBackedText) for value in values)
+    assert ["".join(value.iter_text_chunks()) for value in values] == expected
+    assert result["status"] == "complete"
+
+
+@pytest.mark.parametrize("module", ["zookeeper", "keeper"])
+def test_znode_wire_budget_before_first_value_is_partial(module: str) -> None:
+    result = inspect_record(
+        module,
+        {
+            "status": "open_no_auth",
+            "dump_error": "ZooKeeper response exceeds discovery byte budget",
+            "query_znode_dump_error": "ZooKeeper response exceeds discovery byte budget",
+        },
+    )
+    assert result["status"] == "partial"
+    assert "byte_budget" in result["partial_reasons"]
+
+
+def test_strong_field_keeps_full_disk_backed_scalar_and_neutral_field_is_complete(tmp_path) -> None:
+    text = "glpat-" + "Ab0" * 400_000
+    with DiskBackedText(directory=tmp_path) as value:
+        for offset in range(0, len(text), 4096):
+            value.append_text(text[offset : offset + 4096])
+        value.finish()
+        result = inspect_record(
+            "redis",
+            {
+                "status": "open_no_auth",
+                "key_value_entries": [{"key": "app/api_token", "value": value}],
+            },
+        )
+        assert result["status"] == "complete"
+        assert isinstance(result["findings"], SpoolingFindings)
+        restored = result["findings"][0]["value"]
+        assert isinstance(restored, DiskBackedText)
+        assert (restored.byte_length, restored.digest) == (value.byte_length, value.digest)
+        assert "".join(restored.iter_text_chunks()) == text
+
+        neutral = inspect_record(
+            "redis", {"status": "open_no_auth", "key_value_entries": [{"key": "app/note", "value": value}]}
+        )
+        assert neutral["status"] == "complete"
+        assert not neutral["partial_reasons"]
+        assert neutral["findings"] == []
+
+        masked = DiskBackedText(directory=tmp_path)
+        try:
+            masked.append_text("x" * 1_200_000)
+            masked.finish()
+            hidden = inspect_record(
+                "redis", {"status": "open_no_auth", "key_value_entries": [{"key": "app/api_token", "value": masked}]}
+            )
+            assert hidden["status"] == "complete"
+            assert hidden["findings"] == []
+        finally:
+            masked.close()
+
+
+def test_materialized_long_secret_field_spools_complete_unmasked_value() -> None:
+    token = "glpat-" + "Ab0" * 400_000
+    result = inspect_record(
+        "jupyter", {"status": "open_no_auth", "notebook_contents": {"api_token": token}}, max_bytes=1024
+    )
+    assert result["status"] == "complete", result["partial_reasons"]
+    assert isinstance(result["findings"], SpoolingFindings)
+    assert len(result["findings"]) == 1
+    value = result["findings"][0]["value"]
+    assert isinstance(value, DiskBackedText)
+    assert "".join(value.iter_text_chunks()) == token
+
+
+def test_inspect_record_spools_many_distinct_findings(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core import data_discovery
+
+    monkeypatch.setattr(data_discovery, "FINDING_SPOOL_THRESHOLD", 2)
+    record = {
+        "status": "open_no_auth",
+        "key_value_entries": [{"key": f"secret_{index}", "value": f"glpat-{index:020d}"} for index in range(4)],
+    }
+    result = inspect_record("redis", record)
+    assert result["status"] == "complete"
+    assert isinstance(result["findings"], SpoolingFindings)
+    assert len(result["findings"]) == 8
+    assert len(json.loads(json.dumps(result))["findings"]) == 8
 
 
 def test_discovery_flags_are_available_for_new_modules() -> None:
@@ -75,8 +176,41 @@ def test_discover_help_is_in_module_inventory_group(module: str) -> None:
 def test_discovery_requests_only_existing_read_operations() -> None:
     args = SimpleNamespace(command="redis", discover=True, dump=False, show_keys=False)
     prepare_discovery_request(args)
-    assert args.dump == 1000
+    assert args.dump is True
     assert args.show_keys is False
+    assert args._discover_implicit_dump is True
+
+
+def test_qdrant_discovery_does_not_implicitly_skip_collections_after_twenty() -> None:
+    args = SimpleNamespace(command="qdrant", discover=True, dump=False)
+    prepare_discovery_request(args)
+    assert args.dump is True
+
+
+@pytest.mark.parametrize("module", ["etcd", "consul", "zookeeper", "keeper"])
+def test_keyspace_discovery_has_no_silent_thousand_item_limit(module: str) -> None:
+    args = SimpleNamespace(command=module, discover=True, dump=False, show_keys=False)
+    prepare_discovery_request(args)
+    assert args.dump is True
+
+
+def test_kafka_discovery_reads_to_high_watermark_within_budget() -> None:
+    args = SimpleNamespace(command="kafka", discover=True, dump=False)
+    prepare_discovery_request(args)
+    assert args.dump is True
+
+
+def test_mongodb_implicit_discovery_is_budget_driven_not_limited_to_100_documents() -> None:
+    args = SimpleNamespace(command="mongodb", discover=True, dump=False)
+    prepare_discovery_request(args)
+    assert args.dump is True
+    assert args._discover_implicit_dump is True
+
+
+def test_postgres_implicit_discovery_is_budget_driven_not_limited_to_100_rows() -> None:
+    args = SimpleNamespace(command="postgres", discover=True, dump=False)
+    prepare_discovery_request(args)
+    assert args.dump is True
     assert args._discover_implicit_dump is True
 
 
@@ -183,7 +317,7 @@ def test_shared_discovery_detects_token_in_readable_source(module: str) -> None:
     assert result["status"] == "complete"
     assert result["findings"]
     assert len({(item["type"], item["fingerprint"]) for item in result["findings"]}) == len(result["findings"])
-    assert token not in str(result)
+    assert any(item["value"] == token for item in result["findings"])
 
 
 def test_kafka_discover_is_partial_when_message_cap_is_reached() -> None:
@@ -196,6 +330,34 @@ def test_kafka_discover_is_partial_when_message_cap_is_reached() -> None:
     result = inspect_record("kafka", record)
     assert result["status"] == "partial"
     assert "message_limit_reached" in result["partial_reasons"]
+
+
+def test_kafka_wire_budget_reason_is_reported_without_stage_failure() -> None:
+    result = inspect_record(
+        "kafka",
+        {
+            "status": "open_no_auth",
+            "dump_results": {"orders": ["p0@0 ordinary text"]},
+            "dump_errors": {"payments": "partial partition failures: p0: byte_budget"},
+        },
+    )
+    assert result["status"] == "partial"
+    assert "byte_budget" in result["partial_reasons"]
+
+
+def test_kafka_ui_wire_budget_reason_is_reported_as_partial() -> None:
+    result = inspect_record(
+        "kafka",
+        {
+            "status": "open_no_auth",
+            "is_kafka_ui": True,
+            "ui_dump_records": [],
+            "ui_dump_partial": True,
+            "ui_discovery_budget_reason": "byte_budget",
+        },
+    )
+    assert result["status"] == "partial"
+    assert "byte_budget" in result["partial_reasons"]
 
 
 def test_kafka_discover_is_complete_below_message_cap() -> None:
@@ -315,7 +477,7 @@ def test_bare_discover_scans_content_without_exposing_implicit_raw_inventory(
     assert discovery["findings"], module
     projected = project_discovery_output(args, {**record, "content_discovery": discovery})
     assert private_field not in projected
-    assert _SECRET not in str(projected)
+    assert any(item["value"] == _SECRET for item in projected["content_discovery"]["findings"])
     assert projected["content_discovery"]["findings"]
     assert "\x1b[" not in str(projected)
 
@@ -415,7 +577,7 @@ def test_postgres_implicit_dump_hides_derived_row_counts_but_explicit_rows_remai
 
 
 @pytest.mark.parametrize("output_format", ["txt", "json"])
-def test_bare_discover_never_emits_raw_values_in_live_or_saved_output(tmp_path, output_format: str) -> None:
+def test_bare_discover_emits_full_findings_without_implicit_inventory(tmp_path, output_format: str) -> None:
     args = SimpleNamespace(command="redis", discover=True, dump=False, show_keys=False, debug=False)
     prepare_discovery_request(args)
     emitted: list[str] = []
@@ -470,9 +632,9 @@ def test_bare_discover_never_emits_raw_values_in_live_or_saved_output(tmp_path, 
         )
     )
     saved = output_path.read_text(encoding="utf-8")
-    assert _SECRET not in saved
+    assert _SECRET in saved
     assert "\x1b[" not in saved
-    assert _SECRET not in "\n".join(emitted)
+    assert _SECRET in "\n".join(emitted)
     if output_format == "txt":
         assert len([line for line in emitted if "Redis" in line]) == 1
         assert "Discover Secrets" in saved
@@ -494,17 +656,56 @@ def test_secret_key_name_enters_path_and_source_is_anonymous() -> None:
     assert result["source"] == "anonymous"
     assert len(result["findings"]) == 1
     assert "app/password" in result["findings"][0]["object_path"]
-    assert "secretvalue" not in str(result)
+    assert result["findings"][0]["value"] == "secretvalue"
     rendered = render_discovery("redis", {**record, "content_discovery": result})
     assert "Place=" in rendered[0]
     assert "Discover Secrets (status:complete)" in rendered[-1]
 
 
-def test_discovery_budget_marks_partial_without_false_findings() -> None:
+def test_large_placeholder_finishes_without_false_findings() -> None:
     record = {"status": "open_no_auth", "kv_dump_items": [{"key": "safe", "value": "x" * 200}]}
     result = inspect_record("consul", record, max_bytes=20)
-    assert result["status"] == "partial"
+    assert result["status"] == "complete"
     assert result["findings"] == []
+
+
+def test_expired_source_deadline_keeps_already_loaded_finding() -> None:
+    record = {
+        "status": "open_no_auth",
+        "key_value_entries": [{"key": "app/api_token", "value": "glpat-abcdefghijklmnopqrst"}],
+    }
+    result = inspect_record("redis", record, max_seconds=0.01, started_at=time.monotonic() - 0.1)
+    assert result["status"] == "partial"
+    assert "time_budget" in result["partial_reasons"]
+    assert result["findings"]
+
+
+@pytest.mark.parametrize(("elapsed", "expected"), [(400.0, "complete"), (901.0, "partial")])
+def test_default_discovery_deadline_is_fifteen_minutes(elapsed: float, expected: str) -> None:
+    record = {
+        "status": "open_no_auth",
+        "key_value_entries": [{"key": "app/api_token", "value": "glpat-abcdefghijklmnopqrst"}],
+    }
+    result = inspect_record("redis", record, started_at=time.monotonic() - elapsed)
+    assert result["status"] == expected
+    assert ("time_budget" in result["partial_reasons"]) is (expected == "partial")
+    assert result["findings"]
+
+
+def test_redis_denied_key_makes_coverage_partial_without_scanning_error_text() -> None:
+    record = {
+        "status": "valid_credentials",
+        "provided_credentials_ok": True,
+        "key_value_entries": [
+            {"key": "denied:password", "value": None, "error": "NOPERM glpat-abcdefghijklmnopqrst"},
+            {"key": "readable:token", "value": "glpat-zyxwvutsrqponmlkjihg"},
+        ],
+    }
+    result = inspect_record("redis", record)
+    assert result["status"] == "partial"
+    assert "key_read_error" in result["partial_reasons"]
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["object_path"].startswith("$.key_value_entries.readable:token")
 
 
 def test_empty_accessible_discovery_source_is_complete() -> None:
@@ -552,6 +753,43 @@ def test_discovery_denied_sources_with_empty_result_lists_are_unavailable() -> N
     assert "Forbidden" not in line and "\x1b[" not in line
 
 
+def test_kubeapi_discover_budget_before_first_source_is_partial_not_unavailable() -> None:
+    record = {
+        "status": "auth_valid",
+        "secrets": [],
+        "secrets_error": "byte_budget",
+        "secrets_partial": True,
+        "configmaps": [],
+        "configmaps_error": "byte_budget",
+        "configmaps_partial": True,
+    }
+    result = inspect_record(
+        "kubeapi",
+        record,
+    )
+    assert result["status"] == "partial"
+    assert "byte_budget" in result["partial_reasons"]
+    line = render_discovery("kubeapi", {**record, "content_discovery": result})[0]
+    assert "status:partial" in line
+    assert "\x1b[" not in line
+
+
+def test_kubeapi_acl_denial_remains_unavailable_after_deadline() -> None:
+    result = inspect_record(
+        "kubeapi",
+        {
+            "status": "auth_required",
+            "secrets": [],
+            "secrets_error": "Forbidden",
+            "configmaps": [],
+            "configmaps_error": "Forbidden",
+        },
+        max_seconds=0.001,
+        started_at=time.monotonic() - 1,
+    )
+    assert result["status"] == "unavailable"
+
+
 def test_discovery_one_accessible_empty_source_and_one_denied_is_partial() -> None:
     result = inspect_record(
         "kubeapi",
@@ -590,6 +828,71 @@ def test_explicit_key_and_znode_paths_are_retained_without_access_denied_false_p
     znode_findings = inspect_record("keeper", znode_record)["findings"]
     assert znode_findings
     assert all("/app/password" not in entry["object_path"] for entry in znode_findings)
+
+
+def test_failed_explicit_key_read_does_not_scan_error_payload_as_a_secret() -> None:
+    record = {
+        "status": "open_no_auth",
+        "query_key_entry": {
+            "key": "app/api_token",
+            "value": "glpat-abcdefghijklmnopqrst",
+            "error": "read failed",
+        },
+    }
+    for module in ("redis", "etcd"):
+        result = inspect_record(module, record)
+        assert result["status"] != "complete"
+        assert result["findings"] == []
+
+
+def test_failed_explicit_znode_read_does_not_scan_error_payload_as_a_secret() -> None:
+    result = inspect_record(
+        "zookeeper",
+        {
+            "status": "open_no_auth",
+            "query_znode": "/app/api_token",
+            "query_znode_dump": "glpat-abcdefghijklmnopqrst",
+            "query_znode_dump_error": "NoAuth",
+        },
+    )
+    assert result["status"] != "complete"
+    assert result["findings"] == []
+
+
+def test_etcd_network_budget_error_is_exposed_as_budget_reason() -> None:
+    result = inspect_record(
+        "etcd", {"status": "open_no_auth", "key_value_entries": [], "dump_error": "v3: byte_budget"}
+    )
+    assert result["status"] == "partial"
+    assert "byte_budget" in result["partial_reasons"]
+
+
+def test_exhausted_source_budget_before_first_item_is_partial_not_unavailable() -> None:
+    result = inspect_record("consul", {"status": "open_no_auth", "kv_dump_error": "byte_budget"})
+    assert result["status"] == "partial"
+    assert "byte_budget" in result["partial_reasons"]
+
+
+def test_consul_discover_with_explicit_service_dump_hides_implicit_kv_content() -> None:
+    args = SimpleNamespace(
+        command="consul",
+        discover=True,
+        dump=True,
+        show_keys=False,
+        kv_key=None,
+        dump_all_requested=False,
+        _discover_implicit_dump=False,
+    )
+    projected = project_discovery_output(
+        args,
+        {
+            "kv_dump_items": [{"key": "app/api_token", "value": "glpat-abcdefghijklmnopqrst"}],
+            "services_list": [{"name": "api"}],
+            "content_discovery": {"status": "complete", "findings": []},
+        },
+    )
+    assert "kv_dump_items" not in projected
+    assert projected["services_list"] == [{"name": "api"}]
 
 
 def test_kafka_oracle_and_jenkins_source_names_survive_discovery() -> None:
@@ -633,11 +936,12 @@ def test_new_discovery_lines_follow_airflow_palette_and_remain_plain_in_storage(
     assert any("findings:1" in value and color == "true_red" for value, color in console.calls)
     assert any("status:complete" in value and color == "bright_green" for value, color in console.calls)
     assert any("Pass Value=" in value and color == "orange" for value, color in console.calls)
-    assert all("\x1b[" not in line and "QaSecret2026" not in line for line in lines)
+    assert all("\x1b[" not in line for line in lines)
+    assert any('Value="QaSecret2026"' in line for line in lines)
 
 
-@pytest.mark.parametrize("module", ["vault", "nomad", "jupyter", "redis"])
-def test_runtime_honors_explicit_secret_inspection_byte_budget(module: str, tmp_path) -> None:
+@pytest.mark.parametrize("module", ["vault", "redis"])
+def test_runtime_keeps_complete_named_secret_with_small_internal_portion(module: str, tmp_path) -> None:
     from redposture_core.data_discovery import discovery_fields
 
     args = SimpleNamespace(command=module, discover=True, discover_max_bytes=1, debug=False)
@@ -670,5 +974,5 @@ def test_runtime_honors_explicit_secret_inspection_byte_budget(module: str, tmp_
         AuditCommandPlan(targets_by_port={1234: ("host",)}, output_path=str(output), output_format="json", workers=1)
     )
     saved = json.loads(output.read_text())
-    assert saved["content_discovery"]["status"] == "partial"
-    assert saved["content_discovery"]["bytes_inspected"] == 0
+    assert saved["content_discovery"]["status"] == "complete"
+    assert saved["content_discovery"]["findings"][0]["value"] == _SECRET

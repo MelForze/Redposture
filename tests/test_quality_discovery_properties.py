@@ -48,7 +48,9 @@ def test_airflow_collection_matches_independent_offset_model(names: list[str], c
     st.integers(0, 200),
     st.integers(0, 200),
 )
-def test_airflow_log_stream_never_exceeds_either_byte_budget(chunks: list[str], per_log: int, per_target: int) -> None:
+def test_airflow_log_stream_caps_each_page_without_total_byte_cutoff(
+    chunks: list[str], per_log: int, per_target: int
+) -> None:
     seen: list[str] = []
 
     class Client:
@@ -71,12 +73,20 @@ def test_airflow_log_stream_never_exceeds_either_byte_budget(chunks: list[str], 
         max_total_bytes=per_target,
         deadline=None,
     )
-    expected = "".join(chunks).encode()[: min(per_log, per_target)].decode(errors="replace")
+    expected_parts = []
+    for chunk in chunks:
+        if per_log == 0:
+            break
+        encoded = chunk.encode()
+        expected_parts.append(encoded[:per_log].decode(errors="replace"))
+        if len(encoded) > per_log:
+            break
+    expected = "".join(expected_parts)
     assert value == expected
-    assert used <= min(per_log, per_target)
+    assert used <= per_log * len(chunks)
     assert len(seen) <= len(chunks)
-    if used < len("".join(chunks).encode()):
-        assert reason in {"max_log_bytes", "max_bytes"}
+    if used < len("".join(chunks).encode()) or per_log == 0:
+        assert reason == "max_log_bytes"
 
 
 @given(

@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.qa_owned_images import compose_images, missing_images, remove_images  # noqa: E402
+from scripts.qa_owned_volumes import guarded_command  # noqa: E402
 
 GITLAB_COMPOSE = ROOT / "lab/services/gitlab-real/docker-compose.yml"
 GITLAB_REGISTRY = "http://127.0.0.1:15003"
@@ -64,6 +65,7 @@ def _run_logged(
     timeout: int,
     env: dict[str, str] | None = None,
 ) -> tuple[int, float]:
+    command = guarded_command(command, log.parent)
     log.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     print(f"[start] {_safe_command(command)}", flush=True)

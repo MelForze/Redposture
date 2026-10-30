@@ -8,9 +8,11 @@ import ipaddress
 import json
 import re
 import ssl
+import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 import zlib
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -30,7 +32,11 @@ from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...detection_io import DetectCall, DetectDelay, Steps, run_sync
+from ...discovery_json import DiskJSONDocument
+from ...discovery_options import DEFAULT_DISCOVER_TIME
+from ...discovery_paths import Text, concat_discovery_text
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
+from ...discovery_values import DiskBackedText, contains_disk_backed, iter_json_chunks
 from ...network_proxy import ProxySocketPatch
 from ...rendering import BooleanColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
@@ -41,6 +47,7 @@ from . import native_detect
 from .async_detect import AsyncProbe, probe_direct_paths
 from .discover import DiscoverOptions, DiscoverReport, DiscoverRequest, DiscoverResponse, Finding, run_discovery
 from .http_session import ElasticHttpSession
+from .search_stream import StreamedSearchPage
 
 _ELASTIC_TAG = "ELASTIC"
 _DISCOVER_QUERY_SIZE = 200
@@ -469,6 +476,7 @@ def _elastic_request(
     method: str = "GET",
     headers: dict[str, str] | None = None,
     data: bytes | None = None,
+    response_size_cap: int = 10 * 1024 * 1024,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     return run_sync(
         _elastic_request_steps(
@@ -482,6 +490,7 @@ def _elastic_request(
             method=method,
             headers=headers,
             data=data,
+            response_size_cap=response_size_cap,
         )
     )
 
@@ -498,6 +507,7 @@ def _elastic_request_steps(
     method: str = "GET",
     headers: dict[str, str] | None = None,
     data: bytes | None = None,
+    response_size_cap: int = 10 * 1024 * 1024,
 ) -> Steps[tuple[int, bytes, dict[str, str], str | None]]:
     scheme = "https" if use_https else "http"
     req_headers = {"User-Agent": "RedPosture/1.0"}
@@ -513,7 +523,9 @@ def _elastic_request_steps(
     active_session = _active_elastic_session(host, port)
     if active_session is not None:
         response = yield DetectCall(
-            _elastic_session_response, (active_session, scheme, method, path), {"headers": req_headers, "data": data}
+            _elastic_session_response,
+            (active_session, scheme, method, path),
+            {"headers": req_headers, "data": data, "response_size_cap": response_size_cap},
         )
     else:
         url = build_http_target_url(
@@ -530,7 +542,7 @@ def _elastic_request_steps(
                     timeout=timeout,
                     insecure=bool(use_https and insecure),
                     ca_file=ca_file if use_https and ca_file else None,
-                    response_size_cap=10 * 1024 * 1024,
+                    response_size_cap=response_size_cap,
                 ),
                 method,
                 url,
@@ -2424,6 +2436,203 @@ def _probe_credential_resource_access(
     return result
 
 
+def _probe_credential_write_delete_access(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    scheme: str,
+    insecure: bool,
+    ca_file: str | None,
+    auth_headers: dict[str, str],
+) -> dict[str, Any]:
+    """Test document writes/deletes in a unique disposable index and clean it up."""
+
+    index = f"redposture-access-probe-{uuid.uuid4().hex}"
+    path = f"/{index}"
+    result: dict[str, Any] = {
+        "credential_write_access": "unknown",
+        "credential_delete_access": "unknown",
+        "credential_probe_cleanup": "not_needed",
+        "credential_probe_index": None,
+    }
+
+    def probe_request(
+        request_path: str, method: str, data: bytes | None = None
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        headers = {**auth_headers, "Content-Type": "application/json"} if method == "PUT" else auth_headers
+        return _elastic_request(
+            host,
+            port,
+            request_path,
+            timeout,
+            use_https=scheme == "https",
+            insecure=insecure,
+            ca_file=ca_file,
+            method=method,
+            headers=headers,
+            data=data,
+        )
+
+    def probe_own_index() -> dict[str, Any]:
+        own_result: dict[str, Any] = {
+            "credential_write_access": "unknown",
+            "credential_delete_access": "unknown",
+            "credential_probe_cleanup": "not_needed",
+            "credential_probe_index": None,
+        }
+        try:
+            status, body, _headers, error = probe_request("/_plugins/_security/authinfo", "GET")
+        except Exception:
+            return own_result
+        identity = _load_json_dict(body) if status == 200 and not error else None
+        if identity is None:
+            return own_result
+        roles = identity.get("roles")
+        if not isinstance(roles, list) or "own_index" not in roles:
+            return own_result
+        username = identity.get("user_name")
+        if not isinstance(username, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,254}", username):
+            return own_result
+        own_path = f"/{username}"
+
+        def cleanup_own_index() -> None:
+            own_result["credential_probe_index"] = username
+            try:
+                cleanup_status, cleanup_body, _headers, cleanup_error = probe_request(own_path, "DELETE")
+                cleanup_parsed = _load_json_dict(cleanup_body) if not cleanup_error else None
+                own_result["credential_probe_cleanup"] = (
+                    "complete"
+                    if not cleanup_error
+                    and (
+                        cleanup_status == 200
+                        and cleanup_parsed is not None
+                        and cleanup_parsed.get("acknowledged") is True
+                        or cleanup_status == 404
+                    )
+                    else "failed"
+                )
+            except Exception:
+                own_result["credential_probe_cleanup"] = "failed"
+
+        status, _body, _headers, error = probe_request(own_path, "HEAD")
+        if error or status not in {200, 404}:
+            return own_result
+        existed = status == 200
+        document_path = f"{own_path}/_doc/redposture-probe-{uuid.uuid4().hex}"
+        if existed:
+            status, body, _headers, error = probe_request(document_path, "DELETE")
+            parsed = _load_json_dict(body) if not error else None
+            if status in {401, 403} and not error:
+                own_result["credential_delete_access"] = "denied"
+                return own_result
+            if status != 404 or parsed is None or parsed.get("result") != "not_found":
+                return own_result
+        else:
+            try:
+                status, body, _headers, error = probe_request(own_path, "PUT", b"{}")
+            except Exception:
+                status, body, error = 0, b"", "index creation response unavailable"
+            parsed = _load_json_dict(body) if not error else None
+            if status not in {200, 201} or parsed is None or parsed.get("acknowledged") is not True:
+                if error or status in {200, 201} or status >= 500:
+                    cleanup_own_index()
+                return own_result
+            own_result["credential_probe_index"] = username
+            own_result["credential_probe_cleanup"] = "pending"
+
+        document_may_exist = False
+        document_deleted = False
+        try:
+            document_may_exist = True
+            status, body, _headers, error = probe_request(document_path, "PUT", b'{"redposture_probe":true}')
+            parsed = _load_json_dict(body) if not error else None
+            if status in {200, 201} and parsed is not None and parsed.get("result") in {"created", "updated"}:
+                own_result["credential_write_access"] = "allowed"
+                status, body, _headers, error = probe_request(document_path, "DELETE")
+                parsed = _load_json_dict(body) if not error else None
+                if status == 200 and parsed is not None and parsed.get("result") == "deleted":
+                    document_deleted = True
+                    own_result["credential_delete_access"] = "allowed"
+                elif status in {401, 403} and not error:
+                    own_result["credential_delete_access"] = "denied"
+            elif status in {401, 403} and not error:
+                document_may_exist = False
+                own_result["credential_write_access"] = "denied"
+        except Exception:
+            pass
+        finally:
+            if not existed:
+                cleanup_own_index()
+            elif document_may_exist and not document_deleted:
+                own_result["credential_probe_index"] = username
+                try:
+                    status, body, _headers, error = probe_request(document_path, "DELETE")
+                    parsed = _load_json_dict(body) if not error else None
+                    own_result["credential_probe_cleanup"] = (
+                        "complete"
+                        if not error
+                        and (
+                            status == 200
+                            and parsed is not None
+                            and parsed.get("result") == "deleted"
+                            or status == 404
+                            and parsed is not None
+                            and parsed.get("result") == "not_found"
+                        )
+                        else "failed"
+                    )
+                except Exception:
+                    own_result["credential_probe_cleanup"] = "failed"
+            elif document_deleted:
+                own_result["credential_probe_cleanup"] = "complete"
+        return own_result
+
+    try:
+        status, body, _headers, error = probe_request(path, "PUT", b"{}")
+        parsed = _load_json_dict(body) if not error else None
+        created = status in {200, 201} and parsed is not None and parsed.get("acknowledged") is True
+        if not created:
+            if status in {401, 403} and not error and auth_headers.get("Authorization"):
+                return probe_own_index()
+            if error or status not in {401, 403}:
+                result["credential_probe_index"] = index
+                result["credential_probe_cleanup"] = "pending"
+            return result
+        result["credential_probe_index"] = index
+        result["credential_probe_cleanup"] = "pending"
+        document_path = f"{path}/_doc/redposture-probe"
+        status, body, _headers, error = probe_request(document_path, "PUT", b'{"redposture_probe":true}')
+        parsed = _load_json_dict(body) if not error else None
+        if status in {200, 201} and parsed is not None and parsed.get("result") in {"created", "updated"}:
+            result["credential_write_access"] = "allowed"
+            result["credential_delete_access"] = "unknown"
+            status, body, _headers, error = probe_request(document_path, "DELETE")
+            parsed = _load_json_dict(body) if not error else None
+            if status == 200 and parsed is not None and parsed.get("result") == "deleted":
+                result["credential_delete_access"] = "allowed"
+            elif status in {401, 403} and not error:
+                result["credential_delete_access"] = "denied"
+        elif status in {401, 403} and not error:
+            result["credential_write_access"] = "denied"
+    except Exception:
+        result["credential_probe_index"] = index
+        result["credential_probe_cleanup"] = "pending"
+    finally:
+        if result["credential_probe_cleanup"] == "pending":
+            try:
+                status, body, _headers, error = probe_request(path, "DELETE")
+                parsed = _load_json_dict(body) if not error else None
+                result["credential_probe_cleanup"] = (
+                    "complete"
+                    if (status == 200 and parsed is not None and parsed.get("acknowledged") is True) or status == 404
+                    else "failed"
+                )
+            except Exception:
+                result["credential_probe_cleanup"] = "failed"
+    return result
+
+
 def _list_index_names_detailed(
     host: str,
     port: int,
@@ -2609,13 +2818,58 @@ def _collect_discover_report(
     nested_scheduler: Any | None = None,
     scheduler_key: Any | None = None,
     options: DiscoverOptions | None = None,
+    started_at: float | None = None,
     on_finding: Callable[[Finding], None] | None = None,
 ) -> DiscoverReport:
     """Run the v2 discovery engine while preserving the module HTTP policy."""
 
+    wire_options = options or DiscoverOptions()
+    wire_deadline = (time.monotonic() if started_at is None else started_at) + wire_options.max_seconds
+    wire_stop_reason: str | None = None
+
+    def _stream_json(
+        request: DiscoverRequest, url: str, headers: dict[str, str], request_timeout: float
+    ) -> DiscoverResponse:
+        assert http_pool is not None
+        document = DiskJSONDocument()
+        try:
+            response = http_pool.request_stream(
+                request.method,
+                url,
+                headers={"User-Agent": "RedPosture/1.0", **headers},
+                body=request.body,
+                timeout=request_timeout,
+                deadline=wire_deadline,
+                on_chunk=document.feed,
+            )
+            parsed_payload = None
+            error = str(response.error) if response.error else None
+            if response.status == 200:
+                try:
+                    parsed_payload = document.finish()
+                except (ValueError, OSError) as exc:
+                    parsed_payload = document.partial_value()
+                    error = "; ".join(dict.fromkeys(part for part in (error, str(exc)) if part))
+            return DiscoverResponse(
+                status=int(response.status),
+                payload=b"",
+                headers=dict(response.headers),
+                error=error,
+                truncated=bool(response.truncated or error),
+                parsed_payload=parsed_payload,
+            )
+        finally:
+            document.close()
+
     def _request(request: DiscoverRequest) -> DiscoverResponse:
+        nonlocal wire_stop_reason
+        if wire_deadline <= time.monotonic():
+            wire_stop_reason = "max_seconds"
+            return DiscoverResponse(status=0, payload=b"", error="discover time budget exhausted", truncated=True)
+        response_cap = min(10 * 1024 * 1024, wire_options.max_source_bytes or 10 * 1024 * 1024)
         request_headers = dict(auth_headers)
         request_headers.update(request.headers)
+        request_timeout = min(timeout, max(0.001, wire_deadline - time.monotonic()))
         if http_pool is not None:
             url = build_http_target_url(
                 host,
@@ -2624,36 +2878,113 @@ def _collect_discover_report(
                 default_scheme=scheme,
                 override_bound_scheme=True,
             )
-            response = http_pool.request(
-                request.method,
-                url,
-                headers={"User-Agent": "RedPosture/1.0", **request_headers},
-                body=request.body,
-                timeout=timeout,
-                response_size_cap=10 * 1024 * 1024,
-                replay_safe=True,
-            )
-            status = int(response.status)
-            payload = response.body
-            response_headers = dict(response.headers)
-            error = str(response.error) if response.error else None
-            if response.truncated:
-                response_headers[_RESPONSE_TRUNCATED_HEADER] = "true"
+            search_size_one = request.stream_search
+            if request.method == "POST" and "_search" in request.path and request.body:
+                try:
+                    search_size_one = json.loads(request.body).get("size") == 1
+                except (ValueError, AttributeError):
+                    pass
+            if search_size_one:
+                file = tempfile.TemporaryFile(mode="w+b", prefix="redposture-elastic-search-")
+                keep_file = False
+                try:
+                    response = http_pool.request_stream(
+                        request.method,
+                        url,
+                        headers={"User-Agent": "RedPosture/1.0", **request_headers},
+                        body=request.body,
+                        timeout=request_timeout,
+                        deadline=wire_deadline,
+                        on_chunk=file.write,
+                    )
+                    if response.status == 200:
+                        keep_file = True
+                        return DiscoverResponse(
+                            status=200,
+                            payload=b"",
+                            headers=dict(response.headers),
+                            error=str(response.error) if response.error else None,
+                            truncated=bool(response.truncated),
+                            streamed_search=StreamedSearchPage(
+                                file, incomplete=bool(response.error or response.truncated)
+                            ),
+                        )
+                    return DiscoverResponse(
+                        status=int(response.status),
+                        payload=b"",
+                        headers=dict(response.headers),
+                        error=str(response.error) if response.error else None,
+                        truncated=bool(response.truncated),
+                    )
+                finally:
+                    if not keep_file:
+                        file.close()
+            elif (
+                request.method == "POST"
+                and "_search" in request.path
+                and callable(getattr(http_pool, "request_stream", None))
+            ):
+                streamed_response = _stream_json(request, url, request_headers, request_timeout)
+                if streamed_response.status == 200:
+                    return streamed_response
+                # Search compatibility negotiation needs the bounded
+                # JSON error body (streaming transports discard non-2xx).
+                response = http_pool.request(
+                    request.method,
+                    url,
+                    headers={"User-Agent": "RedPosture/1.0", **request_headers},
+                    body=request.body,
+                    timeout=request_timeout,
+                    response_size_cap=response_cap,
+                    retries=0,
+                    replay_safe=True,
+                )
+                status, payload = int(response.status), response.body
+                response_headers = dict(response.headers)
+                error = str(response.error) if response.error else None
+                if response.truncated:
+                    response_headers[_RESPONSE_TRUNCATED_HEADER] = "true"
+            else:
+                response = http_pool.request(
+                    request.method,
+                    url,
+                    headers={"User-Agent": "RedPosture/1.0", **request_headers},
+                    body=request.body,
+                    timeout=request_timeout,
+                    response_size_cap=response_cap,
+                    retries=0,
+                    replay_safe=True,
+                )
+                status = int(response.status)
+                payload = response.body
+                response_headers = dict(response.headers)
+                error = str(response.error) if response.error else None
+                if response.truncated:
+                    response_headers[_RESPONSE_TRUNCATED_HEADER] = "true"
         else:
             status, payload, response_headers, error = _elastic_request(
                 host,
                 port,
                 request.path,
-                timeout,
+                request_timeout,
                 use_https=scheme == "https",
                 insecure=insecure,
                 ca_file=ca_file,
                 method=request.method,
                 headers=request_headers,
                 data=request.body,
+                response_size_cap=response_cap,
             )
         normalized_headers = dict(response_headers)
         truncated = normalized_headers.pop(_RESPONSE_TRUNCATED_HEADER, "").strip().lower() == "true"
+        if (
+            truncated
+            and status == 200
+            and http_pool is not None
+            and request.method in {"GET", "POST"}
+            and callable(getattr(http_pool, "request_stream", None))
+        ):
+            return _stream_json(request, url, request_headers, request_timeout)
         return DiscoverResponse(
             status=status,
             payload=payload,
@@ -2665,11 +2996,21 @@ def _collect_discover_report(
     discover_kwargs: dict[str, Any] = {"vendor": _normalize_vendor(vendor)}
     if options is not None:
         discover_kwargs["options"] = options
+    if started_at is not None:
+        discover_kwargs["started_at"] = started_at
     if nested_scheduler is not None:
         discover_kwargs.update({"nested_scheduler": nested_scheduler, "scheduler_key": scheduler_key})
     if on_finding is not None:
         discover_kwargs["on_finding"] = on_finding
-    return run_discovery(_request, **discover_kwargs)
+    report = run_discovery(_request, **discover_kwargs)
+    if isinstance(report, DiscoverReport) and wire_stop_reason is not None:
+        report.coverage.mark_truncated(wire_stop_reason)
+        if wire_stop_reason == "max_seconds":
+            report.coverage.timed_out = True
+        if report.error in {"discover byte budget exhausted", "discover time budget exhausted"}:
+            report.error = None
+            report.error_detail = None
+    return report
 
 
 def _collect_discover_results(
@@ -3999,21 +4340,26 @@ def _audit_elastic_host_steps(
                 vendor=str(base_record.get("vendor") or "compatible"),
             )
         if discover:
-            discover_report = _collect_discover_report(
-                host,
-                port,
-                timeout,
-                scheme=scheme,
-                insecure=effective_insecure,
-                ca_file=ca_file,
-                auth_headers=deep_auth_headers,
-                vendor=str(base_record.get("vendor") or "compatible"),
-            )
+            discover_pool = HttpSessionPool(timeout=timeout, insecure=effective_insecure, ca_file=ca_file)
+            try:
+                discover_report = _collect_discover_report(
+                    host,
+                    port,
+                    timeout,
+                    scheme=scheme,
+                    insecure=effective_insecure,
+                    ca_file=ca_file,
+                    auth_headers=deep_auth_headers,
+                    vendor=str(base_record.get("vendor") or "compatible"),
+                    http_pool=discover_pool,
+                )
+            finally:
+                discover_pool.close()
             serialized_discover_report = discover_report.to_dict()
             discover_results = list(serialized_discover_report.get("discover_results") or [])
             discover_error = discover_report.error
             discover_error_detail = discover_report.error_detail
-            discover_findings = list(serialized_discover_report.get("discover_findings") or [])
+            discover_findings = serialized_discover_report.get("discover_findings") or []
             discover_coverage = dict(serialized_discover_report.get("discover_coverage") or {})
         stage4_error = "; ".join(
             str(item)
@@ -4297,6 +4643,7 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
     version = payload.get("server_version")
     version_error: str | None = None
     authenticated_version_resolved = False
+    resource_evidence: dict[str, Any] = {}
     with _elastic_session_scope(session, state):
         auth_probe = _probe_authenticate(
             str(ctx.host),
@@ -4324,6 +4671,31 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
                 auth_headers=headers,
             )
             authenticated_version_resolved = version is not None
+        if auth_probe.valid is True:
+            try:
+                resource_evidence = _probe_credential_resource_access(
+                    str(ctx.host),
+                    int(ctx.port),
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    scheme=scheme,
+                    insecure=insecure,
+                    ca_file=ca_file,
+                    auth_headers=headers,
+                    vendor=str(payload.get("vendor") or "compatible"),
+                )
+            except Exception:
+                resource_evidence = {}
+            resource_evidence.update(
+                _probe_credential_write_delete_access(
+                    str(ctx.host),
+                    int(ctx.port),
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    scheme=scheme,
+                    insecure=insecure,
+                    ca_file=ca_file,
+                    auth_headers=headers,
+                )
+            )
     auth_probe = _redact_auth_probe_result(auth_probe, credential.token)
     _redact_auth_state_details(state, credential.token)
     auth_valid = auth_probe.valid
@@ -4368,6 +4740,7 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
             "network_attempted": auth_probe.network_attempted,
             "verification_capability": auth_probe.verification_capability,
             "credential_verification": _credential_verification_payload(state, auth_probe),
+            **resource_evidence,
             "defcreds_enabled": credential.source == "default",
             "credentials_source": str(credential.source),
             "_credential_capabilities_pending": bool(
@@ -4460,16 +4833,17 @@ def _inspect_elastic_capabilities_with_session(
                 ca_file=ca_file,
                 auth_headers=auth_headers,
             )
-        resource_access = _probe_credential_resource_access(
-            host,
-            port,
-            timeout,
-            scheme=scheme,
-            insecure=insecure,
-            ca_file=ca_file,
-            auth_headers=auth_headers,
-            vendor=str(payload.get("vendor") or "compatible"),
-        )
+        if not resource_access["credential_resource_access_checked"]:
+            resource_access = _probe_credential_resource_access(
+                host,
+                port,
+                timeout,
+                scheme=scheme,
+                insecure=insecure,
+                ca_file=ca_file,
+                auth_headers=auth_headers,
+                vendor=str(payload.get("vendor") or "compatible"),
+            )
 
     payload.update(
         {
@@ -4629,7 +5003,23 @@ def _collect_elastic_data_with_session(
         if callable(live_emit):
             live_emit([f"{_nxc_prefix(payload)} [*] Discover Secrets"])
 
+        disk_live_emitted = False
+
         def _on_finding(finding: Finding) -> None:
+            nonlocal disk_live_emitted
+            disk_emit = getattr(ctx, "live_discovery_value", None)
+            if isinstance(finding.value, DiskBackedText):
+                if callable(disk_emit):
+                    disk_emit(
+                        _ELASTIC_TAG,
+                        host,
+                        port,
+                        finding_type=finding.secret_type,
+                        value=finding.value,
+                        place=_elastic_discovery_place(finding.to_dict()),
+                    )
+                    disk_live_emitted = True
+                return
             if callable(live_emit):
                 live_emit([_format_elastic_discovery_finding(host, port, finding.to_dict())])
 
@@ -4647,9 +5037,10 @@ def _collect_elastic_data_with_session(
                 nested_scheduler=nested_scheduler,
                 scheduler_key=("elastic-discover", host, port),
                 options=DiscoverOptions(
-                    max_seconds=float(getattr(ctx.args, "discover_time", 300.0)),
-                    max_source_bytes=int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024)),
+                    max_seconds=float(getattr(ctx.args, "discover_time", DEFAULT_DISCOVER_TIME)),
+                    max_source_bytes=getattr(ctx.args, "discover_max_bytes", None),
                 ),
+                started_at=getattr(ctx, "discovery_started_at", None),
                 on_finding=_on_finding if callable(live_emit) else None,
             )
         finally:
@@ -4658,7 +5049,7 @@ def _collect_elastic_data_with_session(
         discover_results = list(serialized_discover_report.get("discover_results") or [])
         discover_error = discover_report.error
         discover_error_detail = discover_report.error_detail
-        discover_findings = list(serialized_discover_report.get("discover_findings") or [])
+        discover_findings = serialized_discover_report.get("discover_findings") or []
         discover_coverage = dict(serialized_discover_report.get("discover_coverage") or {})
 
     errors: list[str] = []
@@ -4725,6 +5116,8 @@ def _collect_elastic_data_with_session(
         )
         if callable(getattr(ctx, "live_emit", None)):
             payload["_discover_findings_streamed"] = True
+        if disk_live_emitted:
+            payload["_elastic_disk_live_emitted"] = True
     payload.pop("_elastic_capabilities_checked", None)
     payload.pop("_credential_capabilities_pending", None)
     redacted_payload = _redact_api_token(payload, credential.token)
@@ -4866,16 +5259,19 @@ def _credential_resource_text(record: dict[str, Any], name: str, *, count_field:
 
 
 def _credential_resource_suffix(record: dict[str, Any]) -> str:
-    if not bool(record.get("credential_resource_access_checked")):
-        return ""
     values = (
         ("Indices", _credential_resource_text(record, "Indices", count_field="credential_indices_count")),
+        ("Write", _credential_resource_text(record, "Write")),
+        ("Delete", _credential_resource_text(record, "Delete")),
         ("Documents", _credential_resource_text(record, "Documents")),
         ("Cluster", _credential_resource_text(record, "Cluster")),
         ("Nodes", _credential_resource_text(record, "Nodes", count_field="credential_nodes_count")),
         ("Users", _credential_resource_text(record, "Users", count_field="credential_users_count")),
     )
-    return "".join(f" ({name}:{value})" for name, value in values)
+    suffix = "".join(f" ({name}:{value})" for name, value in values)
+    if record.get("credential_probe_cleanup") == "failed":
+        suffix += f" (Cleanup:Failed; index:{record.get('credential_probe_index') or 'unknown'})"
+    return suffix
 
 
 def _counts_suffix(record: dict[str, Any]) -> str:
@@ -5003,6 +5399,7 @@ def _format_credential_attempts_records(
     accepted_statuses = {"valid_credentials", "weak_default_creds"}
     rejected_statuses = {"auth_required", "invalid_credentials_anonymous"}
     selected_username = str(record.get("provided_username") or record.get("effective_username") or "")
+    selected_password = record.get("provided_password")
     winner_skipped = False
     for attempt in attempts:
         if not isinstance(attempt, dict):
@@ -5014,7 +5411,11 @@ def _format_credential_attempts_records(
         error = str(attempt.get("error") or "").strip()
         accepted = status in accepted_statuses or str(attempt.get("auth_probe_status") or "") == "verified"
         selected_token_attempt = username is None and password is None and bool(record.get("provided_token"))
-        if accepted and not winner_skipped and (str(username or "") == selected_username or selected_token_attempt):
+        if (
+            accepted
+            and not winner_skipped
+            and ((str(username or "") == selected_username and password == selected_password) or selected_token_attempt)
+        ):
             winner_skipped = True
             continue
         if username is None and password is None:
@@ -5037,7 +5438,7 @@ def _format_credential_attempts_records(
             marker = "[!]"
         if not debug and marker == "[!]":
             continue
-        suffix = ""
+        suffix = _credential_resource_suffix(attempt) if marker == "[+]" else ""
         if marker == "[!]" and error:
             suffix = f" err={error if debug else _clip(error, 120)}"
         if debug:
@@ -5053,20 +5454,30 @@ def _format_credential_attempts_records(
                 if value is not None and str(value).strip():
                     diagnostics.append(f"{key}={value}")
             if diagnostics:
-                suffix = f" {' '.join(diagnostics)}{suffix}"
+                suffix += f" {' '.join(diagnostics)}"
         lines.append(f"{prefix} {marker} {credential_text}{suffix}")
     return lines
 
 
-def _format_elastic_discovery_finding(host: Any, port: Any, finding: Mapping[str, Any]) -> str:
+def _elastic_discovery_place(finding: Mapping[str, Any]) -> Text:
     locations = finding.get("locations")
     first_location = locations[0] if isinstance(locations, list) and locations else None
-    place_parts: list[str] = []
+    place_parts: list[Text] = []
     if isinstance(first_location, Mapping):
         for key in ("source_kind", "object", "index", "id", "path"):
             location_value = first_location.get(key)
-            if location_value is not None and str(location_value).strip():
-                place_parts.append(f"{key}:{location_value}")
+            if location_value is not None and (
+                isinstance(location_value, DiskBackedText) or str(location_value).strip()
+            ):
+                if place_parts:
+                    place_parts.append("/")
+                place_parts.extend(
+                    (f"{key}:", location_value if isinstance(location_value, DiskBackedText) else str(location_value))
+                )
+    return concat_discovery_text(*place_parts) if place_parts else "unknown"
+
+
+def _format_elastic_discovery_finding(host: Any, port: Any, finding: Mapping[str, Any]) -> str:
     return format_discovery_finding_line(
         _ELASTIC_TAG,
         host,
@@ -5075,7 +5486,7 @@ def _format_elastic_discovery_finding(host: Any, port: Any, finding: Mapping[str
         score=finding.get("score"),
         finding_type=finding.get("secret_type"),
         value=finding.get("value"),
-        place="/".join(place_parts) or "unknown",
+        place=_elastic_discovery_place(finding),
     )
 
 
@@ -5191,25 +5602,25 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
                 )
             )
         if bool(record.get("discover")):
+            discover_payload = {
+                "timestamp": record.get("timestamp"),
+                "type": "discover_dump",
+                "service": "elastic",
+                "host": record.get("host"),
+                "port": record.get("port"),
+                "results": record.get("discover_results") or [],
+                "schema_version": record.get("discover_schema_version"),
+                "findings": record.get("discover_findings") or [],
+                "coverage": record.get("discover_coverage") or {},
+                "query_size": _DISCOVER_QUERY_SIZE,
+                "max_print_per_index": _DISCOVER_MAX_PRINT_PER_INDEX,
+                "error": record.get("discover_error"),
+                "error_detail": record.get("discover_error_detail"),
+            }
             lines.append(
-                json.dumps(
-                    {
-                        "timestamp": record.get("timestamp"),
-                        "type": "discover_dump",
-                        "service": "elastic",
-                        "host": record.get("host"),
-                        "port": record.get("port"),
-                        "results": record.get("discover_results") or [],
-                        "schema_version": record.get("discover_schema_version"),
-                        "findings": record.get("discover_findings") or [],
-                        "coverage": record.get("discover_coverage") or {},
-                        "query_size": _DISCOVER_QUERY_SIZE,
-                        "max_print_per_index": _DISCOVER_MAX_PRINT_PER_INDEX,
-                        "error": record.get("discover_error"),
-                        "error_detail": record.get("discover_error_detail"),
-                    },
-                    ensure_ascii=False,
-                )
+                "".join(iter_json_chunks(discover_payload))
+                if contains_disk_backed(discover_payload)
+                else json.dumps(discover_payload, ensure_ascii=False)
             )
         return lines
 
@@ -5319,13 +5730,11 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
     if bool(record.get("discover")):
         discover_results = record.get("discover_results")
         discover_findings = record.get("discover_findings")
-        findings = (
-            [item for item in discover_findings if isinstance(item, dict)]
-            if isinstance(discover_findings, list)
-            else []
-        )
+        findings = discover_findings if isinstance(discover_findings, list) else []
         confidence_counts: dict[str, int] = {}
         for finding in findings:
+            if not isinstance(finding, dict):
+                continue
             confidence = str(finding.get("confidence") or "unknown")
             confidence_counts[confidence] = confidence_counts.get(confidence, 0) + 1
         confidence_text = " ".join(
@@ -5376,7 +5785,8 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
         summary_suffix = f" ({confidence_text})" if debug and confidence_text else ""
         if findings and not record.get("_discover_findings_streamed"):
             for finding in findings:
-                lines.append(_format_elastic_discovery_finding(record.get("host"), record.get("port"), finding))
+                if isinstance(finding, dict) and not isinstance(finding.get("value"), DiskBackedText):
+                    lines.append(_format_elastic_discovery_finding(record.get("host"), record.get("port"), finding))
         lines.append(
             f"{prefix} [*] {summary_label} (status:{discover_status}) (findings:{len(findings)}){summary_suffix}"
         )
@@ -5544,7 +5954,7 @@ def _render_colored_elastic_line(console: Console, line: str) -> bool:
         ),
         regexes=tuple(
             rule
-            for resource in ("Indices", "Documents", "Cluster", "Nodes", "Users")
+            for resource in ("Indices", "Documents", "Cluster", "Nodes", "Users", "Write", "Delete")
             for rule in (
                 RegexColorRule(rf"\({resource}:(?:\d+|Read|Allowed)\)", "true_red"),
                 RegexColorRule(rf"\({resource}:Access Denied\)", "bright_green"),

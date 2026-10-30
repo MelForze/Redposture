@@ -155,7 +155,7 @@ snapshot_service_images(){ echo snapshot; }
 
 def test_q4_focused_snapshot_precedes_prepare(tmp_path):
     text = (ROOT / "scripts/run_minio_kubeapi_lab.sh").read_text()
-    body = text.split("trap cleanup EXIT\n", 1)[1].split("openssl req", 1)[0]
+    body = text.split("trap 'rc=$?; cleanup || rc=1; exit \"$rc\"' EXIT\n", 1)[1].split("openssl req", 1)[0]
     setup = """ROOT_DIR=/repo; PYTHON_BIN=qa_python; COMPOSE_FILE=/fixture; PROJECT=qa
 qa_python(){ if [[ "$*" == *qa_owned_images.py* ]]; then echo snapshot; else echo prepare; fi; }
 """

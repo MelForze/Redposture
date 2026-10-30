@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 from collections.abc import Callable, Iterator
+from contextlib import nullcontext
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -30,8 +32,12 @@ from ...clients.http_api import (
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...detection_io import DetectCall, DetectDelay, Steps, run_sync
+from ...discovery_frontier import DiscoveryFrontier
+from ...discovery_options import DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
+from ...discovery_spool import SpoolingRecords
 from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...shell_capture import DEFAULT_CAPTURE_BYTES, hex_preview, is_binary
+from ...storage_discovery import DiscoveryCollector
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
@@ -48,6 +54,7 @@ _KUBE_DATA_RESPONSE_CAP = 10 * 1024 * 1024
 _KUBE_WS_READ_TIMEOUT = 3.0
 _KUBE_WS_HANDSHAKE_TIMEOUT = 5.0
 _KUBE_EFFECTIVE_URL_HEADER = "__redposture_effective_url__"
+_KUBE_BODY_BYTES_HEADER = "__redposture_body_bytes__"
 _KUBE_HTTPS_REQUIRED_ERROR = "server requires HTTPS"
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _CONNECTION_REFUSED_PREFIX = "connection refused"
@@ -171,6 +178,20 @@ class KubeResourceResult:
     def __iter__(self) -> Iterator[Any]:
         yield self.items
         yield self.error
+
+
+@dataclass
+class KubeDiscoveryReadBudget:
+    """Per-response byte limit and target-wide wall-time budget for lists."""
+
+    remaining: int
+    deadline: float
+    bytes_read: int = 0
+
+    def reason(self) -> str | None:
+        if time.monotonic() >= self.deadline:
+            return "time_budget"
+        return None
 
 
 def _coerce_list_result(value: Any) -> KubeListResult:
@@ -343,6 +364,7 @@ def _http_request_steps(
         request_kwargs["response_size_cap"] = int(response_size_cap)
     response = yield DetectCall(_kube_http_response, (request_client, method, url), {**request_kwargs})
     response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+    response_headers[_KUBE_BODY_BYTES_HEADER] = str(len(response.body))
     if client is not None and response.final_url and bool(getattr(response, "redirected", False)):
         response_headers[_KUBE_EFFECTIVE_URL_HEADER] = response.final_url
     if response.error:
@@ -547,6 +569,7 @@ def _api_request_json_with_retries(
     client: Any = None,
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
     json_body: Any = None,
+    discovery_budget: KubeDiscoveryReadBudget | None = None,
 ) -> tuple[int, Any, dict[str, str], str | None]:
     return run_sync(
         _api_request_json_with_retries_steps(
@@ -565,6 +588,7 @@ def _api_request_json_with_retries(
             client=client,
             response_size_cap=response_size_cap,
             json_body=json_body,
+            discovery_budget=discovery_budget,
         )
     )
 
@@ -586,10 +610,22 @@ def _api_request_json_with_retries_steps(
     client: Any = None,
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
     json_body: Any = None,
+    discovery_budget: KubeDiscoveryReadBudget | None = None,
 ) -> Steps[tuple[int, Any, dict[str, str], str | None]]:
     result: tuple[int, Any, dict[str, str], str | None] = (0, None, {}, "request failed")
     attempts = max(1, int(retries) + 1)
     for attempt in range(attempts):
+        if discovery_budget is not None:
+            reason = discovery_budget.reason()
+            if reason is not None:
+                return 0, None, {}, reason
+            remaining_before = discovery_budget.remaining
+            current_cap = min(response_size_cap, remaining_before)
+            budget_limited = current_cap == remaining_before
+            current_timeout = min(timeout, max(0.001, discovery_budget.deadline - time.monotonic()))
+        else:
+            current_cap = response_size_cap
+            current_timeout = timeout
         kwargs: dict[str, Any] = {
             "use_https": use_https,
             "insecure": insecure,
@@ -598,19 +634,33 @@ def _api_request_json_with_retries_steps(
             "username": username,
             "password": password,
         }
-        if response_size_cap != _KUBE_DATA_RESPONSE_CAP:
-            kwargs["response_size_cap"] = response_size_cap
+        if current_cap != _KUBE_DATA_RESPONSE_CAP:
+            kwargs["response_size_cap"] = current_cap
         if client is not None:
             kwargs["client"] = client
         try:
             if method.upper() == "GET" and json_body is None:
-                result = yield DetectCall(_api_get_json, (host, port, path, timeout), {**kwargs})
+                result = yield DetectCall(_api_get_json, (host, port, path, current_timeout), {**kwargs})
             else:
                 result = yield DetectCall(
-                    _api_request_json, (host, port, method, path, timeout), {"json_body": json_body, **kwargs}
+                    _api_request_json, (host, port, method, path, current_timeout), {"json_body": json_body, **kwargs}
                 )
         except (OSError, ssl.SSLError, TimeoutError, ConnectionError, ValueError) as exc:
             result = (0, None, {}, _friendly_error_from_exception(exc))
+        if discovery_budget is not None:
+            raw_bytes = result[2].get(_KUBE_BODY_BYTES_HEADER)
+            if raw_bytes is not None:
+                try:
+                    size = max(0, int(raw_bytes))
+                except (TypeError, ValueError):
+                    size = 0
+                discovery_budget.bytes_read += size
+                if size > current_cap and budget_limited:
+                    return result[0], None, result[2], "byte_budget"
+            if result[3] and "exceeds" in result[3] and "limit" in result[3] and budget_limited:
+                return result[0], None, result[2], "byte_budget"
+            if discovery_budget.reason() == "time_budget" and result[3]:
+                return result[0], None, result[2], "time_budget"
         if not _is_retryable_request_error(result[3]):
             return result
         if attempt + 1 < attempts:
@@ -770,6 +820,9 @@ def _kube_exec_ws(
         "User-Agent": "RedPosture/1.0",
     }
     request_headers.update(headers)
+    from ...http_headers import merge_custom_http_headers
+
+    request_headers = merge_custom_http_headers(request_headers)
 
     sock: socket.socket | None = None
     request_send_started = False
@@ -1169,6 +1222,8 @@ def _kube_list_items(
     client: HttpApiClient | None = None,
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
     retries: int = 0,
+    discovery_budget: KubeDiscoveryReadBudget | None = None,
+    item_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> KubeListResult:
     return run_sync(
         _kube_list_items_steps(
@@ -1187,6 +1242,8 @@ def _kube_list_items(
             client=client,
             response_size_cap=response_size_cap,
             retries=retries,
+            discovery_budget=discovery_budget,
+            item_sink=item_sink,
         )
     )
 
@@ -1208,73 +1265,113 @@ def _kube_list_items_steps(
     client: HttpApiClient | None = None,
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
     retries: int = 0,
+    discovery_budget: KubeDiscoveryReadBudget | None = None,
+    item_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> Steps[KubeListResult]:
     items: list[dict[str, Any]] = []
     continue_token: str | None = None
     seen_continue_tokens: set[str] = set()
     last_status = 0
     access_confirmed = False
+    page_limit = max(1, int(limit))
     effective_max_pages = _KUBE_MAX_LIST_PAGES if max_pages is None else max_pages
-    for _page in range(max(1, int(effective_max_pages))):
-        path = _kube_list_path(base_path, limit=limit, continue_token=continue_token)
-        request_kwargs: dict[str, Any] = {
-            "use_https": use_https,
-            "insecure": insecure,
-            "ca_file": ca_file,
-            "token": token,
-            "username": username,
-            "password": password,
-        }
-        if client is not None:
-            request_kwargs["client"] = client
-        if response_size_cap != _KUBE_DATA_RESPONSE_CAP:
-            request_kwargs["response_size_cap"] = response_size_cap
-        status, payload, _headers, error = yield DetectCall(
-            _api_request_json_with_retries, (host, port, "GET", path, timeout), {"retries": retries, **request_kwargs}
-        )
-        last_status = status
-        if error:
-            error_text = f"partial: {error}" if access_confirmed else error
-            return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
-        if status != 200:
-            error_text = _kube_status_message(status, payload) or f"unexpected status={status}"
-            if access_confirmed:
-                error_text = f"partial: {error_text}"
-            return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
-        if not isinstance(payload, dict):
-            error_text = "invalid kubernetes list response"
-            if access_confirmed:
-                error_text = f"partial: {error_text}"
-            return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
-        raw_items = payload.get("items")
-        if not isinstance(raw_items, list):
-            error_text = "invalid kubernetes list items payload"
-            if access_confirmed:
-                error_text = f"partial: {error_text}"
-            return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
-        access_confirmed = True
-        for item in raw_items:
-            if isinstance(item, dict):
-                items.append(item)
-        metadata = payload.get("metadata")
-        next_token = None
-        if isinstance(metadata, dict):
-            raw_continue = metadata.get("continue")
-            if isinstance(raw_continue, str) and raw_continue.strip():
-                next_token = raw_continue.strip()
-        if not next_token:
-            return KubeListResult(items, status, None, True, True)
-        if next_token == continue_token or next_token in seen_continue_tokens:
-            return KubeListResult(
-                items,
-                status,
-                "partial: pagination continue token repeated",
-                True,
-                False,
+    pages = (
+        itertools.count()
+        if discovery_budget is not None and max_pages is None
+        else range(max(1, int(effective_max_pages)))
+    )
+    with DiscoveryFrontier() if discovery_budget is not None else nullcontext(None) as token_history:
+        for _page in pages:
+            if discovery_budget is not None:
+                reason = discovery_budget.reason()
+                if reason is not None:
+                    return KubeListResult(
+                        items if access_confirmed else None,
+                        last_status,
+                        f"partial: {reason}" if access_confirmed else reason,
+                        access_confirmed,
+                        False,
+                    )
+            request_kwargs: dict[str, Any] = {
+                "use_https": use_https,
+                "insecure": insecure,
+                "ca_file": ca_file,
+                "token": token,
+                "username": username,
+                "password": password,
+            }
+            if client is not None:
+                request_kwargs["client"] = client
+            if response_size_cap != _KUBE_DATA_RESPONSE_CAP:
+                request_kwargs["response_size_cap"] = response_size_cap
+            if discovery_budget is not None:
+                request_kwargs["discovery_budget"] = discovery_budget
+            while True:
+                path = _kube_list_path(base_path, limit=page_limit, continue_token=continue_token)
+                status, payload, _headers, error = yield DetectCall(
+                    _api_request_json_with_retries,
+                    (host, port, "GET", path, timeout),
+                    {"retries": retries, **request_kwargs},
+                )
+                oversized = error is not None and (error == "byte_budget" or ("exceeds" in error and "limit" in error))
+                if (
+                    discovery_budget is None
+                    or not oversized
+                    or page_limit <= 1
+                    or discovery_budget.reason() is not None
+                ):
+                    break
+                page_limit = max(1, page_limit // 2)
+            last_status = status
+            if error:
+                error_text = f"partial: {error}" if access_confirmed else error
+                return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
+            if status != 200:
+                error_text = _kube_status_message(status, payload) or f"unexpected status={status}"
+                if access_confirmed:
+                    error_text = f"partial: {error_text}"
+                return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
+            if not isinstance(payload, dict):
+                error_text = "invalid kubernetes list response"
+                if access_confirmed:
+                    error_text = f"partial: {error_text}"
+                return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
+            raw_items = payload.get("items")
+            if not isinstance(raw_items, list):
+                error_text = "invalid kubernetes list items payload"
+                if access_confirmed:
+                    error_text = f"partial: {error_text}"
+                return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
+            access_confirmed = True
+            for item in raw_items:
+                if isinstance(item, dict):
+                    if item_sink is None:
+                        items.append(item)
+                    else:
+                        item_sink(item)
+            metadata = payload.get("metadata")
+            next_token = None
+            if isinstance(metadata, dict):
+                raw_continue = metadata.get("continue")
+                if isinstance(raw_continue, str) and raw_continue.strip():
+                    next_token = raw_continue.strip()
+            if not next_token:
+                return KubeListResult(items, status, None, True, True)
+            repeated = (
+                not token_history.claim(next_token) if token_history is not None else next_token in seen_continue_tokens
             )
-        seen_continue_tokens.add(next_token)
-        continue_token = next_token
-    return KubeListResult(items, last_status, "partial: pagination limit exceeded", access_confirmed, False)
+            if next_token == continue_token or repeated:
+                return KubeListResult(
+                    items,
+                    status,
+                    "partial: pagination continue token repeated",
+                    True,
+                    False,
+                )
+            if token_history is None:
+                seen_continue_tokens.add(next_token)
+            continue_token = next_token
+        return KubeListResult(items, last_status, "partial: pagination limit exceeded", access_confirmed, False)
 
 
 def _metadata_name(item: dict[str, Any]) -> str:
@@ -1605,8 +1702,55 @@ def _list_secrets(
     client: HttpApiClient | None = None,
     retries: int = 0,
     resource: str = "secrets",
+    discovery_budget: KubeDiscoveryReadBudget | None = None,
+    item_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> KubeResourceResult:
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = SpoolingRecords() if discovery_budget is not None else []
+
+    def add_item(item: dict[str, Any], forced_ns: str | None) -> None:
+        data_map = item.get("data")
+        decoded_data: dict[str, str] = {}
+        if isinstance(data_map, dict):
+            for key in sorted(data_map.keys()):
+                decoded_data[str(key)] = (
+                    str(data_map.get(key) or "")
+                    if resource == "configmaps"
+                    else _decode_secret_data_value(data_map.get(key))
+                )
+        if resource == "configmaps" and isinstance(item.get("binaryData"), dict):
+            for key, value in item["binaryData"].items():
+                decoded_data[str(key)] = _decode_secret_data_value(value)
+        record = {
+            "namespace": forced_ns or _metadata_namespace(item),
+            "name": _metadata_name(item),
+            "type": str(item.get("type") or "-"),
+            "data": decoded_data,
+        }
+        if isinstance(results, SpoolingRecords):
+            results.append(record, sort_key=f"{record['namespace']}\0{record['name']}")
+        else:
+            results.append(record)
+        if item_sink is not None:
+            # Scan on arrival, before the next list page is requested. Use the
+            # original UTF-8 data rather than its escaped inventory display.
+            source: dict[str, Any] = dict(record)
+            source_data = dict(decoded_data)
+            encoded = item.get("binaryData") if resource == "configmaps" else data_map
+            if isinstance(encoded, dict):
+                for key, value in encoded.items():
+                    try:
+                        raw = base64.b64decode(str(value), validate=True)
+                    except (ValueError, TypeError):
+                        source_data.pop(str(key), None)
+                        source.setdefault("data_errors", []).append(f"{key}: invalid_base64")
+                    else:
+                        try:
+                            source_data[str(key)] = raw.decode("utf-8")
+                        except UnicodeDecodeError:
+                            source_data[str(key)] = "base64:" + base64.b64encode(raw).decode("ascii")
+            source["data"] = source_data
+            item_sink(source)
+
     access_confirmed = False
     complete = True
     if not namespaces:
@@ -1624,6 +1768,8 @@ def _list_secrets(
                 password=password,
                 client=client,
                 retries=retries,
+                **({"discovery_budget": discovery_budget} if discovery_budget is not None else {}),
+                **({"item_sink": lambda item: add_item(item, None)} if discovery_budget is not None else {}),
             )
         )
         items, _status, error = list_result
@@ -1632,11 +1778,15 @@ def _list_secrets(
         partial_errors: list[str] = [error] if error else []
         access_confirmed = list_result.access_confirmed
         complete = list_result.complete
-        iter_items: list[tuple[str | None, dict[str, Any]]] = [(None, item) for item in items]
+        for item in items:
+            add_item(item, None)
     else:
-        per_ns_items: list[tuple[str | None, dict[str, Any]]] = []
         partial_errors = []
         for namespace in namespaces:
+            if discovery_budget is not None and (budget_reason := discovery_budget.reason()) is not None:
+                partial_errors.append(f"{namespace}: {budget_reason}")
+                complete = False
+                break
             encoded_ns = urllib.parse.quote(namespace, safe="")
             list_result = _coerce_list_result(
                 _invoke_kube_list_items(
@@ -1652,6 +1802,12 @@ def _list_secrets(
                     password=password,
                     client=client,
                     retries=retries,
+                    **({"discovery_budget": discovery_budget} if discovery_budget is not None else {}),
+                    **(
+                        {"item_sink": lambda item, ns=namespace: add_item(item, ns)}
+                        if discovery_budget is not None
+                        else {}
+                    ),
                 )
             )
             items, _status, error = list_result
@@ -1664,28 +1820,12 @@ def _list_secrets(
             complete = complete and list_result.complete
             if error:
                 partial_errors.append(f"{namespace}: {error}")
-            per_ns_items.extend((namespace, item) for item in items)
-        iter_items = per_ns_items
-
-    for forced_ns, item in iter_items:
-        data_map = item.get("data")
-        decoded_data: dict[str, str] = {}
-        if isinstance(data_map, dict):
-            for key in sorted(data_map.keys()):
-                decoded_data[str(key)] = (
-                    str(data_map.get(key) or "")
-                    if resource == "configmaps"
-                    else _decode_secret_data_value(data_map.get(key))
-                )
-        results.append(
-            {
-                "namespace": forced_ns or _metadata_namespace(item),
-                "name": _metadata_name(item),
-                "type": str(item.get("type") or "-"),
-                "data": decoded_data,
-            }
-        )
-    results.sort(key=lambda item: (str(item.get("namespace") or ""), str(item.get("name") or "")))
+            for item in items:
+                add_item(item, namespace)
+    if isinstance(results, SpoolingRecords):
+        results.finish()
+    else:
+        results.sort(key=lambda item: (str(item.get("namespace") or ""), str(item.get("name") or "")))
     final_error = "; ".join(partial_errors) or None
     if access_confirmed and final_error and not final_error.startswith("partial:"):
         final_error = f"partial: {final_error}"
@@ -3460,6 +3600,29 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
         state.access_namespaces_error = state.anonymous_namespaces_error
         state.access_namespace_status = state.anonymous_namespace_status
     needs_http_data = bool(options["show_namespaces"] or options["show_pods"] or options["show_secrets"])
+    discover_budget = None
+    collector = None
+    if bool(getattr(ctx.args, "discover", False)):
+        started_at = getattr(ctx, "discovery_started_at", None) or state.started_at or time.monotonic()
+        discover_budget = KubeDiscoveryReadBudget(
+            remaining=int(getattr(ctx.args, "discover_max_bytes", None) or UNLIMITED_DISCOVER_BYTES),
+            deadline=float(started_at) + float(getattr(ctx.args, "discover_time", None) or DEFAULT_DISCOVER_TIME),
+        )
+        collector = DiscoveryCollector("kubeapi", ctx, record)
+
+    scanned_sources = {"secrets": 0, "configmaps": 0}
+
+    def scan_source(resource: str, item: dict[str, Any]) -> None:
+        assert collector is not None
+        scanned_sources[resource] += 1
+        for error in item.get("data_errors", []):
+            collector.partial(f"{resource}.{item.get('namespace')}.{item.get('name')}", error)
+        data = item.get("data")
+        if resource == "configmaps" and item.get("name") == "kube-root-ca.crt" and isinstance(data, dict):
+            data = {key: value for key, value in data.items() if key != "ca.crt"}
+        if data:
+            collector.add(f"{resource}.{item.get('namespace')}.{item.get('name')}", data, charge=False)
+
     data_client = (
         _state_http_client_or_none(state, response_size_cap=_KUBE_DATA_RESPONSE_CAP) if needs_http_data else None
     )
@@ -3532,6 +3695,10 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
             pods_error = "pods request failed"
         pods_out = list(pods or [])
     if options["show_secrets"]:
+        discovery_kwargs: dict[str, Any] = {}
+        if discover_budget is not None:
+            discovery_kwargs["discovery_budget"] = discover_budget
+            discovery_kwargs["item_sink"] = lambda item: scan_source("secrets", item)
         secrets_result = _coerce_resource_result(
             _list_secrets(
                 request_host,
@@ -3546,16 +3713,22 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
                 password=password,
                 client=data_client,
                 retries=int(getattr(ctx.args, "retries", 0) or 0),
+                **discovery_kwargs,
             )
         )
         secrets, secrets_error = secrets_result
         if secrets is None and not secrets_error:
             secrets_error = "secrets request failed"
-        secrets_out = list(secrets or [])
+        secrets_out = secrets if isinstance(secrets, SpoolingRecords) else list(secrets or [])
     configmaps_out: list[dict[str, Any]] = []
     configmaps_error: str | None = None
     configmaps_result = KubeResourceResult(None, None, False, False)
     if bool(getattr(ctx.args, "discover", False)):
+        configmap_kwargs: dict[str, Any] = {}
+        if discover_budget is not None:
+            configmap_kwargs["discovery_budget"] = discover_budget
+        if collector is not None:
+            configmap_kwargs["item_sink"] = lambda item: scan_source("configmaps", item)
         configmaps_result = _coerce_resource_result(
             _list_secrets(
                 request_host,
@@ -3571,10 +3744,11 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
                 client=data_client,
                 retries=int(getattr(ctx.args, "retries", 0) or 0),
                 resource="configmaps",
+                **configmap_kwargs,
             )
         )
         configmaps, configmaps_error = configmaps_result
-        configmaps_out = list(configmaps or [])
+        configmaps_out = configmaps if isinstance(configmaps, SpoolingRecords) else list(configmaps or [])
     exec_result: dict[str, Any] | None = None
     if options["exec_pod"] and options["exec_command"]:
         resolved_ns, resolved_pod, resolve_error = _resolve_exec_pod_target(
@@ -3633,6 +3807,25 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
             "elapsed_ms": _elapsed_ms(state),
         }
     )
+    if collector is not None:
+        for resource, result in (("secrets", secrets_result), ("configmaps", configmaps_result)):
+            if result.access_confirmed:
+                collector.mark_accessible_source()
+            # Compatibility with alternate readers which return records rather
+            # than forwarding them to the sink.
+            if not scanned_sources[resource]:
+                for item in result.items or []:
+                    scan_source(resource, item)
+            if not result.complete:
+                error = str(result.error or "incomplete source")
+                if not result.access_confirmed and any(
+                    part in error.lower() for part in ("denied", "forbidden", "unauthorized")
+                ):
+                    error = "access_denied: " + error
+                collector.partial(resource, error)
+        if discover_budget is not None:
+            collector.bytes_read = discover_budget.bytes_read
+        record["content_discovery"] = collector.result()
     state.deep_record = record
     return record
 

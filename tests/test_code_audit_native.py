@@ -56,7 +56,7 @@ def test_n01_unknown_total_resume():
     table = TableInventory("app", "events", columns=[ColumnInventory("app", "events", "payload", "String", 1)])
     calls = []
 
-    def read(session, query):
+    def read(session, query, **_kwargs):
         calls.append(int(re.search(r"OFFSET (\d+)", query)[1]))
         return ReadResult([["abc"], ["def"]], 6) if calls[-1] < 4 else ReadResult([], 0)
 
@@ -71,7 +71,7 @@ def test_n01_unknown_total_resume():
             config=engine.DiscoverConfig(checkpoint=path, chunk_rows=2, max_total_bytes=6),
             query_rows=None,
         )
-        assert calls == [0]
+        assert calls == [0, 2, 4]
         calls.clear()
         resumed = engine.run_discovery(
             None,
@@ -80,7 +80,7 @@ def test_n01_unknown_total_resume():
             config=engine.DiscoverConfig(checkpoint=path, resume=True, chunk_rows=2),
             query_rows=None,
         )
-    assert first["status"] == "partial" and calls == [2, 4] and resumed["status"] == "complete"
+    assert first["status"] == "complete" and calls == [] and resumed["status"] == "complete"
     assert resumed["coverage_percent"] == 100
 
 
@@ -92,7 +92,7 @@ def test_n02_split_resume():
     )
     calls = []
 
-    def read(session, query):
+    def read(session, query, **_kwargs):
         limit, offset = map(int, re.search(r"LIMIT (\d+) OFFSET (\d+)", query).groups())
         calls.append([offset, limit])
         return ReadResult([], 0, "memory limit") if limit > 1 else ReadResult([['{"password":"S3cretValue123"}']], 29)
@@ -386,7 +386,7 @@ def test_n01_long_unknown_frontier_does_not_recurse(monkeypatch, tmp_path):
     checkpoint = tmp_path / "long-frontier.json"
     reads = []
 
-    def read(_session, query):
+    def read(_session, query, **_kwargs):
         reads.append(int(re.search(r"OFFSET (\d+)", query)[1]))
         return ReadResult([], 0)
 
@@ -451,7 +451,7 @@ def test_n01_failed_unknown_frontier_can_finish_after_retry(monkeypatch):
     path = OUT / "failed-frontier.json"
     attempts = []
 
-    def read(session, query):
+    def read(session, query, **_kwargs):
         offset = int(re.search(r"OFFSET (\d+)", query)[1])
         attempts.append(offset)
         if offset == 0:
@@ -466,7 +466,7 @@ def test_n01_failed_unknown_frontier_can_finish_after_retry(monkeypatch):
     assert first["status"] == "partial"
     attempts.clear()
 
-    def recovered(session, query):
+    def recovered(session, query, **_kwargs):
         attempts.append(int(re.search(r"OFFSET (\d+)", query)[1]))
         return ReadResult([], 0)
 

@@ -8,172 +8,178 @@
     "can_read_data": true,
     "can_read_tables": true,
     "content_discovery": {
-      "bytes_inspected": 4534,
+      "bytes_inspected": 4161,
+      "bytes_read": 4161,
+      "emitted_fingerprints": [],
       "findings": [
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.api_clients[0].client_secret",
+          "object_path": "$.table.postgres.redposture.api_clients.client_secret",
           "source": "authenticated",
           "type": "client_secret",
-          "value": "graf...2026"
+          "value": "billing-worker-secret-2026"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.api_clients[1].client_secret",
+          "object_path": "$.table.postgres.redposture.api_clients.client_secret",
           "source": "authenticated",
           "type": "client_secret",
-          "value": "prom...2026"
+          "value": "grafana-reader-secret-2026"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.api_clients[2].client_secret",
+          "object_path": "$.table.postgres.redposture.api_clients.client_secret",
           "source": "authenticated",
           "type": "client_secret",
-          "value": "bill...2026"
+          "value": "prom-rw-secret-2026"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.demo_accounts[0].password",
-          "source": "authenticated",
-          "type": "password",
-          "value": "*****"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.demo_accounts[1].password",
-          "source": "authenticated",
-          "type": "password",
-          "value": "********"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.demo_accounts[2].password",
-          "source": "authenticated",
-          "type": "password",
-          "value": "serv...e123"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.demo_accounts[3].password",
-          "source": "authenticated",
-          "type": "password",
-          "value": "repo...2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.demo_accounts[4].password",
-          "source": "authenticated",
-          "type": "password",
-          "value": "auto...2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.integration_secrets[0].secret_value",
+          "object_path": "$.table.postgres.redposture.audit_events.details",
           "source": "authenticated",
           "type": "generic_secret",
-          "value": "xoxb...oken"
+          "value": "gfa_demo_token_123"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.integration_secrets[0].secret_value",
+          "object_path": "$.table.postgres.redposture.demo_accounts.password",
           "source": "authenticated",
-          "type": "slack_token",
-          "value": "xoxb...oken"
+          "type": "password",
+          "value": "admin"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.integration_secrets[0].endpoint",
+          "object_path": "$.table.postgres.redposture.demo_accounts.password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "auto-runner-2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.demo_accounts.password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "readonly"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.demo_accounts.password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "reporting2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.demo_accounts.password",
+          "source": "authenticated",
+          "type": "password",
+          "value": "service123"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.integration_secrets.endpoint",
           "source": "authenticated",
           "type": "webhook",
-          "value": "http...CTED"
+          "value": "https://hooks.slack.com/services/T000/B000/REDACTED"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.integration_secrets[1].secret_value",
+          "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
           "source": "authenticated",
           "type": "generic_secret",
-          "value": "pd_d...2026"
+          "value": "ghp_lab_demo_token_123456"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.integration_secrets[2].secret_value",
+          "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
           "source": "authenticated",
           "type": "generic_secret",
-          "value": "ghp_...3456"
+          "value": "pd_demo_routing_key_2026"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.service_tokens[0].token",
+          "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
           "source": "authenticated",
           "type": "generic_secret",
-          "value": "gfa_..._123"
+          "value": "xoxb-demo-slack-token"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.service_tokens[1].token",
+          "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
+          "source": "authenticated",
+          "type": "slack_token",
+          "value": "xoxb-demo-slack-token"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.table.postgres.redposture.service_tokens.token",
           "source": "authenticated",
           "type": "generic_secret",
-          "value": "ci_d..._456"
+          "value": "am_ops_token_101"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.service_tokens[2].token",
+          "object_path": "$.table.postgres.redposture.service_tokens.token",
           "source": "authenticated",
           "type": "generic_secret",
-          "value": "prom..._789"
+          "value": "ci_demo_token_456"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.service_tokens[3].token",
+          "object_path": "$.table.postgres.redposture.service_tokens.token",
           "source": "authenticated",
           "type": "generic_secret",
-          "value": "am_o..._101"
+          "value": "prom_rw_token_789"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.web_sessions[0].session_id",
+          "object_path": "$.table.postgres.redposture.web_sessions.session_id",
           "source": "authenticated",
           "type": "session_cookie",
-          "value": "sess...2b7a"
+          "value": "sess-2ac81b90"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.web_sessions[1].session_id",
+          "object_path": "$.table.postgres.redposture.web_sessions.session_id",
           "source": "authenticated",
           "type": "session_cookie",
-          "value": "sess...2e11"
+          "value": "sess-7f9c2b7a"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.web_sessions[2].session_id",
+          "object_path": "$.table.postgres.redposture.web_sessions.session_id",
           "source": "authenticated",
           "type": "session_cookie",
-          "value": "sess...1b90"
+          "value": "sess-d93f2e11"
         }
       ],
+      "live_emitted": false,
+      "partial_reasons": [],
       "source": "authenticated",
       "status": "complete"
     },
+    "credential_verification": "verified",
+    "credential_verified": true,
     "database": "postgres",
     "database_count": 1,
     "database_names": [
@@ -198,15 +204,18 @@
     "os_read_ok": null,
     "os_read_output": null,
     "os_read_path": null,
+    "password_sent": true,
     "port": 5432,
     "privesc_check": false,
     "privesc_checks": [],
     "privesc_summary": {},
+    "protocol_evidence": "postgresql_wire",
     "provided_credentials": true,
     "provided_password": "postgres",
     "provided_username": "postgres",
     "readable_tables": 7,
     "service": "postgres",
+    "service_identity": "postgresql_compatible",
     "show_columns": false,
     "show_columns_limit": null,
     "show_databases": true,
@@ -246,6 +255,9 @@
         "stage_name": "data"
       }
     ],
+    "startup_complete": true,
+    "startup_database": "postgres",
+    "startup_username": "postgres",
     "status": "valid_credentials",
     "superuser": true,
     "table_columns": [],
@@ -253,13 +265,7 @@
     "table_dump_enabled": true,
     "table_dumps": [
       {
-        "columns": [
-          "client_id",
-          "client_secret",
-          "scopes",
-          "enabled",
-          "created_at"
-        ],
+        "columns": null,
         "database": "postgres",
         "error": null,
         "rows": [
@@ -270,13 +276,7 @@
         "table": "redposture.api_clients"
       },
       {
-        "columns": [
-          "id",
-          "event_type",
-          "source_ip",
-          "details",
-          "created_at"
-        ],
+        "columns": null,
         "database": "postgres",
         "error": null,
         "rows": [
@@ -290,14 +290,7 @@
         "table": "redposture.audit_events"
       },
       {
-        "columns": [
-          "invoice_id",
-          "customer_id",
-          "amount_cents",
-          "currency",
-          "status",
-          "paid_at"
-        ],
+        "columns": null,
         "database": "postgres",
         "error": null,
         "rows": [
@@ -309,13 +302,7 @@
         "table": "redposture.billing_invoices"
       },
       {
-        "columns": [
-          "id",
-          "username",
-          "password",
-          "role",
-          "active"
-        ],
+        "columns": null,
         "database": "postgres",
         "error": null,
         "rows": [
@@ -329,14 +316,7 @@
         "table": "redposture.demo_accounts"
       },
       {
-        "columns": [
-          "id",
-          "integration",
-          "account_name",
-          "secret_value",
-          "endpoint",
-          "updated_at"
-        ],
+        "columns": null,
         "database": "postgres",
         "error": null,
         "rows": [
@@ -347,12 +327,7 @@
         "table": "redposture.integration_secrets"
       },
       {
-        "columns": [
-          "id",
-          "service_name",
-          "token",
-          "created_at"
-        ],
+        "columns": null,
         "database": "postgres",
         "error": null,
         "rows": [
@@ -364,13 +339,7 @@
         "table": "redposture.service_tokens"
       },
       {
-        "columns": [
-          "session_id",
-          "username",
-          "source_ip",
-          "user_agent",
-          "expires_at"
-        ],
+        "columns": null,
         "database": "postgres",
         "error": null,
         "rows": [

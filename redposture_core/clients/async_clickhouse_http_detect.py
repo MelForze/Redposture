@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlsplit
 
+from ..http_headers import merge_custom_http_headers
 from .async_http_detect import AsyncHttpFallback
 from .async_retained_socket import RetainedSocketIO
 from .tls_cache import shared_client_ssl_context
@@ -157,6 +158,9 @@ class NativeClickHouseHttp:
             "pool_mgr": self.pool,
             "session_id": self.session_id,
         }
+        custom_headers = merge_custom_http_headers({})
+        if custom_headers:
+            kwargs["headers"] = custom_headers
         if self.tls is not None and self.tls.proxy_path:
             kwargs["proxy_path"] = self.tls.proxy_path
         if self.secure:
@@ -253,7 +257,7 @@ class NativeClickHouseHttp:
                     context, self.socket, server_hostname=self.tls.server_name or self.host
                 )
         self.io.sockets[self.socket] = read_timeout
-        headers = dict(request.options.get("headers") or {})
+        headers = merge_custom_http_headers(request.options.get("headers") or {})
         authority = f"[{self.host}]" if ":" in self.host else self.host
         headers.setdefault("Host", f"{authority}:{self.port}")
         headers.setdefault("Accept-Encoding", "identity")

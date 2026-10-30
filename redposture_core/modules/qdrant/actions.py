@@ -11,9 +11,11 @@ import time
 import urllib.error
 import urllib.parse
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import count
 from typing import Any
 
 from ...clients.http_api import (
@@ -28,6 +30,10 @@ from ...clients.http_api import (
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
+from ...discovery_frontier import DiscoveryFrontier
+from ...discovery_paths import Text, concat_discovery_text
+from ...discovery_values import DiskBackedText
+from ...json_stream import JSONPath, JSONScalarStream
 from ...rendering import (
     CountColorRule,
     RegexColorRule,
@@ -41,6 +47,7 @@ from ...stage_runtime import (
     format_retry_decision,
     merge_stage_records,
 )
+from ...storage_discovery import DiscoveryCollector
 from ...utils import (
     DEFAULT_MAX_NETWORK_HOSTS,
     collect_scan_ports,
@@ -158,8 +165,22 @@ def _http_json_request(
     *,
     headers: dict[str, str] | None = None,
     payload: dict[str, Any] | None = None,
+    response_size_cap: int | None = None,
+    response_meter: Callable[[int], bool] | None = None,
 ) -> tuple[int, Any, str | None]:
-    return run_sync(_http_json_request_steps(host, port, method, path, timeout, headers=headers, payload=payload))
+    return run_sync(
+        _http_json_request_steps(
+            host,
+            port,
+            method,
+            path,
+            timeout,
+            headers=headers,
+            payload=payload,
+            response_size_cap=response_size_cap,
+            response_meter=response_meter,
+        )
+    )
 
 
 def _http_json_request_steps(
@@ -171,6 +192,8 @@ def _http_json_request_steps(
     *,
     headers: dict[str, str] | None = None,
     payload: dict[str, Any] | None = None,
+    response_size_cap: int | None = None,
+    response_meter: Callable[[int], bool] | None = None,
 ) -> Any:
     body_bytes: bytes | None = None
     req_headers = {
@@ -185,6 +208,8 @@ def _http_json_request_steps(
 
     state = getattr(_THREAD_LOCAL_TRANSPORT, "state", None)
     cap = _DETECT_RESPONSE_CAP if path.partition("?")[0] in {"/", "/collections"} else 10 * 1024 * 1024
+    if response_size_cap is not None:
+        cap = min(cap, max(0, int(response_size_cap)))
     if isinstance(state, QdrantLifecycleState) and state.http is not None:
         request_host = state.host or str(host)
         request_port = state.port or int(port)
@@ -231,10 +256,14 @@ def _http_json_request_steps(
             (method, url),
             {"headers": req_headers, "body": body_bytes, "timeout": timeout},
         )
+    if bool(getattr(response, "truncated", False)):
+        return 0, None, "byte_budget" if response_size_cap is not None else "HTTP response exceeds limit"
     if response.error:
         return 0, None, _friendly_error_text(response.error)
     status = int(response.status)
     raw = response.body
+    if response_meter is not None and not response_meter(len(raw)):
+        return 0, None, "byte_budget"
 
     if not raw:
         return status, None, None
@@ -412,23 +441,253 @@ def _qdrant_get_collection_info(
     collection_name: str,
     *,
     headers: dict[str, str] | None = None,
+    response_size_cap: int | None = None,
+    response_meter: Callable[[int], bool] | None = None,
 ) -> tuple[int, Any, str | None]:
     encoded_name = urllib.parse.quote(collection_name, safe="")
-    return _http_json_request(host, port, "GET", f"/collections/{encoded_name}", timeout, headers=headers)
+    budget_options: dict[str, Any] = {}
+    if response_size_cap is not None:
+        budget_options["response_size_cap"] = response_size_cap
+    if response_meter is not None:
+        budget_options["response_meter"] = response_meter
+    return _http_json_request(
+        host,
+        port,
+        "GET",
+        f"/collections/{encoded_name}",
+        timeout,
+        headers=headers,
+        **budget_options,
+    )
 
 
 def _qdrant_scroll_payloads(
-    host: str, port: int, timeout: float, collection_name: str, *, headers: dict[str, str] | None
+    host: str,
+    port: int,
+    timeout: float,
+    collection_name: str,
+    *,
+    headers: dict[str, str] | None,
+    collector: DiscoveryCollector | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Read at most 1,000 points / 8 MiB from a collection without mutation."""
+    with DiscoveryFrontier() if collector is not None else nullcontext(None) as frontier:
+        return _qdrant_scroll_payloads_inner(
+            host, port, timeout, collection_name, headers=headers, collector=collector, frontier=frontier
+        )
+
+
+class _QdrantSinglePointStream:
+    """Inspect one oversized scroll point without retaining its JSON body."""
+
+    def __init__(self, collector: DiscoveryCollector, collection: str, page_number: int) -> None:
+        self.collector = collector
+        self.collection = collection
+        self.page_number = page_number
+        self.point_id: str | int | None = None
+        self.next_offset: str | int | None = None
+        self.offset_seen = False
+        self.points_seen = False
+        self.point_seen = False
+        self.payload_seen = False
+        self._active_path: JSONPath | None = None
+        self._parts: list[str] = []
+        self._part_length = 0
+        self._disk: DiskBackedText | None = None
+        self.parser = JSONScalarStream(
+            self._string, on_primitive=self._primitive, on_container=self._container, deadline=collector.deadline
+        )
+
+    def _container(self, path: JSONPath, kind: str) -> None:
+        if path == ("result", "points"):
+            if kind != "array":
+                raise ValueError("invalid Qdrant points")
+            self.points_seen = True
+        elif len(path) == 3 and path[:2] == ("result", "points"):
+            if path[2] != 0 or kind != "object":
+                raise ValueError("unexpected Qdrant point")
+            self.point_seen = True
+        elif path == ("result", "points", 0, "payload"):
+            if kind != "object":
+                raise ValueError("invalid Qdrant payload")
+            self.payload_seen = True
+
+    def _primitive(self, entry: tuple[JSONPath, Any]) -> None:
+        path, value = entry
+        if path == ("result", "next_page_offset"):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                raise ValueError("invalid Qdrant offset")
+            self.next_offset = value
+            self.offset_seen = True
+        elif path == ("result", "points", 0, "id"):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("invalid Qdrant point ID")
+            self.point_id = value
+        else:
+            self._inspect(path, value)
+
+    def _string(self, path: JSONPath, fragment: str, final: bool) -> None:
+        if self._active_path is None:
+            self._active_path = path
+        if path != self._active_path:
+            raise ValueError("overlapping Qdrant scalars")
+        self._part_length += len(fragment)
+        if self._disk is None and self._part_length > 64 * 1024:
+            self._disk = DiskBackedText()
+            for part in self._parts:
+                self._disk.append_text(part)
+            self._parts.clear()
+        if self._disk is not None:
+            self._disk.append_text(fragment)
+        else:
+            self._parts.append(fragment)
+        if not final:
+            return
+        value: str | DiskBackedText
+        if self._disk is None:
+            value = "".join(self._parts)
+        else:
+            self._disk.finish()
+            value = self._disk
+        self._active_path = None
+        self._parts.clear()
+        self._part_length = 0
+        self._disk = None
+        if path == ("result", "next_page_offset"):
+            if not isinstance(value, str):
+                value.close()
+                raise ValueError("oversized Qdrant offset")
+            self.next_offset = value
+            self.offset_seen = True
+        elif path == ("result", "points", 0, "id"):
+            if not isinstance(value, str):
+                value.close()
+                raise ValueError("oversized Qdrant point ID")
+            self.point_id = value
+        else:
+            self._inspect(path, value)
+
+    def _inspect(self, path: JSONPath, value: Any) -> None:
+        if path[:4] != ("result", "points", 0, "payload") or len(path) < 5:
+            if isinstance(value, DiskBackedText):
+                value.close()
+            return
+        key = next((part for part in reversed(path[4:]) if isinstance(part, (str, DiskBackedText))), str(path[-1]))
+        field_parts: list[Text] = []
+        for part in path[4:]:
+            if field_parts:
+                field_parts.append(".")
+            field_parts.append(str(part) if isinstance(part, int) else part)
+        source = concat_discovery_text(f"collection.{self.collection}.page.{self.page_number}.point.0.", *field_parts)
+        if isinstance(value, DiskBackedText):
+            prefix = next(value.iter_text_chunks(max_chars=64), "").lstrip()
+            if prefix.startswith(("{", "[")):
+                self.collector.partial(source, "nested_json_string_unscanned")
+                value.close()
+                return
+        prior_findings = len(self.collector.findings)
+        self.collector.add(source, {key: value}, charge=False)
+        if isinstance(value, DiskBackedText) and len(self.collector.findings) == prior_findings:
+            value.close()
+
+    def close(self) -> None:
+        self.parser.close()
+        if self._disk is not None:
+            self._disk.close()
+
+
+def _qdrant_stream_oversized_point(
+    host: str,
+    port: int,
+    timeout: float,
+    encoded_collection: str,
+    request_body: dict[str, Any],
+    headers: dict[str, str] | None,
+    collector: DiscoveryCollector,
+    page_number: int,
+) -> tuple[dict[str, Any] | None, str | int | None, str | None]:
+    state = getattr(_THREAD_LOCAL_TRANSPORT, "state", None)
+    if not isinstance(state, QdrantLifecycleState) or state.http is None:
+        return None, None, "response_truncated"
+    scheme = state.scheme or ("https" if port in {443, 6334} else "http")
+    url = build_http_target_url(
+        state.host or host,
+        state.port or port,
+        f"/collections/{encoded_collection}/points/scroll",
+        default_scheme=scheme,
+        override_bound_scheme=True,
+    )
+    decoder = _QdrantSinglePointStream(collector, urllib.parse.unquote(encoded_collection), page_number)
+
+    def on_chunk(chunk: bytes) -> None:
+        if not collector.charge(len(chunk)):
+            raise TimeoutError("discover_time")
+        decoder.parser.feed(chunk)
+
+    try:
+        response = state.http.request_stream(
+            "POST",
+            url,
+            headers={
+                "User-Agent": "RedPosture/1.0",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                **(headers or {}),
+            },
+            body=json.dumps(request_body, ensure_ascii=False).encode(),
+            on_chunk=on_chunk,
+            chunk_size=max(1, min(collector.remaining, 64 * 1024)),
+            timeout=timeout,
+            deadline=collector.deadline,
+        )
+        if response.error or response.truncated or response.status != 200:
+            return None, None, str(response.error or f"status={response.status}")
+        decoder.parser.finish()
+        if not decoder.points_seen or not decoder.offset_seen:
+            return None, None, "invalid_scroll_response"
+        if not decoder.point_seen:
+            return None, decoder.next_offset, None
+        if decoder.point_id is None or not decoder.payload_seen:
+            return None, None, "invalid_scroll_point"
+        return {"id": decoder.point_id, "payload": None}, decoder.next_offset, None
+    except (ValueError, UnicodeError, TimeoutError) as exc:
+        return None, None, str(exc) or "invalid_scroll_response"
+    finally:
+        decoder.close()
+
+
+def _qdrant_scroll_payloads_inner(
+    host: str,
+    port: int,
+    timeout: float,
+    collection_name: str,
+    *,
+    headers: dict[str, str] | None,
+    collector: DiscoveryCollector | None,
+    frontier: DiscoveryFrontier | None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read payloads without mutation, streaming discovery within its budget."""
     encoded = urllib.parse.quote(collection_name, safe="")
     points: list[dict[str, Any]] = []
     offset: Any = None
     seen_offsets: set[str] = set()
     byte_count = 0
     partial = False
-    for _page in range(10):
-        request_body: dict[str, Any] = {"limit": 100, "with_payload": True, "with_vector": False}
+    page_size = 100
+    page_number = 0
+    for _page in count():
+        if collector is None and _page >= 10:
+            break
+        request_options: dict[str, Any] = {}
+        request_timeout = timeout
+        if collector is not None:
+            # Keep ordinary JSON scroll pages small; a single large payload is
+            # handled by the streaming point reader below.
+            response_cap = collector.cap(1024 * 1024)
+            if not response_cap:
+                return points, True
+            request_timeout = min(timeout, max(0.001, collector.deadline - time.monotonic()))
+            request_options = {"response_size_cap": response_cap, "response_meter": collector.charge}
+        request_body: dict[str, Any] = {"limit": page_size, "with_payload": True, "with_vector": False}
         if offset is not None:
             request_body["offset"] = offset
         status, body, error = _http_json_request(
@@ -436,36 +695,78 @@ def _qdrant_scroll_payloads(
             port,
             "POST",
             f"/collections/{encoded}/points/scroll",
-            timeout,
+            request_timeout,
             headers=headers,
             payload=request_body,
+            **request_options,
         )
+        if collector is not None and error == "byte_budget" and page_size > 1 and collector.allowed():
+            page_size = max(1, page_size // 2)
+            continue
+        if collector is not None and error == "byte_budget" and page_size == 1 and collector.allowed():
+            streamed_point, next_offset, stream_error = _qdrant_stream_oversized_point(
+                host, port, request_timeout, encoded, request_body, headers, collector, page_number + 1
+            )
+            if stream_error:
+                collector.partial(f"collection.{collection_name}", stream_error)
+                return points, True
+            collector.mark_accessible_source()
+            if streamed_point is not None:
+                if len(points) < 1000:
+                    points.append(streamed_point)
+                page_number += 1
+            if next_offset is None:
+                return points, partial
+            marker = _json_compact(next_offset)
+            if frontier is not None and not frontier.claim("offset:" + marker):
+                collector.partial(f"collection.{collection_name}", "repeated_offset")
+                return points, True
+            offset = next_offset
+            continue
         result = body.get("result") if isinstance(body, dict) else None
         page_points = result.get("points") if isinstance(result, dict) else None
         if error or status != 200 or not isinstance(page_points, list):
+            if collector is not None:
+                collector.partial(f"collection.{collection_name}", error or f"status={status}")
             return points, True
-        remaining = 1000 - len(points)
+        if collector is not None:
+            collector.mark_accessible_source()
+        remaining = 1000 - len(points) if collector is None else len(page_points)
         selected: list[dict[str, Any]] = []
         for point in page_points:
             if not isinstance(point, dict):
                 partial = True
+                if collector is not None:
+                    collector.partial(f"collection.{collection_name}", "invalid_point")
             elif len(selected) < remaining:
                 selected.append({"id": point.get("id"), "payload": point.get("payload")})
             else:
                 partial = True
-        byte_count += len(json.dumps(selected, ensure_ascii=False, default=str).encode())
-        if byte_count > 8 * 1024 * 1024:
-            return points, True
-        points.extend(selected)
+        if collector is None:
+            byte_count += len(json.dumps(selected, ensure_ascii=False, default=str).encode())
+            if byte_count > 8 * 1024 * 1024:
+                return points, True
+        else:
+            if not collector.add(f"collection.{collection_name}.page.{page_number + 1}", selected, charge=False):
+                return points, True
+        if collector is not None:
+            points.extend({"id": point["id"], "payload": None} for point in selected[: max(0, 1000 - len(points))])
+        else:
+            points.extend(selected)
+        page_number += 1
         offset = result.get("next_page_offset") if isinstance(result, dict) else None
         if offset is None:
             return points, partial
-        if len(points) >= 1000:
+        if collector is None and len(points) >= 1000:
             return points, True
         marker = _json_compact(offset)
-        if marker in seen_offsets:
+        repeated = not frontier.claim("offset:" + marker) if frontier is not None else marker in seen_offsets
+        if repeated:
+            if collector is not None:
+                collector.partial(f"collection.{collection_name}", "repeated_offset")
             return points, True
-        seen_offsets.add(marker)
+        if frontier is None:
+            seen_offsets.add(marker)
     return points, True
 
 
@@ -1879,6 +2180,9 @@ def collect_qdrant_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
     collection_name = options["collection_name"]
     timeout = float(getattr(ctx.args, "timeout", 5.0))
     host, port = str(ctx.host), int(ctx.port)
+    discovery_collector = (
+        DiscoveryCollector("qdrant", ctx, record) if bool(getattr(ctx.args, "discover", False)) else None
+    )
 
     if bool(options["dump_requested"]):
         dump_targets = [collection_name] if collection_name else list(collections or [])
@@ -1892,7 +2196,20 @@ def collect_qdrant_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
                 else "no collections available for dump"
             )
         for name in dump_targets:
-            status, payload, error = _qdrant_get_collection_info(host, port, timeout, str(name), headers=headers)
+            info_options: dict[str, Any] = {}
+            info_timeout = timeout
+            if discovery_collector is not None:
+                response_cap = discovery_collector.cap()
+                if not response_cap:
+                    break
+                info_timeout = min(timeout, max(0.001, discovery_collector.deadline - time.monotonic()))
+                info_options = {
+                    "response_size_cap": response_cap,
+                    "response_meter": discovery_collector.charge,
+                }
+            status, payload, error = _qdrant_get_collection_info(
+                host, port, info_timeout, str(name), headers=headers, **info_options
+            )
             record["collection_dump_items"].append(
                 {
                     "name": str(name),
@@ -1911,9 +2228,24 @@ def collect_qdrant_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
                             "error": error or _qdrant_error_text(payload, fallback_status=status),
                         }
                     )
-                points, partial = _qdrant_scroll_payloads(host, port, timeout, str(name), headers=headers)
+                    if discovery_collector is not None:
+                        discovery_collector.partial(
+                            f"collection.{name}",
+                            error
+                            or _qdrant_error_text(payload, fallback_status=status)
+                            or "collection info unavailable",
+                        )
+                points, partial = _qdrant_scroll_payloads(
+                    host, port, timeout, str(name), headers=headers, collector=discovery_collector
+                )
                 record["payload_discovery_partial"] = bool(record.get("payload_discovery_partial") or partial)
                 record.setdefault("payload_discovery_items", []).append({"collection": str(name), "points": points})
+                if discovery_collector is not None and not discovery_collector.allowed():
+                    break
+        if discovery_collector is not None:
+            if not dump_targets and isinstance(collections, list):
+                discovery_collector.mark_accessible_source()
+            record["content_discovery"] = discovery_collector.result()
 
     edit_target = collection_name or (str(collections[0]) if isinstance(collections, list) and collections else None)
     if edit_target:

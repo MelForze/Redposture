@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import base64
+import binascii
+import codecs
+import itertools
 import json
 import re
+import tempfile
 import threading
 import time
 import urllib.error
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ...clients import transport
@@ -27,6 +32,11 @@ from ...clients.http_api import (
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
+from ...discovery_frontier import DiscoveryFrontier
+from ...discovery_json import DiskJSONDocument
+from ...discovery_options import DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
+from ...discovery_spool import SpoolingRecords, SpoolingStrings
+from ...discovery_values import DiskBackedText
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
@@ -37,6 +47,7 @@ from ...stage_runtime import (
     format_retry_decision,
     merge_stage_records,
 )
+from ...storage_discovery import DiscoveryCollector
 from ...utils import is_signature_compat_typeerror, utc_now_iso
 
 # Connection-error classification + framed reads are shared via the transport layer.
@@ -80,6 +91,17 @@ class _EtcdHttpLifecycle:
     host: str | None = None
     port: int | None = None
     origin_resolved: bool = False
+
+
+@dataclass
+class _EtcdDiscoveryBudget:
+    deadline: float
+    remaining_bytes: int
+    collector: DiscoveryCollector | None = None
+
+    def request_timeout(self, timeout: float) -> float | None:
+        remaining = self.deadline - time.monotonic()
+        return min(timeout, remaining) if remaining > 0 and self.remaining_bytes > 0 else None
 
 
 def _build_etcd_credential_candidates(
@@ -212,10 +234,19 @@ def _http_json_request(
     payload: dict[str, Any] | None = None,
     auth_token: str | None = None,
     basic_auth: tuple[str, str] | None = None,
+    response_size_cap: int | None = None,
 ) -> tuple[int, str]:
     return run_sync(
         _detect_http_json_request_steps(
-            host, port, method, path, timeout, payload=payload, auth_token=auth_token, basic_auth=basic_auth
+            host,
+            port,
+            method,
+            path,
+            timeout,
+            payload=payload,
+            auth_token=auth_token,
+            basic_auth=basic_auth,
+            response_size_cap=response_size_cap,
         )
     )
 
@@ -230,6 +261,7 @@ def _detect_http_json_request_steps(
     payload: dict[str, Any] | None = None,
     auth_token: str | None = None,
     basic_auth: tuple[str, str] | None = None,
+    response_size_cap: int | None = None,
 ) -> Any:
     lifecycle = getattr(_ETCD_HTTP_LOCAL, "state", None)
     request_host = lifecycle.host or str(host) if isinstance(lifecycle, _EtcdHttpLifecycle) else str(host)
@@ -261,6 +293,8 @@ def _detect_http_json_request_steps(
         if requested_path.startswith(("/version", "/v3/auth/", "/v3beta/auth/", "/v3alpha/auth/"))
         else 10 * 1024 * 1024
     )
+    if response_size_cap is not None:
+        response_cap = min(response_cap, max(0, int(response_size_cap)))
     client = (
         None
         if isinstance(lifecycle, _EtcdHttpLifecycle)
@@ -335,6 +369,8 @@ def _detect_http_json_request_steps(
                     lifecycle.origin_resolved = True
                 break
         assert response is not None
+        if bool(getattr(response, "truncated", False)):
+            raise urllib.error.URLError("HTTP response exceeds limit")
         if response.error:
             raise urllib.error.URLError(response.error)
         last_status, last_text = int(response.status), response.text
@@ -476,7 +512,7 @@ def _normalize_etcd_key(value: str | None) -> str | None:
     return f"/{raw}"
 
 
-def _etcd_kv_entry(key: str, value: str | None = None, *, error: str | None = None) -> dict[str, str | None]:
+def _etcd_kv_entry(key: str, value: Any = None, *, error: str | None = None) -> dict[str, Any]:
     return {"key": str(key), "value": value, "error": error}
 
 
@@ -510,6 +546,276 @@ def _b64_decode_text(value: Any) -> str:
     except Exception:
         return ""
     return raw.decode("utf-8", errors="replace")
+
+
+def _b64_decode_discovery_value(value: Any) -> str | DiskBackedText:
+    """Decode a large JSON base64 scalar without materializing it in memory."""
+    if not isinstance(value, DiskBackedText):
+        decoded = _b64_decode_text(value)
+        if len(decoded) <= 65_536:
+            return decoded
+        output = DiskBackedText()
+        try:
+            output.append_text(decoded)
+            output.finish()
+            return output
+        except BaseException:
+            output.close()
+            raise
+    output = DiskBackedText()
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    pending = ""
+    try:
+        for part in value.iter_text_chunks():
+            pending += part
+            length = len(pending) // 4 * 4
+            if length:
+                output.append_text(decoder.decode(base64.b64decode(pending[:length], validate=True)))
+                pending = pending[length:]
+        if pending:
+            output.append_text(decoder.decode(base64.b64decode(pending + "=" * (-len(pending) % 4), validate=True)))
+        output.append_text(decoder.decode(b"", final=True))
+        output.finish()
+        return output
+    except (ValueError, binascii.Error, UnicodeError):
+        output.close()
+        raise
+
+
+def _stream_v3_page(
+    host: str,
+    port: int,
+    timeout: float,
+    payload: dict[str, Any],
+    *,
+    auth_token: str | None,
+    deadline: float,
+) -> tuple[int, Mapping[str, Any] | None, str | None, int]:
+    """Retry one oversized etcd range page with disk-backed JSON scalars."""
+    lifecycle = getattr(_ETCD_HTTP_LOCAL, "state", None)
+    pool = (
+        lifecycle.pool if isinstance(lifecycle, _EtcdHttpLifecycle) else HttpSessionPool(timeout=timeout, insecure=True)
+    )
+    own_pool = not isinstance(lifecycle, _EtcdHttpLifecycle)
+    binding = current_http_target_binding()
+    request_host = lifecycle.host or host if isinstance(lifecycle, _EtcdHttpLifecycle) else host
+    request_port = lifecycle.port or port if isinstance(lifecycle, _EtcdHttpLifecycle) else port
+    scheme = lifecycle.scheme if isinstance(lifecycle, _EtcdHttpLifecycle) else None
+    scheme = scheme or binding.scheme or ("https" if request_port in {443, 8443} else "http")
+    cache_key = (request_host, request_port, scheme, binding.base_path)
+    with _ETCD_V3_PREFIX_CACHE_LOCK:
+        cached_prefix = _ETCD_V3_PREFIX_CACHE.get(cache_key)
+    prefixes = list(dict.fromkeys(([cached_prefix] if cached_prefix else []) + list(_ETCD_V3_PREFIXES)))
+    headers = {"User-Agent": "RedPosture/1.0", "Content-Type": "application/json"}
+    if auth_token:
+        headers["Authorization"] = auth_token
+        headers["Grpc-Metadata-Authorization"] = auth_token
+    request_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    builder: DiskJSONDocument | None = None
+    try:
+        for prefix in prefixes:
+            if builder is not None:
+                builder.close()
+            active_document = DiskJSONDocument(deadline=deadline)
+            builder = active_document
+            count = 0
+            status = 0
+
+            def on_response(code: int, _headers: Any) -> None:
+                nonlocal status
+                status = code
+
+            def on_chunk(chunk: bytes, target: DiskJSONDocument = active_document) -> None:
+                nonlocal count
+                count += len(chunk)
+                target.feed(chunk)
+
+            url = build_http_target_url(
+                request_host,
+                request_port,
+                prefix + "/kv/range",
+                default_scheme=scheme,
+                override_bound_scheme=True,
+            )
+            try:
+                response = pool.request_stream(
+                    "POST",
+                    url,
+                    on_chunk=on_chunk,
+                    on_response=on_response,
+                    body=request_body,
+                    headers=headers,
+                    chunk_size=65_536,
+                    timeout=max(0.001, min(timeout, deadline - time.monotonic())),
+                    deadline=deadline,
+                    allow_cross_origin_redirects=False,
+                    preserve_authorization_on_cross_origin=False,
+                )
+            except (OSError, ValueError, UnicodeError) as exc:
+                return status, _retained_etcd_json(builder, status), str(exc), count
+            status = response.status
+            if status in {404, 501}:
+                continue
+            if response.error or response.truncated:
+                return status, _retained_etcd_json(builder, status), str(response.error or "response_truncated"), count
+            if status != 200:
+                return status, None, None, count
+            try:
+                parsed = builder.finish()
+            except (OSError, ValueError, UnicodeError) as exc:
+                return status, _retained_etcd_json(builder, status), f"invalid_json:{exc}", count
+            if not isinstance(parsed, Mapping):
+                return status, None, "invalid_json", count
+            with _ETCD_V3_PREFIX_CACHE_LOCK:
+                _ETCD_V3_PREFIX_CACHE[cache_key] = prefix
+            return status, parsed, None, count
+        return 404, None, "v3_range_unavailable", 0
+    finally:
+        if builder is not None:
+            builder.close()
+        if own_pool:
+            pool.close()
+
+
+def _stream_v2_tree(
+    host: str,
+    port: int,
+    timeout: float,
+    path: str,
+    *,
+    deadline: float,
+    basic_auth: tuple[str, str] | None = None,
+) -> tuple[int, Mapping[str, Any] | None, str | None, int]:
+    """Read a v2 tree or selected key without buffering the full JSON body."""
+    lifecycle = getattr(_ETCD_HTTP_LOCAL, "state", None)
+    pool = (
+        lifecycle.pool if isinstance(lifecycle, _EtcdHttpLifecycle) else HttpSessionPool(timeout=timeout, insecure=True)
+    )
+    own_pool = not isinstance(lifecycle, _EtcdHttpLifecycle)
+    request_host = lifecycle.host or host if isinstance(lifecycle, _EtcdHttpLifecycle) else host
+    request_port = lifecycle.port or port if isinstance(lifecycle, _EtcdHttpLifecycle) else port
+    binding = current_http_target_binding()
+    scheme = (lifecycle.scheme if isinstance(lifecycle, _EtcdHttpLifecycle) else None) or binding.scheme
+    scheme = scheme or ("https" if request_port in {443, 8443} else "http")
+    headers = {"User-Agent": "RedPosture/1.0", "Accept": "application/json"}
+    if basic_auth is not None:
+        encoded = base64.b64encode(f"{basic_auth[0]}:{basic_auth[1]}".encode()).decode("ascii")
+        headers["Authorization"] = f"Basic {encoded}"
+    url = build_http_target_url(request_host, request_port, path, default_scheme=scheme, override_bound_scheme=True)
+    builder = DiskJSONDocument(deadline=deadline)
+    status = 0
+    count = 0
+
+    def on_response(code: int, _headers: Any) -> None:
+        nonlocal status
+        status = code
+
+    def on_chunk(chunk: bytes) -> None:
+        nonlocal count
+        count += len(chunk)
+        builder.feed(chunk)
+
+    try:
+        response = pool.request_stream(
+            "GET",
+            url,
+            on_chunk=on_chunk,
+            on_response=on_response,
+            headers=headers,
+            chunk_size=65_536,
+            timeout=max(0.001, min(timeout, deadline - time.monotonic())),
+            deadline=deadline,
+            allow_cross_origin_redirects=False,
+            preserve_authorization_on_cross_origin=False,
+        )
+        status = response.status
+        if response.error or response.truncated:
+            return (
+                status,
+                _retained_etcd_json(builder, status, v2=True),
+                str(response.error or "response_truncated"),
+                count,
+            )
+        if status != 200:
+            return status, None, None, count
+        try:
+            payload = builder.finish()
+        except (OSError, ValueError, UnicodeError) as exc:
+            return status, _retained_etcd_json(builder, status, v2=True), f"invalid_json:{exc}", count
+        return status, payload if isinstance(payload, Mapping) else None, None, count
+    except (OSError, ValueError, UnicodeError) as exc:
+        return status, _retained_etcd_json(builder, status, v2=True), str(exc), count
+    finally:
+        builder.close()
+        if own_pool:
+            pool.close()
+
+
+def _retained_etcd_json(builder: DiskJSONDocument, status: int, *, v2: bool = False) -> Mapping[str, Any] | None:
+    """Keep complete array records, never an interrupted KV or leaf node."""
+    if status != 200:
+        return None
+    node_open = builder.is_open_container(("node",))
+    value = builder.partial_value(completed_arrays_only=True)
+    if not isinstance(value, Mapping):
+        return None
+    if v2 and node_open:
+        node = value.get("node")
+        if not isinstance(node, Mapping) or not bool(node.get("dir")):
+            return None
+    return value
+
+
+def _iter_v2_leaves(root: Any):
+    if not isinstance(root, Mapping):
+        return
+    pending = [iter((root,))]
+    while pending:
+        node = next(pending[-1], None)
+        if node is None:
+            pending.pop()
+            continue
+        if not isinstance(node, Mapping):
+            continue
+        if bool(node.get("dir")):
+            children = node.get("nodes")
+            if isinstance(children, list):
+                pending.append(iter(children))
+            continue
+        yield node
+
+
+def _count_v2_payload(payload: Any) -> int | None:
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("node"), Mapping):
+        return None
+    return sum(1 for _ in _iter_v2_leaves(payload["node"]))
+
+
+def _dump_v2_payload(payload: Any, collector: DiscoveryCollector | None) -> list[dict[str, Any]] | None:
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("node"), Mapping):
+        return None
+    entries: list[dict[str, Any]] = SpoolingRecords() if collector is not None else []
+    for node in _iter_v2_leaves(payload["node"]):
+        key = node.get("key")
+        if not isinstance(key, str) or not key:
+            if collector is not None:
+                collector.partial("v2", "invalid_key")
+            continue
+        value = node.get("value")
+        if collector is not None:
+            source = f"key_value_entries.{key}"
+            if isinstance(value, DiskBackedText):
+                collector.scan_disk_text(source, value, key=key.rsplit("/", 1)[-1])
+            else:
+                collector.add(source, {key.rsplit("/", 1)[-1]: value}, charge=False)
+        entry = _etcd_kv_entry(key, value if collector is not None else _format_etcd_text(value))
+        if isinstance(entries, SpoolingRecords):
+            entries.append(entry, sort_key=key)
+        else:
+            entries.append(entry)
+    if isinstance(entries, SpoolingRecords):
+        entries.finish()
+    return entries
 
 
 def _next_key_b64(key_b64: str) -> str:
@@ -566,33 +872,73 @@ def _dump_v2_key(
     timeout: float,
     *,
     basic_auth: tuple[str, str] | None = None,
-) -> tuple[dict[str, str | None] | None, str | None]:
-    if basic_auth is None:
-        status, body = _http_json_request(host, port, "GET", f"/v2/keys{key}", timeout)
-    else:
-        status, body = _http_json_request(
+    discovery_budget: _EtcdDiscoveryBudget | None = None,
+    retained_payload: Mapping[str, Any] | None = None,
+    retained_error: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    path = f"/v2/keys{key}"
+    request_options: dict[str, Any] = {}
+    if basic_auth is not None:
+        request_options["basic_auth"] = basic_auth
+    if discovery_budget is not None and retained_payload is None:
+        bounded_timeout = discovery_budget.request_timeout(timeout)
+        if bounded_timeout is None:
+            return None, "time_budget"
+        timeout = bounded_timeout
+    payload = retained_payload
+    stream_error = retained_error
+    try:
+        if retained_payload is None:
+            status, body = _http_json_request(host, port, "GET", path, timeout, **request_options)
+        else:
+            status, body = 200, ""
+    except urllib.error.URLError as exc:
+        if discovery_budget is None or "HTTP response exceeds limit" not in str(exc):
+            raise
+        status, payload, stream_error, streamed_bytes = _stream_v2_tree(
             host,
             port,
-            "GET",
-            f"/v2/keys{key}",
             timeout,
+            path,
+            deadline=discovery_budget.deadline,
             basic_auth=basic_auth,
         )
+        if discovery_budget.collector is not None:
+            discovery_budget.collector.bytes_read += streamed_bytes
+            if stream_error:
+                discovery_budget.collector.partial("v2", stream_error)
+        if stream_error is not None and payload is None:
+            return None, stream_error
+        body = ""
     if status == 404:
         return _etcd_kv_entry(key, "<not found>"), None
     if status != 200:
         return None, f"/v2/keys{key} returned status {status}"
 
-    payload = _load_json(body)
+    if payload is None:
+        payload = _load_json(body)
     if payload is None:
         return None, f"/v2/keys{key} returned invalid JSON"
     node = payload.get("node")
-    if not isinstance(node, dict):
+    if not isinstance(node, Mapping):
         return None, f"/v2/keys{key} returned invalid node"
     if bool(node.get("dir")):
-        return _etcd_kv_entry(key, "<dir>"), None
+        return _etcd_kv_entry(key, "<dir>"), stream_error
     resolved_key = str(node.get("key") or key).strip() or key
-    return _etcd_kv_entry(resolved_key, _format_etcd_text(node.get("value"))), None
+    value = node.get("value")
+    if discovery_budget is not None and discovery_budget.collector is not None:
+        collector = discovery_budget.collector
+        if stream_error:
+            collector.partial("v2", stream_error)
+        collector.mark_accessible_source()
+        source = f"key_value_entries.{resolved_key}"
+        if isinstance(value, DiskBackedText):
+            collector.scan_disk_text(source, value, key=resolved_key.rsplit("/", 1)[-1])
+        else:
+            collector.add(source, {resolved_key.rsplit("/", 1)[-1]: value}, charge=False)
+    return _etcd_kv_entry(
+        resolved_key, value if discovery_budget is not None else _format_etcd_text(value)
+    ), stream_error
 
 
 def _dump_v3_all(
@@ -646,6 +992,7 @@ def _stream_dump_v3_all(
     delay_ms: int,
     limit: int | None = None,
     auth_token: str | None = None,
+    discovery_budget: _EtcdDiscoveryBudget | None = None,
 ) -> tuple[list[dict[str, str | None]] | None, str | None]:
     """Dump the whole v3 keyspace gradually, one range page at a time.
 
@@ -656,12 +1003,22 @@ def _stream_dump_v3_all(
     milliseconds between pages. ``limit`` caps the total number of dumped entries;
     ``None`` dumps everything.
     """
-    page_size = max(1, batch)
+    page_size = min(16, max(1, batch)) if discovery_budget is not None else max(1, batch)
+    adaptive_ceiling = max(1, batch)
     delay_seconds = max(0, delay_ms) / 1000.0
-    entries: list[dict[str, str | None]] = []
+    entries: list[dict[str, str | None]] = SpoolingRecords() if discovery_budget is not None else []
     start_key_b64 = _ETCD_V3_ALL_RANGE_KEY_B64
 
     while True:
+        request_timeout = timeout
+        request_options: dict[str, Any] = {}
+        if discovery_budget is not None:
+            bounded_timeout = discovery_budget.request_timeout(timeout)
+            if bounded_timeout is None:
+                reason = "time_budget" if time.monotonic() >= discovery_budget.deadline else "byte_budget"
+                return entries, reason
+            request_timeout = bounded_timeout
+            request_options["response_size_cap"] = min(discovery_budget.remaining_bytes, 4 * 1024 * 1024)
         page_limit = page_size
         if limit is not None:
             remaining = limit - len(entries)
@@ -674,33 +1031,95 @@ def _stream_dump_v3_all(
             "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
             "limit": page_limit,
         }
-        if auth_token is None:
-            status, body = _http_json_request(host, port, "POST", "/v3/kv/range", timeout, payload=request_payload)
-        else:
-            status, body = _http_json_request(
-                host,
-                port,
-                "POST",
-                "/v3/kv/range",
-                timeout,
-                payload=request_payload,
-                auth_token=auth_token,
-            )
+        streamed_payload: Mapping[str, Any] | None = None
+        stream_error: str | None = None
+        streamed_bytes = 0
+        body = ""
+        try:
+            if auth_token is None:
+                status, body = _http_json_request(
+                    host,
+                    port,
+                    "POST",
+                    "/v3/kv/range",
+                    request_timeout,
+                    payload=request_payload,
+                    **request_options,
+                )
+            else:
+                status, body = _http_json_request(
+                    host,
+                    port,
+                    "POST",
+                    "/v3/kv/range",
+                    request_timeout,
+                    payload=request_payload,
+                    auth_token=auth_token,
+                    **request_options,
+                )
+        except urllib.error.URLError as exc:
+            if discovery_budget is not None and "timed out" in str(exc).lower() and page_limit > 1:
+                page_size = max(1, min(32, page_limit // 2))
+                adaptive_ceiling = min(adaptive_ceiling, page_size)
+                continue
+            if discovery_budget is not None and "limit" in str(exc).lower():
+                if page_limit > 1:
+                    page_size = max(1, page_limit // 2)
+                    adaptive_ceiling = min(adaptive_ceiling, page_size)
+                    continue
+                status, streamed_payload, stream_error, streamed_bytes = _stream_v3_page(
+                    host,
+                    port,
+                    request_timeout,
+                    request_payload,
+                    auth_token=auth_token,
+                    deadline=discovery_budget.deadline,
+                )
+                if stream_error and discovery_budget.collector is not None:
+                    discovery_budget.collector.partial("v3", stream_error)
+                if stream_error and streamed_payload is None:
+                    return entries, stream_error
+            else:
+                return entries, str(exc.reason)
         if status in (401, 403) or _body_indicates_auth_required(body):
-            return (entries if entries else None), "authentication required"
+            return (
+                entries if entries else None
+            ), "access_denied" if auth_token is not None else "authentication required"
         if status != 200:
             return (entries if entries else None), f"/v3/kv/range returned status {status}"
 
-        payload = _load_json(body)
+        if discovery_budget is not None and discovery_budget.collector is not None:
+            discovery_budget.collector.bytes_read += streamed_bytes or len(body.encode("utf-8"))
+            if stream_error:
+                discovery_budget.collector.partial("v3", stream_error)
+
+        payload = streamed_payload if streamed_payload is not None else _load_json(body)
         if payload is None:
             return (entries if entries else None), "/v3/kv/range returned invalid JSON"
         kvs = payload.get("kvs")
         if not isinstance(kvs, list):
+            if stream_error:
+                return entries, stream_error
             break
+
+        if stream_error and not kvs:
+            return entries, stream_error
+        if not kvs and bool(payload.get("more")):
+            return entries, "pagination_stalled"
+        if kvs and start_key_b64 != _ETCD_V3_ALL_RANGE_KEY_B64:
+            last_item = kvs[-1]
+            last_key = last_item.get("key") if isinstance(last_item, Mapping) else None
+            try:
+                requested = base64.b64decode(start_key_b64 + "===", validate=False)
+                returned = base64.b64decode(str(last_key) + "===", validate=False)
+            except (ValueError, binascii.Error):
+                return entries, "pagination_stalled"
+            if returned < requested:
+                return entries, "pagination_stalled"
 
         last_key_b64: str | None = None
         for item in kvs:
-            if not isinstance(item, dict):
+            if not isinstance(item, Mapping):
                 continue
             raw_key_b64 = item.get("key")
             if isinstance(raw_key_b64, str):
@@ -708,46 +1127,129 @@ def _stream_dump_v3_all(
             key = _b64_decode_text(raw_key_b64)
             if not key:
                 continue
-            value = _format_etcd_text(_b64_decode_text(item.get("value")))
-            entries.append(_etcd_kv_entry(key, value))
+            try:
+                value = (
+                    _b64_decode_discovery_value(item.get("value"))
+                    if discovery_budget is not None
+                    else _b64_decode_text(item.get("value"))
+                )
+            except (ValueError, binascii.Error, UnicodeError):
+                return entries, "invalid_base64_value"
+            if discovery_budget is not None and discovery_budget.collector is not None:
+                source = f"key_value_entries.{key}"
+                if isinstance(value, DiskBackedText):
+                    discovery_budget.collector.scan_disk_text(source, value, key=key.rsplit("/", 1)[-1])
+                else:
+                    discovery_budget.collector.add(source, {key.rsplit("/", 1)[-1]: value}, charge=False)
+            if discovery_budget is None:
+                value = _format_etcd_text(value)
+            entry = _etcd_kv_entry(key, value)
+            if isinstance(entries, SpoolingRecords):
+                entries.append(entry, sort_key=key)
+            else:
+                entries.append(entry)
 
+        if stream_error:
+            return entries, stream_error
         if not bool(payload.get("more")) or last_key_b64 is None:
             break
+        if discovery_budget is not None and len(kvs) >= page_limit:
+            # Learn from a small first page instead of asking an unknown
+            # server to materialize ten thousand large values at once.
+            wire_bytes = max(1, streamed_bytes or len(body.encode("utf-8")))
+            target_bytes = min(discovery_budget.remaining_bytes, 4 * 1024 * 1024)
+            suggested = max(1, target_bytes * len(kvs) // wire_bytes)
+            page_size = min(adaptive_ceiling, page_limit * 2, suggested)
         start_key_b64 = _next_key_b64(last_key_b64)
         if delay_seconds > 0:
-            time.sleep(delay_seconds)
+            time.sleep(
+                min(delay_seconds, max(0.0, discovery_budget.deadline - time.monotonic()))
+                if discovery_budget
+                else delay_seconds
+            )
 
-    entries.sort(key=lambda item: str(item.get("key") or ""))
+    if isinstance(entries, SpoolingRecords):
+        entries.finish()
+    else:
+        entries.sort(key=lambda item: str(item.get("key") or ""))
     return entries, None
 
 
 def _dump_v3_key(
-    host: str, port: int, key: str, timeout: float, *, auth_token: str | None = None
-) -> tuple[dict[str, str | None] | None, str | None]:
+    host: str,
+    port: int,
+    key: str,
+    timeout: float,
+    *,
+    auth_token: str | None = None,
+    discovery_budget: _EtcdDiscoveryBudget | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
     request_payload = {"key": _b64_encode_text(key)}
-    if auth_token is None:
-        status, body = _http_json_request(host, port, "POST", "/v3/kv/range", timeout, payload=request_payload)
-    else:
+    streamed_payload: Mapping[str, Any] | None = None
+    error: str | None = None
+    streamed_bytes = 0
+    body = ""
+    try:
         status, body = _http_json_request(
             host, port, "POST", "/v3/kv/range", timeout, payload=request_payload, auth_token=auth_token
         )
+    except urllib.error.URLError as exc:
+        if discovery_budget is None or "limit" not in str(exc).lower():
+            raise
+        status, streamed_payload, error, streamed_bytes = _stream_v3_page(
+            host,
+            port,
+            timeout,
+            request_payload,
+            auth_token=auth_token,
+            deadline=discovery_budget.deadline,
+        )
+        if error and discovery_budget.collector is not None:
+            discovery_budget.collector.partial("v3", error)
+        if error and streamed_payload is None:
+            return None, error
     if status in (401, 403) or _body_indicates_auth_required(body):
         return None, "authentication required"
     if status != 200:
         return None, f"/v3/kv/range returned status {status}"
 
-    payload = _load_json(body)
+    if discovery_budget is not None and discovery_budget.collector is not None:
+        discovery_budget.collector.bytes_read += streamed_bytes or len(body.encode("utf-8"))
+        if error:
+            discovery_budget.collector.partial("v3", error)
+    payload = streamed_payload if streamed_payload is not None else _load_json(body)
     if payload is None:
         return None, "/v3/kv/range returned invalid JSON"
     kvs = payload.get("kvs")
     if not isinstance(kvs, list) or not kvs:
+        if error:
+            return None, error
+        if discovery_budget is not None and discovery_budget.collector is not None:
+            discovery_budget.collector.mark_accessible_source()
         return _etcd_kv_entry(key, "<not found>"), None
     first = kvs[0]
-    if not isinstance(first, dict):
+    if not isinstance(first, Mapping):
+        if error:
+            return None, error
         return _etcd_kv_entry(key, "<not found>"), None
     resolved_key = _b64_decode_text(first.get("key")) or key
-    value = _format_etcd_text(_b64_decode_text(first.get("value")))
-    return _etcd_kv_entry(resolved_key, value), None
+    if discovery_budget is not None and resolved_key != key:
+        return None, "selected_key_mismatch"
+    try:
+        value = (
+            _b64_decode_discovery_value(first.get("value"))
+            if discovery_budget is not None
+            else _format_etcd_text(_b64_decode_text(first.get("value")))
+        )
+    except (ValueError, binascii.Error, UnicodeError):
+        return None, "invalid_base64_value"
+    if discovery_budget is not None and discovery_budget.collector is not None:
+        source = f"key_value_entries.{key}"
+        if isinstance(value, DiskBackedText):
+            discovery_budget.collector.scan_disk_text(source, value, key=key.rsplit("/", 1)[-1])
+        else:
+            discovery_budget.collector.add(source, {key.rsplit("/", 1)[-1]: value}, charge=False)
+    return _etcd_kv_entry(resolved_key, value), error
 
 
 def _audit_etcd_host(
@@ -767,6 +1269,10 @@ def _audit_etcd_host(
     password: str | None = None,
     defcreds: bool = False,
     credential_candidates: list[dict[str, Any]] | None = None,
+    discover: bool = False,
+    discover_time: float | None = None,
+    discover_max_bytes: int | None = None,
+    discover_ctx: Any | None = None,
 ) -> dict[str, Any]:
     return run_sync(
         _detect_audit_etcd_host_steps(
@@ -785,6 +1291,10 @@ def _audit_etcd_host(
             password=password,
             defcreds=defcreds,
             credential_candidates=credential_candidates,
+            discover=discover,
+            discover_time=discover_time,
+            discover_max_bytes=discover_max_bytes,
+            discover_ctx=discover_ctx,
         )
     )
 
@@ -806,6 +1316,10 @@ def _detect_audit_etcd_host_steps(
     password: str | None = None,
     defcreds: bool = False,
     credential_candidates: list[dict[str, Any]] | None = None,
+    discover: bool = False,
+    discover_time: float | None = None,
+    discover_max_bytes: int | None = None,
+    discover_ctx: Any | None = None,
 ) -> Any:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -820,9 +1334,19 @@ def _detect_audit_etcd_host_steps(
     provided_username = provided_candidates[0][0] if provided_candidates else None
     provided_password = provided_candidates[0][1] if provided_candidates else None
     defaults_enabled = any(source == "default" for _user, _secret, source in normalized_candidates)
+    discovery_budget = (
+        _EtcdDiscoveryBudget(
+            deadline=float(getattr(discover_ctx, "discovery_started_at", None) or time.monotonic())
+            + float(discover_time or DEFAULT_DISCOVER_TIME),
+            remaining_bytes=int(discover_max_bytes or UNLIMITED_DISCOVER_BYTES),
+        )
+        if discover and (dump_keys or query_key)
+        else None
+    )
 
     for attempt in range(attempts):
         started = time.monotonic()
+        pre_collector_streamed_bytes = 0
         try:
             version_status, version_body = yield DetectCall(
                 _http_json_request, (host, port, "GET", "/version", timeout), {}
@@ -843,17 +1367,58 @@ def _detect_audit_etcd_host_steps(
             key_count_v2_error: str | None = None
             v2_error: str | None = None
 
-            v2_status, v2_body = yield DetectCall(
-                _http_json_request, (host, port, "GET", "/v2/keys?recursive=true", timeout), {}
+            v2_probe_error: str | None = None
+            v2_streamed_payload: Mapping[str, Any] | None = None
+            v2_probe_path = (
+                f"/v2/keys{query_key}" if discovery_budget is not None and query_key else "/v2/keys?recursive=true"
             )
-            v2_json = _load_json(v2_body)
+            v2_options: dict[str, Any] = {}
+            v2_timeout = timeout
+            if discovery_budget is not None and is_etcd:
+                bounded_timeout = discovery_budget.request_timeout(timeout)
+                if bounded_timeout is None:
+                    v2_probe_error = "time_budget" if time.monotonic() >= discovery_budget.deadline else "byte_budget"
+                else:
+                    v2_timeout = bounded_timeout
+                    v2_options["response_size_cap"] = min(discovery_budget.remaining_bytes, 4 * 1024 * 1024)
+            v2_status, v2_body = 0, ""
+            if v2_probe_error is None:
+                try:
+                    v2_status, v2_body = yield DetectCall(
+                        _http_json_request,
+                        (host, port, "GET", v2_probe_path, v2_timeout),
+                        v2_options,
+                    )
+                except urllib.error.URLError as exc:
+                    if not is_etcd or "HTTP response exceeds limit" not in str(exc):
+                        raise
+                    if discovery_budget is None:
+                        # A strong /version fingerprint already confirmed etcd.
+                        # The detect pass must not fail because inventory is large.
+                        v2_probe_error = "v2 response exceeds buffered limit"
+                    else:
+                        v2_status, v2_streamed_payload, v2_probe_error, streamed_bytes = yield DetectCall(
+                            _stream_v2_tree,
+                            (host, port, v2_timeout, v2_probe_path),
+                            {"deadline": discovery_budget.deadline},
+                        )
+                        pre_collector_streamed_bytes += streamed_bytes
+            v2_json = v2_streamed_payload if v2_streamed_payload is not None else _load_json(v2_body)
             v2_shape_valid = _looks_like_v2_keys_response(v2_body) or (
-                is_etcd and isinstance(v2_json, dict) and isinstance(v2_json.get("node"), dict)
+                is_etcd and isinstance(v2_json, Mapping) and isinstance(v2_json.get("node"), Mapping)
             )
-            if v2_status == 200 and v2_shape_valid:
+            if v2_probe_error is not None:
+                v2_error = v2_probe_error
+                if v2_status == 200 and v2_shape_valid:
+                    v2_supported = True
+                    v2_auth_required = False
+                    key_count_v2_error = v2_probe_error
+            elif v2_status == 200 and v2_shape_valid:
                 v2_supported = True
                 v2_auth_required = False
-                key_count_v2 = _count_v2_keys(v2_body)
+                key_count_v2 = (
+                    _count_v2_payload(v2_json) if v2_streamed_payload is not None else _count_v2_keys(v2_body)
+                )
                 if key_count_v2 is None:
                     key_count_v2_error = "v2 key count response returned invalid JSON"
             elif is_etcd and v2_status in {401, 403} and _body_indicates_auth_required(v2_body):
@@ -994,16 +1559,45 @@ def _detect_audit_etcd_host_steps(
                         break
 
             if v2_basic_auth is not None:
-                v2_status, v2_body = yield DetectCall(
-                    _http_json_request,
-                    (host, port, "GET", "/v2/keys?recursive=true", timeout),
-                    {"basic_auth": v2_basic_auth},
-                )
-                if v2_status == 200 and _count_v2_keys(v2_body) is not None:
-                    key_count_v2 = _count_v2_keys(v2_body)
-                    key_count_v2_error = (
-                        None if key_count_v2 is not None else "v2 key count response returned invalid JSON"
-                    )
+                replay_timeout = timeout
+                replay_options: dict[str, Any] = {"basic_auth": v2_basic_auth}
+                replay_error: str | None = None
+                if discovery_budget is not None:
+                    bounded_timeout = discovery_budget.request_timeout(timeout)
+                    if bounded_timeout is None:
+                        replay_error = "time_budget" if time.monotonic() >= discovery_budget.deadline else "byte_budget"
+                    else:
+                        replay_timeout = bounded_timeout
+                        replay_options["response_size_cap"] = min(discovery_budget.remaining_bytes, 4 * 1024 * 1024)
+                if replay_error is None:
+                    try:
+                        v2_status, v2_body = yield DetectCall(
+                            _http_json_request,
+                            (host, port, "GET", "/v2/keys?recursive=true", replay_timeout),
+                            replay_options,
+                        )
+                    except urllib.error.URLError as exc:
+                        if discovery_budget is None or "HTTP response exceeds limit" not in str(exc):
+                            raise
+                        v2_status, v2_streamed_payload, replay_error, streamed_bytes = yield DetectCall(
+                            _stream_v2_tree,
+                            (host, port, replay_timeout, "/v2/keys?recursive=true"),
+                            {"deadline": discovery_budget.deadline, "basic_auth": v2_basic_auth},
+                        )
+                        pre_collector_streamed_bytes += streamed_bytes
+                    if replay_error is None and v2_status == 200:
+                        key_count_v2 = (
+                            _count_v2_payload(v2_streamed_payload)
+                            if v2_streamed_payload is not None
+                            else _count_v2_keys(v2_body)
+                        )
+                        key_count_v2_error = (
+                            None if key_count_v2 is not None else "v2 key count response returned invalid JSON"
+                        )
+                if replay_error is not None:
+                    v2_error = replay_error
+                    key_count_v2 = None
+                    key_count_v2_error = replay_error
 
             # If we successfully authenticated, re-run the /v3/kv/range probe with
             # the token so downstream key enumeration reflects post-auth state.
@@ -1031,17 +1625,36 @@ def _detect_audit_etcd_host_steps(
             }
             keys: list[str] | None = None
             key_values: list[str] | None = None
-            key_value_entries: list[dict[str, str | None]] | None = None
+            key_value_entries: list[Mapping[str, Any]] | None = None
             key_value_entries_by_api: dict[str, list[dict[str, str | None]] | None] = {}
             query_key_value: str | None = None
             query_key_entry: dict[str, str | None] | None = None
             query_key_entries_by_api: dict[str, dict[str, str | None] | None] = {}
-            key_dump_error: str | None = None
+            key_dump_error: str | None = (
+                v2_error
+                if v2_probe_error is not None
+                or v2_streamed_payload is not None
+                or v2_error in {"byte_budget", "time_budget"}
+                else None
+            )
             key_count_error: str | None = None
             v2_has_access = bool(v2_supported and (v2_auth_required is False or v2_basic_auth is not None))
             v3_has_access = bool(v3_supported and (v3_auth_required is False or auth_token is not None))
             api_has_access = {"v2": v2_has_access, "v3": v3_has_access}
             has_access = v2_has_access or v3_has_access
+            collector = None
+            if discovery_budget is not None and discover_ctx is not None:
+                collector = DiscoveryCollector(
+                    "etcd",
+                    discover_ctx,
+                    {"status": "valid_credentials" if selected_credential is not None else "open_no_auth"},
+                )
+                collector.bytes_read += pre_collector_streamed_bytes
+                discovery_budget.collector = collector
+                if key_dump_error:
+                    collector.partial("v2", key_dump_error)
+                if not has_access:
+                    collector.partial("etcd", "access_denied")
             if has_access:
                 known_counts = [
                     count
@@ -1061,13 +1674,33 @@ def _detect_audit_etcd_host_steps(
                         if item
                     ]
                     key_count_error = "; ".join(count_errors) or "one or more API key counts are unknown"
-                if show_keys or dump_keys:
-                    dump_errors: list[str] = []
+                if show_keys or (dump_keys and not (discover and query_key)):
+                    dump_errors: list[str] = [f"v2: {key_dump_error}"] if key_dump_error else []
                     if v2_has_access:
-                        v2_entries = _dump_v2_all_from_body(v2_body)
+                        v2_entries = (
+                            _dump_v2_payload(v2_streamed_payload, collector)
+                            if v2_streamed_payload is not None
+                            else None
+                            if v2_error in {"byte_budget", "time_budget"}
+                            else _dump_v2_all_from_body(v2_body)
+                        )
                         key_value_entries_by_api["v2"] = v2_entries
+                        if collector is not None and v2_entries is not None:
+                            collector.mark_accessible_source()
+                            if v2_streamed_payload is None:
+                                for entry in v2_entries:
+                                    key = str(entry.get("key") or "")
+                                    collector.add(
+                                        f"key_value_entries.{key}",
+                                        {key.rsplit("/", 1)[-1]: entry.get("value")},
+                                        charge=False,
+                                    )
                         if v2_entries is None:
-                            dump_errors.append("v2: /v2/keys returned invalid JSON")
+                            dump_errors.append(
+                                f"v2: {v2_error}"
+                                if v2_error in {"byte_budget", "time_budget"}
+                                else "v2: /v2/keys returned invalid JSON"
+                            )
                     if v3_has_access:
                         if dump_keys:
                             v3_entries, v3_dump_error = _stream_dump_v3_all(
@@ -1078,6 +1711,7 @@ def _detect_audit_etcd_host_steps(
                                 delay_ms=dump_delay,
                                 limit=dump_keys_limit,
                                 auth_token=auth_token,
+                                **({"discovery_budget": discovery_budget} if discovery_budget is not None else {}),
                             )
                         else:
                             v3_entries, v3_dump_error = _dump_v3_all(
@@ -1088,28 +1722,68 @@ def _detect_audit_etcd_host_steps(
                                 auth_token=auth_token,
                             )
                         key_value_entries_by_api["v3"] = v3_entries
+                        if collector is not None:
+                            api_has_access["v3"] = v3_entries is not None
+                        if collector is not None and v3_entries is not None:
+                            collector.mark_accessible_source()
                         if v3_dump_error:
                             dump_errors.append(f"v3: {v3_dump_error}")
 
-                    combined_entries: list[dict[str, str | None]] = []
+                    combined_entries: list[Mapping[str, Any]] = (
+                        SpoolingRecords() if discovery_budget is not None else []
+                    )
                     for api_name in ("v2", "v3"):
                         api_entries = key_value_entries_by_api.get(api_name)
                         if not isinstance(api_entries, list):
                             continue
                         for item in api_entries:
-                            combined_entries.append({**item, "api": api_name})
+                            entry = {**item, "api": api_name}
+                            if isinstance(combined_entries, SpoolingRecords):
+                                combined_entries.append(entry, sort_key=str(item.get("key") or ""))
+                            else:
+                                combined_entries.append(entry)
                     if combined_entries:
                         if show_keys:
-                            names = {_key_name_from_entry(item) for item in combined_entries}
-                            keys = sorted(item for item in names if item)
+                            if discovery_budget is not None:
+                                names = SpoolingRecords()
+                                with DiscoveryFrontier() as seen_names:
+                                    for catalog_entry in combined_entries:
+                                        name = _key_name_from_entry(catalog_entry)
+                                        if name and seen_names.claim(name):
+                                            names.append({"name": name}, sort_key=name)
+                                keys = SpoolingStrings(str(item["name"]) for item in names)
+                                keys.finish()
+                            else:
+                                unique_names = {_key_name_from_entry(item) for item in combined_entries}
+                                keys = sorted(item for item in unique_names if item)
                             if show_keys_limit is not None:
-                                keys = keys[:show_keys_limit]
+                                if isinstance(keys, SpoolingStrings):
+                                    keys = SpoolingStrings(itertools.islice(keys, max(0, show_keys_limit)))
+                                    keys.finish()
+                                else:
+                                    keys = keys[:show_keys_limit]
                         if dump_keys:
-                            entries = list(combined_entries)
+                            entries: list[Mapping[str, Any]] = (
+                                combined_entries
+                                if isinstance(combined_entries, SpoolingRecords)
+                                else list(combined_entries)
+                            )
                             if dump_keys_limit is not None:
-                                entries = entries[:dump_keys_limit]
+                                if isinstance(entries, SpoolingRecords):
+                                    limited_entries = SpoolingRecords()
+                                    for ordinal, entry in enumerate(entries):
+                                        if ordinal >= dump_keys_limit:
+                                            break
+                                        limited_entries.append(entry)
+                                    entries = limited_entries
+                                else:
+                                    entries = entries[:dump_keys_limit]
                             key_value_entries = entries
-                            key_values = [_etcd_kv_entry_text(item) for item in entries]
+                            key_values = (
+                                None
+                                if discovery_budget is not None
+                                else [_etcd_kv_entry_text(item) for item in entries]
+                            )
                     elif show_keys:
                         keys = []
                     elif dump_keys:
@@ -1126,6 +1800,9 @@ def _detect_audit_etcd_host_steps(
                             query_key,
                             timeout,
                             basic_auth=v2_basic_auth,
+                            discovery_budget=discovery_budget,
+                            retained_payload=v2_streamed_payload if v2_error else None,
+                            retained_error=v2_error if v2_streamed_payload is not None else None,
                         )
                         query_key_entries_by_api["v2"] = v2_entry
                         if one_key_error:
@@ -1137,6 +1814,7 @@ def _detect_audit_etcd_host_steps(
                             query_key,
                             timeout,
                             auth_token=auth_token,
+                            **({"discovery_budget": discovery_budget} if discovery_budget is not None else {}),
                         )
                         query_key_entries_by_api["v3"] = v3_entry
                         if one_key_error:
@@ -1145,7 +1823,11 @@ def _detect_audit_etcd_host_steps(
                         key_entry = query_key_entries_by_api.get(api_name)
                         if key_entry:
                             query_key_entry = {**key_entry, "api": api_name}
-                            query_key_value = _etcd_kv_entry_text(key_entry)
+                            query_key_value = (
+                                None
+                                if isinstance(key_entry.get("value"), DiskBackedText)
+                                else _etcd_kv_entry_text(key_entry)
+                            )
                             break
                     if query_errors:
                         query_error = "; ".join(query_errors)
@@ -1156,6 +1838,8 @@ def _detect_audit_etcd_host_steps(
             errors = [item for item in (v2_error, v3_error) if item]
             if key_dump_error:
                 errors.append(key_dump_error)
+            if collector is not None and key_dump_error:
+                collector.partial("etcd", key_dump_error.replace("authentication required", "access_denied"))
             error = "; ".join(errors) if errors else None
 
             if not is_etcd and not v2_supported:
@@ -1209,6 +1893,7 @@ def _detect_audit_etcd_host_steps(
                 "auth_required": auth_required,
                 "api_auth_required": api_auth_required,
                 "api_has_access": api_has_access,
+                **({"content_discovery": collector.result()} if collector is not None else {}),
                 "provided_credentials": provided_credentials,
                 "provided_username": provided_username,
                 "provided_password": provided_password,
@@ -1245,6 +1930,7 @@ def _detect_audit_etcd_host_steps(
                 "query_key_value": query_key_value,
                 "query_key_entry": query_key_entry,
                 "query_key_entries_by_api": query_key_entries_by_api,
+                "dump_error": key_dump_error,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "error": error,
             }
@@ -1405,6 +2091,8 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
 
 
 def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if record.get("_etcd_keys_streamed"):
+        return []
     show_keys = bool(record.get("show_keys"))
     dump_keys = bool(record.get("dump_keys"))
     query_key = str(record.get("query_key") or "").strip()
@@ -1529,6 +2217,78 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
     return lines
 
 
+def _spool_keys_details(record: dict[str, Any], *, dump_values: bool) -> str:
+    """Render the disk catalog without making parallel lists of every value."""
+    prefix = _nxc_prefix(record)
+    show_keys = bool(record.get("show_keys"))
+    limit = record.get("show_keys_limit")
+    rows = record.get("key_value_entries") or []
+    escapes = {index: f"\\u{index:04x}" for index in range(32)}
+    escapes.update({9: "\\t", 10: "\\n", 13: "\\r"})
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", prefix="redposture-etcd-dump-", delete=False
+    ) as output:
+        path = output.name
+
+        def value_line(entry: Mapping[str, Any]) -> None:
+            output.write(prefix + " ")
+            key = str(entry.get("key") or "")
+            output.write(key.translate(escapes) + ":")
+            value = entry.get("value")
+            if entry.get("error"):
+                value = "<" + str(entry["error"]) + ">"
+            chunks = (
+                value.iter_text_chunks()
+                if isinstance(value, DiskBackedText)
+                else (
+                    str(value or "")[position : position + 65536] for position in range(0, len(str(value or "")), 65536)
+                )
+            )
+            for chunk in chunks:
+                output.write(chunk.translate(escapes))
+            output.write("\n")
+
+        try:
+            if show_keys and rows:
+                total = record.get("key_count")
+                suffix = (
+                    f" (showing:{limit} of {total})"
+                    if isinstance(limit, int) and isinstance(total, int) and total > limit
+                    else ""
+                )
+                output.write(f"{prefix} [*] Keys Enumeration{suffix}\n")
+            if dump_values and rows and not show_keys:
+                output.write(f"{prefix} [*] Dump Keys\n")
+            remaining = SpoolingRecords()
+            current_key: str | None = None
+            shown = 0
+            show_current = False
+            for entry in rows:
+                key = str(entry.get("key") or "")
+                if key != current_key:
+                    show_current = show_keys and (not isinstance(limit, int) or shown < limit)
+                    current_key = key
+                    if show_current:
+                        shown += 1
+                        output.write(prefix + " " + key.translate(escapes) + "\n")
+                if dump_values:
+                    if not show_keys or show_current:
+                        value_line(entry)
+                    else:
+                        remaining.append(entry)
+            if remaining:
+                output.write(f"{prefix} [*] Dump Keys\n")
+                for entry in remaining:
+                    value_line(entry)
+            if record.get("query_key") and isinstance(record.get("query_key_entry"), dict):
+                output.write(f"{prefix} [*] Dump Key {record['query_key']}\n")
+                value_line(record["query_key_entry"])
+        except BaseException:
+            Path(path).unlink(missing_ok=True)
+            raise
+    return path
+
+
 def _render_colored_etcd_line(console: Console, line: str) -> bool:
     if render_colored_marker_line(
         console,
@@ -1564,6 +2324,10 @@ def _call_audit_etcd_host_with_stage_debug(
     debug_emit: Callable[[str], None] | None,
     target_spec: Any | None = None,
     proxy: Any | None = None,
+    discover: bool = False,
+    discover_time: float | None = None,
+    discover_max_bytes: int | None = None,
+    discover_ctx: Any | None = None,
 ) -> dict[str, Any]:
     return run_sync(
         _detect_call_audit_etcd_host_with_stage_debug_steps(
@@ -1587,6 +2351,10 @@ def _call_audit_etcd_host_with_stage_debug(
             debug_emit=debug_emit,
             target_spec=target_spec,
             proxy=proxy,
+            discover=discover,
+            discover_time=discover_time,
+            discover_max_bytes=discover_max_bytes,
+            discover_ctx=discover_ctx,
         )
     )
 
@@ -1613,6 +2381,10 @@ def _detect_call_audit_etcd_host_with_stage_debug_steps(
     debug_emit: Callable[[str], None] | None,
     target_spec: Any | None = None,
     proxy: Any | None = None,
+    discover: bool = False,
+    discover_time: float | None = None,
+    discover_max_bytes: int | None = None,
+    discover_ctx: Any | None = None,
 ) -> Any:
     started = time.monotonic()
     audit_limit_kwargs: dict[str, Any] = (
@@ -1629,6 +2401,12 @@ def _detect_call_audit_etcd_host_with_stage_debug_steps(
     audit_kwargs["username"] = username
     audit_kwargs["password"] = password
     audit_kwargs["defcreds"] = defcreds
+    if discover and run_deep_checks:
+        audit_kwargs["discover"] = True
+        audit_kwargs["discover_time"] = discover_time
+        audit_kwargs["discover_max_bytes"] = discover_max_bytes
+        if discover_ctx is not None:
+            audit_kwargs["discover_ctx"] = discover_ctx
     if credential_candidates:
         audit_kwargs["credential_candidates"] = credential_candidates
     target_scheme = str(getattr(target_spec, "scheme", "") or "").lower()
@@ -1688,6 +2466,20 @@ def _detect_call_audit_etcd_host_with_stage_debug_steps(
                 pass
 
     result: dict[str, Any] = dict(record)
+    if (
+        discover_ctx is not None
+        and run_deep_checks
+        and str(getattr(discover_ctx.args, "output_format", "txt")) == "txt"
+        and (
+            isinstance(result.get("key_value_entries"), SpoolingRecords)
+            or isinstance((result.get("query_key_entry") or {}).get("value"), DiskBackedText)
+        )
+        and (show_keys or not getattr(discover_ctx.args, "_discover_implicit_dump", False))
+    ):
+        result["_stream_lines_file"] = _spool_keys_details(
+            result, dump_values=not getattr(discover_ctx.args, "_discover_implicit_dump", False)
+        )
+        result["_etcd_keys_streamed"] = True
     status = str(result.get("status") or "fail")
     is_etcd = bool(result.get("is_etcd"))
     attempts = max(1, retries + 1)

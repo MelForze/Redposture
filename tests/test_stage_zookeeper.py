@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import struct
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -54,6 +55,24 @@ from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_mo
 def test_canonical_zookeeper_stage_has_no_keeper_package_dependency() -> None:
     assert lifecycle_stage.engine is implementation_engine
     assert not hasattr(lifecycle_stage, "keeper_actions")
+
+
+def test_discovery_znode_read_passes_remaining_byte_budget_to_client() -> None:
+    seen: list[int] = []
+
+    class Client:
+        def get_data_limited(self, path: str, max_bytes: int):
+            assert path == "/qa"
+            seen.append(max_bytes)
+            return b"secret", _ZK_ERR_OK, {"data_length": 6}
+
+    client = Client()
+    ctx = SimpleNamespace(args=SimpleNamespace(retries=0))
+    current, result, error, attempts = lifecycle_actions._read_zookeeper_lifecycle_with_retry(
+        ctx, None, client, authenticated=False, operation="data", path="/qa", max_data_bytes=50
+    )
+    assert (current, result, error, attempts) == (client, (b"secret", _ZK_ERR_OK, {"data_length": 6}), None, 1)
+    assert seen == [50]
 
 
 def _zk_string(value: str) -> bytes:
@@ -384,6 +403,15 @@ def test_enumerate_znodes_handles_noauth_and_truncation() -> None:
     assert truncated is True
     assert meta["/brokers"]["error"] is None
     assert error is None
+
+
+def test_enumerate_znodes_expired_discovery_deadline_skips_reads() -> None:
+    class _FakeClient:
+        def get_children2(self, _path: str):
+            pytest.fail("expired discovery must not read znodes")
+
+    nodes, count, truncated, meta, error = _enumerate_znodes(_FakeClient(), 100, deadline=time.monotonic() - 1)
+    assert (nodes, count, truncated, meta, error) == ([], 0, True, {}, "discover_time")
 
 
 def test_enumerate_znodes_count_only_mode_skips_path_collection() -> None:
@@ -4401,6 +4429,117 @@ def _lifecycle_options() -> dict[str, object]:
         "enum_workers": 3,
         "transport_config": None,
     }
+
+
+def test_lifecycle_discover_expired_before_tree_read_is_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def get_children2(self, _path: str):
+            pytest.fail("expired discovery must not read children")
+
+        def get_data(self, _path: str):
+            pytest.fail("expired discovery must not read data")
+
+    client = FakeClient()
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=client)
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_refresh_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: (client, None),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_enumerate_zookeeper_lifecycle",
+        lambda *_args, **_kwargs: pytest.fail("expired discovery must not enumerate"),
+    )
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1, discover=True, discover_time=0.01),
+        discovery_started_at=time.monotonic() - 1,
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+    record = lifecycle_actions.collect_zookeeper_data(
+        ctx, {"status": "open_no_auth"}, {**_lifecycle_options(), "dump": True}
+    )
+    assert record["znodes_truncated"] is True
+    assert record["content_discovery"]["status"] == "partial"
+    assert "discover_time" in record["content_discovery"]["partial_reasons"]
+
+
+def test_lifecycle_discover_continues_past_old_byte_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class FakeClient:
+        def get_data_discovery(self, path: str, *, deadline: float | None = None):
+            calls.append(path)
+            if path == "/a":
+                return b'{"password":"first-secret-value"}', _ZK_ERR_OK, None
+            if path == "/b":
+                return b'{"password":"second-secret-value"}', _ZK_ERR_OK, None
+            return b"", _ZK_ERR_OK, None
+
+        def read_children_discovery(self, path: str, callback: Any, *, deadline: float | None = None):
+            if path == "/":
+                callback("a")
+                callback("b")
+            return _ZK_ERR_OK, None
+
+    client = FakeClient()
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=client)
+    monkeypatch.setattr(lifecycle_actions, "_refresh_zookeeper_lifecycle_client", lambda *_a, **_k: (client, None))
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(
+            retries=0, timeout=0.1, discover=True, discover_time=10, discover_max_bytes=10, _discover_implicit_dump=True
+        ),
+        discovery_started_at=time.monotonic(),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+    record = lifecycle_actions.collect_zookeeper_data(
+        ctx, {"status": "open_no_auth"}, {**_lifecycle_options(), "dump": True}
+    )
+    assert calls == ["/", "/a", "/b"]
+    assert record["content_discovery"]["status"] == "complete"
+    assert {item["value"] for item in record["content_discovery"]["findings"]} == {
+        "first-secret-value",
+        "second-secret-value",
+    }
+
+
+def test_lifecycle_default_discover_deadline_stops_old_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def get_children2(self, _path: str):
+            pytest.fail("default discovery deadline must stop tree reads")
+
+        def get_data(self, _path: str):
+            pytest.fail("default discovery deadline must stop data reads")
+
+    client = FakeClient()
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=client)
+    monkeypatch.setattr(lifecycle_actions, "_refresh_zookeeper_lifecycle_client", lambda *_a, **_k: (client, None))
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1, discover=True, discover_time=None),
+        discovery_started_at=time.monotonic() - 901,
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+    record = lifecycle_actions.collect_zookeeper_data(
+        ctx, {"status": "open_no_auth"}, {**_lifecycle_options(), "dump": True}
+    )
+    assert "discover_time" in record["content_discovery"]["partial_reasons"]
+    assert record["znodes_truncated"] is True
 
 
 def test_lifecycle_detect_exhausted_retries_emit_coherent_protocol_traces(

@@ -51,77 +51,39 @@ async def _startup(
         await asyncio.wait_for(writer.drain(), timeout)
     except TimeoutError as exc:
         raise TimeoutError("timed out") from exc
-    detected = False
-    auth_required: bool | None = None
-    auth_method: str | None = None
-    version: str | None = None
-    while True:
-        header = await _read(reader, 5, timeout)
-        kind = header[:1]
-        length = int.from_bytes(header[1:], "big")
-        if length < 4 or length > actions._PG_MAX_MESSAGE_SIZE:
-            raise ValueError(f"invalid postgres message length: {length}")
-        payload = await _read(reader, length - 4, timeout)
-        if not detected and kind not in actions._PG_HANDSHAKE_TYPES:
-            raise actions._PgAuditError(f"unexpected response prefix: {kind!r}", detected=False)
-        if kind == b"R":
-            detected = True
-            if len(payload) < 4:
-                raise actions._PgAuditError("invalid authentication payload", detected=True)
-            code = int.from_bytes(payload[:4], "big")
-            if code == 0:
-                if auth_required is None:
-                    auth_required = False
-                continue
-            method = {3: "cleartext", 5: "md5", 10: "scram-sha-256", 11: "scram-sha-256", 12: "scram-sha-256"}.get(code)
-            if code == 5 and len(payload) < 8:
-                raise actions._PgAuditError(
-                    "invalid MD5 authentication payload", detected=True, auth_required=True, auth_method=method
-                )
-            message = {
-                3: "password authentication required",
-                5: "md5 authentication required",
-                10: "SCRAM authentication required",
-                11: "unexpected SCRAM continue",
-                12: "unexpected SCRAM final",
-            }.get(code, f"unsupported auth method: {code}")
-            raise actions._PgAuditError(message, detected=True, auth_required=True, auth_method=method)
-        if kind == b"S":
-            detected = True
-            key, value = actions._pg_parse_parameter_status(payload)
-            if key == "server_version":
-                version = value
-            continue
-        if kind in {b"K", b"N"}:
-            detected = True
-            continue
-        if kind == b"E":
-            sqlstate, message = actions._pg_parse_error(payload)
-            lower = message.lower()
-            auth_failure = sqlstate in {"28P01", "28000"} or "password authentication failed" in lower
-            error_kind = (
-                "authentication_failed"
-                if auth_failure
-                else "auth_configuration_error"
-                if "no authentication method is found" in lower
-                else "startup_rejected"
-            )
-            raise actions._PgAuditError(
-                message,
-                detected=True,
-                auth_required=True if auth_failure else None,
-                auth_method=auth_method,
-                sqlstate=sqlstate,
-                failure_phase="startup",
-                error_kind=error_kind,
-            )
-        if kind == b"Z":
-            return actions._PgSession(
-                auth_required=False if auth_required is None else auth_required,
-                auth_method=auth_method,
-                server_version=version,
-            )
-        raise actions._PgAuditError(f"unexpected handshake message: {kind!r}", detected=detected)
+    evidence = actions._PgStartupEvidence("postgres", database)
+    try:
+        while True:
+            header = await _read(reader, 5, timeout)
+            kind = header[:1]
+            length = int.from_bytes(header[1:], "big")
+            if length < 4 or length > actions._PG_MAX_MESSAGE_SIZE:
+                raise ValueError(f"invalid postgres message length: {length}")
+            payload = await _read(reader, length - 4, timeout)
+            evidence.observe(kind, payload)
+            if kind == b"R":
+                code = int.from_bytes(payload[:4], "big")
+                if code == 0:
+                    continue
+                message = {
+                    3: "password authentication required",
+                    5: "md5 authentication required",
+                    10: "SCRAM authentication required",
+                    11: "unexpected SCRAM continue",
+                    12: "unexpected SCRAM final",
+                }.get(code, f"unsupported auth method: {code}")
+                raise evidence.error(message, error_kind="authentication_unavailable")
+            if kind == b"Z":
+                return evidence.session()
+    except actions._PgAuditError as exc:
+        evidence.enrich(exc)
+        raise
+    except (OSError, ConnectionError) as exc:
+        if not evidence.detected:
+            raise
+        raise evidence.error(str(exc), error_kind="transport_error") from exc
+    except ValueError as exc:
+        raise evidence.error(str(exc), error_kind="protocol_error") from exc
 
 
 async def _probe(
@@ -206,6 +168,7 @@ async def detect(ctx: Any, _http: Any) -> AuditRecord:
                 "auth_required": session.auth_required,
                 "auth_method": session.auth_method,
                 "server_version": session.server_version,
+                **actions._pg_startup_record_fields(session, username="postgres", database=database),
                 "error": None,
             }
             break
@@ -226,6 +189,7 @@ async def detect(ctx: Any, _http: Any) -> AuditRecord:
                 "sqlstate": exc.sqlstate,
                 "failure_phase": exc.failure_phase or ("startup" if exc.detected else "connect"),
                 "error_kind": exc.error_kind or ("startup_rejected" if exc.detected else "connection_error"),
+                **actions._pg_startup_record_fields(exc, username="postgres", database=database),
                 "error": str(exc),
             }
             break
@@ -240,6 +204,12 @@ async def detect(ctx: Any, _http: Any) -> AuditRecord:
             "status": "fail",
             "auth_required": None,
             "error": last_error or "connection failed",
+            "failure_phase": "connect",
+            "error_kind": "transport_error",
+            "password_sent": False,
+            "credential_verified": None,
+            "startup_username": "postgres",
+            "startup_database": database,
         }
     payload.update(timestamp=actions.utc_now_iso(), elapsed_ms=int((time.monotonic() - started) * 1000))
     record = stage._postgres_record(payload)

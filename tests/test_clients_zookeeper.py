@@ -7,10 +7,164 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 import redposture_core.clients.zookeeper as zk
+
+
+def test_discovery_get_data_spools_large_frame_without_legacy_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(zk, "_ZK_MAX_FRAME", 64)
+    value = b'{"password":"' + b"x" * 100_000 + b'"}'
+    stat = struct.pack(">qqqqiiiqiiq", 0, 0, 0, 0, 0, 0, 0, 0, len(value), 0, 0)
+    response = struct.pack(">iqi", 1, 0, 0) + struct.pack(">i", len(value)) + value + stat
+
+    class Socket:
+        def __init__(self) -> None:
+            self.data = memoryview(struct.pack(">i", len(response)) + response)
+            self.offset = 0
+            self.max_read = 0
+
+        def sendall(self, _data: bytes) -> None:
+            return None
+
+        def recv(self, size: int) -> bytes:
+            self.max_read = max(self.max_read, size)
+            end = min(len(self.data), self.offset + size)
+            chunk = bytes(self.data[self.offset : end])
+            self.offset = end
+            return chunk
+
+    client = zk._ZkClient("qa", 2181, 1.0)
+    sock = Socket()
+    client.sock = cast(Any, sock)
+    data, error, metadata = client.get_data_discovery("/qa")
+    assert error == zk._ZK_ERR_OK
+    assert metadata == {"data_length": len(value), "num_children": 0}
+    assert b"".join(data.iter_chunks()) == value
+    assert sock.max_read <= 65_536
+
+
+def test_discovery_children_stream_callback_avoids_whole_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(zk, "_ZK_MAX_FRAME", 64)
+    names = [f"child-{index}" for index in range(1_000)]
+    children = struct.pack(">i", len(names)) + b"".join(zk._encode_zk_string(name) for name in names)
+    stat = struct.pack(">qqqqiiiqiiq", 0, 0, 0, 0, 0, 0, 0, 0, 0, len(names), 0)
+    frame = struct.pack(">iqi", 1, 0, 0) + children + stat
+
+    class Socket:
+        def __init__(self) -> None:
+            self.data = memoryview(struct.pack(">i", len(frame)) + frame)
+            self.offset = 0
+
+        def sendall(self, _data: bytes) -> None:
+            return None
+
+        def recv(self, count: int) -> bytes:
+            end = min(self.offset + count, len(self.data))
+            value = bytes(self.data[self.offset : end])
+            self.offset = end
+            return value
+
+    client = zk._ZkClient("qa", 2181, 1.0)
+    client.sock = cast(Any, Socket())
+    seen: list[str] = []
+    error, metadata = client.read_children_discovery("/", seen.append)
+    assert seen == names
+    assert error == zk._ZK_ERR_OK
+    assert metadata == {"data_length": 0, "num_children": len(names)}
+
+
+def test_discovery_truncated_frame_closes_socket_before_next_request() -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.parts = [struct.pack(">i", 100), b"short", b""]
+            self.closed = False
+
+        def sendall(self, _data: bytes) -> None:
+            return None
+
+        def recv(self, _count: int) -> bytes:
+            return self.parts.pop(0)
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = zk._ZkClient("qa", 2181, 1.0)
+    sock = Socket()
+    client.sock = cast(Any, sock)
+    with pytest.raises(ConnectionError, match="unexpected EOF"):
+        client.get_data_discovery("/qa")
+    assert sock.closed and client.sock is None
+
+
+def test_limited_znode_frame_rejects_oversize_before_body_read() -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.reads: list[int] = []
+
+        def recv(self, size: int) -> bytes:
+            self.reads.append(size)
+            assert size == 4, "oversized znode body must not be read"
+            return struct.pack(">i", 10_000)
+
+    sock = Socket()
+    with pytest.raises(ValueError, match="discovery byte budget"):
+        zk._recv_frame(sock, max_size=100)
+    assert sock.reads == [4]
+
+
+def test_limited_znode_read_closes_session_after_oversized_reply() -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.reads: list[int] = []
+            self.closed = False
+
+        def sendall(self, _data: bytes) -> None:
+            return None
+
+        def recv(self, size: int) -> bytes:
+            self.reads.append(size)
+            assert size == 4
+            return struct.pack(">i", 1000)
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = zk._ZkClient("qa", 2181, 1.0)
+    sock = Socket()
+    client.sock = cast(Any, sock)
+    with pytest.raises(ValueError, match="discovery byte budget"):
+        client.get_data_limited("/qa", 10)
+    assert sock.reads == [4]
+    assert sock.closed and client.sock is None
+
+
+def test_limited_children_read_rejects_oversized_tree_page_before_body() -> None:
+    class Socket:
+        def __init__(self) -> None:
+            self.reads: list[int] = []
+            self.closed = False
+
+        def sendall(self, _data: bytes) -> None:
+            return None
+
+        def recv(self, size: int) -> bytes:
+            self.reads.append(size)
+            assert size == 4
+            return struct.pack(">i", 1000)
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = zk._ZkClient("qa", 2181, 1.0)
+    sock = Socket()
+    client.sock = cast(Any, sock)
+    with pytest.raises(ValueError, match="discovery byte budget"):
+        client.get_children2_limited("/", 10)
+    assert sock.reads == [4]
+    assert sock.closed and client.sock is None
 
 
 def test_sequential_create_returns_server_allocated_path() -> None:
@@ -20,7 +174,10 @@ def test_sequential_create_returns_server_allocated_path() -> None:
         def __init__(self) -> None:
             return
 
-        def _request(self, opcode: int, payload: bytes = b"") -> tuple[int, bytes]:
+        def _request(
+            self, opcode: int, payload: bytes = b"", *, max_response_size: int | None = None
+        ) -> tuple[int, bytes]:
+            _ = max_response_size
             requests.append((opcode, payload))
             return 0, zk._encode_zk_string("/clickhouse/task_queue/ddl/query-0000000007")
 
@@ -193,6 +350,24 @@ def test_serial_enumeration_hard_caps_wide_page_and_traversal() -> None:
     assert truncated is True
     assert calls == ["/", "/node-000", "/node-001"]
     assert error is None
+
+
+def test_serial_discovery_enumeration_reuses_children_portion_limit() -> None:
+    calls: list[tuple[str, int]] = []
+
+    class Client:
+        def get_children2_limited(self, path: str, remaining: int):
+            calls.append((path, remaining))
+            return (["a"] if path == "/" else ["b"] if path == "/a" else []), zk._ZK_ERR_OK, {"data_length": 0}, 10
+
+    budget = [10]
+    nodes, total, truncated, _meta, error = zk._enumerate_znodes(
+        Client(), max_znodes=10, enum_workers=1, byte_budget=budget
+    )
+    assert "/a/b" in nodes and total >= 2
+    assert truncated is False and error is None
+    assert budget == [10]
+    assert calls == [("/", 10), ("/a", 10), ("/a/b", 10)]
 
 
 def test_enumeration_preserves_root_noauth_as_coverage_evidence(monkeypatch: pytest.MonkeyPatch) -> None:

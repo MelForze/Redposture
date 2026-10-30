@@ -6,6 +6,7 @@ import http.client
 import io
 import socket
 import ssl
+import time
 import urllib.request
 from typing import Any
 from unittest.mock import Mock
@@ -192,6 +193,78 @@ def test_pool_retry_policy_distinguishes_transient_failures_and_cancellation(
     assert result.status == (200 if should_retry else 0)
 
 
+def test_explicit_short_http_timeout_is_not_rounded_above_discovery_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = session.HttpSessionPool(timeout=1, retries=0)
+    calls: list[float] = []
+
+    def request(*_args: Any, **kwargs: Any):
+        calls.append(kwargs["timeout"])
+        return api.HttpResponse(200, b"ok", {}), None, False
+
+    monkeypatch.setattr(pool, "_request_once", request)
+    pool.request("GET", "http://target/", timeout=0.005, retries=0)
+    pool.request_once("GET", "http://target/", timeout=0.005)
+    assert calls == [0.005, 0.005]
+
+
+def test_explicit_timeout_stops_redirect_chain_after_budget_is_spent(monkeypatch: pytest.MonkeyPatch) -> None:
+    pool = session.HttpSessionPool(timeout=1)
+    calls: list[float] = []
+
+    def request(*_args: Any, **kwargs: Any):
+        calls.append(kwargs["timeout"])
+        time.sleep(0.02)
+        return api.HttpResponse(302, b"", {"Location": "/next"}), None, False
+
+    monkeypatch.setattr(pool, "_request_once", request)
+    result = pool.request("GET", "http://target/", timeout=0.005, retries=0)
+    assert len(calls) == 1
+    assert result.error and "timeout" in result.error.lower()
+
+
+def test_explicit_timeout_stops_retry_after_budget_is_spent(monkeypatch: pytest.MonkeyPatch) -> None:
+    pool = session.HttpSessionPool(timeout=1, retries=2)
+    calls: list[float] = []
+
+    def request(*_args: Any, **kwargs: Any):
+        calls.append(kwargs["timeout"])
+        time.sleep(0.02)
+        return api.HttpResponse(0, b"", {}, error="timed out"), TimeoutError("timed out"), False
+
+    monkeypatch.setattr(pool, "_request_once", request)
+    result = pool.request("GET", "http://target/", timeout=0.005)
+    assert len(calls) == 1
+    assert calls[0] == 0.005
+    assert result.error == "timed out"
+
+
+def test_pool_body_reader_checks_deadline_between_dribbling_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    response = Mock()
+    response.status = 200
+    response.length = 100
+    response.will_close = False
+    response.getheaders.return_value = []
+    response.getheader.return_value = ""
+    reads: list[int] = []
+
+    def read1(size: int) -> bytes:
+        reads.append(size)
+        time.sleep(0.02)
+        return b"a"
+
+    response.read1.side_effect = read1
+    connection = _connection(response)
+    monkeypatch.setattr(session.http.client, "HTTPConnection", Mock(return_value=connection))
+    pool = session.HttpSessionPool(timeout=1)
+    result = pool.request("GET", "http://target/", timeout=0.005, response_size_cap=3, preserve_partial_body=True)
+    assert len(reads) == 1
+    assert result.body == b"a"
+    assert result.error and "timeout" in result.error.lower()
+    pool.close()
+
+
 @pytest.mark.parametrize("proxy_scheme", ["http", "https"])
 def test_pool_builds_target_tls_over_selected_proxy_transport(
     monkeypatch: pytest.MonkeyPatch, proxy_scheme: str
@@ -308,6 +381,50 @@ def test_manual_nested_tls_exchange_handles_bidirectional_progress_and_bounds(ph
     assert truncated is (phase == "cap")
     if phase == "write":
         outer.recv.assert_called_once()
+
+
+def test_manual_nested_tls_exchange_stops_after_shared_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock[0])
+    tls = Mock()
+    tls.do_handshake.return_value = None
+    tls.write.return_value = 4
+
+    def slow_read(_size: int) -> bytes:
+        clock[0] = 2.0
+        return b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabc"
+
+    tls.read.side_effect = slow_read
+    outer = Mock()
+    raw, truncated = api._tls_over_tls_exchange(
+        outer, _TlsContext(tls), server_hostname="target", request_payload=b"data", response_cap=100, deadline=1.0
+    )
+    assert truncated is True
+    assert raw.endswith(b"abc")
+    assert tls.read.call_count == 1
+    assert outer.settimeout.called
+
+
+def test_manual_https_proxy_returns_partial_body_at_explicit_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock[0])
+    outer = Mock()
+    monkeypatch.setattr(api, "open_connection_via_proxy", Mock(return_value=outer))
+    tls = Mock()
+    tls.do_handshake.return_value = None
+    tls.write.side_effect = lambda view: len(view)
+
+    def slow_read(_size: int) -> bytes:
+        clock[0] = 2.0
+        return b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabc"
+
+    tls.read.side_effect = slow_read
+    client = api.HttpApiClient(api.HttpClientConfig(proxy=_proxy(), ssl_context=_TlsContext(tls), retries=0))
+    response = client.get("https://target/data", timeout=1.0)
+    assert response.status == 200 and response.body == b"abc"
+    assert response.truncated is True
+    assert tls.read.call_count == 1
+    outer.close.assert_called_once()
 
 
 def test_manual_https_proxy_always_closes_tunnel_after_parse_error(monkeypatch: pytest.MonkeyPatch) -> None:

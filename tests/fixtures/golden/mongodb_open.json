@@ -51,72 +51,76 @@
     ],
     "content_discovery": {
       "bytes_inspected": 1475,
+      "bytes_read": 1475,
+      "emitted_fingerprints": [],
       "findings": [
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.redposture.service_tokens.token",
+          "object_path": "$.database.redposture.collection.audit_events.document.details",
           "source": "anonymous",
           "type": "generic_secret",
-          "value": "gfa_..._123"
+          "value": "gfa_demo_token_123"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.redposture.service_tokens.token",
+          "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "admin"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "auto-runner-2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "readonly"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "reporting2026"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+          "source": "anonymous",
+          "type": "password",
+          "value": "service123"
+        },
+        {
+          "confidence": "high",
+          "fingerprint": "<DOCKER_ID>",
+          "object_path": "$.database.redposture.collection.service_tokens.document.token",
           "source": "anonymous",
           "type": "generic_secret",
-          "value": "ci_d..._456"
+          "value": "ci_demo_token_456"
         },
         {
           "confidence": "high",
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.redposture.service_tokens.token",
+          "object_path": "$.database.redposture.collection.service_tokens.document.token",
           "source": "anonymous",
           "type": "generic_secret",
-          "value": "prom..._789"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.redposture.demo_accounts.password",
-          "source": "anonymous",
-          "type": "password",
-          "value": "*****"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.redposture.demo_accounts.password",
-          "source": "anonymous",
-          "type": "password",
-          "value": "********"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.redposture.demo_accounts.password",
-          "source": "anonymous",
-          "type": "password",
-          "value": "serv...e123"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.redposture.demo_accounts.password",
-          "source": "anonymous",
-          "type": "password",
-          "value": "repo...2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.redposture.demo_accounts.password",
-          "source": "anonymous",
-          "type": "password",
-          "value": "auto...2026"
+          "value": "prom_rw_token_789"
         }
       ],
+      "live_emitted": false,
+      "partial_reasons": [],
       "source": "anonymous",
       "status": "complete"
     },

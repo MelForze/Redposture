@@ -13,6 +13,8 @@ if [[ -z "$PYTHON_BIN" ]]; then
   fi
 fi
 
+source "$ROOT_DIR/scripts/qa_volume_guard.sh"
+
 QA_IMAGE_SNAPSHOT=""
 cleanup() {
   local rc=0
@@ -31,7 +33,7 @@ if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")"
   echo "[error] Compose project already exists: $PROJECT" >&2
   exit 2
 fi
-trap cleanup EXIT
+trap 'rc=$?; cleanup || rc=1; exit "$rc"' EXIT
 if [[ "${REDPOSTURE_QA_CLEAN_IMAGES:-0}" == "1" ]]; then
   QA_IMAGE_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/redposture-cve-images.XXXXXX")"
   "$PYTHON_BIN" "$ROOT_DIR/scripts/qa_owned_images.py" snapshot "$QA_IMAGE_SNAPSHOT" -- \

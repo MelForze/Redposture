@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from typing import Any
+
+from .discovery_values import DiskBackedText
 
 _TYPE_ALIASES = {
     "access_token": "Token",
@@ -70,6 +73,26 @@ def format_discovery_finding_line(
     encoded_value = json.dumps(str(value if value is not None else ""), ensure_ascii=False, separators=(",", ":"))
     encoded_place = json.dumps(str(place if place is not None else ""), ensure_ascii=False, separators=(",", ":"))
     return f"{module}\t{host or '?'}\t{int(port or 0)}\t [!] {kind} Value={encoded_value} Place={encoded_place}"
+
+
+def iter_disk_discovery_finding_line_chunks(
+    module: str,
+    host: Any,
+    port: Any,
+    *,
+    finding_type: Any,
+    value: DiskBackedText,
+    place: Any,
+) -> Iterator[str]:
+    """Yield the same TXT line as the short-value formatter without loading the value."""
+    kind = normalize_discovery_type(finding_type)
+    yield f"{module}\t{host or '?'}\t{int(port or 0)}\t [!] {kind} Value="
+    yield from value.iter_json_chunks()
+    yield " Place="
+    if isinstance(place, DiskBackedText):
+        yield from place.iter_json_chunks()
+    else:
+        yield json.dumps(str(place if place is not None else ""), ensure_ascii=False, separators=(",", ":"))
 
 
 def discovery_color_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:

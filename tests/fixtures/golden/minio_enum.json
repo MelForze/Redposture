@@ -63,7 +63,7 @@
     "discover_candidates_count": 10,
     "discover_coverage": "complete",
     "discover_coverage_percent": 100.0,
-    "discover_findings_count": 11,
+    "discover_findings_count": 10,
     "discover_objects_scanned": 10,
     "discover_partial_reasons": [],
     "discover_requested": true,
@@ -139,23 +139,13 @@
       {
         "bucket": "secrets-corpus",
         "key": "app/.env",
-        "masked_value": "AKIA...MPLE",
         "object_path": "$",
         "type": "aws_access_key",
         "value": "AKIAIOSFODNN7EXAMPLE"
       },
       {
         "bucket": "secrets-corpus",
-        "key": "app/.env",
-        "masked_value": "AWS_...EKEY",
-        "object_path": "$",
-        "type": "high_entropy",
-        "value": "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-      },
-      {
-        "bucket": "secrets-corpus",
         "key": "app/config.json",
-        "masked_value": "post...ouse",
         "object_path": "$.db",
         "type": "connection_string",
         "value": "postgresql://reporter:lab-password@db.internal:5432/warehouse"
@@ -163,7 +153,6 @@
       {
         "bucket": "secrets-corpus",
         "key": "app/config.json",
-        "masked_value": "post...ouse",
         "object_path": "$.db",
         "type": "url_credentials",
         "value": "postgresql://reporter:lab-password@db.internal:5432/warehouse"
@@ -171,7 +160,6 @@
       {
         "bucket": "secrets-corpus",
         "key": "app/config.yaml",
-        "masked_value": "back...word",
         "object_path": "$",
         "type": "password",
         "value": "backup-lab-password"
@@ -179,31 +167,27 @@
       {
         "bucket": "secrets-corpus",
         "key": "app/config.yaml",
-        "masked_value": "glpa...stuv",
         "object_path": "$",
         "type": "gitlab_token",
         "value": "glpat-abcdefghijklmnopqrstuv"
       },
       {
         "bucket": "secrets-corpus",
+        "key": "app/config.yaml",
+        "object_path": "$",
+        "type": "generic_secret",
+        "value": "glpat-abcdefghijklmnopqrstuv"
+      },
+      {
+        "bucket": "secrets-corpus",
         "key": "dup/copy.env",
-        "masked_value": "AKIA...MPLE",
         "object_path": "$",
         "type": "aws_access_key",
         "value": "AKIAIOSFODNN7EXAMPLE"
       },
       {
         "bucket": "secrets-corpus",
-        "key": "dup/copy.env",
-        "masked_value": "AWS_...EKEY",
-        "object_path": "$",
-        "type": "high_entropy",
-        "value": "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-      },
-      {
-        "bucket": "secrets-corpus",
         "key": "infra/terraform.tfstate",
-        "masked_value": "tf-l...8f99",
         "object_path": "$.resources[0].instances[0].attributes.secret",
         "type": "generic_secret",
         "value": "tf-lab-secret-8f99"
@@ -211,7 +195,6 @@
       {
         "bucket": "secrets-corpus",
         "key": "keys/id_rsa",
-        "masked_value": "<private-key:redacted>",
         "object_path": "$",
         "type": "private_key",
         "value": "-----BEGIN PRIVATE KEY-----\nTEFCUFJJVkFURUtFWURBVEE=\n-----END PRIVATE KEY-----"
@@ -219,7 +202,6 @@
       {
         "bucket": "secrets-corpus",
         "key": "misc/harmless-name-with-secret.log",
-        "masked_value": "AKIA...MPLE",
         "object_path": "$",
         "type": "aws_access_key",
         "value": "AKIAIOSFODNN7EXAMPLE"

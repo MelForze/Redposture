@@ -98,7 +98,7 @@ def _clickhouse_fixture(monkeypatch):
     monkeypatch.setattr(engine, "collect_inventory", lambda _: ([table], []))
     reads = []
 
-    def read(session, query):
+    def read(session, query, **_kwargs):
         reads.append(query)
         return ReadResult([["ordinary", "secret-value-123"]], 24)
 

@@ -72,3 +72,11 @@ def test_discovery_section_keeps_title_white_and_colors_status_and_findings(
 
 def test_bare_discover_secrets_header_has_no_color_span() -> None:
     assert discovery_color_spans("[*]", "Discover Secrets") == []
+
+
+def test_budget_limited_discovery_keeps_airflow_summary_colors() -> None:
+    payload = "Discover Secrets (status:partial) (findings:0) (source:authenticated) (reason:byte_budget)"
+    spans = discovery_color_spans("[*]", payload)
+    colored = [(payload[start:end], color) for start, end, color in spans]
+    assert ("(status:partial)", "orange") in colored
+    assert ("(findings:0)", "bright_green") in colored

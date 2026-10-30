@@ -19,14 +19,19 @@ from ...clients.oracle import (
     OracleClientError,
     OracleConnectConfig,
     OracleDependencyError,
+    OracleReadBudgetError,
     OracleServiceError,
     classify_nne_policy,
     connect_oracle,
     normalize_oracle_error,
+    oracle_connection_usable,
     parse_listener_dump,
     tns_listener_command,
 )
 from ...console import Console
+from ...discovery_options import DEFAULT_DISCOVER_TIME
+from ...discovery_spool import SpoolingRecords
+from ...discovery_values import iter_json_chunks
 from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...shell_capture import build_capture_command, is_binary, parse_capture_lines, result_text_lines
 from ...show_limits import (
@@ -37,6 +42,7 @@ from ...stage_runtime import (
     StageTelemetryBuilder,
     merge_stage_records,
 )
+from ...storage_discovery import DiscoveryCollector
 from ...utils import (
     as_dict,
     as_list,
@@ -608,6 +614,10 @@ def _collect_oracle_data(
     discover: bool = False,
     discover_time: float | None = None,
     discover_max_bytes: int | None = None,
+    discovery_started_at: float | None = None,
+    discover_implicit_dump: bool = False,
+    discover_ctx: Any | None = None,
+    on_discovery_ready: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     context: dict[str, Any] = {}
     banner: dict[str, Any] = {}
@@ -635,8 +645,16 @@ def _collect_oracle_data(
         "error": None,
     }
     if discover:
+        data["rows"] = SpoolingRecords()
+        data["tables"] = SpoolingRecords()
         data["discover_partial"] = False
         data["discover_reasons"] = []
+    discover_deadline = (
+        (discovery_started_at if discovery_started_at is not None else time.monotonic())
+        + float(discover_time or DEFAULT_DISCOVER_TIME)
+        if discover
+        else None
+    )
     try:
         context = client.current_context()
     except Exception as exc:
@@ -645,6 +663,8 @@ def _collect_oracle_data(
         banner = client.server_banner()
     except Exception:
         banner = {}
+    if discover and on_discovery_ready is not None:
+        on_discovery_ready({"server_version": banner.get("version"), "con_name": context.get("con_name")})
 
     if listener_dump:
         data["listener_dump"] = _probe_listener_dump(
@@ -673,54 +693,157 @@ def _collect_oracle_data(
         data["privileges"] = client.list_privileges()
     if show_schemas:
         data["schemas"] = client.list_schemas()
+    collector = (
+        DiscoveryCollector("oracle", discover_ctx, {"status": "valid_credentials"})
+        if discover and discover_ctx is not None
+        else None
+    )
+
+    def _mark_discover_partial(reason: str) -> None:
+        data["discover_partial"] = True
+        if reason not in data["discover_reasons"]:
+            data["discover_reasons"].append(reason)
+        if collector is not None:
+            collector.partial("oracle", reason)
+
+    def _next_discovery_item(items: Any) -> Any:
+        connection = getattr(client, "connection", None)
+        if (
+            discover_deadline is None
+            or connection is None
+            or not oracle_connection_usable(connection)
+            or not hasattr(connection, "call_timeout")
+        ):
+            return next(items)
+        previous_timeout = connection.call_timeout
+        remaining_ms = max(1, int((discover_deadline - time.monotonic()) * 1000))
+        prior_ms = int(previous_timeout or 0)
+        connection.call_timeout = min(prior_ms, remaining_ms) if prior_ms > 0 else remaining_ms
+        try:
+            return next(items)
+        finally:
+            if oracle_connection_usable(connection):
+                connection.call_timeout = previous_timeout
+
+    def _read_discovery_table(owner: str, name: str, limit: int) -> bool:
+        stream = getattr(client, "iter_table_rows", None)
+        streaming = callable(stream)
+        try:
+            stream_options = {"deadline": discover_deadline} if isinstance(client, OracleAuditClient) else {}
+            rows = iter(
+                stream(owner, name, **stream_options)
+                if callable(stream)
+                else client.dump_table(owner, name, limit=limit)
+            )
+        except OracleReadBudgetError as exc:
+            _mark_discover_partial(str(exc))
+            return True
+        except Exception:
+            _mark_discover_partial(f"{owner}.{name}: read failed")
+            return False
+        row_limit = None if discover_implicit_dump and streaming else limit
+        count = 0
+        try:
+            while True:
+                if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                    _mark_discover_partial("discovery budget reached")
+                    return True
+                if row_limit is not None and count >= row_limit:
+                    _mark_discover_partial(f"{owner}.{name}: row limit reached")
+                    return False
+                try:
+                    row = _next_discovery_item(rows)
+                except StopIteration:
+                    return False
+                item = {"schema": owner, "table": name, "row": row}
+                if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                    _mark_discover_partial("discovery budget reached")
+                    return True
+                data["rows"].append(item)
+                count += 1
+                if collector is not None and not collector.add(f"table.{owner}.{name}", row):
+                    _mark_discover_partial(
+                        "discover_time" if time.monotonic() >= collector.deadline else "source_scan_incomplete"
+                    )
+                    return True
+        except OracleReadBudgetError as exc:
+            _mark_discover_partial(str(exc))
+            return True
+        except Exception:
+            _mark_discover_partial(f"{owner}.{name}: read failed")
+            return False
+        finally:
+            close = getattr(rows, "close", None)
+            if callable(close):
+                close()
+
     if show_tables or dump_rows:
-        data["tables"] = client.list_tables(schema)
+        if discover_deadline is not None and time.monotonic() >= discover_deadline:
+            _mark_discover_partial("discovery budget reached")
+        elif discover and callable(getattr(client, "iter_tables", None)):
+            tables = (
+                client.iter_tables(schema, deadline=discover_deadline)
+                if isinstance(client, OracleAuditClient)
+                else client.iter_tables(schema)
+            )
+            try:
+                while True:
+                    if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                        _mark_discover_partial("discovery budget reached")
+                        break
+                    try:
+                        visible = _next_discovery_item(tables)
+                    except StopIteration:
+                        break
+                    if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                        _mark_discover_partial("discovery budget reached")
+                        break
+                    data["tables"].append(visible)
+            except OracleReadBudgetError as exc:
+                _mark_discover_partial(str(exc))
+            except Exception:
+                _mark_discover_partial("table catalog read failed")
+            finally:
+                close = getattr(tables, "close", None)
+                if callable(close):
+                    close()
+        else:
+            data["tables"] = client.list_tables(schema)
+            if discover and len(data["tables"]) >= 1000:
+                _mark_discover_partial("table catalog limit reached")
+        own_schema = str(context.get("session_user") or "").upper()
+        selected_schema = str(schema or "").upper()
+        if (
+            discover
+            and dump_rows
+            and not table
+            and not data["tables"]
+            and not data["discover_partial"]
+            and (not selected_schema or selected_schema != own_schema)
+        ):
+            # An empty visible catalog does not prove that a selected schema
+            # contains no tables; the account may simply lack SELECT grants.
+            data["discover_unavailable"] = True
     if dump_rows:
         limit = dump_limit if dump_limit is not None else _ORACLE_DUMP_SAFETY_LIMIT
         target_schema = schema
         target_table = table
-        if discover and not target_schema and not target_table:
-            # A plain --discover has no table selector. The ordinary --dump
-            # path below picks one table for interactive inspection; discovery
-            # must inspect every visible table within its time/byte budget.
-            deadline = time.monotonic() + float(discover_time or 300)
-            remaining = int(discover_max_bytes or 50 * 1024 * 1024)
+        if discover and not target_table:
+            # Discovery reads every visible table in the selected schema, or
+            # every visible schema when none was selected. The ordinary --dump
+            # path below picks one table for interactive inspection.
             for visible in as_list(data.get("tables")):
-                if time.monotonic() >= deadline or remaining <= 0:
-                    data["discover_partial"] = True
-                    data["discover_reasons"].append("discovery budget reached")
+                if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                    _mark_discover_partial("discovery budget reached")
                     break
                 owner = (
                     str(visible.get("owner") or visible.get("schema_name") or "") if isinstance(visible, dict) else ""
                 )
                 name = str(visible.get("table_name") or "") if isinstance(visible, dict) else ""
                 if not owner or not name:
-                    data["discover_partial"] = True
-                    data["discover_reasons"].append("table identity unavailable")
+                    _mark_discover_partial("table identity unavailable")
                     continue
-                try:
-                    rows = list(client.dump_table(owner, name, limit=limit))
-                except Exception:
-                    data["discover_partial"] = True
-                    data["discover_reasons"].append(f"{owner}.{name}: read failed")
-                    continue
-                budget_exhausted = False
-                for row in rows:
-                    item = {"schema": owner, "table": name, "row": row}
-                    size = len(json.dumps(item, ensure_ascii=False, default=str).encode("utf-8"))
-                    if size > remaining or time.monotonic() >= deadline:
-                        data["discover_partial"] = True
-                        data["discover_reasons"].append("discovery budget reached")
-                        budget_exhausted = True
-                        break
-                    data["rows"].append(item)
-                    remaining -= size
-                if len(rows) >= limit:
-                    data["discover_partial"] = True
-                    data["discover_reasons"].append(f"{owner}.{name}: row limit reached")
-                if budget_exhausted or remaining <= 0 or time.monotonic() >= deadline:
-                    data["discover_partial"] = True
-                    data["discover_reasons"].append("discovery budget reached")
+                if _read_discovery_table(owner, name, limit):
                     break
         else:
             if not target_schema or not target_table:
@@ -744,17 +867,58 @@ def _collect_oracle_data(
                     )
                     target_table = target_table or str(table_rows[0].get("table_name") or "")
             if target_schema and target_table:
-                rows = list(client.dump_table(target_schema, target_table, limit=limit))
-                data["rows"] = [{"schema": target_schema, "table": target_table, "row": row} for row in rows]
-                if discover and len(rows) >= limit:
-                    data["discover_partial"] = True
-                    data["discover_reasons"].append(f"{target_schema}.{target_table}: row limit reached")
+                if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                    _mark_discover_partial("discovery budget reached")
+                elif discover:
+                    _read_discovery_table(target_schema, target_table, limit)
+                else:
+                    rows = list(client.dump_table(target_schema, target_table, limit=limit))
+                    data["rows"] = [{"schema": target_schema, "table": target_table, "row": row} for row in rows]
             else:
                 data["error"] = (
                     data.get("error") or "--dump requires --schema and --table or at least one visible table"
                 )
+    query_streamed = False
     if query:
-        data["query_rows"] = client.query(query, limit=dump_limit or 200)
+        query_stream = getattr(client, "iter_query_rows", None)
+        if discover and callable(query_stream):
+            query_streamed = True
+            data["query_rows"] = SpoolingRecords()
+            query_rows = None
+            index = 0
+            preview_limit = dump_limit or 200
+            try:
+                query_rows = iter(query_stream(query, deadline=discover_deadline))
+                while True:
+                    if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                        raise OracleReadBudgetError("discover_time")
+                    try:
+                        row = _next_discovery_item(query_rows)
+                    except StopIteration:
+                        break
+                    if index < preview_limit:
+                        data["query_rows"].append(row)
+                    if collector is not None and not collector.add(f"query_rows[{index}]", row):
+                        _mark_discover_partial(
+                            "discover_time" if time.monotonic() >= collector.deadline else "source_scan_incomplete"
+                        )
+                        break
+                    index += 1
+            except OracleReadBudgetError as exc:
+                _mark_discover_partial(str(exc))
+            except Exception as exc:
+                _mark_discover_partial("query: read failed")
+                data["error"] = data.get("error") or normalize_oracle_error(exc)
+            finally:
+                close = getattr(query_rows, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception as exc:
+                        _mark_discover_partial("query: cleanup failed")
+                        data["error"] = data.get("error") or normalize_oracle_error(exc)
+        else:
+            data["query_rows"] = client.query(query, limit=dump_limit or 200)
     if privesc_check or privesc_chain:
         findings = client.check_privesc()
         data["privesc_findings"] = findings
@@ -816,6 +980,16 @@ def _collect_oracle_data(
         "can_read_hashes": bool(data["hashes"]),
         "can_list_dblinks": bool(data["db_links"]),
     }
+    if collector is not None:
+        if data["query_rows"] and not query_streamed:
+            collector.add("query_rows", data["query_rows"])
+        if not data.get("discover_unavailable") and not data.get("discover_partial"):
+            collector.mark_accessible_source()
+        result = collector.result()
+        if data.get("discover_unavailable") and not data.get("discover_partial"):
+            result["status"] = "unavailable"
+            result["partial_reasons"].append("no_readable_table")
+        data["content_discovery"] = result
     return data
 
 
@@ -1178,6 +1352,9 @@ def _audit_oracle_host(
     discover: bool = False,
     discover_time: float | None = None,
     discover_max_bytes: int | None = None,
+    discovery_started_at: float | None = None,
+    discover_implicit_dump: bool = False,
+    discover_ctx: Any | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, int(retries) + 1)
     last_error: str | None = None
@@ -1505,6 +1682,27 @@ def _audit_oracle_host(
                 )
                 return record
 
+            record.update(
+                {
+                    "is_oracle": True,
+                    "status": status,
+                    "auth_required": auth_required,
+                    "transport_mode": selected_protocol,
+                    "tls_supported": selected_protocol == "tcps",
+                    "connect_service": selected_service,
+                    "connect_sid": selected_sid,
+                    "provided_credentials": bool(credential_candidates),
+                    "provided_username": selected_credential.get("username")
+                    if selected_credential
+                    else (credential_candidates[0].get("username") if credential_candidates else None),
+                    "provided_password": selected_credential.get("password")
+                    if selected_credential
+                    else (credential_candidates[0].get("password") if credential_candidates else None),
+                    "effective_username": selected_credential.get("username") if selected_credential else None,
+                    "defcreds_enabled": any(bool(item.get("default")) for item in credential_candidates),
+                    "credential_attempts": credential_attempts,
+                }
+            )
             try:
                 data = _collect_oracle_data(
                     active_client,
@@ -1543,6 +1741,18 @@ def _audit_oracle_host(
                     discover=discover,
                     discover_time=discover_time,
                     discover_max_bytes=discover_max_bytes,
+                    discovery_started_at=discovery_started_at,
+                    discover_implicit_dump=discover_implicit_dump,
+                    **(
+                        {
+                            "discover_ctx": discover_ctx,
+                            "on_discovery_ready": lambda metadata: _emit_oracle_discovery_prefix(
+                                record, discover_ctx, metadata
+                            ),
+                        }
+                        if discover_ctx is not None
+                        else {}
+                    ),
                 )
             except Exception as exc:
                 data = {"error": normalize_oracle_error(exc), "partial": True}
@@ -1552,23 +1762,6 @@ def _audit_oracle_host(
             record.update(
                 {
                     "timestamp": utc_now_iso(),
-                    "is_oracle": True,
-                    "status": status,
-                    "auth_required": auth_required,
-                    "transport_mode": selected_protocol,
-                    "tls_supported": selected_protocol == "tcps",
-                    "connect_service": selected_service,
-                    "connect_sid": selected_sid,
-                    "provided_credentials": bool(credential_candidates),
-                    "provided_username": selected_credential.get("username")
-                    if selected_credential
-                    else (credential_candidates[0].get("username") if credential_candidates else None),
-                    "provided_password": selected_credential.get("password")
-                    if selected_credential
-                    else (credential_candidates[0].get("password") if credential_candidates else None),
-                    "effective_username": selected_credential.get("username") if selected_credential else None,
-                    "defcreds_enabled": any(bool(item.get("default")) for item in credential_candidates),
-                    "credential_attempts": credential_attempts,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": data.get("error"),
                 }
@@ -1648,6 +1841,9 @@ def _audit_oracle_host_stage(
     discover: bool = False,
     discover_time: float | None = None,
     discover_max_bytes: int | None = None,
+    discovery_started_at: float | None = None,
+    discover_implicit_dump: bool = False,
+    discover_ctx: Any | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     record = _audit_oracle_host(
@@ -1697,6 +1893,9 @@ def _audit_oracle_host_stage(
         discover=bool(discover) and run_deep_checks,
         discover_time=discover_time,
         discover_max_bytes=discover_max_bytes,
+        discovery_started_at=discovery_started_at,
+        discover_implicit_dump=discover_implicit_dump,
+        **({"discover_ctx": discover_ctx} if discover_ctx is not None and discover and run_deep_checks else {}),
     )
     record["show_pdbs_limit"] = show_pdbs_limit if run_deep_checks else None
     record["show_users_limit"] = show_users_limit if run_deep_checks else None
@@ -1742,6 +1941,20 @@ def _caps_suffix(record: dict[str, Any]) -> str:
     return f" {' '.join(parts)}" if parts else ""
 
 
+def _emit_oracle_discovery_prefix(record: dict[str, Any], ctx: Any, metadata: dict[str, Any]) -> None:
+    emit = getattr(ctx, "live_emit", None)
+    if not callable(emit) or record.get("_oracle_credentials_live_emitted"):
+        return
+    record.update(metadata)
+    lines = _format_credential_attempts_records(record, "txt")
+    selected = _format_record(record, "txt")
+    if selected:
+        lines.append(selected)
+    if lines:
+        emit(lines)
+        record["_oracle_credentials_live_emitted"] = True
+
+
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth_required = record.get("auth_required")
     auth_required_text = "True" if auth_required is True else "False" if auth_required is False else "unknown"
@@ -1770,6 +1983,8 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
 def _format_record(record: dict[str, Any], output_format: str) -> str:
     if output_format == "json":
         return json.dumps(record, ensure_ascii=False)
+    if record.get("_oracle_credentials_live_emitted"):
+        return ""
     prefix = _nxc_prefix(record)
     status = str(record.get("status") or "fail")
     credential_attempts = record.get("credential_attempts")
@@ -1801,7 +2016,12 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
     attempts = record.get("credential_attempts")
-    if output_format != "txt" or not isinstance(attempts, list) or not attempts:
+    if (
+        output_format != "txt"
+        or record.get("_oracle_credentials_live_emitted")
+        or not isinstance(attempts, list)
+        or not attempts
+    ):
         return []
 
     inconclusive = sum(
@@ -1868,6 +2088,22 @@ def _limited_detail(
     if meta["truncated"]:
         header = f"{prefix} [*] {title} (showing:{meta['shown']} of {meta['total']})"
     return [header] + [f"{prefix} {formatter(item)}" for item in displayed]
+
+
+def _discovery_query_preview(row: Any) -> str:
+    """Keep the existing short query preview without materializing disk cells."""
+    prefix = ""
+    chunks = iter_json_chunks(row, max_chars=512)
+    try:
+        for chunk in chunks:
+            prefix += chunk[: 261 - len(prefix)]
+            if len(prefix) >= 261:
+                break
+    finally:
+        close = getattr(chunks, "close", None)
+        if callable(close):
+            close()
+    return _clip(prefix, 260)
 
 
 def _format_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -2021,8 +2257,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             identity = (str(table.get("owner")), str(table.get("table_name")))
             for index, row in rows_by_table.get(identity, []):
                 lines.append(
-                    f"{prefix} {row.get('schema')}.{row.get('table')}:"
-                    f"{_clip(json.dumps(row.get('row'), ensure_ascii=False, separators=(',', ':')), 260)}"
+                    f"{prefix} {row.get('schema')}.{row.get('table')}:{_discovery_query_preview(row.get('row'))}"
                 )
                 grouped_rows.add(index)
     else:
@@ -2072,7 +2307,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                 if index in grouped_rows:
                     continue
                 lines.append(
-                    f"{prefix} {row.get('schema')}.{row.get('table')}:{_clip(json.dumps(row.get('row'), ensure_ascii=False, separators=(',', ':')), 260)}"
+                    f"{prefix} {row.get('schema')}.{row.get('table')}:{_discovery_query_preview(row.get('row'))}"
                 )
     if record.get("query_rows"):
         if output_format == "json":
@@ -2093,7 +2328,12 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             prefix = _nxc_prefix(record)
             lines.append(f"{prefix} [*] Query")
             for row in record.get("query_rows") or []:
-                lines.append(f"{prefix} {_clip(json.dumps(row, ensure_ascii=False, separators=(',', ':')), 260)}")
+                shown = (
+                    _discovery_query_preview(row)
+                    if isinstance(record.get("content_discovery"), dict)
+                    else _clip(json.dumps(row, ensure_ascii=False, separators=(",", ":")), 260)
+                )
+                lines.append(f"{prefix} {shown}")
     if record.get("privesc_findings"):
         if output_format == "json":
             lines.append(

@@ -317,7 +317,7 @@ def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.Monke
         "redposture_core.stage_grafana._http_request",
         lambda *_args, **kwargs: (
             (200, '{"id":1,"login":"admin","isGrafanaAdmin":true}', {})
-            if (kwargs.get("headers") or {}).get("Authorization")
+            if (kwargs.get("headers") or {}).get("Authorization") == _auth_header("admin", "admin")
             else (401, "{}", {})
         ),
     )
@@ -1417,12 +1417,16 @@ def test_grafana_defcreds_falls_back_after_api_token_transport_error(
     winning_header = _auth_header("admin", "password")
     datasource_headers: list[str | None] = []
 
-    def fake_http(_host, _port, path, _timeout, *, headers=None, **_kwargs):
+    def fake_http(_host, _port, path, _timeout, *, headers=None, method="GET", **_kwargs):
         authorization = (headers or {}).get("Authorization")
         if path == "/api/health":
             return 401, "", {}
         if path == "/login":
+            if method == "POST":
+                return 401, '{"message":"Invalid username or password"}', {}
             return 200, "<title>Grafana</title>", {}
+        if path == "/api/org":
+            return 401, '{"message":"Unauthorized"}', {}
         if path == "/api/user":
             if str(authorization).startswith("Bearer "):
                 raise OSError("token transport failure")

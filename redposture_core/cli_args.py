@@ -15,7 +15,6 @@ from . import module_registry as _registry
 from .module_registry import ParserHelperSet, command_names_for_error, configure_cli_subcommands
 
 COMMAND_LISTEN = _registry.COMMAND_LISTEN
-COMMAND_SCAN = _registry.COMMAND_SCAN
 COMMAND_TRIGGER = _registry.COMMAND_TRIGGER
 COMMAND_COLLECT = _registry.COMMAND_COLLECT
 COMMAND_REDIS = _registry.COMMAND_REDIS
@@ -389,7 +388,7 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         help="Retry attempts for network requests (with exponential backoff).",
     )
     # Audit modules pass include_profiles=False; exporter workflows keep their
-    # separate scan/collect/trigger contracts and must not expose CVE matching.
+    # separate collect/trigger contracts and must not expose CVE matching.
     if not include_profiles:
         parser.add_argument(
             "--enum-cve",
@@ -551,7 +550,7 @@ _ROOT_HELP_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
         "Protocol & callback checks",
         (
-            ("exporters", "scan, collect, trigger"),
+            ("exporters", "collect, trigger"),
             ("grpc", "auth, reflection, health"),
             ("kafka", "broker auth and topics"),
             ("keeper", "quorum and znodes"),
@@ -627,6 +626,67 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    from .http_headers import parse_http_header
+
+    http_commands = {
+        "airflow",
+        "clickhouse",
+        "consul",
+        "docker",
+        "docker-registry",
+        "elastic",
+        "etcd",
+        "gitlab",
+        "grafana",
+        "harbor",
+        "jenkins",
+        "jupyter",
+        "kafka",
+        "keycloak",
+        "kubeapi",
+        "minio",
+        "nexus",
+        "nomad",
+        "portainer",
+        "proxmox",
+        "qdrant",
+        "rabbitmq",
+        "spark",
+        "vault",
+        "yarn",
+        "spray",
+    }
+    for name in http_commands:
+        subparser = subparsers.choices.get(name)
+        if subparser is None:
+            continue
+        common = next((group for group in subparser._action_groups if group.title == "Common"), subparser)
+        common.add_argument(
+            "-H",
+            "--header",
+            dest="http_headers",
+            action="append",
+            type=parse_http_header,
+            default=None,
+            metavar="'Name: value'",
+            help="Custom HTTP request header (repeatable; overrides built-in headers).",
+        )
+    exporters_parser = subparsers.choices.get("exporters")
+    if exporters_parser is not None:
+        for action in exporters_parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name in ("collect", "trigger"):
+                    action.choices[name].add_argument(
+                        "-H",
+                        "--header",
+                        dest="http_headers",
+                        action="append",
+                        type=parse_http_header,
+                        default=None,
+                        metavar="'Name: value'",
+                        help="Custom HTTP request header (repeatable; overrides built-in headers).",
+                    )
+
     from .data_discovery import DISCOVERY_MODULES
     from .discovery_options import add_discovery_budget_flags
 
@@ -655,10 +715,10 @@ def build_parser() -> argparse.ArgumentParser:
             group.add_argument(
                 "--discover",
                 action="store_true",
-                help="Read bounded accessible content and inspect it for secrets.",
+                help="Read accessible content in bounded portions and inspect it for secrets.",
             )
-            if not any(action.dest == "discover_max_bytes" for action in subparser._actions):
-                add_discovery_budget_flags(group, default_time=300.0, default_bytes=50 * 1024 * 1024)
+            if not any(action.dest == "discover_time" for action in subparser._actions):
+                add_discovery_budget_flags(group)
 
     return parser
 
@@ -730,8 +790,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if raw_argv[0] == COMMAND_LISTEN:
         parser.error("direct 'listen' mode removed; use 'exporters trigger ...'")
 
-    if raw_argv[0] == COMMAND_SCAN:
-        parser.error("direct 'scan' mode removed; use 'exporters scan ...'")
+    if raw_argv[0] == "scan" or (len(raw_argv) >= 2 and raw_argv[:2] == [COMMAND_EXPORTERS, "scan"]):
+        parser.error("'exporters scan' was removed; use 'exporters collect ...' or 'exporters trigger ...'")
     if raw_argv[0] == COMMAND_COLLECT:
         parser.error("direct 'collect' mode removed; use 'exporters collect ...'")
     if raw_argv[0] == COMMAND_TRIGGER:

@@ -10,6 +10,7 @@ import time
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..http_headers import merge_custom_http_headers
 from .http_session import HttpSessionPool
 
 
@@ -53,15 +54,17 @@ class WebSocket:
                     raise RuntimeError("HTTP session pool is closed")
                 self.pool._active_sockets.add(self.sock)
             key = base64.b64encode(os.urandom(16)).decode()
-            headers = {
-                "Host": parsed.netloc,
-                "Origin": f"{parsed.scheme}://{parsed.netloc}",
-                "Connection": "Upgrade",
-                "Upgrade": "websocket",
-                "Sec-WebSocket-Version": "13",
-                "Sec-WebSocket-Key": key,
-                **self.headers,
-            }
+            headers = merge_custom_http_headers(
+                {
+                    "Host": parsed.netloc,
+                    "Origin": f"{parsed.scheme}://{parsed.netloc}",
+                    "Connection": "Upgrade",
+                    "Upgrade": "websocket",
+                    "Sec-WebSocket-Version": "13",
+                    "Sec-WebSocket-Key": key,
+                    **self.headers,
+                }
+            )
             path = (parsed.path or "/") + ("?" + parsed.query if parsed.query else "")
             request = f"GET {path} HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
             self.sock.settimeout(self._timeout())
@@ -139,7 +142,16 @@ class WebSocket:
     def send_json(self, value: Any) -> None:
         self._send(1, json.dumps(value).encode())
 
+    def send_bytes(self, value: bytes) -> None:
+        self._send(2, value)
+
+    def recv_bytes(self) -> bytes:
+        return self._recv_message(binary=True)
+
     def recv_json(self) -> Any:
+        return json.loads(self._recv_message(binary=False).decode("utf-8"))
+
+    def _recv_message(self, *, binary: bool) -> bytes:
         message = bytearray()
         started = False
         while True:
@@ -168,9 +180,13 @@ class WebSocket:
                 continue
             if opcode == 10:
                 continue
-            if opcode not in {0, 1} or (opcode == 0 and not started) or (opcode == 1 and started):
+            if (
+                opcode not in ({0, 1, 2} if binary else {0, 1})
+                or (opcode == 0 and not started)
+                or (opcode in {1, 2} and started)
+            ):
                 raise ValueError("unexpected WebSocket message type")
             started = True
             message.extend(body)
             if fin:
-                return json.loads(message.decode("utf-8"))
+                return bytes(message)

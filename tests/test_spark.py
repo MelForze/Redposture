@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from redposture_core.clients.http_api import HttpResponse
+from redposture_core.discovery_values import DiskBackedText
 
 WORKER = {
     "id": "worker-qa",
@@ -91,6 +92,79 @@ def test_master_json_confirms_spark_without_claiming_rest_submission():
     assert record["submit_access"] == "unverified"
     assert record["rce_potential"] is False
     assert all(call[0] == "GET" for call in ctx.lifecycle_state.http.calls)
+
+
+def test_master_detects_realistic_long_app_name_without_rejecting_product():
+    master = {**MASTER, "activeapps": [{**APP, "name": "qa-API_TOKEN=glpat-" + "q" * 100_000}]}
+    record = actions().detect_record(context({"/json/": (200, master), "/": HTML}))
+    assert record["is_spark"] is True
+    assert record["detection_status"] == "confirmed"
+
+
+def test_streamed_discovery_accepts_long_app_name_and_keeps_finding():
+    ctx = context({"/json/": (200, MASTER), "/": HTML}, discover=True)
+    detected = actions().detect_record(ctx)
+    ctx.lifecycle_state.http.routes["/json/"] = HttpResponse(200, b"{", {}, truncated=True)
+    master = {**MASTER, "activeapps": [{**APP, "name": "qa-API_TOKEN=glpat-" + "q" * 100_000}]}
+    payload = json.dumps(master).encode()
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        for offset in range(0, len(payload), 4096):
+            on_chunk(payload[offset : offset + 4096])
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    record = actions().data_record(ctx, detected)
+    assert record["content_discovery"]["status"] == "complete"
+    assert any(
+        "glpat-"
+        in (
+            "".join(item["value"].iter_text_chunks())
+            if isinstance(item["value"], DiskBackedText)
+            else str(item["value"])
+        )
+        for item in record["content_discovery"]["findings"]
+    )
+
+
+def test_master_detects_complete_large_json_by_streaming_after_buffered_cap():
+    master = {**MASTER, "activeapps": [{**APP, "name": "qa-API_TOKEN=glpat-" + "q" * 5_000_000}]}
+    payload = json.dumps(master).encode()
+    ctx = context({"/json/": HttpResponse(200, b"{", {"Content-Type": "application/json"}, truncated=True), "/": HTML})
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        for offset in range(0, len(payload), 65536):
+            on_chunk(payload[offset : offset + 65536])
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    record = actions().detect_record(ctx)
+    assert record["is_spark"] is True
+    assert record["surface"] == "master_ui"
+    assert record["master_url"] == MASTER["url"]
+
+
+@pytest.mark.parametrize("corruption", ["truncated", "wrong-master", "control-in-name"])
+def test_large_streamed_master_proof_rejects_incomplete_or_invalid_metadata(corruption):
+    master = {**MASTER, "activeapps": [{**APP, "name": "qa-name-" + "q" * 100_000}]}
+    if corruption == "wrong-master":
+        master["url"] = "http://not-spark.invalid/"
+    if corruption == "control-in-name":
+        master["activeapps"][0]["name"] += "\n"
+    payload = json.dumps(master).encode()
+    if corruption == "truncated":
+        payload = payload[:-2]
+    ctx = context({"/json/": HttpResponse(200, b"{", {"Content-Type": "application/json"}, truncated=True)})
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        on_chunk(payload)
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    assert actions().detect_record(ctx)["is_spark"] is False
 
 
 def test_rest_status_is_strong_read_only_product_proof():
@@ -203,7 +277,8 @@ def test_inventory_item_cap_marks_partial_without_following_discovered_worker_ur
     record = actions().data_record(ctx, actions().detect_record(ctx))
     assert len(record["workers"]) == 5000
     assert record["workers_partial"] is True
-    assert record["content_discovery_partial"] is True
+    assert record["content_discovery_partial"] is False
+    assert record["content_discovery"]["status"] == "complete"
     assert record["inventory_status"] == "partial"
     assert all(call[1] in {"/json/", "/"} for call in ctx.lifecycle_state.http.calls)
 
@@ -213,6 +288,99 @@ def test_discovery_byte_budget_does_not_label_unread_metadata_complete():
     record = actions().data_record(ctx, actions().detect_record(ctx))
     assert record["content_discovery_partial"] is True
     assert "spark_metadata" not in record
+
+
+def test_discovery_streams_large_master_json_after_buffered_response_truncates():
+    ctx = context({"/json/": (200, MASTER), "/": HTML}, discover=True, discover_max_bytes=4096)
+    detected = actions().detect_record(ctx)
+    ctx.lifecycle_state.http.routes["/json/"] = HttpResponse(200, b"{", {}, truncated=True)
+    large = copy.deepcopy(MASTER)
+    large["activeapps"][0] = {
+        "id": "app-qa",
+        "description": " " * 8000,
+        "name": "glpat-abcdefghijklmnopqrst",
+        "user": "alice",
+        "cores": 1,
+        "state": "RUNNING",
+    }
+    payload = json.dumps(large).encode()
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        for offset in range(0, len(payload), 257):
+            on_chunk(payload[offset : offset + 257])
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    record = actions().data_record(ctx, detected)
+    assert record["content_discovery"]["status"] == "complete"
+    assert record["content_discovery_partial"] is False
+    assert any(item["type"] == "gitlab_token" for item in record["content_discovery"]["findings"])
+
+
+@pytest.mark.parametrize("invalid", ["wrong-master", "missing-apps"])
+def test_discovery_streamed_master_requires_same_identity_and_both_collections(invalid: str):
+    ctx = context({"/json/": (200, MASTER), "/": HTML}, discover=True, discover_max_bytes=4096)
+    detected = actions().detect_record(ctx)
+    ctx.lifecycle_state.http.routes["/json/"] = HttpResponse(200, b"{", {}, truncated=True)
+    body = copy.deepcopy(MASTER)
+    if invalid == "wrong-master":
+        body["url"] = "spark://other.internal:7077"
+    else:
+        del body["activeapps"]
+    payload = json.dumps(body).encode()
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        on_chunk(payload)
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    record = actions().data_record(ctx, detected)
+    assert record["content_discovery"]["status"] == "partial"
+    assert record["content_discovery_partial"] is True
+
+
+def test_discovery_streamed_master_keeps_full_long_assignment_in_app_description():
+    token = "glpat-" + "Ab0" * 5000
+    ctx = context({"/json/": (200, MASTER), "/": HTML}, discover=True, discover_max_bytes=4096)
+    detected = actions().detect_record(ctx)
+    ctx.lifecycle_state.http.routes["/json/"] = HttpResponse(200, b"{", {}, truncated=True)
+    body = copy.deepcopy(MASTER)
+    body["activeapps"] = [{**APP, "description": "API_TOKEN=" + token}]
+    payload = json.dumps(body).encode()
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        for offset in range(0, len(payload), 257):
+            on_chunk(payload[offset : offset + 257])
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    report = actions().data_record(ctx, detected)["content_discovery"]
+    assert report["status"] == "complete", report["partial_reasons"]
+    values = [item["value"] for item in report["findings"]]
+    assert len(values) == 1 and isinstance(values[0], DiskBackedText)
+    assert "".join(values[0].iter_text_chunks()) == token
+
+
+def test_discovery_streamed_master_with_invalid_app_row_is_partial():
+    ctx = context({"/json/": (200, MASTER), "/": HTML}, discover=True, discover_max_bytes=4096)
+    detected = actions().detect_record(ctx)
+    ctx.lifecycle_state.http.routes["/json/"] = HttpResponse(200, b"{", {}, truncated=True)
+    body = copy.deepcopy(MASTER)
+    body["activeapps"] = [{"id": "app-qa", "name": "glpat-abcdefghijklmnopqrst", "user": "qa", "state": "RUNNING"}]
+    payload = json.dumps(body).encode()
+
+    def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
+        on_response(200, {"Content-Type": "application/json"})
+        on_chunk(payload)
+        return HttpResponse(200, b"", {"Content-Type": "application/json"})
+
+    ctx.lifecycle_state.http.request_stream = stream
+    record = actions().data_record(ctx, detected)
+    assert record["content_discovery"]["status"] == "partial"
+    assert record["content_discovery_partial"] is True
 
 
 def test_rest_only_inventory_is_unavailable_without_guessing_ui_port():

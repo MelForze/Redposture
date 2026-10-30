@@ -62,11 +62,11 @@ def test_selected_token_credential_summary_keeps_capability_state(
         "credential_jobs_access": access,
         "credential_jobs_count": count,
     }
-    assert f"[+] qa (API token) (Jobs:{expected})" in render._format_record(record, "txt")
+    assert f"[+] qa:API token (Jobs:{expected})" in render._format_record(record, "txt")
     assert render._format_record(record, "json") == ""
 
 
-def test_attempt_rendering_handles_token_failure_and_skips_only_selected_success() -> None:
+def test_attempt_rendering_shows_every_pair_and_unverified_result() -> None:
     record = {
         "credential_results": [{"username": "chosen"}],
         "credential_password": "secret",
@@ -84,9 +84,11 @@ def test_attempt_rendering_handles_token_failure_and_skips_only_selected_success
         ],
     }
     lines = render._format_credential_attempts_records(record, "txt")
-    assert len(lines) == 2
-    assert "[-] token-user (API token)" in lines[0] and "never-print" not in lines[0]
-    assert "[+] other:pass" in lines[1]
+    assert len(lines) == 4
+    assert "[-] token-user:never-print (type:API token)" in lines[0]
+    assert "[+] chosen:secret" in lines[1]
+    assert "[+] other:pass" in lines[2]
+    assert "pending:pass (status:unverified)" in lines[3]
     assert render._format_credential_attempts_records(record, "json") == []
     assert (
         render._format_credential_attempts_records({"credential_state": "invalid", "credential_results": []}, "txt")

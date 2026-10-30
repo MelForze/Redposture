@@ -8,6 +8,7 @@ from typing import Any
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...console import Console
+from ...discovery_options import DEFAULT_DISCOVER_TIME
 from ...shell_capture import CommandResult, ShellView
 from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
@@ -121,14 +122,20 @@ def _build_clickhouse_host_stage_options(args: Any) -> dict[str, Any]:
         "discover_chunk_rows": int(getattr(args, "discover_chunk_rows", 1000)),
         "discover_max_query_time": float(getattr(args, "max_query_time", 10.0)),
         "discover_max_query_rows": int(getattr(args, "max_query_rows", 100000)),
-        "discover_max_query_bytes": int(getattr(args, "max_query_bytes", 67108864)),
-        "discover_max_memory": int(getattr(args, "max_query_memory", 268435456)),
+        "discover_max_query_bytes": int(getattr(args, "max_query_bytes", 0)),
+        "discover_max_memory": (
+            int(args.max_query_memory) if getattr(args, "max_query_memory", None) is not None else None
+        ),
         "discover_max_threads": int(getattr(args, "discover_max_threads", 1)),
         "discover_exclusions": exclusions,
         "discover_detectors": detectors,
         "discover_redact": bool(getattr(args, "discover_redact", False)),
-        "discover_max_seconds": getattr(args, "discover_time", None),
-        "discover_max_total_bytes": getattr(args, "discover_max_bytes", 50 * 1024 * 1024),
+        "discover_max_seconds": (
+            float(getattr(args, "discover_time", None) or DEFAULT_DISCOVER_TIME)
+            if bool(getattr(args, "discover", False))
+            else None
+        ),
+        "discover_max_total_bytes": getattr(args, "discover_max_bytes", None),
     }
 
 

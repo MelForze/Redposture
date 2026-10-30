@@ -806,7 +806,7 @@ def test_enum_cve_flag_is_available_for_every_audit_module(module: str) -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        ["exporters", "scan", "-t", "127.0.0.1", "--enum-cve"],
+        ["exporters", "collect", "-t", "127.0.0.1", "--enum-cve"],
         ["exporters", "collect", "-t", "127.0.0.1", "--enum-cve"],
         ["exporters", "trigger", "-t", "127.0.0.1", "--enum-cve"],
         ["--selfcert", "--enum-cve"],

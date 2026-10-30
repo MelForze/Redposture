@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from redposture_core.cli import parse_args
-from redposture_core.modules.clickhouse import actions, policy
+from redposture_core.modules.clickhouse import actions, policy, stage
 from redposture_core.modules.clickhouse.discover import DiscoverConfig, run_discovery
 from redposture_core.modules.clickhouse.discover.checkpoint import CheckpointStore
 from redposture_core.modules.clickhouse.discover.engine import _scan_rows
@@ -24,7 +24,7 @@ from redposture_core.modules.clickhouse.discover.inventory import (
 from redposture_core.modules.clickhouse.discover.models import ScanChunk
 from redposture_core.modules.clickhouse.discover.reader import build_chunk_query, read_chunk
 from redposture_core.scheduler import SharedNestedScheduler
-from redposture_core.secret_detection import detector_names, fingerprint, mask_secret, scan_value
+from redposture_core.secret_detection import detector_names, fingerprint, scan_value
 
 
 class _NativeClient:
@@ -60,6 +60,43 @@ def _inventory_query(query: str) -> tuple[list[list[Any]] | None, str | None]:
     raise AssertionError(query)
 
 
+@pytest.mark.parametrize("protocol", ["native", "http"])
+def test_clickhouse_discovery_catalog_query_receives_remaining_server_time(protocol: str) -> None:
+    observed: list[dict[str, Any]] = []
+
+    class Client:
+        def execute(self, _query: str, **kwargs: Any) -> list[tuple[int]]:
+            observed.append(kwargs)
+            return [(1,)]
+
+        def query(self, _query: str, **kwargs: Any) -> Any:
+            observed.append(kwargs)
+            return SimpleNamespace(result_rows=[(1,)])
+
+    rows, error = actions._query_rows(
+        SimpleNamespace(protocol=protocol, client=Client()), "SELECT 1", max_execution_time=0.25
+    )
+    assert (rows, error) == ([[1]], None)
+    assert observed == [{"settings": {"max_execution_time": 0.25, "timeout_before_checking_execution_speed": 0}}]
+
+
+def test_clickhouse_chunk_query_uses_remaining_target_deadline() -> None:
+    session = _session([("qa_token=abcdefghijklmnopqrst",)])
+    report = run_discovery(
+        session,
+        host="127.0.0.1",
+        port=9000,
+        config=DiscoverConfig(max_seconds=0.5, max_query_time=10.0),
+        query_rows=_inventory_query,
+        started_at=time.monotonic(),
+    )
+    assert report["status"] == "complete"
+    chunk_queries = [query for query in session.client.queries if "max_execution_time=" in query]
+    assert chunk_queries
+    assert all(float(re.search(r"max_execution_time=([0-9.]+)", query).group(1)) <= 0.5 for query in chunk_queries)
+    assert all("timeout_before_checking_execution_speed=0" in query for query in chunk_queries)
+
+
 def test_detector_engine_handles_nested_json_neutral_column_and_dedup_material() -> None:
     value = json.dumps(
         {
@@ -71,10 +108,11 @@ def test_detector_engine_handles_nested_json_neutral_column_and_dedup_material()
     assert {match.detector for match in matches} >= {"client_secret", "bearer_token", "jwt"}
     assert any(match.object_path == "$.neutral.client_secret" for match in matches)
     assert fingerprint("same") == fingerprint("same")
-    assert mask_secret("super-secret-value-123") != "super-secret-value-123"
+    assert any(match.value == "super-secret-value-123" for match in matches)
 
 
-def test_clickhouse_row_scanner_finds_camelcase_secret_key():
+@pytest.mark.parametrize("legacy_redact_setting", [False, True])
+def test_clickhouse_row_scanner_finds_camelcase_secret_key(legacy_redact_setting: bool):
     chunk = ScanChunk("app", "events", ("payload",), "202609", 0, 1)
     coverage = {"app.events.payload": {"rows_scanned": 0, "bytes_scanned": 0}}
     findings: dict[str, dict[str, Any]] = {}
@@ -84,11 +122,12 @@ def test_clickhouse_row_scanner_finds_camelcase_secret_key():
         findings,
         coverage,
         enabled=detector_names(),
-        redact=False,
+        redact=legacy_redact_setting,
     )
     finding = next(iter(findings.values()))
     assert finding["type"] == "password"
     assert finding["value"] == "S3cretValue123"
+    assert "masked_value" not in finding
     assert finding["object_path"] == "$.service.userPassword"
 
 
@@ -131,6 +170,112 @@ def test_native_reader_streams_without_execute_materialization() -> None:
     assert result.error is None
     assert result.rows == [["a"], ["b"]]
     assert session.client.queries == ["SELECT payload"]
+
+
+def test_native_reader_stops_at_byte_budget_and_keeps_prefix() -> None:
+    class Client:
+        consumed = 0
+        disconnected = False
+
+        def execute_iter(self, _query: str):
+            for value in ("safe", "client_secret=abcdefghijklmnopqrst", "unread"):
+                self.consumed += 1
+                yield (value,)
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+    client = Client()
+    result = read_chunk(SimpleNamespace(protocol="native", client=client), "SELECT payload", max_bytes=8)
+    assert result.rows == [["safe"]]
+    assert result.bytes_read == 4
+    assert result.error == "discover_max_bytes"
+    assert client.consumed == 2
+    assert client.disconnected is True
+
+
+def test_native_reader_checks_target_deadline_between_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core.modules.clickhouse.discover import reader
+
+    clock = [0.0]
+
+    estimate_bytes = reader._estimate_bytes
+
+    def slow_estimate(row):
+        size = estimate_bytes(row)
+        clock[0] = 2.0
+        return size
+
+    class Client:
+        consumed = 0
+
+        def execute_iter(self, _query: str):
+            self.consumed += 1
+            yield ("first",)
+            self.consumed += 1
+            yield ("unread",)
+
+    monkeypatch.setattr(reader, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(reader, "_estimate_bytes", slow_estimate)
+    client = Client()
+    result = read_chunk(SimpleNamespace(protocol="native", client=client), "SELECT payload", deadline=1.0)
+    assert result.rows == [["first"]]
+    assert result.error == "discover_time"
+    assert client.consumed == 1
+
+
+def test_native_reader_interrupts_blocked_response_at_target_deadline() -> None:
+    interrupted = threading.Event()
+
+    class Socket:
+        def shutdown(self, _how: int) -> None:
+            interrupted.set()
+
+    class Client:
+        connection = SimpleNamespace(socket=Socket())
+
+        def execute_iter(self, _query: str):
+            yield ("password=earlysecret",)
+            if not interrupted.wait(0.6):
+                raise TimeoutError("driver timeout exceeded target deadline")
+            raise OSError("response interrupted")
+
+    started = time.monotonic()
+    result = read_chunk(SimpleNamespace(protocol="native", client=Client()), "SELECT payload", deadline=started + 0.03)
+    assert interrupted.is_set()
+    assert time.monotonic() - started < 0.4
+    assert result.rows == [["password=earlysecret"]]
+    assert result.error == "discover_time"
+
+
+def test_native_reader_disarms_deadline_after_success() -> None:
+    interrupted = threading.Event()
+    session = _session([("safe",)])
+    session.client.connection = SimpleNamespace(socket=SimpleNamespace(shutdown=lambda _how: interrupted.set()))
+    result = read_chunk(session, "SELECT payload", deadline=time.monotonic() + 0.03)
+    assert result.error is None
+    assert result.rows == [["safe"]]
+    assert not interrupted.wait(0.06)
+
+
+def test_native_catalog_query_interrupts_blocked_response_at_deadline() -> None:
+    interrupted = threading.Event()
+
+    class Client:
+        connection = SimpleNamespace(socket=SimpleNamespace(shutdown=lambda _how: interrupted.set()))
+
+        def execute(self, _query: str, **_kwargs: Any):
+            interrupted.wait(0.6)
+            raise OSError("response interrupted")
+
+    started = time.monotonic()
+    rows, error = actions._query_rows(
+        SimpleNamespace(protocol="native", client=Client()), "SELECT catalog", max_execution_time=0.03
+    )
+    assert interrupted.is_set()
+    assert time.monotonic() - started < 0.4
+    assert rows is None
+    assert error == "discover_time"
 
 
 def test_inventory_catalog_sizes_partitions_and_fallbacks() -> None:
@@ -231,8 +376,8 @@ def test_discovery_inventory_scan_checkpoint_and_resume(tmp_path: Path) -> None:
     assert report["tables_scanned"] == 1
     stripe = next(item for item in report["findings"] if item["type"] == "stripe_key")
     assert stripe["occurrences"] == 2
-    assert stripe["value"] is None
-    assert stripe["masked_value"] != secret
+    assert stripe["value"] == secret
+    assert "masked_value" not in stripe
     assert checkpoint.exists()
     assert "SELECT `payload`,`labels`" in session.client.queries[0]
 
@@ -283,7 +428,7 @@ def test_discovery_emits_new_findings_after_each_completed_chunk() -> None:
     assert emitted == [(0, 1, "first-secret-value"), (1, 2, "second-secret-value")]
 
 
-def test_global_byte_budget_is_exact_and_resume_continues_partial_chunk(tmp_path: Path) -> None:
+def test_portion_budget_continues_current_chunk_without_resume(tmp_path: Path) -> None:
     checkpoint = tmp_path / "budget.json"
     values = [("password=firstsecret",), ("password=secondsecret",)]
 
@@ -302,14 +447,13 @@ def test_global_byte_budget_is_exact_and_resume_continues_partial_chunk(tmp_path
         config=DiscoverConfig(checkpoint=checkpoint, chunk_rows=2, max_total_bytes=cap, redact=False),
         query_rows=_inventory_query,
     )
-    assert first["status"] == "partial"
-    assert first["bytes_scanned"] <= cap
-    assert first["partial_reasons"] == ["discover_max_bytes"]
+    assert first["status"] == "complete", first
+    assert first["bytes_scanned"] > cap
+    assert first["partial_reasons"] == []
     assert any(finding["value"] == "firstsecret" for finding in first["findings"])
+    assert any(finding["value"] == "secondsecret" for finding in first["findings"])
     state = CheckpointStore(checkpoint, "127.0.0.1:9000", resume=True).target_state()
-    assert any(
-        chunk.get("status") == "budget_partial" and chunk.get("next_offset") == 1 for chunk in state["chunks"].values()
-    )
+    assert any(chunk.get("status") == "complete" for chunk in state["chunks"].values())
 
     second = run_discovery(
         session,
@@ -336,6 +480,67 @@ def test_global_time_budget_stops_clickhouse_before_reading_rows() -> None:
     assert report["status"] == "partial"
     assert report["partial_reasons"] == ["discover_time"]
     assert session.client.queries == []
+
+
+def test_global_time_budget_includes_target_detection_and_skips_inventory() -> None:
+    queries: list[str] = []
+
+    def query_inventory(query: str) -> tuple[list[list[Any]] | None, str | None]:
+        queries.append(query)
+        return _inventory_query(query)
+
+    report = run_discovery(
+        _session([]),
+        host="127.0.0.1",
+        port=9000,
+        config=DiscoverConfig(max_seconds=0.01),
+        query_rows=query_inventory,
+        started_at=time.monotonic() - 1,
+    )
+    assert queries == []
+    assert report["status"] == "partial"
+    assert report["partial_reasons"] == ["discover_time"]
+
+
+def test_clickhouse_default_discover_time_includes_target_detection() -> None:
+    options = stage._build_clickhouse_host_stage_options(SimpleNamespace(discover=True, discover_time=None))
+    calls: list[str] = []
+
+    def query_inventory(query: str) -> tuple[list[list[Any]] | None, str | None]:
+        calls.append(query)
+        return _inventory_query(query)
+
+    report = run_discovery(
+        _session([]),
+        host="127.0.0.1",
+        port=9000,
+        config=DiscoverConfig(max_seconds=options["discover_max_seconds"]),
+        query_rows=query_inventory,
+        started_at=time.monotonic() - 901,
+    )
+    assert calls == []
+    assert report["status"] == "partial"
+    assert report["partial_reasons"] == ["discover_time"]
+
+
+def test_global_time_budget_stops_inventory_after_slow_query() -> None:
+    queries: list[str] = []
+
+    def query_inventory(query: str) -> tuple[list[list[Any]] | None, str | None]:
+        queries.append(query)
+        time.sleep(0.02)
+        return _inventory_query(query)
+
+    report = run_discovery(
+        _session([]),
+        host="127.0.0.1",
+        port=9000,
+        config=DiscoverConfig(max_seconds=0.01),
+        query_rows=query_inventory,
+    )
+    assert len(queries) == 1
+    assert report["status"] == "partial"
+    assert report["partial_reasons"] == ["discover_time"]
 
 
 def test_discovery_uses_four_independent_table_sessions() -> None:
@@ -385,7 +590,18 @@ def test_discovery_uses_four_independent_table_sessions() -> None:
     assert peak == 4
 
 
-def test_discovery_parallelizes_independent_chunks_of_one_large_table() -> None:
+def test_discovery_parallelizes_independent_chunks_of_one_large_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    from redposture_core.modules.clickhouse.discover import engine
+
+    original_build_chunk_query = engine.build_chunk_query
+
+    def assert_detached_columns(chunk: ScanChunk, **kwargs: Any) -> str:
+        # Workers must not read the coordinator's live SQLite catalog while
+        # it records completed chunks on the same connection.
+        assert type(chunk.columns) is tuple
+        return original_build_chunk_query(chunk, **kwargs)
+
+    monkeypatch.setattr(engine, "build_chunk_query", assert_detached_columns)
     active = 0
     peak = 0
     lock = threading.Lock()
@@ -510,6 +726,58 @@ def test_permission_error_is_partial_and_never_reports_full_coverage(tmp_path: P
     assert report["scan_errors"][0]["kind"] == "permission_denied"
 
 
+def test_mid_chunk_read_failure_preserves_received_secret_and_partial_checkpoint(tmp_path: Path) -> None:
+    class InterruptedClient:
+        def execute_iter(self, _query: str):
+            yield ("password=EarlierSecret2026", {"plain": "value"})
+            raise RuntimeError("network reset after first row")
+
+    report = run_discovery(
+        SimpleNamespace(protocol="native", client=InterruptedClient()),
+        host="127.0.0.1",
+        port=9000,
+        config=DiscoverConfig(checkpoint=tmp_path / "interrupted.json", chunk_rows=2, detectors=("password",)),
+        query_rows=_inventory_query,
+    )
+    assert report["status"] == "partial"
+    assert report["findings"]
+    assert report["scan_errors"][0]["kind"] == "query_error"
+
+
+def test_mid_chunk_failure_resume_starts_after_saved_row(tmp_path: Path) -> None:
+    queries: list[str] = []
+
+    class InterruptedClient:
+        def execute_iter(self, query: str):
+            queries.append(query)
+            if "OFFSET 0" in query:
+                yield ("password=EarlierSecret2026", {"plain": "value"})
+                raise RuntimeError("network reset after first row")
+            assert "LIMIT 1 OFFSET 1" in query
+            yield ("password=LaterSecret2026", {"plain": "value"})
+
+    session = SimpleNamespace(protocol="native", client=InterruptedClient())
+    checkpoint = tmp_path / "interrupted-resume.json"
+    first = run_discovery(
+        session,
+        host="127.0.0.1",
+        port=9000,
+        config=DiscoverConfig(checkpoint=checkpoint, chunk_rows=2, detectors=("password",)),
+        query_rows=_inventory_query,
+    )
+    assert first["status"] == "partial"
+    resumed = run_discovery(
+        session,
+        host="127.0.0.1",
+        port=9000,
+        config=DiscoverConfig(checkpoint=checkpoint, resume=True, chunk_rows=2, detectors=("password",)),
+        query_rows=_inventory_query,
+    )
+    assert resumed["status"] == "complete"
+    assert len(resumed["findings"]) == 2
+    assert len(queries) == 2
+
+
 def test_discover_cli_contract_and_validation(tmp_path: Path) -> None:
     checkpoint = tmp_path / "state.json"
     args = parse_args(
@@ -545,8 +813,8 @@ def test_discover_cli_contract_and_validation(tmp_path: Path) -> None:
     assert "--resume requires --discover" in console.errors[-1]
 
 
-def test_discover_txt_renderer_is_compact_masked_and_does_not_clip_values() -> None:
-    long_masked_value = "abcd" + ("x" * 120) + "wxyz"
+def test_discover_txt_renderer_does_not_clip_or_use_legacy_mask() -> None:
+    long_value = "abcd" + ("x" * 120) + "wxyz"
     record = {
         "host": "127.0.0.1",
         "port": 9000,
@@ -563,8 +831,8 @@ def test_discover_txt_renderer_is_compact_masked_and_does_not_clip_values() -> N
                 {
                     "type": "api_key",
                     "confidence": "high",
-                    "masked_value": long_masked_value,
-                    "value": None,
+                    "masked_value": "abcd...wxyz",
+                    "value": long_value,
                     "occurrences": 2,
                     "location_count": 1,
                     "locations": [
@@ -578,7 +846,7 @@ def test_discover_txt_renderer_is_compact_masked_and_does_not_clip_values() -> N
     assert "coverage:100.00%" in lines[-2]
     finding_line = next(line for line in lines if " [!] ApiKey " in line)
     assert lines.index(finding_line) < lines.index(next(line for line in lines if "Discover Secrets (status:" in line))
-    assert f'Value="{long_masked_value}"' in finding_line
+    assert f'Value="{long_value}"' in finding_line
     assert 'Place="app.events.payload$.token"' in finding_line
     assert "confidence" not in finding_line
     assert "occurrences" not in finding_line

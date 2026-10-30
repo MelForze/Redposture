@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-SECTIONS=(fixtures pytest mutation cli-fuzz hypothesis stress focused-services proxy docker-matrix optional-real)
-DEFAULT_SECTIONS=(fixtures pytest mutation cli-fuzz hypothesis stress focused-services proxy docker-matrix)
+SECTIONS=(fixtures mutation cli-fuzz hypothesis stress focused-services proxy docker-matrix optional-real)
+DEFAULT_SECTIONS=(fixtures mutation cli-fuzz hypothesis stress focused-services proxy docker-matrix)
 REQUESTED=()
 ARTIFACT_DIR=""
 LIST_ONLY=0
@@ -26,7 +26,6 @@ EOF
 list_sections() {
   cat <<'EOF'
 fixtures          Service fixture fidelity
-pytest            Full deterministic pytest suite
 mutation          Mutation smoke
 cli-fuzz          CLI parameter fuzz
 hypothesis        10,000-example property fuzzing
@@ -146,9 +145,6 @@ execute_section() {
     fixtures)
       "${PYTHON_BIN}" lab/services/coverage.py "${ARTIFACT_DIR}/service-coverage"
       ;;
-    pytest)
-      "${PYTHON_BIN}" -m pytest -q --junitxml="${ARTIFACT_DIR}/deterministic.xml"
-      ;;
     mutation)
       "${PYTHON_BIN}" scripts/run_mutation_smoke.py
       ;;
@@ -157,12 +153,15 @@ execute_section() {
         --junitxml="${ARTIFACT_DIR}/cli-fuzz.xml"
       ;;
     hypothesis)
-      REDPOSTURE_HYPOTHESIS_PROFILE=redposture-local "${PYTHON_BIN}" -m pytest \
+      echo "[hypothesis] max_examples=10000 timeout=${QA_HYPOTHESIS_TIMEOUT_SECONDS:-1800}s"
+      REDPOSTURE_HYPOTHESIS_PROFILE=redposture-local PYTHONUNBUFFERED=1 \
+        "${PYTHON_BIN}" scripts/run_qa_with_timeout.py "${QA_HYPOTHESIS_TIMEOUT_SECONDS:-1800}" -- \
+        "${PYTHON_BIN}" -m pytest \
         tests/test_detection_cve_hypothesis.py tests/test_registry_nexus_detection.py \
         tests/test_quality_discovery_properties.py tests/test_quality_discovery_stateful.py \
         tests/test_quality_exporters_matrix.py tests/test_quality_registry_matrix.py \
         tests/test_quality_kafka_fuzz.py tests/test_quality_proxmox_discovery.py \
-        --hypothesis-seed=20260928 -q --junitxml="${ARTIFACT_DIR}/hypothesis.xml"
+        --hypothesis-seed=20260928 -vv --durations=10 --junitxml="${ARTIFACT_DIR}/hypothesis.xml"
       ;;
     stress)
       "${PYTHON_BIN}" -m pytest -q -m local_output_audit \

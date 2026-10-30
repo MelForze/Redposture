@@ -53,7 +53,7 @@ def configure_nomad_parser(
     inventory.add_argument(
         "--namespace", default="default", metavar="name", help="Job namespace for inventory and discovery."
     )
-    add_discovery_budget_flags(inventory, default_time=300.0, default_bytes=50 * 1024 * 1024)
+    add_discovery_budget_flags(inventory)
     add_flags(execution)
     execution.add_argument(
         "--allocation",

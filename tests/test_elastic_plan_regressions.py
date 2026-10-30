@@ -307,6 +307,8 @@ def test_opensearch_auth_resolves_version_hidden_from_anonymous_probe(
         raise AssertionError(path)
 
     monkeypatch.setattr(actions, "_elastic_request", fake_request)
+    monkeypatch.setattr(actions, "_probe_credential_resource_access", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(actions, "_probe_credential_write_delete_access", lambda *_args, **_kwargs: {})
     ctx = _auth_context(username="logstash", password="logstash")
 
     record = actions.authenticate_elastic(

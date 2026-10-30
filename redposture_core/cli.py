@@ -16,6 +16,7 @@ from .cli_args import (
     parse_args,
 )
 from .console import set_console_no_color
+from .http_headers import custom_http_headers
 from .logger import AttemptLogger
 from .module_registry import (
     COMMAND_SPECS_BY_NAME,
@@ -204,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             with _termination_signal_context():
                 try:
-                    with proxy_socket_context(proxy_cfg):
+                    with proxy_socket_context(proxy_cfg), custom_http_headers(getattr(args, "http_headers", None)):
                         return _run_command(args, logger)
                 except KeyboardInterrupt:
                     # F1 fix: without this the interpreter dumps a full traceback on

@@ -1,5 +1,6 @@
 [
   {
+    "_zookeeper_discovery_streamed": true,
     "anonymous_auth_probe_results": {
       "/": "ok"
     },
@@ -14,7 +15,9 @@
     "can_delete_znode": null,
     "connect_error": null,
     "content_discovery": {
-      "bytes_inspected": 1080,
+      "bytes_inspected": 1015,
+      "bytes_read": 665,
+      "emitted_fingerprints": [],
       "findings": [
         {
           "confidence": "high",
@@ -22,7 +25,7 @@
           "object_path": "$.znode./config/services/grafana.grafana",
           "source": "anonymous",
           "type": "password",
-          "value": "*****"
+          "value": "admin"
         },
         {
           "confidence": "high",
@@ -30,7 +33,7 @@
           "object_path": "$.znode./config/services/kafka.kafka",
           "source": "anonymous",
           "type": "password",
-          "value": "metr...pass"
+          "value": "metricspass"
         },
         {
           "confidence": "high",
@@ -38,7 +41,7 @@
           "object_path": "$.znode./config/services/postgres.postgres",
           "source": "anonymous",
           "type": "connection_string",
-          "value": "post...able"
+          "value": "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
         },
         {
           "confidence": "high",
@@ -46,7 +49,7 @@
           "object_path": "$.znode./config/services/postgres.postgres",
           "source": "anonymous",
           "type": "url_credentials",
-          "value": "post...able"
+          "value": "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
         },
         {
           "confidence": "high",
@@ -54,7 +57,7 @@
           "object_path": "$.znode./observability/remote_write_url.remote_write_url",
           "source": "anonymous",
           "type": "url_credentials",
-          "value": "http...rite"
+          "value": "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
         },
         {
           "confidence": "high",
@@ -62,7 +65,7 @@
           "object_path": "$.znode./redposture/app/api_key.api_key",
           "source": "anonymous",
           "type": "api_key",
-          "value": "rp-z...2026"
+          "value": "rp-zk-key-2026"
         },
         {
           "confidence": "high",
@@ -70,7 +73,7 @@
           "object_path": "$.znode./redposture/app/jwt_secret.jwt_secret",
           "source": "anonymous",
           "type": "generic_secret",
-          "value": "rp-j...2026"
+          "value": "rp-jwt-lab-2026"
         },
         {
           "confidence": "high",
@@ -78,7 +81,7 @@
           "object_path": "$.znode./redposture/app/oidc_client_secret.oidc_client_secret",
           "source": "anonymous",
           "type": "client_secret",
-          "value": "oidc...-lab"
+          "value": "oidc-client-secret-lab"
         },
         {
           "confidence": "high",
@@ -86,7 +89,7 @@
           "object_path": "$.znode./redposture/cache/redis_uri.redis_uri",
           "source": "anonymous",
           "type": "connection_string",
-          "value": "redi...79/0"
+          "value": "redis://default:redis@redis:6379/0"
         },
         {
           "confidence": "high",
@@ -94,7 +97,7 @@
           "object_path": "$.znode./redposture/cache/redis_uri.redis_uri",
           "source": "anonymous",
           "type": "url_credentials",
-          "value": "redi...79/0"
+          "value": "redis://default:redis@redis:6379/0"
         },
         {
           "confidence": "high",
@@ -102,9 +105,11 @@
           "object_path": "$.znode./redposture/db/password.password",
           "source": "anonymous",
           "type": "password",
-          "value": "********"
+          "value": "postgres"
         }
       ],
+      "live_emitted": false,
+      "partial_reasons": [],
       "source": "anonymous",
       "status": "complete"
     },
@@ -131,7 +136,7 @@
     "is_zookeeper": true,
     "is_zookeeper_compatible": true,
     "keeper_virtual_probe": null,
-    "max_znodes": 2000,
+    "max_znodes": null,
     "module": "zookeeper",
     "port": 2181,
     "probe_write_requested": false,
@@ -206,290 +211,79 @@
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
-    "znode_details": [
-      {
-        "bytes": 18,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 11,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 25,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 31,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 7,
-        "children": 4,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 61,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 85,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 73,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 21,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 33,
-        "children": 2,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 60,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 3,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 22,
-        "children": 4,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 46,
-        "children": 3,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 14,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 15,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 22,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 34,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 34,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 39,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 8,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 3,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 0,
-        "children": 2,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 0,
-        "children": 0,
-        "error": null,
-        "state": "empty"
-      },
-      {
-        "bytes": 0,
-        "children": 0,
-        "error": null,
-        "state": "empty"
-      }
-    ],
-    "znode_dump_items": [
-      {
-        "value": "cluster=kafka-open"
-      },
-      {
-        "value": "source=seed"
-      },
-      {
-        "value": "host=kafka-open,port=9092"
-      },
-      {
-        "value": "profile=lab,reload_interval=30s"
-      },
-      {
-        "value": "count=4"
-      },
-      {
-        "value": "url=http://grafana:3000,admin_user=admin,admin_password=admin"
-      },
-      {
-        "value": "open=kafka-open:9092,auth=kafka-auth:9092,sasl_user=metrics,sasl_password=metricspass"
-      },
-      {
-        "value": "dsn=postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
-      },
-      {
-        "value": "mode=lab,metrics=true"
-      },
-      {
-        "value": "stack=prometheus-grafana,team=sre"
-      },
-      {
-        "value": "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
-      },
-      {
-        "value": "15s"
-      },
-      {
-        "value": "env=lab,owner=platform"
-      },
-      {
-        "value": "service=redposture-api,namespace=observability"
-      },
-      {
-        "value": "rp-zk-key-2026"
-      },
-      {
-        "value": "rp-jwt-lab-2026"
-      },
-      {
-        "value": "oidc-client-secret-lab"
-      },
-      {
-        "value": "backend=redis,host=redis,port=6379"
-      },
-      {
-        "value": "redis://default:redis@redis:6379/0"
-      },
-      {
-        "value": "engine=postgres,host=postgres,port=5432"
-      },
-      {
-        "value": "postgres"
-      },
-      {
-        "value": "lab"
-      },
-      {
-        "value": "<empty>"
-      },
-      {
-        "value": "<empty>"
-      },
-      {
-        "value": "<empty>"
-      }
-    ],
+    "znode_details": null,
     "znode_truncated_reason": null,
+    "znode_values": null,
+    "znodes": null,
+    "znodes_truncated": false
+  },
+  {
+    "host": "127.0.0.1",
+    "port": 2181,
+    "service": "zookeeper",
+    "type": "znodes_dump",
+    "znode_count": 25,
     "znode_values": [
+      "/:<empty>",
       "/brokers:cluster=kafka-open",
-      "/brokers/ids:source=seed",
-      "/brokers/ids/1:host=kafka-open,port=9092",
+      "/zookeeper:<empty>",
       "/config:profile=lab,reload_interval=30s",
+      "/observability:stack=prometheus-grafana,team=sre",
+      "/redposture:env=lab,owner=platform",
+      "/brokers/ids:source=seed",
+      "/zookeeper/config:<empty>",
+      "/zookeeper/quota:<empty>",
       "/config/services:count=4",
+      "/observability/scrape_interval:15s",
+      "/observability/remote_write_url:https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write",
+      "/redposture/app:service=redposture-api,namespace=observability",
+      "/redposture/cache:backend=redis,host=redis,port=6379",
+      "/redposture/env:lab",
+      "/redposture/db:engine=postgres,host=postgres,port=5432",
+      "/brokers/ids/1:host=kafka-open,port=9092",
       "/config/services/grafana:url=http://grafana:3000,admin_user=admin,admin_password=admin",
-      "/config/services/kafka:open=kafka-open:9092,auth=kafka-auth:9092,sasl_user=metrics,sasl_password=metricspass",
       "/config/services/postgres:dsn=postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable",
       "/config/services/redposture:mode=lab,metrics=true",
-      "/observability:stack=prometheus-grafana,team=sre",
-      "/observability/remote_write_url:https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write",
-      "/observability/scrape_interval:15s",
-      "/redposture:env=lab,owner=platform",
-      "/redposture/app:service=redposture-api,namespace=observability",
-      "/redposture/app/api_key:rp-zk-key-2026",
-      "/redposture/app/jwt_secret:rp-jwt-lab-2026",
+      "/config/services/kafka:open=kafka-open:9092,auth=kafka-auth:9092,sasl_user=metrics,sasl_password=metricspass",
       "/redposture/app/oidc_client_secret:oidc-client-secret-lab",
-      "/redposture/cache:backend=redis,host=redis,port=6379",
+      "/redposture/app/jwt_secret:rp-jwt-lab-2026",
+      "/redposture/app/api_key:rp-zk-key-2026",
       "/redposture/cache/redis_uri:redis://default:redis@redis:6379/0",
-      "/redposture/db:engine=postgres,host=postgres,port=5432",
-      "/redposture/db/password:postgres",
-      "/redposture/env:lab",
-      "/zookeeper:<empty>",
-      "/zookeeper/config:<empty>",
-      "/zookeeper/quota:<empty>"
-    ],
+      "/redposture/db/password:postgres"
+    ]
+  },
+  {
+    "host": "127.0.0.1",
+    "port": 2181,
+    "service": "zookeeper",
+    "type": "znodes_list",
+    "znode_count": 25,
     "znodes": [
       "/brokers",
-      "/brokers/ids",
-      "/brokers/ids/1",
+      "/zookeeper",
       "/config",
+      "/observability",
+      "/redposture",
+      "/brokers/ids",
+      "/zookeeper/config",
+      "/zookeeper/quota",
       "/config/services",
+      "/observability/scrape_interval",
+      "/observability/remote_write_url",
+      "/redposture/app",
+      "/redposture/cache",
+      "/redposture/env",
+      "/redposture/db",
+      "/brokers/ids/1",
       "/config/services/grafana",
-      "/config/services/kafka",
       "/config/services/postgres",
       "/config/services/redposture",
-      "/observability",
-      "/observability/remote_write_url",
-      "/observability/scrape_interval",
-      "/redposture",
-      "/redposture/app",
-      "/redposture/app/api_key",
-      "/redposture/app/jwt_secret",
+      "/config/services/kafka",
       "/redposture/app/oidc_client_secret",
-      "/redposture/cache",
+      "/redposture/app/jwt_secret",
+      "/redposture/app/api_key",
       "/redposture/cache/redis_uri",
-      "/redposture/db",
-      "/redposture/db/password",
-      "/redposture/env",
-      "/zookeeper",
-      "/zookeeper/config",
-      "/zookeeper/quota"
-    ],
-    "znodes_truncated": false
+      "/redposture/db/password"
+    ]
   }
 ]

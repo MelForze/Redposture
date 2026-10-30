@@ -190,7 +190,12 @@ def test_remote_artifact_collection_keeps_flags_and_result(monkeypatch: pytest.M
     result = pg._pg_collect_database_artifacts_remote("db", 5432, 2.0, 1, "audit", "pw", "app", **options)
     if failure == "terminate":
         assert result == retained
-        assert collect.call_args.kwargs == {"database_name": "app", **options}
+        assert collect.call_args.kwargs == {
+            "database_name": "app",
+            **options,
+            "discovery_collector": None,
+            "retain_dump_rows": True,
+        }
     else:
         assert result[:5] == (None, [], [], [], None) and result[5]
         collect.assert_not_called()
@@ -330,24 +335,26 @@ def test_audit_execute_failure_keeps_sql_and_authenticated_session_evidence(
 
 
 @pytest.mark.parametrize(
-    "payload,password,expected",
+    "payload,password,expected,detected",
     [
-        (b"\0", "pw", "invalid authentication payload"),
-        (struct.pack("!I", 3), None, "password authentication required"),
-        (struct.pack("!I", 5), "pw", "invalid MD5 authentication payload"),
-        (struct.pack("!I", 5) + b"salt", None, "md5 authentication required"),
-        (struct.pack("!I", 10), None, "SCRAM authentication required"),
-        (struct.pack("!I", 10) + b"PLAIN\0\0", "pw", "unsupported SASL mechanisms"),
+        (b"\0", "pw", "invalid authentication payload", False),
+        (struct.pack("!I", 3), None, "password authentication required", True),
+        (struct.pack("!I", 5), "pw", "invalid MD5 authentication payload", False),
+        (struct.pack("!I", 5) + b"salt", None, "md5 authentication required", True),
+        (struct.pack("!I", 10) + b"SCRAM-SHA-256\0\0", None, "SCRAM authentication required", True),
+        (struct.pack("!I", 10) + b"PLAIN\0\0", "pw", "unsupported SASL mechanisms", True),
     ],
 )
 def test_auth_challenges_without_usable_credentials_fail_explicitly(
-    monkeypatch: pytest.MonkeyPatch, payload: bytes, password: str | None, expected: str
+    monkeypatch: pytest.MonkeyPatch, payload: bytes, password: str | None, expected: str, detected: bool
 ) -> None:
     monkeypatch.setattr(pg, "_pg_send_startup", Mock())
     monkeypatch.setattr(pg, "_pg_read_message", Mock(return_value=(b"R", payload)))
     with pytest.raises(pg._PgAuditError, match=expected) as raised:
         pg._pg_startup_and_auth(None, "audit", password, "app")
-    assert raised.value.detected is True
+    assert raised.value.detected is detected
+    assert raised.value.password_sent is False
+    assert raised.value.credential_verified is None
 
 
 @pytest.mark.parametrize("wrapped", [False, True])

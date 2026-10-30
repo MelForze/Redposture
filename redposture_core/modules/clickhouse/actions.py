@@ -21,7 +21,10 @@ from ...clients import transport
 from ...clients.http_api import infer_http_base_path
 from ...console import Console
 from ...detection_io import DetectCall, DetectDelay, run_sync
+from ...discovery_options import DEFAULT_DISCOVER_TIME
+from ...discovery_paths import concat_discovery_text
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
+from ...discovery_values import DiskBackedText
 from ...rendering import (
     BooleanColorRule,
     CountColorRule,
@@ -51,6 +54,7 @@ from ...utils import (
     utc_now_iso,
 )
 from .discover import DiscoverConfig, run_discovery
+from .discover.reader import native_query_deadline, read_chunk
 
 # Connection-error classification + framed reads are shared via the transport layer.
 _is_timeout_error = transport.is_connection_timeout
@@ -531,6 +535,9 @@ def _open_clickhouse_client(
 
     if protocol == "http":
         clickhouse_connect = _load_clickhouse_connect_module()
+        from ...clients.clickhouse_http import constructor_headers
+        from ...http_headers import merge_custom_http_headers
+
         kwargs = {
             "host": host,
             "port": int(port),
@@ -542,6 +549,9 @@ def _open_clickhouse_client(
             "connect_timeout": float(timeout),
             "send_receive_timeout": float(timeout),
         }
+        custom_headers = constructor_headers(merge_custom_http_headers({}))
+        if custom_headers:
+            kwargs["headers"] = custom_headers
         if tls.proxy_path:
             kwargs["proxy_path"] = tls.proxy_path
         if tls.enabled:
@@ -561,6 +571,10 @@ def _open_clickhouse_client(
         try:
             return clickhouse_connect.get_client(**kwargs)
         except TypeError as exc:
+            if custom_headers and is_signature_compat_typeerror(exc, expected_keywords={"headers"}):
+                from ...clients.clickhouse_http import create_http_client_with_headers
+
+                return create_http_client_with_headers(kwargs, custom_headers)
             if not is_signature_compat_typeerror(exc, expected_keywords={"connect_timeout", "send_receive_timeout"}):
                 raise
             unsupported = "send_receive_timeout" if "send_receive_timeout" in str(exc) else "connect_timeout"
@@ -570,16 +584,48 @@ def _open_clickhouse_client(
     raise ValueError(f"unsupported protocol: {protocol}")
 
 
-def _query_rows(session: _ChSession, query: str) -> tuple[list[list[Any]] | None, str | None]:
+def _query_rows(
+    session: _ChSession, query: str, *, max_execution_time: float | None = None, discovery: bool = False
+) -> tuple[list[list[Any]] | None, str | None]:
+    if discovery:
+        if max_execution_time is not None and max_execution_time <= 0:
+            return [], "discover_time"
+        result = read_chunk(
+            session,
+            query,
+            deadline=time.monotonic() + max_execution_time if max_execution_time is not None else None,
+        )
+        return result.rows, result.error
+    expired = None
     try:
+        settings = (
+            {
+                "max_execution_time": max(0.001, float(max_execution_time)),
+                "timeout_before_checking_execution_speed": 0,
+            }
+            if max_execution_time is not None
+            else None
+        )
         if session.protocol == "native":
-            raw_rows = session.client.execute(query)
+            deadline = time.monotonic() + max_execution_time if max_execution_time is not None else None
+            with native_query_deadline(session.client, deadline) as expired:
+                raw_rows = session.client.execute(query, **({"settings": settings} if settings is not None else {}))
+            if expired.is_set():
+                return None, "discover_time"
         else:
-            result = session.client.query(query)
+            result = session.client.query(query, **({"settings": settings} if settings is not None else {}))
             raw_rows = getattr(result, "result_rows", None)
             if raw_rows is None:
                 raw_rows = []
     except Exception as exc:
+        if expired is not None and expired.is_set():
+            disconnect = getattr(session.client, "disconnect", None)
+            if callable(disconnect):
+                try:
+                    disconnect()
+                except Exception:
+                    pass
+            return None, "discover_time"
         return None, _friendly_error_from_exception(exc)
 
     rows: list[list[Any]] = []
@@ -2161,10 +2207,19 @@ def collect_clickhouse_data(
             nested_scheduler = getattr(ctx, "nested_scheduler", None)
             nested_budget = int(getattr(ctx.args, "_audit_nested_workers", 1) or 1)
             discover_worker_count = min(4, nested_budget) if nested_scheduler is not None else 1
+            discover_started_at = getattr(ctx, "discovery_started_at", None)
+            discover_max_seconds = options.get("discover_max_seconds") or DEFAULT_DISCOVER_TIME
+            discover_deadline = (
+                discover_started_at + float(discover_max_seconds)
+                if discover_started_at is not None and discover_max_seconds is not None
+                else None
+            )
             discover_sessions = [session]
             extra_sessions: list[_ChSession] = []
             try:
                 for _index in range(1, discover_worker_count):
+                    if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                        break
                     extra_session, extra_error = _open_operational_session(
                         session.protocol,
                         str(ctx.host),
@@ -2190,12 +2245,23 @@ def collect_clickhouse_data(
 
                 def on_chunk_findings(_chunk: Any, discovered: list[dict[str, Any]]) -> None:
                     if live_discover_emit is not None:
-                        live_discover_emit(
-                            [
-                                _format_discover_finding_line({"host": ctx.host, "port": ctx.port}, item)
-                                for item in discovered
-                            ]
-                        )
+                        for item in discovered:
+                            value = item.get("value")
+                            if isinstance(value, DiskBackedText):
+                                disk_emit = getattr(ctx, "live_discovery_value", None)
+                                if callable(disk_emit):
+                                    disk_emit(
+                                        "CLICKHOUSE",
+                                        ctx.host,
+                                        ctx.port,
+                                        finding_type=item.get("type"),
+                                        value=value,
+                                        place=_clickhouse_discovery_place(item),
+                                    )
+                            else:
+                                live_discover_emit(
+                                    [_format_discover_finding_line({"host": ctx.host, "port": ctx.port}, item)]
+                                )
 
                 discover_report = run_discovery(
                     session,
@@ -2207,20 +2273,38 @@ def collect_clickhouse_data(
                         chunk_rows=int(options.get("discover_chunk_rows") or 1000),
                         max_query_time=float(options.get("discover_max_query_time") or 10.0),
                         max_query_rows=int(options.get("discover_max_query_rows") or 100000),
-                        max_query_bytes=int(options.get("discover_max_query_bytes") or 67108864),
-                        max_memory=int(options.get("discover_max_memory") or 268435456),
+                        max_query_bytes=int(options.get("discover_max_query_bytes") or 0),
+                        max_memory=(
+                            int(options["discover_max_memory"])
+                            if options.get("discover_max_memory") is not None
+                            else None
+                        ),
                         max_threads=int(options.get("discover_max_threads") or 1),
                         exclusions=tuple(options.get("discover_exclusions") or ()),
                         detectors=tuple(options.get("discover_detectors") or ()),
                         redact=bool(options.get("discover_redact", False)),
-                        max_seconds=options.get("discover_max_seconds"),
+                        max_seconds=discover_max_seconds,
                         max_total_bytes=options.get("discover_max_total_bytes"),
                     ),
-                    query_rows=lambda query: _query_rows(session, query),
+                    query_rows=lambda query: _query_rows(
+                        session,
+                        query,
+                        discovery=True,
+                        max_execution_time=max(
+                            0.001,
+                            min(
+                                float(options.get("discover_max_query_time") or 10.0),
+                                discover_deadline - time.monotonic()
+                                if discover_deadline is not None
+                                else float(options.get("discover_max_query_time") or 10.0),
+                            ),
+                        ),
+                    ),
                     sessions=tuple(discover_sessions),
                     nested_scheduler=nested_scheduler,
                     scheduler_key=("clickhouse-discover", ctx.host, ctx.port),
                     on_chunk_findings=on_chunk_findings if live_discover_emit is not None else None,
+                    started_at=discover_started_at,
                 )
             except (OSError, ValueError) as exc:
                 discover_report = {
@@ -2304,6 +2388,9 @@ def collect_clickhouse_data(
         "discover_requested": bool(options.get("discover")),
         "discover_report": discover_report,
         "_discover_findings_streamed": bool(options.get("discover") and getattr(ctx, "live_emit", None)),
+        "_clickhouse_disk_live_emitted": bool(
+            options.get("discover") and getattr(ctx, "live_emit", None) and getattr(ctx, "live_discovery_value", None)
+        ),
     }
     payload.update(payload_update)
     payload["partial"] = bool(payload["partial_reasons"])
@@ -3338,7 +3425,7 @@ def _format_discover_detail_records(record: dict[str, Any], output_format: str) 
     findings = report.get("findings")
     if isinstance(findings, list) and not record.get("_discover_findings_streamed"):
         for finding in findings:
-            if not isinstance(finding, dict):
+            if not isinstance(finding, dict) or isinstance(finding.get("value"), DiskBackedText):
                 continue
             lines.append(_format_discover_finding_line(record, finding))
     lines.append(
@@ -3357,18 +3444,20 @@ def _format_discover_detail_records(record: dict[str, Any], output_format: str) 
     return lines
 
 
-def _format_discover_finding_line(record: dict[str, Any], finding: dict[str, Any]) -> str:
+def _clickhouse_discovery_place(finding: dict[str, Any]) -> str | DiskBackedText:
     locations = finding.get("locations")
     first_location = locations[0] if isinstance(locations, list) and locations else {}
     if not isinstance(first_location, dict):
         first_location = {}
     location = ".".join(str(first_location.get(key) or "?") for key in ("database", "table", "column"))
-    object_path = str(first_location.get("object_path") or "$")
+    object_path = first_location.get("object_path") or "$"
+    return concat_discovery_text(location, object_path if isinstance(object_path, DiskBackedText) else str(object_path))
+
+
+def _format_discover_finding_line(record: dict[str, Any], finding: dict[str, Any]) -> str:
     shown_value = finding.get("value")
     if shown_value is None:
-        shown_value = finding.get("masked_value")
-    if shown_value is None:
-        shown_value = "<redacted>"
+        shown_value = "<unavailable>"
     return format_discovery_finding_line(
         "CLICKHOUSE",
         record.get("host"),
@@ -3377,7 +3466,7 @@ def _format_discover_finding_line(record: dict[str, Any], finding: dict[str, Any
         score=finding.get("score"),
         finding_type=finding.get("type"),
         value=shown_value,
-        place=f"{location}{object_path}",
+        place=_clickhouse_discovery_place(finding),
     )
 
 

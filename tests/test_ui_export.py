@@ -107,3 +107,16 @@ def test_ui_export_auto_resumes_partial_and_starts_new_run_after_completion(tmp_
     assert resumed["path"] == fresh["path"]
     assert resumed["count"] == 2
     assert Path(complete["path"]).exists()
+
+
+def test_export_streams_disk_values_without_repr_or_materialization(tmp_path):
+    from redposture_core.discovery_values import DiskBackedText
+
+    value = DiskBackedText()
+    value.append_text("full\r\nсекрет" * 10000)
+    value.finish()
+    with UIExport(str(tmp_path), "http://qa", "kafka_ui", resume=False) as export:
+        export.add("message:1", "messages", {"value": value})
+        result = export.finish(complete=True)
+    stored = json.loads(Path(result["path"]).read_text())
+    assert stored["value"]["value"] == "full\r\nсекрет" * 10000

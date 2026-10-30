@@ -1,0 +1,25 @@
+services:
+  proxmox:
+    image: redposture-proxmox-native-proxmox:latest
+    build: .
+    platform: linux/amd64
+    hostname: pve-lab
+    mem_limit: 1536m
+    cpus: 2.0
+    pids_limit: 512
+    environment:
+      PVE_ROOT_PASSWORD: ${PVE_ROOT_PASSWORD:?Set a disposable QA password}
+    ports: ["127.0.0.1::8006"]
+    devices: ["/dev/fuse:/dev/fuse"]
+    cap_add: [SYS_ADMIN]
+    volumes: ["cluster:/var/lib/pve-cluster", "ssh:/etc/ssh", "root-ssh:/root/.ssh"]
+    healthcheck:
+      test: [CMD, /usr/local/sbin/proxmox-lab-healthcheck]
+      interval: 5s
+      timeout: 10s
+      retries: 36
+      start_period: 60s
+volumes:
+  cluster:
+  ssh:
+  root-ssh:
