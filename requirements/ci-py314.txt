@@ -2,7 +2,7 @@
 # Exact versions are portable across macOS/Linux; artifact hashes are intentionally omitted.
 ast_serialize==0.12.1
 cachetools==7.2.0
-certifi==2026.7.22
+certifi==2026.10.18
 cffi==2.1.1
 cfgv==3.5.0
 clickhouse-connect==1.9.0
@@ -11,9 +11,9 @@ colorama==0.4.6
 coverage==7.16.2
 cryptography==50.0.2
 distlib==0.4.3
-dnspython==2.8.0
+dnspython==2.9.0
 editables==0.6
-filelock==4.0.11
+filelock==4.2.1
 grpcio-tools==1.80.0
 grpcio==1.84.0
 h2==4.4.1
@@ -38,7 +38,7 @@ pre_commit==4.6.2
 protobuf==6.33.6
 pycparser==3.0
 Pygments==2.21.0
-pymongo==4.18.2
+pymongo==4.18.3
 pyproject-api==1.11.3
 pytest-cov==7.1.0
 pytest-socket==0.8.1
@@ -47,7 +47,7 @@ python-discovery==1.6.1
 pytz==2026.5
 PyYAML==6.0.3
 ruff==0.16.10
-setuptools==84.0.0
+setuptools==84.1.0
 sortedcontainers==2.4.0
 tomli_w==1.2.0
 tomlkit==0.15.1
@@ -56,5 +56,5 @@ trove-classifiers==2026.9.21.13
 typing_extensions==4.16.0
 tzlocal==5.4.4
 urllib3==2.8.0
-virtualenv==21.14.5
+virtualenv==21.14.13
 zstandard==0.25.0
