@@ -329,6 +329,7 @@ def test_execute_evidence_colors_and_plain_output(capsys):
         assert _render_colored_proxmox_line(_ColorConsole(), line)
         output = capsys.readouterr().out
         _assert_color(output, "execute:" + value, color)
+        assert "(rce:" not in line
         assert _render_colored_proxmox_line(_ColorConsole(no_color=True), line)
         assert "\x1b" not in capsys.readouterr().out
 

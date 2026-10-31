@@ -6,6 +6,7 @@ from typing import Any
 
 from ...stage_runtime import validate_basic_module_args
 from ..execution_api import validate as validate_execution
+from ..execution_api import validate_os_shell
 from ..token_api import validate_token_args
 
 
@@ -15,6 +16,14 @@ def validate_args(args: Any, console: Any) -> int | None:
         return rc
     if (execution_rc := validate_execution(args, console)) is not None:
         return execution_rc
+    if (
+        shell_rc := validate_os_shell(
+            args,
+            console,
+            forbidden=("endpoints", "containers", "images", "networks", "volumes", "system", "discover", "enum_cve"),
+        )
+    ) is not None:
+        return shell_rc
     rc = validate_token_args(args, console, "portainer")
     if rc is not None:
         return rc
@@ -27,11 +36,11 @@ def validate_args(args: Any, console: Any) -> int | None:
     if container is not None and (not container.strip() or any(ch in container for ch in "\r\n\x00")):
         console.error("--container requires a nonempty container ID or name")
         return 2
-    if getattr(args, "execute", None) is not None and not endpoint:
-        console.error("--execute requires --endpoint ID|NAME")
+    if (getattr(args, "execute", None) is not None or getattr(args, "os_shell", False)) and not endpoint:
+        console.error("--execute/--os-shell requires --endpoint ID|NAME")
         return 2
-    if getattr(args, "execute", None) is not None and not container:
-        console.error("--execute requires --container ID|NAME")
+    if (getattr(args, "execute", None) is not None or getattr(args, "os_shell", False)) and not container:
+        console.error("--execute/--os-shell requires --container ID|NAME")
         return 2
     args.token = token
     return None

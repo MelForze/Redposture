@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import http.client
+import selectors
+import socket
 import ssl
 import threading
 import urllib.parse
@@ -31,6 +33,9 @@ class HTTPConnectionPool:
         self._tls_context = tls_context or shared_client_ssl_context(insecure=False)
         self._idle: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
         self._idle_total = 0
+        self._closed = False
+        self._connections: set[http.client.HTTPConnection] = set()
+        self._active_sockets: set[Any] = set()
         self._lock = threading.Lock()
 
     @staticmethod
@@ -66,19 +71,50 @@ class HTTPConnectionPool:
         port = int(port)
         key = (scheme, host, port)
         with self._lock:
+            if self._closed:
+                raise ValueError("HTTP connection pool is closed")
             bucket = self._idle.get(key)
-            if bucket:
+            while bucket:
                 conn = bucket.pop()
                 self._idle_total = max(0, self._idle_total - 1)
                 if not bucket:
                     self._idle.pop(key, None)
+                if self._stale(conn):
+                    self._connections.discard(conn)
+                    conn.close()
+                    continue
                 conn.timeout = timeout
                 if conn.sock is not None:
                     conn.sock.settimeout(timeout)
                 return conn
+        connection: http.client.HTTPConnection
         if scheme == "https":
-            return http.client.HTTPSConnection(host, port, timeout=timeout, context=self._tls_context)
-        return http.client.HTTPConnection(host, port, timeout=timeout)
+            connection = http.client.HTTPSConnection(host, port, timeout=timeout, context=self._tls_context)
+        else:
+            connection = http.client.HTTPConnection(host, port, timeout=timeout)
+        with self._lock:
+            if self._closed:
+                connection.close()
+                raise ValueError("HTTP connection pool is closed")
+            self._connections.add(connection)
+        return connection
+
+    @staticmethod
+    def _stale(connection: http.client.HTTPConnection) -> bool:
+        sock = connection.sock
+        if sock is None or not callable(getattr(sock, "fileno", None)):
+            return False
+        try:
+            pending = getattr(sock, "pending", None)
+            if callable(pending) and pending():
+                return True
+            # Readable idle sockets are EOF or unsolicited data, neither is a
+            # clean response boundary. Selectors also work above FD_SETSIZE.
+            with selectors.DefaultSelector() as selector:
+                selector.register(sock, selectors.EVENT_READ)
+                return bool(selector.select(0))
+        except (OSError, ValueError):
+            return True
 
     def _evict_one(self) -> None:
         for key in list(self._idle):
@@ -86,6 +122,7 @@ class HTTPConnectionPool:
             if not bucket:
                 continue
             victim = bucket.pop(0)
+            self._connections.discard(victim)
             self._idle_total = max(0, self._idle_total - 1)
             if not bucket:
                 self._idle.pop(key, None)
@@ -104,6 +141,8 @@ class HTTPConnectionPool:
         reusable: bool,
     ) -> None:
         if not reusable:
+            with self._lock:
+                self._connections.discard(conn)
             try:
                 conn.close()
             except OSError:
@@ -113,7 +152,10 @@ class HTTPConnectionPool:
         key = (scheme, host, port)
         with self._lock:
             bucket = self._idle.setdefault(key, [])
-            if len(bucket) >= self._max_idle_per_host:
+            if self._closed or len(bucket) >= self._max_idle_per_host:
+                if not bucket:
+                    self._idle.pop(key, None)
+                self._connections.discard(conn)
                 try:
                     conn.close()
                 except OSError:
@@ -124,12 +166,14 @@ class HTTPConnectionPool:
                 if self._idle_total < self._max_idle_total:
                     break
             if self._idle_total >= self._max_idle_total:
+                self._connections.discard(conn)
                 try:
                     conn.close()
                 except OSError:
                     pass
                 return
-            bucket.append(conn)
+            # Eviction may remove the last item of this same origin bucket.
+            self._idle.setdefault(key, []).append(conn)
             self._idle_total += 1
 
     def get(
@@ -168,9 +212,11 @@ class HTTPConnectionPool:
         headers: dict[str, str] | None = None,
     ) -> tuple[int | None, bytes, str | None, BaseException | None, bool, dict[str, str]]:
         scheme, host, port, path = self._target_from_url(url)
-        conn = self._acquire(scheme, host, port, timeout)
+        conn = None
+        active_sock = None
         reusable = False
         try:
+            conn = self._acquire(scheme, host, port, timeout)
             conn.request(
                 "GET",
                 path,
@@ -182,6 +228,14 @@ class HTTPConnectionPool:
                     }
                 ),
             )
+            active_sock = getattr(conn, "sock", None)
+            if active_sock is not None:
+                with self._lock:
+                    closed = self._closed
+                    if not closed:
+                        self._active_sockets.add(active_sock)
+                if closed:
+                    active_sock.shutdown(socket.SHUT_RDWR)
             response = conn.getresponse()
             truncated = False
             if max_bytes is None:
@@ -208,19 +262,33 @@ class HTTPConnectionPool:
         except Exception as exc:
             return None, b"", None, exc, False, {}
         finally:
-            self._release(scheme, host, port, conn, reusable)
+            with self._lock:
+                if active_sock is not None:
+                    self._active_sockets.discard(active_sock)
+            if conn is not None:
+                self._release(scheme, host, port, conn, reusable)
 
     def close(self) -> None:
         with self._lock:
-            buckets = list(self._idle.values())
+            self._closed = True
+            connections = list(self._connections)
+            active_sockets = list(self._active_sockets)
+            # Include caller-provided idle connection objects as before.
+            connections.extend(conn for bucket in self._idle.values() for conn in bucket)
+            self._connections.clear()
+            self._active_sockets.clear()
             self._idle.clear()
             self._idle_total = 0
-        for bucket in buckets:
-            for conn in bucket:
-                try:
-                    conn.close()
-                except OSError:
-                    pass
+        for sock in active_sockets:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        for conn in set(connections):
+            try:
+                conn.close()
+            except OSError:
+                pass
 
 
 _ACTIVE_HTTP_POOL: HTTPConnectionPool | None = None

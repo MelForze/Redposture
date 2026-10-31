@@ -10,6 +10,7 @@ ALLOW_MISSING=0
 SKIP_INSTALL=0
 USE_WORKTREE=0
 ALLOW_DIRTY=0
+PARALLEL_TESTS=0
 TMP_ROOT=""
 
 cleanup() {
@@ -21,7 +22,7 @@ trap cleanup EXIT
 
 usage() {
   cat <<'EOF'
-Usage: scripts/check_ci_matrix.sh [--allow-missing] [--skip-install] [--worktree] [--allow-dirty]
+Usage: scripts/check_ci_matrix.sh [--allow-missing] [--skip-install] [--worktree] [--allow-dirty] [--parallel-tests|--sequential-tests]
 
 Runs the local pre-push CI gate:
   - install exact locked project + dev deps into per-version venvs
@@ -34,9 +35,12 @@ Options:
   --skip-install    Reuse existing .ci-venvs without reinstalling dependencies.
   --worktree        Test the current working tree instead of clean tracked HEAD.
   --allow-dirty     Allow uncommitted changes when testing clean tracked HEAD.
+  --parallel-tests Run the unchanged test job for available Python versions concurrently.
+  --sequential-tests Run test jobs sequentially (default and resource fallback).
 
 Environment:
   REDPOSTURE_CI_VENV_ROOT   Override venv directory. Default: .ci-venvs
+  REDPOSTURE_CI_PARALLEL_LOG_DIR   Artifact directory for parallel test logs and metrics.
 EOF
 }
 
@@ -56,6 +60,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --allow-dirty)
       ALLOW_DIRTY=1
+      shift
+      ;;
+    --parallel-tests)
+      PARALLEL_TESTS=1
+      shift
+      ;;
+    --sequential-tests)
+      PARALLEL_TESTS=0
       shift
       ;;
     -h|--help)
@@ -151,11 +163,17 @@ QUALITY_VENV="$(venv_for "$QUALITY_PY")"
 echo "== lint (${QUALITY_PY}) =="
 PATH="$QUALITY_VENV/bin:$PATH" bash scripts/run_ci_job.sh lint
 
-for py in "${AVAILABLE[@]}"; do
-  venv="$(venv_for "$py")"
-  echo "== tests ${py} =="
-  PATH="$venv/bin:$PATH" bash scripts/run_ci_job.sh test
-done
+if [[ "$PARALLEL_TESTS" -eq 1 && ${#AVAILABLE[@]} -gt 1 ]]; then
+  parallel_dir="${REDPOSTURE_CI_PARALLEL_LOG_DIR:-$VENV_ROOT/parallel-$(date +%Y%m%d-%H%M%S)}"
+  echo "== tests parallel: ${AVAILABLE[*]}; artifacts=$parallel_dir =="
+  python3 scripts/run_ci_parallel.py --venv-root "$VENV_ROOT" --source-root "$PWD" --out "$parallel_dir" --versions "${AVAILABLE[@]}"
+else
+  for py in "${AVAILABLE[@]}"; do
+    venv="$(venv_for "$py")"
+    echo "== tests ${py} =="
+    PATH="$venv/bin:$PATH" bash scripts/run_ci_job.sh test
+  done
+fi
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
   echo "[!] skipped missing Python interpreters: ${MISSING[*]}" >&2

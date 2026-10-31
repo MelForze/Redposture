@@ -650,7 +650,8 @@ def test_audit_grafana_classifies_successful_default_credentials_even_if_anonymo
     first_success = next(line for line in detail_lines if "[+] admin:password" in line)
     later_success = next(line for line in detail_lines if "[+] grafana:grafana" in line)
     assert "(datasources:1)" in first_success
-    assert "(datasources:" not in later_success
+    # Historical records without per-pair evidence must not borrow the winner's count.
+    assert "(datasources:unknown)" in later_success
 
 
 def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> None:

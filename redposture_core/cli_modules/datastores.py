@@ -368,7 +368,7 @@ def configure_kafka_parser(
     execution = parser.add_argument_group(
         "UI command execution", "Provectus Kafka UI Groovy smart-filter API only; not Kafka brokers or Kafbat."
     )
-    add_execution_flags(execution)
+    add_execution_flags(execution, include_os_shell=True)
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(
         "-f",

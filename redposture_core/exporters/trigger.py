@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import ssl
+import sys
 import time
 import urllib.error
 import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from typing import Any
 
 from ..constants import SCAN_EXPORTERS
 from ..logger import AttemptLogger
 from ..scheduler import BoundedScheduler
+from .discovery_logic import PreparedExporter, prepare_exporter_catalog
 from .http_client import activate_exporter_tls_context, build_http_url, format_http_host
+from .http_pool import HTTPConnectionPool, activate_http_pool, get_active_http_pool
 from .output import extract_display_port
 
 HttpGetText = Callable[[str, float, int], tuple[int, str]]
@@ -135,7 +139,9 @@ def detect_trigger_exporter_task(
             )
         return result
 
-    markers = tuple(str(item) for item in exporter["markers"])
+    markers = exporter.trigger_markers if isinstance(exporter, PreparedExporter) else None
+    if markers is None:
+        markers = tuple(str(item) for item in exporter["markers"])
     if status < 200 or status >= 300 or not any(marker in body for marker in markers):
         return result
 
@@ -382,6 +388,11 @@ def trigger_detected_exporter_task(
     return result
 
 
+def _environment_proxy_configured(scheme: str) -> bool:
+    proxies = urllib.request.getproxies()
+    return bool(proxies.get(scheme) or proxies.get("all"))
+
+
 def scan_exporters_and_trigger(
     logger: AttemptLogger | None,
     hosts: list[str],
@@ -400,7 +411,73 @@ def scan_exporters_and_trigger(
     tls_context: ssl.SSLContext | None = None,
     profile_delay: float = 0.0,
 ) -> dict[str, Any]:
-    native_transport = http_get_text_fn is None
+    # A custom caller owns its transport. The standard command owns exactly
+    # one bounded pool; action variants keep their existing sequential order.
+    if http_get_text_fn is None and get_active_http_pool() is None and not _environment_proxy_configured(scheme):
+        with activate_http_pool(
+            HTTPConnectionPool(
+                max_idle_total=max(1, workers) * 2,
+                max_idle_per_host=max(1, min(workers, 4)),
+                tls_context=tls_context,
+            )
+        ):
+            return _scan_exporters_and_trigger(
+                logger,
+                hosts,
+                callback_targets,
+                timeout,
+                workers,
+                retries,
+                trigger_exporters,
+                log_trigger_events_only,
+                emit_trigger_event,
+                emit_stage_event,
+                progress_advance,
+                progress_add_total,
+                http_get_text_fn,
+                scheme,
+                tls_context,
+                profile_delay,
+            )
+    return _scan_exporters_and_trigger(
+        logger,
+        hosts,
+        callback_targets,
+        timeout,
+        workers,
+        retries,
+        trigger_exporters,
+        log_trigger_events_only,
+        emit_trigger_event,
+        emit_stage_event,
+        progress_advance,
+        progress_add_total,
+        http_get_text_fn,
+        scheme,
+        tls_context,
+        profile_delay,
+    )
+
+
+def _scan_exporters_and_trigger(
+    logger: AttemptLogger | None,
+    hosts: list[str],
+    callback_targets: list[str],
+    timeout: float,
+    workers: int = 10,
+    retries: int = 3,
+    trigger_exporters: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    log_trigger_events_only: bool = False,
+    emit_trigger_event: Callable[[dict[str, Any]], None] | None = None,
+    emit_stage_event: Callable[[dict[str, Any]], None] | None = None,
+    progress_advance: Callable[[int], None] | None = None,
+    progress_add_total: Callable[[int], None] | None = None,
+    http_get_text_fn: HttpGetText | None = None,
+    scheme: str = "http",
+    tls_context: ssl.SSLContext | None = None,
+    profile_delay: float = 0.0,
+) -> dict[str, Any]:
+    native_transport = http_get_text_fn is None and not _environment_proxy_configured(scheme)
     if http_get_text_fn is None:
         from .http_client import http_get_text
 
@@ -414,7 +491,7 @@ def scan_exporters_and_trigger(
 
         http_get_text_fn = _tls_http_get_text
 
-    exporters = list(trigger_exporters or SCAN_EXPORTERS)
+    exporters = prepare_exporter_catalog(list(trigger_exporters or SCAN_EXPORTERS))
     callback_list = list(dict.fromkeys(callback_targets))
     pipeline_started_at = time.monotonic()
 
@@ -447,47 +524,65 @@ def scan_exporters_and_trigger(
         str(exporter.get("name") or ""): {} for exporter in exporters
     }
 
-    detected_pairs: list[tuple[str, dict[str, Any]]] = []
-
     detect_total = len(hosts) * len(exporters)
     if emit_stage_event is not None:
         emit_stage_event({"kind": "pass", "pass": "detect", "event": "start", "total": detect_total})
     detect_started_at = time.monotonic()
-    detect_jobs = [(host, exporter) for host in hosts for exporter in exporters]
-    detect_scheduler = BoundedScheduler[tuple[str, dict[str, Any]], dict[str, Any]](
-        max_workers=max(1, workers),
-        max_inflight=max(1, workers) * 4,
+    deep_started_at = detect_started_at
+    detect_ms = 0
+    detected_done = 0
+    deep_started = False
+
+    from ..async_detection import (
+        AsyncDetectScheduler,
+        adaptive_detect_ceiling,
+        async_detection_allowed,
+        automatic_detect_concurrency,
+    )
+    from ..clients.async_http_detect import AsyncHttpFallback
+    from .async_detect import prefetch_metrics
+
+    pool = get_active_http_pool()
+    detect_limit = (
+        automatic_detect_concurrency(
+            detect_total,
+            deep_workers=max(1, workers),
+            retained_fds=pool._max_idle_total if pool else 0,
+        )
+        if native_transport and detect_total >= 32 and async_detection_allowed(None)
+        else 0
     )
 
-    def _detect_job(job: tuple[str, dict[str, Any]]) -> dict[str, Any]:
-        host, exporter = job
+    def detect_job(host: str, exporter: dict[str, Any], details: Any = None) -> dict[str, Any]:
+        get = http_get_text_fn
+        if details is not None:
+
+            def observed(*_args: Any) -> tuple[int, str]:
+                if details.get("error"):
+                    raise getattr(details, "exception", None) or OSError(str(details["error"]))
+                return int(details["status"] or 0), str(details["body"] or "")
+
+            get = observed
         return detect_trigger_exporter_task(
             logger,
             host,
             exporter,
             timeout,
             retries,
-            http_get_text_fn,
+            get,
             log_trigger_events_only,
             emit_trigger_event,
             scheme,
         )
 
-    from ..async_detection import AsyncDetectScheduler, async_detection_allowed, automatic_detect_concurrency
-
-    detect_limit = (
-        automatic_detect_concurrency(detect_total, deep_workers=max(1, workers))
-        if native_transport and detect_total >= 32 and async_detection_allowed(None)
-        else 0
-    )
-    outcomes: Any
-    if detect_limit:
-        from ..clients.async_http_detect import AsyncHttpFallback
-        from .async_detect import prefetch_metrics
-
-        async def prepare(job: tuple[str, dict[str, Any]]) -> Any:
-            host, exporter = job
-            try:
+    async def prepare(job: tuple[str, str, dict[str, Any]]) -> Any:
+        kind, host, exporter = job
+        if kind != "detect":
+            return None
+        try:
+            # Preserve both existing detect batches, including retries within
+            # each batch, but keep the recovery batch on the event loop.
+            for batch in range(2):
                 details = await prefetch_metrics(
                     host,
                     int(exporter["port"]),
@@ -496,97 +591,20 @@ def scan_exporters_and_trigger(
                     retries,
                     tls_context,
                     path=str(exporter["detect_path"]),
+                    **({"max_bytes": sys.maxsize} if batch else {}),
                 )
-                if details.get("error") or details.get("truncated"):
-                    return None
-                return details
-            except AsyncHttpFallback:
-                return None
+                if details.get("truncated"):
+                    return None  # Legacy detection reads the complete body.
+                if not details.get("error") or batch:
+                    return details
+        except AsyncHttpFallback:
+            return None
+        raise AssertionError("unreachable trigger detect batch")
 
-        def finish(job: tuple[str, dict[str, Any]], details: Any) -> Any:
-            if details is None:
-                return _detect_job(job)
-            host, exporter = job
-            return detect_trigger_exporter_task(
-                logger,
-                host,
-                exporter,
-                timeout,
-                retries,
-                lambda *_args: (int(details["status"] or 0), str(details["body"] or "")),
-                log_trigger_events_only,
-                emit_trigger_event,
-                scheme,
-            )
-
-        outcomes = AsyncDetectScheduler[tuple[str, dict[str, Any]], Any, Any](
-            detect_workers=detect_limit, deep_workers=max(1, workers)
-        ).iter_completed(detect_jobs, prepare, finish)
-    else:
-        outcomes = detect_scheduler.iter_completed(detect_jobs, _detect_job)
-    try:
-        for (host, exporter), result in outcomes:
-            try:
-                if result["detected"]:
-                    total_detected += 1
-                    host_detected[host] = True
-                    by_host[host]["detected"] += 1
-                    exporter_name = str(result.get("exporter") or "")
-                    if exporter_name in by_exporter:
-                        by_exporter[exporter_name]["detected"] += 1
-                    detected_pairs.append((host, exporter))
-                    if callback_list and progress_add_total is not None:
-                        progress_add_total(len(callback_list) * len(trigger_query_variants(exporter)))
-            finally:
-                if progress_advance is not None:
-                    progress_advance(1)
-    finally:
-        close_outcomes = getattr(outcomes, "close", None)
-        if callable(close_outcomes):
-            close_outcomes()
-    detect_ms = int((time.monotonic() - detect_started_at) * 1000)
-    if emit_stage_event is not None:
-        emit_stage_event(
-            {
-                "kind": "stage_trace",
-                "stage_name": "detect_protocol",
-                "attempt": 1,
-                "duration_ms": detect_ms,
-                "result": "ok",
-                "error": "-",
-            }
-        )
-        emit_stage_event(
-            {
-                "kind": "pass",
-                "pass": "detect",
-                "event": "complete",
-                "total": detect_total,
-                "detected_exporters": total_detected,
-                "deep_candidates": len(detected_pairs),
-            }
-        )
-        for host in hosts:
-            detected_count = int(by_host.get(host, {}).get("detected", 0))
-            emit_stage_event(
-                {
-                    "kind": "gate",
-                    "host": host,
-                    "gate": "run" if detected_count > 0 else "skip",
-                    "reason": f"detected={detected_count}",
-                }
-            )
-
-    if emit_stage_event is not None:
-        emit_stage_event({"kind": "pass", "pass": "deep", "event": "start", "total": len(detected_pairs)})
-    deep_started_at = time.monotonic()
-    deep_scheduler = BoundedScheduler[tuple[str, dict[str, Any]], dict[str, Any]](
-        max_workers=max(1, workers),
-        max_inflight=max(1, workers) * 4,
-    )
-
-    def _deep_job(job: tuple[str, dict[str, Any]]) -> dict[str, Any]:
-        host, exporter = job
+    def finish(job: tuple[str, str, dict[str, Any]], details: Any = None) -> dict[str, Any]:
+        kind, host, exporter = job
+        if kind == "detect":
+            return detect_job(host, exporter, details)
         return trigger_detected_exporter_task(
             logger,
             host,
@@ -600,53 +618,149 @@ def scan_exporters_and_trigger(
             profile_delay,
         )
 
-    for _job, result in deep_scheduler.iter_completed(detected_pairs, _deep_job):
-        host = str(result["host"])
+    def children(job: tuple[str, str, dict[str, Any]], result: dict[str, Any]):
+        nonlocal total_detected, detected_done, detect_ms, deep_started, deep_started_at
+        kind, host, exporter = job
+        if kind != "detect":
+            return
+        detected_done += 1
+        if result["detected"]:
+            total_detected += 1
+            host_detected[host] = True
+            by_host[host]["detected"] += 1
+            exporter_name = str(result.get("exporter") or "")
+            if exporter_name in by_exporter:
+                by_exporter[exporter_name]["detected"] += 1
+            if callback_list and progress_add_total is not None:
+                progress_add_total(len(callback_list) * len(trigger_query_variants(exporter)))
+        if progress_advance is not None:
+            progress_advance(1)
+        if detected_done == detect_total:
+            detect_ms = int((time.monotonic() - detect_started_at) * 1000)
+            if emit_stage_event is not None:
+                emit_stage_event(
+                    {
+                        "kind": "stage_trace",
+                        "stage_name": "detect_protocol",
+                        "attempt": 1,
+                        "duration_ms": detect_ms,
+                        "result": "ok",
+                        "error": "-",
+                    }
+                )
+                emit_stage_event(
+                    {
+                        "kind": "pass",
+                        "pass": "detect",
+                        "event": "complete",
+                        "total": detect_total,
+                        "detected_exporters": total_detected,
+                        "deep_candidates": total_detected,
+                    }
+                )
+                for candidate in hosts:
+                    count = by_host[candidate]["detected"]
+                    emit_stage_event(
+                        {
+                            "kind": "gate",
+                            "host": candidate,
+                            "gate": "run" if count else "skip",
+                            "reason": f"detected={count}",
+                        }
+                    )
+        if result["detected"]:
+            if not deep_started:
+                deep_started = True
+                deep_started_at = time.monotonic()
+                if emit_stage_event is not None:
+                    emit_stage_event(
+                        {"kind": "pass", "pass": "deep", "event": "start", "total": total_detected, "mode": "pipeline"}
+                    )
+            yield "trigger", host, exporter
 
-        attempted = int(result["attempted"])
-        accepted = int(result.get("accepted", 0))
-        unconfirmed = int(result.get("unconfirmed", 0))
-        success = int(result["success"])
-        fail = sum(
-            int(stats.get("fail", 0)) for stats in result.get("by_callback", {}).values() if isinstance(stats, dict)
+    roots = (("detect", host, exporter) for host in hosts for exporter in exporters)
+    if detect_limit:
+        outcomes = AsyncDetectScheduler[tuple[str, str, dict[str, Any]], Any, Any](
+            detect_workers=detect_limit,
+            deep_workers=max(1, workers),
+            adaptive_max=adaptive_detect_ceiling(
+                detect_total,
+                initial=detect_limit,
+                deep_workers=max(1, workers),
+                retained_fds=pool._max_idle_total if pool else 0,
+            ),
+            retained_fds=pool._max_idle_total if pool else 0,
+        ).iter_completed(
+            roots,
+            prepare,
+            finish,
+            children=children,
+            inline_finish=lambda job, details: (
+                job[0] == "detect"
+                and details is not None
+                and not details.get("error")
+                and not 200 <= int(details.get("status") or 0) < 300
+            ),
         )
+    else:
+        outcomes = BoundedScheduler[tuple[str, str, dict[str, Any]], dict[str, Any]](
+            max_workers=max(1, workers),
+            max_inflight=max(1, workers) * 4,
+        ).iter_expanding(roots, finish, children)
+    try:
+        for job, result in outcomes:
+            if job[0] != "trigger":
+                continue
+            host = str(result["host"])
 
-        total_attempted += attempted
-        total_accepted += accepted
-        total_unconfirmed += unconfirmed
-        total_success += success
+            attempted = int(result["attempted"])
+            accepted = int(result.get("accepted", 0))
+            unconfirmed = int(result.get("unconfirmed", 0))
+            success = int(result["success"])
+            fail = sum(
+                int(stats.get("fail", 0)) for stats in result.get("by_callback", {}).values() if isinstance(stats, dict)
+            )
 
-        by_host[host]["attempted"] += attempted
-        by_host[host]["accepted"] += accepted
-        by_host[host]["unconfirmed"] += unconfirmed
-        by_host[host]["success"] += success
-        by_host[host]["fail"] += fail
-        exporter_name = str(result.get("exporter") or "")
-        if exporter_name in by_exporter:
-            by_exporter[exporter_name]["attempted"] += attempted
-            by_exporter[exporter_name]["accepted"] += accepted
-            by_exporter[exporter_name]["unconfirmed"] += unconfirmed
-            by_exporter[exporter_name]["success"] += success
-            by_exporter[exporter_name]["fail"] += fail
-            if attempted > 0:
-                exporter_hosts = attempts_by_exporter_host[exporter_name]
-                exporter_hosts[host] = exporter_hosts.get(host, 0) + attempted
+            total_attempted += attempted
+            total_accepted += accepted
+            total_unconfirmed += unconfirmed
+            total_success += success
 
-        try:
-            callback_data = result["by_callback"]
-            if isinstance(callback_data, dict):
-                for target, stats in callback_data.items():
-                    if target not in by_callback or not isinstance(stats, dict):
-                        continue
-                    by_callback[target]["attempted"] += int(stats.get("attempted", 0))
-                    by_callback[target]["accepted"] += int(stats.get("accepted", 0))
-                    by_callback[target]["unconfirmed"] += int(stats.get("unconfirmed", 0))
-                    by_callback[target]["success"] += int(stats.get("success", 0))
-                    by_callback[target]["fail"] += int(stats.get("fail", 0))
-        finally:
-            if progress_advance is not None and attempted > 0:
-                progress_advance(attempted)
-    deep_ms = int((time.monotonic() - deep_started_at) * 1000)
+            by_host[host]["attempted"] += attempted
+            by_host[host]["accepted"] += accepted
+            by_host[host]["unconfirmed"] += unconfirmed
+            by_host[host]["success"] += success
+            by_host[host]["fail"] += fail
+            exporter_name = str(result.get("exporter") or "")
+            if exporter_name in by_exporter:
+                by_exporter[exporter_name]["attempted"] += attempted
+                by_exporter[exporter_name]["accepted"] += accepted
+                by_exporter[exporter_name]["unconfirmed"] += unconfirmed
+                by_exporter[exporter_name]["success"] += success
+                by_exporter[exporter_name]["fail"] += fail
+                if attempted > 0:
+                    exporter_hosts = attempts_by_exporter_host[exporter_name]
+                    exporter_hosts[host] = exporter_hosts.get(host, 0) + attempted
+
+            try:
+                callback_data = result["by_callback"]
+                if isinstance(callback_data, dict):
+                    for target, stats in callback_data.items():
+                        if target not in by_callback or not isinstance(stats, dict):
+                            continue
+                        by_callback[target]["attempted"] += int(stats.get("attempted", 0))
+                        by_callback[target]["accepted"] += int(stats.get("accepted", 0))
+                        by_callback[target]["unconfirmed"] += int(stats.get("unconfirmed", 0))
+                        by_callback[target]["success"] += int(stats.get("success", 0))
+                        by_callback[target]["fail"] += int(stats.get("fail", 0))
+            finally:
+                if progress_advance is not None and attempted > 0:
+                    progress_advance(attempted)
+    finally:
+        close = getattr(outcomes, "close", None)
+        if callable(close):
+            close()
+    deep_ms = int((time.monotonic() - deep_started_at) * 1000) if deep_started else 0
     if emit_stage_event is not None:
         emit_stage_event(
             {
@@ -663,8 +777,8 @@ def scan_exporters_and_trigger(
                 "kind": "pass",
                 "pass": "deep",
                 "event": "complete",
-                "total": len(detected_pairs),
-                "processed": len(detected_pairs),
+                "total": total_detected,
+                "processed": total_detected,
             }
         )
         total_ms = int((time.monotonic() - pipeline_started_at) * 1000)

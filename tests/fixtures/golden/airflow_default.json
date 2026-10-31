@@ -3,6 +3,171 @@
     "anonymous_dags_allowed": false,
     "api_endpoint": "http://127.0.0.1:18080",
     "api_generation": "v1",
+    "attempted_credentials": [
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "12345678",
+        "source": "default",
+        "status": "detected",
+        "username": "admin"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "admin",
+        "source": "default",
+        "status": "detected",
+        "username": "admin"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "airflow",
+        "source": "default",
+        "status": "detected",
+        "username": "admin"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "airflow123",
+        "source": "default",
+        "status": "detected",
+        "username": "admin"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "changeme",
+        "source": "default",
+        "status": "detected",
+        "username": "admin"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "detected",
+        "username": "admin"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "admin",
+        "source": "default",
+        "status": "detected",
+        "username": "airflow"
+      },
+      {
+        "credential_capabilities": {
+          "authenticated_connections_access": "allowed",
+          "authenticated_connections_count": 1,
+          "authenticated_connections_http_status": 200,
+          "authenticated_dags_access": "allowed",
+          "authenticated_dags_count": 1,
+          "authenticated_dags_http_status": 200,
+          "authenticated_keys_access": "allowed",
+          "authenticated_keys_count": 1,
+          "authenticated_keys_http_status": 200
+        },
+        "credential_state": "valid",
+        "error": null,
+        "password": "airflow",
+        "source": "default",
+        "status": "detected",
+        "username": "airflow"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "airflow123",
+        "source": "default",
+        "status": "detected",
+        "username": "airflow"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "changeme",
+        "source": "default",
+        "status": "detected",
+        "username": "airflow"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "detected",
+        "username": "airflow"
+      },
+      {
+        "credential_state": "verification_unavailable",
+        "error": null,
+        "password": "dev",
+        "source": "default",
+        "status": "detected",
+        "username": "dev"
+      },
+      {
+        "credential_state": "verification_unavailable",
+        "error": null,
+        "password": "guest",
+        "source": "default",
+        "status": "detected",
+        "username": "guest"
+      },
+      {
+        "credential_state": "verification_unavailable",
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "detected",
+        "username": "root"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "root",
+        "source": "default",
+        "status": "detected",
+        "username": "root"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "service",
+        "source": "default",
+        "status": "detected",
+        "username": "service"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "test",
+        "source": "default",
+        "status": "detected",
+        "username": "test"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "password",
+        "source": "default",
+        "status": "detected",
+        "username": "user"
+      },
+      {
+        "credential_state": "invalid",
+        "error": null,
+        "password": "user",
+        "source": "default",
+        "status": "detected",
+        "username": "user"
+      }
+    ],
     "auth_method": "native",
     "auth_required": true,
     "authenticated_connections_access": "allowed",
@@ -15,6 +180,17 @@
     "authenticated_keys_count": 1,
     "authenticated_keys_http_status": 200,
     "connections_allowed": false,
+    "credential_capabilities": {
+      "authenticated_connections_access": "allowed",
+      "authenticated_connections_count": 1,
+      "authenticated_connections_http_status": 200,
+      "authenticated_dags_access": "allowed",
+      "authenticated_dags_count": 1,
+      "authenticated_dags_http_status": 200,
+      "authenticated_keys_access": "allowed",
+      "authenticated_keys_count": 1,
+      "authenticated_keys_http_status": 200
+    },
     "credential_results": [
       {
         "error_code": null,

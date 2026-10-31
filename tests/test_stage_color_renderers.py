@@ -223,11 +223,11 @@ def test_render_colored_postgres_colors_caps_and_dbs() -> None:
     console = _RecordingConsole()
     line = (
         "POSTGRES\t127.0.0.1\t5432\t [+] postgres:postgres (DBs:2) "
-        "(superuser:False) (execute:unknown) (read:True) (auth required:unknown)"
+        "(superuser:False) (rce:unknown) (read:True) (auth required:unknown)"
     )
     assert _render_colored_postgres_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(superuser:False)", "bright_green")
-    assert _contains_paint(console.paint_calls, "(execute:unknown)", "orange")
+    assert _contains_paint(console.paint_calls, "(rce:unknown)", "orange")
     assert _contains_paint(console.paint_calls, "(read:True)", "true_red")
     assert _contains_paint(console.paint_calls, "(DBs:2)", "true_red")
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
@@ -237,11 +237,11 @@ def test_render_colored_clickhouse_colors_caps_and_dbs() -> None:
     console = _RecordingConsole()
     line = (
         "CLICKHOUSE\t127.0.0.1\t9000\t [+] default:<empty> "
-        "(read:false) (execute:unknown) (admin:true) (DBs:2) (auth required:unknown)"
+        "(read:false) (rce:unknown) (admin:true) (DBs:2) (auth required:unknown)"
     )
     assert _render_colored_clickhouse_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(read:false)", "bright_green")
-    assert _contains_paint(console.paint_calls, "(execute:unknown)", "orange")
+    assert _contains_paint(console.paint_calls, "(rce:unknown)", "orange")
     assert _contains_paint(console.paint_calls, "(admin:true)", "true_red")
     assert _contains_paint(console.paint_calls, "(DBs:2)", "true_red")
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")

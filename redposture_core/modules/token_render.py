@@ -27,6 +27,11 @@ def detect(module: str, title: str, record: dict[str, Any], fmt: str) -> str:
     auth = auth_required_text(record.get("auth_required"), None)
     if auth != "unknown":
         line += f" (auth required:{auth})"
+    rce = record.get("rce")
+    if type(rce) is bool:
+        line += f" (rce:{rce})"
+    elif "rce" in record:
+        line += " (rce:unknown)"
     if module == "nomad":
         value = record.get("acl_enabled")
         if type(value) is bool:
@@ -35,7 +40,7 @@ def detect(module: str, title: str, record: dict[str, Any], fmt: str) -> str:
         access = probe.get("access") if isinstance(probe, dict) else None
         if access in {"allowed", "denied"}:
             line += f" (Job registration allowed:{access == 'allowed'})"
-    if record.get("rce_potential") and not record.get("execute_verified"):
+    if record.get("rce_potential") and "rce" not in record and not record.get("execute_verified"):
         line += " (RCE:Possible)"
     if record.get("version"):
         line += f" (version:{record['version']})"
@@ -100,6 +105,7 @@ def colorize(console: Any, line: str, module: str) -> bool:
             BooleanColorRule("auth required", true_color="bright_green", false_color="true_red"),
             BooleanColorRule("ACL enabled", true_color="bright_green", false_color="true_red"),
             BooleanColorRule("Job registration allowed", true_color="true_red", false_color="bright_green"),
+            BooleanColorRule("rce", true_color="true_red", false_color="bright_green"),
             BooleanColorRule("executed", true_color="true_red", false_color="orange"),
         ),
         regexes=(
@@ -115,6 +121,7 @@ def colorize(console: Any, line: str, module: str) -> bool:
             RegexColorRule(r"\([^()]*unknown\)", "orange"),
             RegexColorRule(r"\(version:[^)]+\)", "orange"),
             RegexColorRule(r"\(RCE:Possible\)", "true_red"),
+            RegexColorRule(r"\(rce:unknown\)", "orange"),
             RegexColorRule(r"\(status:(?:partial|unavailable)\)", "orange"),
             RegexColorRule(r"Token verification unavailable", "orange"),
             RegexColorRule(r"reason=.*", "orange"),

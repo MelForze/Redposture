@@ -8,9 +8,11 @@ import re
 from typing import Any
 
 from ..clients.websocket import WebSocket
+from ..console import Console
+from ..shell_capture import MAX_CAPTURE_BYTES, CommandResult, ShellView, read_shell_command
 
 
-def add_flags(group: Any) -> None:
+def add_flags(group: Any, *, include_os_shell: bool = False, os_shell_help: str | None = None) -> None:
     group.add_argument(
         "--execute", metavar="command", help="Execute a shell command on the confirmed service and return its output."
     )
@@ -28,6 +30,12 @@ def add_flags(group: Any) -> None:
         metavar="bytes",
         help="Maximum captured execution data (default: 1048576).",
     )
+    if include_os_shell:
+        group.add_argument(
+            "--os-shell",
+            action="store_true",
+            help=os_shell_help or "Start an interactive shell using the confirmed service execution surface.",
+        )
 
 
 def validate(args: Any, console: Any) -> int | None:
@@ -47,6 +55,156 @@ def validate(args: Any, console: Any) -> int | None:
         console.error("--execute-max-bytes must be > 0 and <= 67108864")
         return 2
     return None
+
+
+def validate_os_shell(
+    args: Any,
+    console: Any,
+    *,
+    forbidden: tuple[str, ...] = (),
+    unsupported_reason: str | None = None,
+) -> int | None:
+    if not bool(getattr(args, "os_shell", False)):
+        return None
+    if unsupported_reason:
+        console.error(f"--os-shell is unsupported: {unsupported_reason}")
+        return 2
+    if getattr(args, "execute", None) is not None:
+        console.error("--os-shell cannot be combined with --execute")
+        return 2
+    if getattr(args, "output", None):
+        console.error("--os-shell cannot be used with -o/--output")
+        return 2
+    if str(getattr(args, "output_format", "txt") or "txt").lower() != "txt":
+        console.error("--os-shell requires --format txt")
+        return 2
+    if bool(getattr(args, "defcreds", False)):
+        console.error("--os-shell cannot be combined with --defcreds")
+        return 2
+    for name in forbidden:
+        value = getattr(args, name, None)
+        if bool(value):
+            console.error(f"--os-shell cannot be combined with --{name.replace('_', '-')}")
+            return 2
+    return None
+
+
+def validate_os_shell_plan(plan: Any, console: Any) -> int | None:
+    try:
+        plan.require_single_target_spec()
+    except (AttributeError, ValueError) as exc:
+        console.error(f"--os-shell requires exactly one target: {exc}")
+        return 2
+    return None
+
+
+def run_os_shell(
+    ctx: Any,
+    record: Any,
+    state: Any,
+    *,
+    module: str,
+    surface: str,
+    execute_once: Any,
+    cache_fields: tuple[str, ...] = ("execution", "ui_execution"),
+    preflight: Any = None,
+) -> None:
+    """Run repeated one-shot commands against an already authenticated target."""
+    console = Console(
+        debug=bool(getattr(ctx.args, "debug", False)),
+        no_color=bool(getattr(ctx.args, "no_color", False)),
+    )
+    command_record = record.to_dict() if callable(getattr(record, "to_dict", None)) else record
+    if callable(preflight):
+        refusal = preflight(command_record)
+        if refusal:
+            console.error(str(refusal))
+            return
+    shell = ShellView()
+    try:
+        shell.capture_bytes = min(
+            MAX_CAPTURE_BYTES,
+            max(1, int(getattr(ctx.args, "execute_max_bytes", shell.capture_bytes))),
+        )
+    except (TypeError, ValueError):
+        pass
+    original_command = getattr(ctx.args, "execute", None)
+    original_max_bytes = getattr(ctx.args, "execute_max_bytes", None)
+    while True:
+        try:
+            command = read_shell_command(f"{module}-os> ")
+        except (EOFError, KeyboardInterrupt):
+            console.plain("")
+            break
+        if not command.strip():
+            continue
+        if command.strip().lower() in {"exit", "quit"}:
+            break
+        handled, should_exit = shell.handle(command, console)
+        if should_exit:
+            break
+        if handled:
+            continue
+        try:
+            encoded = command.encode("utf-8")
+        except UnicodeEncodeError:
+            shell.show(CommandResult(error="command is not valid UTF-8"), console)
+            continue
+        if "\x00" in command or len(encoded) > 65536:
+            shell.show(CommandResult(error="command must not contain NUL and must be at most 65536 bytes"), console)
+            continue
+        shell.remember(command)
+        try:
+            ctx.args.execute = command
+            ctx.args.execute_max_bytes = shell.capture_bytes
+            for field in cache_fields:
+                if hasattr(state, field):
+                    setattr(state, field, None)
+            result_payload = execute_once(ctx, command_record, state)
+        except KeyboardInterrupt:
+            shell.show(
+                CommandResult(error="interrupted locally; command outcome is unknown", outcome_unknown=True), console
+            )
+            continue
+        except Exception as exc:
+            shell.show(CommandResult(error=f"command result unavailable: {exc}", outcome_unknown=True), console)
+            continue
+        finally:
+            ctx.args.execute = original_command
+            if original_max_bytes is not None:
+                ctx.args.execute_max_bytes = original_max_bytes
+        payload = result_payload.to_dict() if callable(getattr(result_payload, "to_dict", None)) else result_payload
+        output = payload.get("execution") if isinstance(payload, dict) else None
+        if not isinstance(output, dict):
+            shell.show(CommandResult(error="execution adapter returned no command result"), console)
+            continue
+        stdout = str(output.get("stdout") or "").encode("utf-8", errors="replace")
+        stderr = str(output.get("stderr") or "").encode("utf-8", errors="replace")
+        executed = output.get("executed") is True
+        exit_code = output.get("exit_code")
+        truncated = output.get("truncated") is True
+        stdout_total = output.get("stdout_total")
+        stderr_total = output.get("stderr_total")
+        result = CommandResult(
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code if type(exit_code) is int else None,
+            duration_ms=output.get("duration_ms") if type(output.get("duration_ms")) is int else None,
+            stdout_total=stdout_total if type(stdout_total) is int else len(stdout),
+            stderr_total=stderr_total if type(stderr_total) is int else len(stderr),
+            capture_truncated=truncated,
+            error=None if executed else str(output.get("error") or "command was not verified"),
+            outcome_unknown=bool(output.get("outcome_unknown")) or (not executed and output.get("status") == "timeout"),
+        )
+        shell.show(result, console)
+        cleanup = str(output.get("cleanup") or "")
+        if cleanup in {"failed", "unknown"}:
+            detail = str(output.get("cleanup_error") or "cleanup status is unknown")
+            label = "failed" if cleanup == "failed" else "unknown"
+            console.plain(f"[-] cleanup {label}: {detail}", color="true_red")
+    ctx.args.execute = original_command
+    if original_max_bytes is not None:
+        ctx.args.execute_max_bytes = original_max_bytes
 
 
 def headers(ctx: Any, prior: dict[str, Any], module: str) -> dict[str, str]:

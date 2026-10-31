@@ -62,6 +62,8 @@
     "provided_username": "admin",
     "query_topic": "tls.orders",
     "query_topic_value": "tls.orders (partitions:2)",
+    "rce": false,
+    "rce_probe_performed": true,
     "service": "kafka",
     "show_topics": true,
     "show_topics_limit": null,

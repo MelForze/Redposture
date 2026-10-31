@@ -15,6 +15,7 @@ from ...discovery_rendering import discovery_color_spans
 from ...rendering import (
     BooleanColorRule,
     CountColorRule,
+    RegexColorRule,
     render_colored_marker_line,
     render_tagged_detail_line,
 )
@@ -103,6 +104,11 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     # Keep the version in this service line, and be explicit when the vendor
     # does not expose a product version through a read-only endpoint.
     line += f" (version:{_version(record, product) or 'unknown'})"
+    rce = record.get("rce")
+    if type(rce) is bool:
+        line = line.replace(" (version:", f" (rce:{rce}) (version:")
+    elif "rce" in record:
+        line = line.replace(" (version:", " (rce:unknown) (version:")
     count_field = {
         "nexus": ("nexus_repository_count", "repositories"),
         "harbor": ("harbor_project_count", "projects"),
@@ -319,7 +325,11 @@ def _render_colored_registry_line(console: Console, line: str) -> bool:
         line,
         tag=tag,
         include_auth_required=False,
-        booleans=(BooleanColorRule("auth required", true_color="bright_green", false_color="true_red"),),
+        booleans=(
+            BooleanColorRule("auth required", true_color="bright_green", false_color="true_red"),
+            BooleanColorRule("rce", true_color="true_red", false_color="bright_green"),
+        ),
+        regexes=(RegexColorRule(r"\(rce:unknown\)", "orange"),),
         counts=tuple(
             CountColorRule(name, "true_red", unknown_color="orange", zero_color="bright_green")
             for name in ("images", "projects", "repositories", "artifacts", "assets", "tags", "layers", "components")

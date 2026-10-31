@@ -26,6 +26,7 @@
         "documents": 5
       }
     ],
+    "credential_capabilities": {},
     "credential_state": null,
     "database": "redposture",
     "database_count": 5,

@@ -206,7 +206,7 @@ def test_authenticated_credential_line_reports_counts_and_access_once():
     render._render_colored_airflow_line(console, line)
     assert "<true_red>Dags:3</true_red>" in console.lines[0]
     assert "<bright_green>Keys:Access Denied</bright_green>" in console.lines[0]
-    assert "<true_red>Connections:0</true_red>" in console.lines[0]
+    assert "<bright_green>Connections:0</bright_green>" in console.lines[0]
 
 
 def test_authenticated_resource_denial_is_green():

@@ -44,6 +44,9 @@ def test_grafana_only_verified_login_recovers_missing_private_health_version(mon
 
     def request(host, port, path, timeout, **kwargs):
         calls.append((path, kwargs["headers"]))
+        if path == "/api/datasources":
+            return 200, "[]", {}
+        assert path == "/api/health"
         return 200, json.dumps({"database": "ok", "version": "11.3.1", "commit": "abc"}), {}
 
     monkeypatch.setattr(grafana, "_http_request", request)
@@ -57,7 +60,11 @@ def test_grafana_only_verified_login_recovers_missing_private_health_version(mon
     result = grafana.authenticate_grafana(ctx, {"auth_required": True}, {})
     if ok:
         assert result["server_version"] == "11.3.1" and result["provided_credentials_ok"] is True
-        assert calls == [("/api/health", {"Authorization": grafana._auth_header("u", "p")})]
+        assert calls == [
+            ("/api/datasources", {"Authorization": grafana._auth_header("u", "p")}),
+            ("/api/health", {"Authorization": grafana._auth_header("u", "p")}),
+        ]
+        assert result["auth_attempts"][0]["credential_capabilities"]["datasource_count"] == 0
     else:
         assert not calls and result.get("server_version") is None
 

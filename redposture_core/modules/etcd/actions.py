@@ -31,6 +31,7 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
+from ...credential_evidence import attempt_capabilities
 from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
 from ...discovery_frontier import DiscoveryFrontier
 from ...discovery_json import DiskJSONDocument
@@ -1510,6 +1511,31 @@ def _detect_audit_etcd_host_steps(
                             "error": err,
                         }
                     )
+                    if candidate_token is not None and auth_token is not None:
+                        try:
+                            count_status, count_body = yield DetectCall(
+                                _http_json_request,
+                                (host, port, "POST", "/v3/kv/range", timeout),
+                                {
+                                    "payload": {
+                                        "key": _ETCD_V3_ALL_RANGE_KEY_B64,
+                                        "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
+                                        "count_only": True,
+                                    },
+                                    "auth_token": candidate_token,
+                                },
+                            )
+                            own_count, own_error = (
+                                _parse_v3_key_count(count_body)
+                                if count_status == 200
+                                else (None, f"HTTP {count_status}")
+                            )
+                        except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+                            own_count, own_error = None, _friendly_error_from_exception(exc)
+                        credential_attempts[-1]["credential_capabilities"] = {
+                            "key_count": own_count,
+                            "key_count_error": own_error,
+                        }
                     if candidate_token is not None and auth_token is None:
                         auth_token = candidate_token
                         selected_credential = {
@@ -1544,6 +1570,23 @@ def _detect_audit_etcd_host_steps(
                             "error": err,
                         }
                     )
+                    if candidate_ok and v2_basic_auth is not None:
+                        try:
+                            count_status, count_body = yield DetectCall(
+                                _http_json_request,
+                                (host, port, "GET", "/v2/keys?recursive=true", timeout),
+                                {"basic_auth": (user, secret)},
+                            )
+                            own_count = _count_v2_keys(count_body) if count_status == 200 else None
+                            own_error = (
+                                None if own_count is not None else f"v2 key count unavailable: HTTP {count_status}"
+                            )
+                        except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+                            own_count, own_error = None, _friendly_error_from_exception(exc)
+                        credential_attempts[-1]["credential_capabilities"] = {
+                            "key_count": own_count,
+                            "key_count_error": own_error,
+                        }
                     if candidate_ok and v2_basic_auth is None:
                         v2_basic_auth = (user, secret)
                         if selected_credential is None:
@@ -1576,15 +1619,17 @@ def _detect_audit_etcd_host_steps(
                             (host, port, "GET", "/v2/keys?recursive=true", replay_timeout),
                             replay_options,
                         )
-                    except urllib.error.URLError as exc:
-                        if discovery_budget is None or "HTTP response exceeds limit" not in str(exc):
-                            raise
-                        v2_status, v2_streamed_payload, replay_error, streamed_bytes = yield DetectCall(
-                            _stream_v2_tree,
-                            (host, port, replay_timeout, "/v2/keys?recursive=true"),
-                            {"deadline": discovery_budget.deadline, "basic_auth": v2_basic_auth},
-                        )
-                        pre_collector_streamed_bytes += streamed_bytes
+                    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+                        if discovery_budget is not None and "HTTP response exceeds limit" in str(exc):
+                            v2_status, v2_streamed_payload, replay_error, streamed_bytes = yield DetectCall(
+                                _stream_v2_tree,
+                                (host, port, replay_timeout, "/v2/keys?recursive=true"),
+                                {"deadline": discovery_budget.deadline, "basic_auth": v2_basic_auth},
+                            )
+                            pre_collector_streamed_bytes += streamed_bytes
+                        else:
+                            v2_status = 0
+                            replay_error = _friendly_error_from_exception(exc)
                     if replay_error is None and v2_status == 200:
                         key_count_v2 = (
                             _count_v2_payload(v2_streamed_payload)
@@ -1594,6 +1639,8 @@ def _detect_audit_etcd_host_steps(
                         key_count_v2_error = (
                             None if key_count_v2 is not None else "v2 key count response returned invalid JSON"
                         )
+                    elif replay_error is None:
+                        replay_error = f"v2 key count unavailable: HTTP {v2_status}"
                 if replay_error is not None:
                     v2_error = replay_error
                     key_count_v2 = None
@@ -1602,22 +1649,34 @@ def _detect_audit_etcd_host_steps(
             # If we successfully authenticated, re-run the /v3/kv/range probe with
             # the token so downstream key enumeration reflects post-auth state.
             if auth_token is not None:
-                range_status, range_body = yield DetectCall(
-                    _http_json_request,
-                    (host, port, "POST", "/v3/kv/range", timeout),
-                    {
-                        "payload": {
-                            "key": _ETCD_V3_ALL_RANGE_KEY_B64,
-                            "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
-                            "count_only": True,
+                try:
+                    range_status, range_body = yield DetectCall(
+                        _http_json_request,
+                        (host, port, "POST", "/v3/kv/range", timeout),
+                        {
+                            "payload": {
+                                "key": _ETCD_V3_ALL_RANGE_KEY_B64,
+                                "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
+                                "count_only": True,
+                            },
+                            "auth_token": auth_token,
                         },
-                        "auth_token": auth_token,
-                    },
-                )
-                if range_status == 200:
-                    v3_auth_required = True  # confirmed auth-gated
-                    key_count_v3, key_count_v3_error = _parse_v3_key_count(range_body)
+                    )
+                    if range_status == 200:
+                        v3_auth_required = True  # confirmed auth-gated
+                        key_count_v3, key_count_v3_error = _parse_v3_key_count(range_body)
+                    else:
+                        key_count_v3, key_count_v3_error = None, f"HTTP {range_status}"
+                except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+                    key_count_v3, key_count_v3_error = None, _friendly_error_from_exception(exc)
 
+            for credential_attempt in credential_attempts:
+                if credential_attempt.get("ok") is True and "credential_capabilities" not in credential_attempt:
+                    api_v3 = credential_attempt.get("api") == "v3"
+                    credential_attempt["credential_capabilities"] = {
+                        "key_count": key_count_v3 if api_v3 else key_count_v2,
+                        "key_count_error": key_count_v3_error if api_v3 else key_count_v2_error,
+                    }
             key_count: int | None = None
             key_count_by_api: dict[str, int | None] = {
                 "v2": key_count_v2 if v2_supported else None,
@@ -2050,7 +2109,14 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
     if output_format != "txt":
         return []
 
+    runtime_attempts = record.get("attempted_credentials")
     attempts_raw = record.get("credential_attempts")
+    if isinstance(runtime_attempts, list) and runtime_attempts:
+        attempts_raw = [
+            {**attempt, "ok": str(attempt.get("status") or "") in {"valid_credentials", "weak_default_creds"}}
+            for attempt in runtime_attempts
+            if isinstance(attempt, dict)
+        ]
     if not isinstance(attempts_raw, list) or not attempts_raw:
         return []
 
@@ -2079,13 +2145,13 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             and str(raw_username or "-") == str(effective_username)
             and raw_password == effective_password
         )
-        if selected:
-            key_count = record.get("key_count")
-            if isinstance(key_count, int):
-                line = f"{line} (keys:{format_count_value(key_count)})"
-            else:
-                count_error = _clip(str(record.get("key_count_error") or "unknown count"), 72)
-                line = f"{line} (keys:unknown) err={count_error}"
+        capabilities = attempt_capabilities(record, attempt, selected=selected)
+        key_count = capabilities.get("key_count")
+        if isinstance(key_count, int):
+            line = f"{line} (keys:{format_count_value(key_count)})"
+        else:
+            count_error = _clip(str(capabilities.get("key_count_error") or "unknown count"), 72)
+            line = f"{line} (keys:unknown) err={count_error}"
         lines.append(line)
     return lines
 
@@ -2515,6 +2581,10 @@ def _detect_call_audit_etcd_host_with_stage_debug_steps(
         f"capabilities_ms={stage_durations_ms.get(_STAGE_ACCESS_CAPABILITIES, 0)} "
         f"data_ms={stage_durations_ms.get(_STAGE_DATA, 0)} total_ms={elapsed_ms}"
     )
+    if status in {"valid_credentials", "weak_default_creds"}:
+        result["credential_capabilities"] = {
+            key: result.get(key) for key in ("key_count", "key_count_by_api", "key_count_state", "key_count_error")
+        }
     return telemetry.attach(result, status=status, total_ms=elapsed_ms)
 
 

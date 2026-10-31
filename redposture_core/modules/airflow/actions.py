@@ -704,11 +704,20 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         else None
     )
     merged["default_credentials"] = getattr(credential, "source", "") == "default" and merged["provided_credentials_ok"]
+    if merged["provided_credentials_ok"]:
+        try:
+            merged = capabilities_record(ctx, merged)
+        except Exception as exc:
+            # Identity proof remains valid even when a resource probe fails.
+            merged["credential_capabilities"] = {"capability_error": str(exc)}
+            merged.pop("_credential_capabilities_pending", None)
     return merged
 
 
 def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     merged = dict(prior)
+    if isinstance(prior.get("credential_capabilities"), dict):
+        return merged
     if prior.get("credential_proof_surface") == "web" or str(prior.get("credential_state") or "") not in {
         "valid",
         "valid_but_restricted",
@@ -741,6 +750,9 @@ def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         if access.error:
             merged[f"authenticated_{name}_error"] = access.error
     merged.pop("_credential_capabilities_pending", None)
+    merged["credential_capabilities"] = {
+        key: value for key, value in merged.items() if key.startswith("authenticated_")
+    }
     return merged
 
 

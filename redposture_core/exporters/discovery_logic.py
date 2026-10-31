@@ -25,16 +25,44 @@ def as_token_tuple(raw: Any) -> tuple[str, ...]:
     return tuple(result)
 
 
+class PreparedExporter(dict[str, Any]):
+    """Command-local profile snapshot; immutable token tuples are out-of-band."""
+
+    def __init__(self, source: dict[str, Any]) -> None:
+        super().__init__(source)
+        self.exporter_name = str(source.get("name") or "").strip()
+        self.strong_markers = as_token_tuple(source.get("strong_markers")) or as_token_tuple(source.get("markers"))
+        self.weak_markers = tuple(
+            token for token in as_token_tuple(source.get("weak_markers")) if token not in self.strong_markers
+        )
+        self.negative_markers = as_token_tuple(source.get("negative_markers"))
+        self.vars_markers = as_token_tuple(source.get("fingerprint_vars"))
+        self.cmdline_markers = as_token_tuple(source.get("fingerprint_cmdline"))
+        raw = source.get("markers")
+        self.trigger_markers = tuple(str(item) for item in raw) if isinstance(raw, (tuple, list)) else None
+
+
+def prepare_exporter_catalog(exporters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item if isinstance(item, PreparedExporter) else PreparedExporter(item) for item in exporters]
+
+
 def score_metrics_candidate(exporter: dict[str, Any], body: str) -> dict[str, Any] | None:
-    exporter_name = str(exporter.get("name") or "").strip()
+    if isinstance(exporter, PreparedExporter):
+        exporter_name = exporter.exporter_name
+        strong_markers, weak_markers, negative_markers = (
+            exporter.strong_markers,
+            exporter.weak_markers,
+            exporter.negative_markers,
+        )
+    else:
+        exporter_name = str(exporter.get("name") or "").strip()
+        strong_markers = as_token_tuple(exporter.get("strong_markers")) or as_token_tuple(exporter.get("markers"))
+        weak_markers = tuple(
+            marker for marker in as_token_tuple(exporter.get("weak_markers")) if marker not in strong_markers
+        )
+        negative_markers = as_token_tuple(exporter.get("negative_markers"))
     if not exporter_name:
         return None
-
-    strong_markers = as_token_tuple(exporter.get("strong_markers")) or as_token_tuple(exporter.get("markers"))
-    weak_markers = tuple(
-        marker for marker in as_token_tuple(exporter.get("weak_markers")) if marker not in strong_markers
-    )
-    negative_markers = as_token_tuple(exporter.get("negative_markers"))
 
     strong_hits = [marker for marker in strong_markers if marker in body]
     weak_hits = [marker for marker in weak_markers if marker in body]
@@ -120,8 +148,16 @@ def fetch_fingerprint_bodies(
 
 
 def score_fingerprint_candidate(exporter: dict[str, Any], vars_body: str, cmdline_body: str) -> tuple[int, int]:
-    vars_tokens = as_token_tuple(exporter.get("fingerprint_vars"))
-    cmdline_tokens = as_token_tuple(exporter.get("fingerprint_cmdline"))
+    vars_tokens = (
+        exporter.vars_markers
+        if isinstance(exporter, PreparedExporter)
+        else as_token_tuple(exporter.get("fingerprint_vars"))
+    )
+    cmdline_tokens = (
+        exporter.cmdline_markers
+        if isinstance(exporter, PreparedExporter)
+        else as_token_tuple(exporter.get("fingerprint_cmdline"))
+    )
 
     vars_hits = sum(1 for token in vars_tokens if token in vars_body)
     cmdline_hits = sum(1 for token in cmdline_tokens if token in cmdline_body)

@@ -9,6 +9,7 @@ from typing import Any
 from ...clients.kafka import KAFKA_MAX_WRITE_VALUE_BYTES
 from ...stage_runtime import validate_basic_module_args
 from ..execution_api import validate as validate_execution
+from ..execution_api import validate_os_shell
 
 
 def validate_args(args: Any, console: Any) -> int | None:
@@ -17,6 +18,29 @@ def validate_args(args: Any, console: Any) -> int | None:
         return common_rc
     if (execution_rc := validate_execution(args, console)) is not None:
         return execution_rc
+    if (
+        shell_rc := validate_os_shell(
+            args,
+            console,
+            forbidden=(
+                "show_topics",
+                "topic",
+                "query_topic",
+                "dump",
+                "probe_write",
+                "write_message",
+                "write_file",
+                "write_key",
+                "max_messages",
+                "show_clusters",
+                "show_brokers",
+                "show_consumer_groups",
+                "enum_cve",
+                "discover",
+            ),
+        )
+    ) is not None:
+        return shell_rc
     if getattr(args, "execute", None) is not None and (
         bool(getattr(args, "probe_write", False))
         or getattr(args, "write_message", None) is not None

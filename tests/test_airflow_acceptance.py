@@ -512,7 +512,7 @@ def test_web_login_proves_pair_without_claiming_api_access(monkeypatch):
     authenticated = actions.auth_record(ctx, prior)
     assert authenticated["provided_credentials_ok"] is True
     assert authenticated["credential_proof_surface"] == "web"
-    assert authenticated["_credential_capabilities_pending"] is False
+    assert "_credential_capabilities_pending" not in authenticated
     capabilities = actions.capabilities_record(ctx, authenticated)
     discovered = actions.discover_record(ctx, capabilities)
     assert "authenticated_dags_access" not in discovered

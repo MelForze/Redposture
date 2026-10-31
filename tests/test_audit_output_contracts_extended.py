@@ -297,6 +297,7 @@ def test_real_renderers_keep_terminal_and_output_file_order_identical(module: st
         auth=None,
         capabilities=None,
         data=None,
+        rce_probe=None,
         lifecycle_state_factory=None,
         lifecycle_state_close=None,
         deep_gate=lambda _record: (False, "render-only contract"),
@@ -319,3 +320,51 @@ def test_real_renderers_keep_terminal_and_output_file_order_identical(module: st
     assert "\x1b[" not in "\n".join(stored)
     expected_service = normalize_report_line_for_storage(_service_lines(real_spec, payload)[0])
     assert stored.count(expected_service) == 1, (module, stored)
+
+
+@pytest.mark.parametrize("module", ("kafka", "consul", "jenkins", "nomad", "jupyter", "portainer", "nexus"))
+@pytest.mark.parametrize("verdict", (True, False, None))
+def test_active_rce_probe_keeps_real_service_line_identical_in_terminal_and_file(module, verdict, tmp_path):
+    real_spec = _build_real_spec(module)
+    payload = _detected_payload(module, real_spec)
+    record = AuditRecord.from_mapping(payload, module=module, service=module)
+    emitted = []
+    probes = []
+    output_path = tmp_path / f"{module}-rce.txt"
+
+    def probe(_ctx, detected):
+        assert not emitted, "Service output must wait for the probe verdict"
+        probes.append(detected)
+        return replace(detected, extra={**detected.extra, "rce": verdict})
+
+    spec = replace(
+        real_spec,
+        host_stage=None,
+        host_stage_options=None,
+        detect=lambda _ctx: record,
+        auth=None,
+        capabilities=None,
+        data=None,
+        lifecycle_state_factory=None,
+        lifecycle_state_close=None,
+        deep_gate=lambda _record: (False, "render-only RCE contract"),
+        is_detected=lambda _record: True,
+        rce_probe=probe,
+    )
+    args = SimpleNamespace(debug=False, enum_cve=False, discover=False, no_color=True)
+    AuditCommandRunner(args=args, spec=spec, emit_line=emitted.append).run_plan(
+        AuditCommandPlan(
+            targets_by_port={real_spec.default_port: (record.host,)},
+            workers=1,
+            output_format="txt",
+            output_path=str(output_path),
+        )
+    )
+
+    expected = normalize_report_line_for_storage(_service_lines(real_spec, {**payload, "rce": verdict})[0])
+    stored = output_path.read_text().splitlines()
+    assert len(probes) == 1
+    assert stored == [normalize_report_line_for_storage(line) for line in emitted]
+    assert stored.count(expected) == 1
+    assert f"(rce:{verdict if verdict is not None else 'unknown'})" in expected
+    assert "\x1b" not in output_path.read_text()

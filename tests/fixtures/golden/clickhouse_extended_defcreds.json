@@ -14,6 +14,7 @@
     "admin_capability": true,
     "attempted_credentials": [
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "admin",
         "source": "default",
@@ -21,6 +22,7 @@
         "username": "admin"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "changeme",
         "source": "default",
@@ -28,6 +30,7 @@
         "username": "admin"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "password",
         "source": "default",
@@ -35,6 +38,7 @@
         "username": "admin"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "clickhouse",
         "source": "default",
@@ -42,6 +46,7 @@
         "username": "clickhouse"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "password",
         "source": "default",
@@ -49,6 +54,14 @@
         "username": "clickhouse"
       },
       {
+        "credential_capabilities": {
+          "admin_capability": true,
+          "capability_error": null,
+          "database_count": 8,
+          "execute_capability": true,
+          "execute_capability_reason": "active capability probe complete",
+          "read_capability": true
+        },
         "error": null,
         "password": "",
         "source": "default",
@@ -56,6 +69,7 @@
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "12345678",
         "source": "default",
@@ -63,6 +77,7 @@
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "changeme",
         "source": "default",
@@ -70,6 +85,7 @@
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "clickhouse",
         "source": "default",
@@ -77,6 +93,7 @@
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "default",
         "source": "default",
@@ -84,6 +101,7 @@
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "password",
         "source": "default",
@@ -91,6 +109,7 @@
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "password",
         "source": "default",
@@ -98,6 +117,7 @@
         "username": "root"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "root",
         "source": "default",
@@ -105,6 +125,7 @@
         "username": "root"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "password",
         "source": "default",
@@ -112,6 +133,7 @@
         "username": "user"
       },
       {
+        "credential_capabilities": {},
         "error": null,
         "password": "user",
         "source": "default",
@@ -125,111 +147,156 @@
     "credential_attempt_count": 15,
     "credential_attempts": [
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: admin: Authentication failed: password is incorrect, or there is no user with such name.. Stack trace:\n\n0. DB::Exception::Exception(DB::Exception::Mess...",
         "ok": false,
         "password": "admin",
+        "source": "default",
         "token": null,
         "username": "admin"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: admin: Authentication failed: password is incorrect, or there is no user with such name.. Stack trace:\n\n0. DB::Exception::Exception(DB::Exception::Mess...",
         "ok": false,
         "password": "changeme",
+        "source": "default",
         "token": null,
         "username": "admin"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: admin: Authentication failed: password is incorrect, or there is no user with such name.. Stack trace:\n\n0. DB::Exception::Exception(DB::Exception::Mess...",
         "ok": false,
         "password": "password",
+        "source": "default",
         "token": null,
         "username": "admin"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: clickhouse: Authentication failed: password is incorrect, or there is no user with such name.. Stack trace:\n\n0. DB::Exception::Exception(DB::Exception:...",
         "ok": false,
         "password": "clickhouse",
+        "source": "default",
         "token": null,
         "username": "clickhouse"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: clickhouse: Authentication failed: password is incorrect, or there is no user with such name.. Stack trace:\n\n0. DB::Exception::Exception(DB::Exception:...",
         "ok": false,
         "password": "password",
+        "source": "default",
         "token": null,
         "username": "clickhouse"
       },
       {
+        "credential_capabilities": {
+          "admin_capability": true,
+          "capability_error": null,
+          "database_count": 8,
+          "execute_capability": true,
+          "execute_capability_reason": "active capability probe complete",
+          "read_capability": true
+        },
         "error": null,
         "ok": true,
         "password": "",
+        "source": "default",
         "token": null,
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
         "ok": false,
         "password": "12345678",
+        "source": "default",
         "token": null,
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
         "ok": false,
         "password": "changeme",
+        "source": "default",
         "token": null,
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
         "ok": false,
         "password": "clickhouse",
+        "source": "default",
         "token": null,
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
         "ok": false,
         "password": "default",
+        "source": "default",
         "token": null,
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
         "ok": false,
         "password": "password",
+        "source": "default",
         "token": null,
         "username": "default"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: root: Authentication failed: password is incorrect, or there is no user with such name.. Stack trace:\n\n0. DB::Exception::Exception(DB::Exception::Messa...",
         "ok": false,
         "password": "password",
+        "source": "default",
         "token": null,
         "username": "root"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: root: Authentication failed: password is incorrect, or there is no user with such name.. Stack trace:\n\n0. DB::Exception::Exception(DB::Exception::Messa...",
         "ok": false,
         "password": "root",
+        "source": "default",
         "token": null,
         "username": "root"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: user: Authentication failed: password is incorrect, or there is no user with such name.. Stack trace:\n\n0. DB::Exception::Exception(DB::Exception::Messa...",
         "ok": false,
         "password": "password",
+        "source": "default",
         "token": null,
         "username": "user"
       },
       {
+        "credential_capabilities": {},
         "error": "Code: 516.\nDB::Exception: user: Authentication failed: password is incorrect, or there is no user with such name.. Stack trace:\n\n0. DB::Exception::Exception(DB::Exception::Messa...",
         "ok": false,
         "password": "user",
+        "source": "default",
         "token": null,
         "username": "user"
       }
     ],
+    "credential_capabilities": {
+      "admin_capability": true,
+      "capability_error": null,
+      "database_count": 8,
+      "execute_capability": true,
+      "execute_capability_reason": "active capability probe complete",
+      "read_capability": true
+    },
     "credentials_source": "default",
     "database": "default",
     "database_count": 8,
@@ -271,14 +338,12 @@
         "analytics.orders.currency": {
           "approximate_total_rows": 4,
           "bytes_scanned": 12,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "FixedString(3)"
         },
         "analytics.orders.customer_id": {
@@ -290,14 +355,12 @@
         "analytics.orders.metadata": {
           "approximate_total_rows": 4,
           "bytes_scanned": 154,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "analytics.orders.order_id": {
@@ -309,92 +372,78 @@
         "analytics.orders.payment_ref": {
           "approximate_total_rows": 4,
           "bytes_scanned": 40,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "analytics.orders.promo_code": {
           "approximate_total_rows": 4,
           "bytes_scanned": 13,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "Nullable(String)"
         },
         "analytics.orders.region": {
           "approximate_total_rows": 4,
           "bytes_scanned": 8,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "LowCardinality(String)"
         },
         "analytics.orders.status": {
           "approximate_total_rows": 4,
           "bytes_scanned": 24,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "LowCardinality(String)"
         },
         "analytics.sessions.auth_provider": {
           "approximate_total_rows": 4,
           "bytes_scanned": 17,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "LowCardinality(String)"
         },
         "analytics.sessions.device": {
           "approximate_total_rows": 4,
           "bytes_scanned": 47,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "analytics.sessions.email": {
           "approximate_total_rows": 4,
           "bytes_scanned": 53,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "analytics.sessions.expires_at": {
@@ -430,27 +479,23 @@
         "analytics.sessions.source_ip": {
           "approximate_total_rows": 4,
           "bytes_scanned": 42,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "analytics.sessions.token": {
           "approximate_total_rows": 4,
           "bytes_scanned": 149,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 4,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "analytics.sessions.user_id": {
@@ -462,14 +507,12 @@
         "discovery.secret_corpus.attributes": {
           "approximate_total_rows": 5004,
           "bytes_scanned": 124067,
-          "completed_chunks": 7,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 5004,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 7,
-          "total_partitions": 2,
           "type": "Map(String, String)"
         },
         "discovery.secret_corpus.event_date": {
@@ -481,27 +524,23 @@
         "discovery.secret_corpus.fixed_value": {
           "approximate_total_rows": 5004,
           "bytes_scanned": 48944,
-          "completed_chunks": 7,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 5004,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 7,
-          "total_partitions": 2,
           "type": "FixedString(32)"
         },
         "discovery.secret_corpus.fragments": {
           "approximate_total_rows": 5004,
           "bytes_scanned": 64092,
-          "completed_chunks": 7,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 5004,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 7,
-          "total_partitions": 2,
           "type": "Array(String)"
         },
         "discovery.secret_corpus.id": {
@@ -513,40 +552,34 @@
         "discovery.secret_corpus.payload_a": {
           "approximate_total_rows": 5004,
           "bytes_scanned": 94144,
-          "completed_chunks": 7,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 5004,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 7,
-          "total_partitions": 2,
           "type": "String"
         },
         "discovery.secret_corpus.payload_b": {
           "approximate_total_rows": 5004,
           "bytes_scanned": 192,
-          "completed_chunks": 7,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 5004,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 7,
-          "total_partitions": 2,
           "type": "Nullable(String)"
         },
         "iam.api_clients.client_id": {
           "approximate_total_rows": 3,
           "bytes_scanned": 37,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 3,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "iam.api_clients.created_at": {
@@ -558,14 +591,12 @@
         "iam.api_clients.owner": {
           "approximate_total_rows": 3,
           "bytes_scanned": 50,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 3,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "iam.api_clients.rotate_at": {
@@ -577,79 +608,67 @@
         "iam.api_clients.scopes": {
           "approximate_total_rows": 3,
           "bytes_scanned": 60,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 3,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "Array(String)"
         },
         "iam.api_clients.secret": {
           "approximate_total_rows": 3,
           "bytes_scanned": 68,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 3,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "observability.events.attrs": {
           "approximate_total_rows": 8,
           "bytes_scanned": 217,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "Map(String, String)"
         },
         "observability.events.client_ip": {
           "approximate_total_rows": 8,
           "bytes_scanned": 83,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "observability.events.cluster": {
           "approximate_total_rows": 8,
           "bytes_scanned": 32,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "LowCardinality(String)"
         },
         "observability.events.env": {
           "approximate_total_rows": 8,
           "bytes_scanned": 35,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "LowCardinality(String)"
         },
         "observability.events.latency_ms": {
@@ -661,79 +680,67 @@
         "observability.events.level": {
           "approximate_total_rows": 8,
           "bytes_scanned": 33,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "LowCardinality(String)"
         },
         "observability.events.message": {
           "approximate_total_rows": 8,
           "bytes_scanned": 127,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "observability.events.method": {
           "approximate_total_rows": 8,
           "bytes_scanned": 30,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "LowCardinality(String)"
         },
         "observability.events.request_id": {
           "approximate_total_rows": 8,
           "bytes_scanned": 97,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "observability.events.route": {
           "approximate_total_rows": 8,
           "bytes_scanned": 100,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "observability.events.service": {
           "approximate_total_rows": 8,
           "bytes_scanned": 86,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "LowCardinality(String)"
         },
         "observability.events.status_code": {
@@ -757,53 +764,45 @@
         "observability.events.upstream": {
           "approximate_total_rows": 8,
           "bytes_scanned": 129,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "observability.events.user_agent": {
           "approximate_total_rows": 8,
           "bytes_scanned": 88,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 8,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "String"
         },
         "observability.metric_samples.labels": {
           "approximate_total_rows": 10,
           "bytes_scanned": 327,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 10,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "Map(String, String)"
         },
         "observability.metric_samples.metric_name": {
           "approximate_total_rows": 10,
           "bytes_scanned": 167,
-          "completed_chunks": 1,
+          "chunks_complete": true,
           "coverage_percent": 100.0,
           "failed_chunks": 0,
           "rows_scanned": 10,
           "status": "complete",
           "total_bytes": 0,
-          "total_chunks": 1,
-          "total_partitions": 1,
           "type": "LowCardinality(String)"
         },
         "observability.metric_samples.ts": {

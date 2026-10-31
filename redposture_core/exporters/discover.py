@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from ..constants import DISCOVERY_EXPORTERS
+from ..detection_io import DetectCall, run_sync
 from ..logger import AttemptLogger
 from ..scheduler import BoundedScheduler
 from ..stage_runtime import start_audit_progress
@@ -15,6 +16,8 @@ from ..utils import utc_now_iso
 from .detection import build_scan_error_record, looks_like_prometheus_metrics
 from .discovery_logic import (
     fetch_fingerprint_bodies,
+    needs_fingerprint_tiebreak,
+    prepare_exporter_catalog,
     resolve_best_exporter_candidate,
     resolve_fingerprint_only_candidate,
     resolve_prometheus_port_fallback,
@@ -139,8 +142,39 @@ def scan_presence_port_task(
     response_body_max_bytes: int = SCAN_RESPONSE_BODY_MAX_BYTES,
     weak_candidate_confidence_score: int = WEAK_CANDIDATE_CONFIDENCE_SCORE,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    return run_sync(
+        scan_presence_port_steps(
+            host,
+            port,
+            exporters,
+            timeout,
+            retries,
+            scheme=scheme,
+            http_get_details_fn=http_get_details_fn,
+            fetch_fingerprint_bodies_fn=fetch_fingerprint_bodies_fn,
+            response_body_max_bytes=response_body_max_bytes,
+            weak_candidate_confidence_score=weak_candidate_confidence_score,
+        )
+    )
+
+
+def scan_presence_port_steps(
+    host: str,
+    port: int,
+    exporters: list[dict[str, Any]],
+    timeout: float,
+    retries: int,
+    *,
+    scheme: str = "http",
+    http_get_details_fn: HttpGetDetails = http_get_details,
+    fetch_fingerprint_bodies_fn: Callable[[str, int, float, int], tuple[str, str]] | None = None,
+    response_body_max_bytes: int = SCAN_RESPONSE_BODY_MAX_BYTES,
+    weak_candidate_confidence_score: int = WEAK_CANDIDATE_CONFIDENCE_SCORE,
+):
     url = build_http_url(host, port, "/metrics", scheme=scheme)
-    result = http_get_details_fn(url, timeout=timeout, retries=retries, max_bytes=response_body_max_bytes)
+    result = yield DetectCall(
+        http_get_details_fn, (url,), {"timeout": timeout, "retries": retries, "max_bytes": response_body_max_bytes}
+    )
 
     status = result["status"]
     body = str(result["body"] or "")
@@ -207,6 +241,16 @@ def scan_presence_port_task(
             )
 
         fetch_fingerprint_bodies_fn = _fetch_fingerprint_bodies_with_client
+
+    if (
+        candidates and needs_fingerprint_tiebreak(candidates, weak_confidence_score=weak_candidate_confidence_score)
+    ) or (not candidates and is_prometheus_like and exporters):
+        fingerprint_bodies = yield DetectCall(fetch_fingerprint_bodies_fn, (host, port, timeout, retries), {})
+
+        def observed_fingerprint(*_args: Any) -> tuple[str, str]:
+            return fingerprint_bodies
+
+        fetch_fingerprint_bodies_fn = observed_fingerprint
 
     if candidates:
         winner, method, resolution = resolve_best_exporter_candidate(
@@ -322,7 +366,7 @@ def scan_exporter_presence(
 ) -> tuple[int, int, dict[str, list[dict[str, Any]]]]:
     # Collect hides ordinary misses in its live output. Keep every probe and
     # every requested scan-file record; only skip unused console formatting.
-    exporters = list(discovery_exporters or DISCOVERY_EXPORTERS)
+    exporters = prepare_exporter_catalog(list(discovery_exporters or DISCOVERY_EXPORTERS))
     if custom_ports:
         ports = list(dict.fromkeys(int(port) for port in custom_ports))
     else:
@@ -414,6 +458,7 @@ def scan_exporter_presence(
                 )
                 from ..async_detection import (
                     AsyncDetectScheduler,
+                    adaptive_detect_ceiling,
                     async_detection_allowed,
                     automatic_detect_concurrency,
                 )
@@ -453,7 +498,15 @@ def scan_exporter_presence(
                             return build_scan_error_record(item[0], item[1], exc), None
 
                     outcomes = AsyncDetectScheduler[tuple[str, int, str], Any, Any](
-                        detect_workers=detect_limit, deep_workers=max_workers
+                        detect_workers=detect_limit,
+                        deep_workers=max_workers,
+                        adaptive_max=adaptive_detect_ceiling(
+                            work_item_count,
+                            initial=detect_limit,
+                            deep_workers=max_workers,
+                            retained_fds=pool._max_idle_total,
+                        ),
+                        retained_fds=pool._max_idle_total,
                     ).iter_completed(items, prepare, finish)
                     if stats_sink is not None:
                         stats_sink["detect_concurrency"] = detect_limit

@@ -23,7 +23,13 @@ from .clients.http_api import HttpResponse, infer_http_base_path
 from .clients.http_session import HttpSessionPool
 from .detection_steps import run_requests
 from .discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME
-from .rendering import CountColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
+from .rendering import (
+    BooleanColorRule,
+    CountColorRule,
+    RegexColorRule,
+    render_colored_marker_line,
+    render_tagged_detail_line,
+)
 
 UI_PORTS: dict[str, tuple[int, ...]] = {
     "portainer": (9443, 9000),
@@ -2685,9 +2691,11 @@ def colorize_panel_line(console: Any, line: str, label: str) -> bool:
         tag=label,
         regexes=(
             RegexColorRule(r"\(version:unknown\)", "orange"),
+            RegexColorRule(r"\(rce:unknown\)", "orange"),
             RegexColorRule(r"coverage:partial", "orange"),
             RegexColorRule(r"\(reason:[^)]+\)", "orange"),
         ),
+        booleans=(BooleanColorRule("rce", true_color="true_red", false_color="bright_green"),),
         counts=(CountColorRule("count", "true_red", unknown_color="orange", zero_color="bright_green"),),
         extra_spans=credential_spans,
     )

@@ -7,6 +7,7 @@ from typing import Any
 
 from ...stage_runtime import validate_basic_module_args
 from ..execution_api import validate as validate_execution
+from ..execution_api import validate_os_shell
 from .actions import _normalize_ssrf_urls
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -19,6 +20,38 @@ def validate_args(args: Any, console: Any) -> int | None:
     execution_rc = validate_execution(args, console)
     if execution_rc is not None:
         return execution_rc
+    if (
+        shell_rc := validate_os_shell(
+            args,
+            console,
+            forbidden=(
+                "ssrf_target",
+                "ssrf_port",
+                "ssrf_path",
+                "show_keys",
+                "kv_key",
+                "dump",
+                "show_services",
+                "show_agents",
+                "show_checks",
+                "check_dump_id",
+                "show_nodes",
+                "service_dump_name",
+                "agent_name",
+                "node_name",
+                "revshell",
+                "delete_revshell",
+                "revshell_listen",
+                "revshell_host",
+                "revshell_port",
+                "revshell_payload",
+                "revshell_check_id",
+                "enum_cve",
+                "discover",
+            ),
+        )
+    ) is not None:
+        return shell_rc
     if getattr(args, "execute", None) is not None and (
         bool(getattr(args, "revshell", False)) or bool(getattr(args, "delete_revshell", False))
     ):

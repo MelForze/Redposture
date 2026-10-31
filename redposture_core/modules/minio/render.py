@@ -16,6 +16,7 @@ import re
 from typing import Any
 
 from ...console import Console
+from ...credential_evidence import attempt_capabilities
 from ...discovery_paths import concat_discovery_text
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
 from ...discovery_values import DiskBackedText
@@ -96,15 +97,24 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     parts = [f"(admin:{_admin_text(record)})"]
     # A present list means the corresponding flag ran; show the count (even 0).
     buckets = record.get("buckets")
-    if isinstance(buckets, list) and not record.get("_discover_auth_before_data"):
-        parts.append(f"(buckets:{len(buckets)})")
+    bucket_count = record.get("bucket_count")
+    evidence = record.get("credential_capabilities")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    if isinstance(buckets, list):
+        bucket_count = len(buckets)
+    if "bucket_count" in evidence and evidence.get("inventory_error"):
+        bucket_count = evidence["bucket_count"]
+    if (isinstance(buckets, list) or "bucket_count" in record) and not record.get("_discover_auth_before_data"):
+        parts.append(f"(buckets:{bucket_count if isinstance(bucket_count, int) else 'unknown'})")
     # Objects are streamed to a file (not held in the record); the count is
     # captured while streaming, so `(objects:N)` still shows the real total.
     objects_count = record.get("objects_count")
-    if isinstance(objects_count, int) and not record.get("_discover_auth_before_data"):
-        parts.append(f"(objects:{objects_count})")
+    if "objects_count" in evidence and evidence.get("inventory_error"):
+        objects_count = evidence["objects_count"]
+    if "objects_count" in record and not record.get("_discover_auth_before_data"):
+        parts.append(f"(objects:{objects_count if isinstance(objects_count, int) else 'unknown'})")
     # `credential_secret` is a TXT-only echo of the accepted secret (redacted from
-    # JSON alongside attempted_credentials); an operator needs the working pair.
+    # JSON as a duplicate root field); the per-pair ledger retains the pair.
     secret = _password_text(record.get("credential_secret")) if "credential_secret" in record else None
     identity = f"{access_key or '?'}:{secret}" if secret is not None else (access_key or "?")
     return f"{_prefix(record)} [+] {identity} {' '.join(parts)}"
@@ -143,14 +153,32 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             continue
         username = str(attempt.get("username") or "")
         accepted = str(attempt.get("credential_state") or "") in {"valid", "valid_but_restricted"}
-        if accepted and not winner_skipped and username == selected_key:
+        selected_password_matches = (
+            attempt.get("password") == record["credential_secret"]
+            if "credential_secret" in record
+            else sum(item.get("username") == selected_key for item in attempts if isinstance(item, dict)) == 1
+        )
+        if accepted and not winner_skipped and username == selected_key and selected_password_matches:
             winner_skipped = True  # the winning credential is shown by _format_record
             continue
         # Show the password on both outcomes: the operator must be able to see
         # which exact credential worked, not just that some default did (several
         # defaults can share a username). Mirrors the other 13 default-cred modules.
         if accepted:
-            lines.append(f"{prefix} [+] {username}:{_password_text(attempt.get('password'))}")
+            capabilities = attempt_capabilities(record, attempt)
+            lines.append(
+                _format_record(
+                    {
+                        **capabilities,
+                        "host": record.get("host"),
+                        "port": record.get("port"),
+                        "credential_state": "valid",
+                        "credential_results": [{"access_key": username}],
+                        "credential_secret": attempt.get("password"),
+                    },
+                    output_format,
+                )
+            )
         elif attempt.get("credential_state") == "invalid":
             lines.append(f"{prefix} [-] {username}:{_password_text(attempt.get('password'))}")
         elif attempt.get("credential_state") == "transient_failure":

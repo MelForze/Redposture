@@ -10,6 +10,8 @@ import time
 from types import SimpleNamespace as NS
 from typing import Any
 
+import pytest
+
 from redposture_core.audit_models import AuditRecord
 from redposture_core.clients.http_api import HttpResponse
 from redposture_core.modules.portainer import execution
@@ -35,13 +37,15 @@ class Pool:
         self.calls.append((method, url, kwargs))
         if method == "GET" and url.endswith("/api/endpoints?start=0&limit=100"):
             return _response(200, [{"Id": 2, "Name": "qa-engine"}])
+        if method == "GET" and url.endswith("/containers/json?all=false"):
+            return _response(200, [{"Id": "first-running", "State": "running"}])
         if method == "GET" and url.endswith("/exec/exec-1/json"):
             return _response(200, {"Running": False, "ExitCode": self.exit_code})
         raise AssertionError(f"unexpected request: {method} {url}")
 
     def request_once(self, method: str, url: str, **kwargs: Any) -> HttpResponse:
         self.calls.append((method, url, kwargs))
-        if method == "POST" and url.endswith("/containers/qa-container/exec"):
+        if method == "POST" and url.endswith(("/containers/qa-container/exec", "/containers/first-running/exec")):
             payload = json.loads(kwargs["body"])
             assert payload["AttachStdout"] is True
             assert payload["AttachStderr"] is True
@@ -139,6 +143,44 @@ def test_portainer_exec_requires_explicit_selector_without_network(monkeypatch) 
     assert result["execution"]["executed"] is False
     assert "--endpoint" in result["execution"]["error"]
     assert not pool.calls
+
+
+def test_rce_probe_selects_first_environment_and_running_container(monkeypatch) -> None:
+    pool = Pool()
+    monkeypatch.setattr(execution, "HttpSessionPool", lambda **_: pool)
+    ctx, record, state = _context(pool, "echo REDPOSTURE_RCE_probe")
+    ctx.args.endpoint = None
+    ctx.args.container = None
+    ctx.args._rce_probe = True
+
+    result = execution.collect(ctx, record.to_dict(), state)
+
+    assert result["execute_verified"] is True
+    assert result["execution"]["stdout"] == "REDPOSTURE_RCE_probe\n"
+    assert ctx.args.endpoint == "2"
+    assert ctx.args.container == "first-running"
+    assert any(url.endswith("/containers/json?all=false") for method, url, _ in pool.calls if method == "GET")
+
+
+@pytest.mark.parametrize("status,verdict", [(401, False), (403, False), (404, None), (500, None)])
+def test_rce_probe_preserves_exec_auth_denial_without_starting_command(monkeypatch, status, verdict):
+    from redposture_core.modules.rce_probe import probe_execution
+
+    class DeniedPool(Pool):
+        def request_once(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            assert url.endswith("/containers/qa-container/exec")
+            return _response(status, {"message": "unavailable"})
+
+    pool = DeniedPool()
+    monkeypatch.setattr(execution, "HttpSessionPool", lambda **_: pool)
+    ctx, record, state = _context(pool)
+    result = probe_execution(ctx, record, state, execution.collect)
+
+    assert result.extra["rce"] is verdict
+    assert result.extra["rce_probe_performed"] is (verdict is not None)
+    assert sum(method == "POST" for method, _, _ in pool.calls) == 1
+    assert not any(url.endswith(("/start", "/stop", "/kill")) for _, url, _ in pool.calls)
 
 
 def test_portainer_exec_timeout_has_remote_proof_and_does_not_stop_container(monkeypatch, tmp_path) -> None:

@@ -19,6 +19,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "admin",
+        "source": "default",
         "token": null,
         "username": "admin"
       },
@@ -26,6 +27,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "changeme",
+        "source": "default",
         "token": null,
         "username": "admin"
       },
@@ -33,6 +35,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "oracle",
+        "source": "default",
         "token": null,
         "username": "admin"
       },
@@ -40,6 +43,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "password",
+        "source": "default",
         "token": null,
         "username": "admin"
       },
@@ -47,6 +51,7 @@
         "error": "account locked",
         "ok": false,
         "password": "dbsnmp",
+        "source": "default",
         "token": null,
         "username": "dbsnmp"
       },
@@ -54,6 +59,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "dev",
+        "source": "default",
         "token": null,
         "username": "dev"
       },
@@ -61,6 +67,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "hr",
+        "source": "default",
         "token": null,
         "username": "hr"
       },
@@ -68,6 +75,7 @@
         "error": "account locked",
         "ok": false,
         "password": "outln",
+        "source": "default",
         "token": null,
         "username": "outln"
       },
@@ -75,6 +83,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "oracle",
+        "source": "default",
         "token": null,
         "username": "pdbadmin"
       },
@@ -82,6 +91,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "pdbadmin",
+        "source": "default",
         "token": null,
         "username": "pdbadmin"
       },
@@ -89,6 +99,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "scott",
+        "source": "default",
         "token": null,
         "username": "scott"
       },
@@ -96,6 +107,7 @@
         "error": null,
         "ok": true,
         "password": "tiger",
+        "source": "default",
         "token": null,
         "username": "scott"
       },
@@ -103,6 +115,7 @@
         "error": "ORA-28009: connection as SYS should be as SYSDBA or SYSOPER\nHelp: https://docs.oracle.com/error-help/db/ora-28009/",
         "ok": false,
         "password": "change_on_install",
+        "source": "default",
         "token": null,
         "username": "sys"
       },
@@ -110,6 +123,7 @@
         "error": "ORA-28009: connection as SYS should be as SYSDBA or SYSOPER\nHelp: https://docs.oracle.com/error-help/db/ora-28009/",
         "ok": false,
         "password": "oracle",
+        "source": "default",
         "token": null,
         "username": "sys"
       },
@@ -117,6 +131,7 @@
         "error": "ORA-28009: connection as SYS should be as SYSDBA or SYSOPER\nHelp: https://docs.oracle.com/error-help/db/ora-28009/",
         "ok": false,
         "password": "sys",
+        "source": "default",
         "token": null,
         "username": "sys"
       },
@@ -124,6 +139,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "12345678",
+        "source": "default",
         "token": null,
         "username": "system"
       },
@@ -131,6 +147,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "manager",
+        "source": "default",
         "token": null,
         "username": "system"
       },
@@ -138,6 +155,7 @@
         "error": null,
         "ok": true,
         "password": "oracle",
+        "source": "default",
         "token": null,
         "username": "system"
       },
@@ -145,6 +163,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "system",
+        "source": "default",
         "token": null,
         "username": "system"
       },
@@ -152,6 +171,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "test",
+        "source": "default",
         "token": null,
         "username": "test"
       },
@@ -159,6 +179,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "user",
+        "source": "default",
         "token": null,
         "username": "user"
       }

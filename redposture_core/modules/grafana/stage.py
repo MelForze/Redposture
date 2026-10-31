@@ -123,6 +123,7 @@ def build_grafana_spec(args: Any) -> ModuleAuditSpec:
         skip_credentials_without_verifier=True,
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
+        credential_attempt_detail_fields=("credential_capabilities",),
     )
 
     return with_async_io_detection(

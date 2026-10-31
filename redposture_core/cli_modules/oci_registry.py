@@ -103,7 +103,7 @@ def configure_oci_registry_parser(
     auth.add_argument("--defcreds", action="store_true", help="Check a small catalog of weak Basic pairs.")
     add_oci_content_flags(actions, product=product)
     if product == "nexus":
-        add_flags(parser.add_argument_group("Execution"))
+        add_flags(parser.add_argument_group("Execution"), include_os_shell=True)
 
 
 def configure_docker_registry_parser(parser: argparse.ArgumentParser, **kwargs: object) -> None:

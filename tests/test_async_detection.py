@@ -201,3 +201,84 @@ def test_only_explicitly_pure_negatives_may_finish_on_loop():
     assert result == dict(enumerate(range(20)))
     assert all(locations[i] == "redposture-async-detect" for i in range(0, 20, 2))
     assert all(locations[i].startswith("redposture-scheduler-") for i in range(1, 20, 2))
+
+
+def test_static_source_does_not_poll_while_last_detection_is_pending(monkeypatch):
+    """Idle detect slots must sleep without repeatedly scheduling timer callbacks."""
+    from redposture_core.async_detection import AsyncDetectScheduler
+
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay, *args, **kwargs):
+        assert delay != 0.002, "idle scheduler is busy-polling"
+        return await real_sleep(delay, *args, **kwargs)
+
+    async def detect(item):
+        await asyncio.sleep(0.02)
+        return item
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    assert list(
+        AsyncDetectScheduler(detect_workers=16, deep_workers=1).iter_completed([7], detect, lambda i, v: v)
+    ) == [(7, 7)]
+
+
+def test_cancel_after_source_exhaustion_interrupts_blocked_finish(monkeypatch):
+    from redposture_core.async_detection import AsyncDetectScheduler
+    from redposture_core.scheduler import _DaemonWorkerPool
+
+    draining = threading.Event()
+    original_close = _DaemonWorkerPool.close
+
+    def close(pool):
+        draining.set()
+        return original_close(pool)
+
+    monkeypatch.setattr(_DaemonWorkerPool, "close", close)
+    finish_started = threading.Event()
+    release_finish = threading.Event()
+    cancelled = threading.Event()
+    coordinator_done = threading.Event()
+    source_exhausted = threading.Event()
+    values = []
+    errors = []
+
+    def source():
+        yield 1
+        source_exhausted.set()
+
+    async def detect(item):
+        return item
+
+    def finish(item, value):
+        finish_started.set()
+        release_finish.wait(3)
+        return value
+
+    def consume():
+        try:
+            values.extend(
+                AsyncDetectScheduler(detect_workers=8, deep_workers=1).iter_completed(
+                    source(),
+                    detect,
+                    finish,
+                    cancel_event=cancelled,
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            coordinator_done.set()
+
+    thread = threading.Thread(target=consume, daemon=True)
+    thread.start()
+    try:
+        assert source_exhausted.wait(1) and finish_started.wait(1)
+        # Catch the premature pool.close window; a live watcher need not enter it.
+        draining.wait(0.1)
+        cancelled.set()
+        assert coordinator_done.wait(1), "cancel monitoring ended before synchronous work drained"
+        assert not errors and values == []
+    finally:
+        release_finish.set()
+        thread.join(3)

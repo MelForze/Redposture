@@ -19,6 +19,8 @@ from ...stage_runtime import (
     command_result_exit_code,
     install_record_callback,
 )
+from ..execution_api import run_os_shell, validate_os_shell_plan
+from ..rce_probe import probe_execution
 from . import actions, execution, policy, render
 
 _DEFAULT_PORT = 8500
@@ -88,9 +90,22 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
         )
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
+        if bool(getattr(ctx.args, "os_shell", False)):
+            run_os_shell(
+                ctx,
+                record,
+                ctx.lifecycle_state,
+                module="consul",
+                surface="temporary Consul agent check",
+                execute_once=execution.collect,
+            )
+            return AuditRecord.from_mapping(record.to_dict(), module="consul", service="consul")
         payload = actions.collect_consul_data(ctx, record, options)
         payload = execution.collect(ctx, payload, ctx.lifecycle_state)
         return AuditRecord.from_mapping(payload, module="consul", service="consul")
+
+    def _rce_probe(ctx: Any, record: AuditRecord) -> AuditRecord:
+        return probe_execution(ctx, record, ctx.lifecycle_state, execution.collect)
 
     def _state_factory(ctx: Any) -> actions.ConsulLifecycleState:
         target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
@@ -149,6 +164,9 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
         render_module=render,
         colorize=render._render_colored_consul_line,
         is_detected=lambda record: record.extra.get("is_consul") is True,
+        rce_probe=_rce_probe,
+        live_phase_output=bool(getattr(args, "os_shell", False)),
+        defer_detect_output_until_auth=bool(getattr(args, "os_shell", False)),
     )
 
     from .async_detect import bind
@@ -169,6 +187,8 @@ def run_consul_stage(args: Any, logger: Any) -> int:
         plan = build_consul_plan(args)
     except ValueError as exc:
         console.error(str(exc))
+        return 2
+    if bool(getattr(args, "os_shell", False)) and validate_os_shell_plan(plan, console) is not None:
         return 2
     try:
         runner = AuditCommandRunner(args=args, spec=build_consul_spec(args), logger=logger, console=console)

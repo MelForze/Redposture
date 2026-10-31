@@ -19,6 +19,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "bad",
+        "source": "combo",
         "token": null,
         "username": "bad"
       },
@@ -26,6 +27,7 @@
         "error": null,
         "ok": true,
         "password": "OracleLab!2026",
+        "source": "combo",
         "token": null,
         "username": "redposture"
       }

@@ -16,6 +16,8 @@ from ...stage_runtime import (
     run_basic_host_audit,
 )
 from ...web_panels import default_pairs
+from ..execution_api import run_os_shell
+from ..rce_probe import probe_execution
 from . import actions, execution, policy, render
 
 
@@ -44,6 +46,16 @@ def build_portainer_spec(args: Any) -> ModuleAuditSpec:
         )
 
     def data(ctx: Any, record: AuditRecord) -> AuditRecord:
+        if bool(getattr(ctx.args, "os_shell", False)):
+            run_os_shell(
+                ctx,
+                record,
+                ctx.lifecycle_state,
+                module="portainer",
+                surface="selected Portainer container",
+                execute_once=execution.collect,
+            )
+            return record
         payload = execution.collect(ctx, record.to_dict(), ctx.lifecycle_state)
         if getattr(ctx.args, "execute", None) is not None and not payload.get("execute_verified"):
             return AuditRecord.from_mapping(payload, module="portainer", service="portainer")
@@ -53,6 +65,9 @@ def build_portainer_spec(args: Any) -> ModuleAuditSpec:
         ):
             return AuditRecord.from_mapping(payload, module="portainer", service="portainer")
         return AuditRecord.from_mapping(actions.data_record(ctx, payload), module="portainer", service="portainer")
+
+    def rce_probe(ctx: Any, record: AuditRecord) -> AuditRecord:
+        return probe_execution(ctx, record, ctx.lifecycle_state, execution.collect)
 
     spec = ModuleAuditSpec(
         module="portainer",
@@ -65,6 +80,9 @@ def build_portainer_spec(args: Any) -> ModuleAuditSpec:
         render=render.render_record,
         colorize=render.colorize,
         is_detected=lambda record: record.extra.get("is_portainer") is True,
+        rce_probe=rce_probe,
+        live_phase_output=bool(getattr(args, "os_shell", False)),
+        defer_detect_output_until_auth=bool(getattr(args, "os_shell", False)),
         credential_gate=lambda credential, record: (
             record.extra.get("provided_credentials_ok") is True,
             "Portainer identity verifier",

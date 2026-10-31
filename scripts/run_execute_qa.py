@@ -161,7 +161,7 @@ def _seed_portainer() -> None:
             "-d",
             "--name",
             "qa-execute-container",
-            "docker:27.5.1-dind",
+            "python:3.12.14-alpine",
             "sh",
             "-c",
             "while :; do sleep 3600; done",
@@ -243,7 +243,34 @@ def _validate_result(module: str, output: Path) -> dict[str, Any]:
     return record
 
 
-def run_module(module: str, project: str, out_dir: Path) -> dict[str, Any]:
+def _shell_cli_command(module: str, output: Path) -> list[str]:
+    command = _cli_command(module, output)
+    for flag in ("--format", "--execute", "-o"):
+        index = command.index(flag)
+        del command[index : index + 2]
+    command.append("--os-shell")
+    return command
+
+
+def _validate_shell_result(module: str, stdout: str) -> dict[str, Any]:
+    first = f"redposture-{module}-shell-first"
+    second = f"redposture-{module}-shell-second"
+    if "\x1b[" in stdout:
+        raise RuntimeError(f"{module} --no-color output contains ANSI")
+    prompt_at = stdout.find(f"{module}-os> ")
+    if prompt_at < 0:
+        raise RuntimeError(f"{module} did not enter interactive shell")
+    detection_at = stdout.find(module.upper())
+    if detection_at < 0 or detection_at > prompt_at:
+        raise RuntimeError(f"{module} service detection was not printed before the interactive shell")
+    if stdout.count(first) != 2 or stdout.count(second) != 2:
+        raise RuntimeError(f"{module} did not return both command results exactly once")
+    if stdout.count("[+] exit:0") != 1 or stdout.count("[-] exit:7") != 1:
+        raise RuntimeError(f"{module} did not return both expected exit statuses")
+    return {"first": first, "second": second, "exit_codes": [0, 7]}
+
+
+def run_module(module: str, project: str, out_dir: Path, *, os_shell: bool = False) -> dict[str, Any]:
     module_dir = out_dir / module
     module_dir.mkdir(parents=True, exist_ok=True)
     compose_log = module_dir / "compose-up.log"
@@ -261,13 +288,26 @@ def run_module(module: str, project: str, out_dir: Path) -> dict[str, Any]:
             _wait_http("http://127.0.0.1:19580", "/login", timeout=240)
         else:
             _wait_http("http://127.0.0.1:19500", "/v1/status/leader")
-        command = _cli_command(module, result_path)
-        cli = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False, timeout=300)
+        command = _shell_cli_command(module, result_path) if os_shell else _cli_command(module, result_path)
+        first = f"redposture-{module}-shell-first"
+        second = f"redposture-{module}-shell-second"
+        shell_input = f"printf {first}; exit 0\nprintf {second}; exit 7\nexit\n" if os_shell else None
+        cli = subprocess.run(
+            command, cwd=ROOT, text=True, input=shell_input, capture_output=True, check=False, timeout=300
+        )
         (module_dir / "cli.stdout.log").write_text(cli.stdout, encoding="utf-8")
         (module_dir / "cli.stderr.log").write_text(cli.stderr, encoding="utf-8")
         if cli.returncode != 0:
             raise RuntimeError(f"CLI exited {cli.returncode}; inspect {module_dir / 'cli.stderr.log'}")
-        record = _validate_result(module, result_path)
+        record = _validate_shell_result(module, cli.stdout) if os_shell else _validate_result(module, result_path)
+        if os_shell and module == "consul":
+            status, checks = _json_request("http://127.0.0.1:19500", "/v1/agent/checks")
+            if (
+                status != 200
+                or not isinstance(checks, dict)
+                or any(str(check_id).startswith("redposture-exec-") for check_id in checks)
+            ):
+                raise RuntimeError("Consul temporary execution checks were not cleaned")
         outcome.update(status="passed", record=record)
     except Exception as exc:  # noqa: BLE001 - report and clean every profile
         outcome["error"] = str(exc)
@@ -297,17 +337,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("out_dir", type=Path, help="Fresh output directory for stand logs and results.")
     parser.add_argument("module", nargs="?", choices=(*MODULES, "all"), default="all")
+    parser.add_argument("--os-shell", action="store_true", help="Check two interactive commands and cleanup.")
     args = parser.parse_args()
     if args.out_dir.exists() and any(args.out_dir.iterdir()):
         parser.error(f"output directory is not empty: {args.out_dir}")
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    modules = MODULES if args.module == "all" else (args.module,)
+    modules = (
+        (("consul", "kafka", "jenkins", "portainer") if args.os_shell else MODULES)
+        if args.module == "all"
+        else (args.module,)
+    )
     project = f"redposture-execute-{os.getpid()}"
-    results = [run_module(module, project, args.out_dir) for module in modules]
+    results = [run_module(module, project, args.out_dir, os_shell=args.os_shell) for module in modules]
     report = {
         "project": project,
         "results": results,
         "sequential": True,
+        "os_shell": args.os_shell,
         "cleaned": all(item.get("cleaned") for item in results),
     }
     (args.out_dir / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

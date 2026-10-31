@@ -67,7 +67,8 @@ def exception(code):
 
 
 @pytest.mark.parametrize("enum_cve", [False, True])
-def test_native_select1_then_same_driver_socket_serves_sync_query(monkeypatch, enum_cve):
+@pytest.mark.parametrize("recover", [False, True])
+def test_native_select1_then_same_driver_socket_serves_sync_query(monkeypatch, enum_cve, recover):
     # A driver execute on the event loop would violate the native detection contract.
     from clickhouse_driver import Client
 
@@ -134,12 +135,18 @@ def test_native_select1_then_same_driver_socket_serves_sync_query(monkeypatch, e
         async with server:
             ctx = context(server.sockets[0].getsockname()[1], enum_cve=enum_cve)
             options = stage._build_clickhouse_host_stage_options(ctx.args)
-            record = await async_detect.detect(ctx, None, options)
+            if recover:
+                from tests.test_native_detect_timeout_retries import recover_real_protocol
+
+                spec = stage.build_clickhouse_spec(ctx.args)
+                record, ctx = await recover_real_protocol(spec, ctx, monkeypatch)
+            else:
+                record = await async_detect.detect(ctx, None, options)
             assert record.status == "open_no_auth"
             session = ctx.lifecycle_state.anonymous_session
             assert session is not None
             assert session.client.connection.connected is True
-            assert session.client.connection.socket.gettimeout() == 1
+            assert session.client.connection.socket.gettimeout() == (7 if recover else 1)
             if enum_cve:
                 assert record.extra["server_version"] == "20.8.1"
             # This is the existing synchronous downstream worker, not a detect facade.

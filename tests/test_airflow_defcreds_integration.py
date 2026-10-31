@@ -337,12 +337,15 @@ def test_airflow2_defcreds_checks_every_pair_and_continues_after_success_and_tra
 
     expected = _plan_pairs(plan)
     assert len(expected) == 19
-    assert server.basic_dag_requests[: len(expected)] == expected
-    assert set(server.basic_dag_requests[: len(expected)]) == set(expected)
+    # Every verified pair immediately obtains its own ACL evidence. The
+    # selected pair reuses that evidence in the later capability stage.
+    expected_requests = [pair for pair in expected for _ in range(2 if pair in valid else 1)]
+    assert server.basic_dag_requests == expected_requests
+    assert set(server.basic_dag_requests) == set(expected)
     credential_lines = [line for line in lines if "\t [+] " in line or "\t [-] " in line or "\t [!] " in line]
     assert len(credential_lines) == len(expected) - 1
     assert any("[+] admin:admin (Dags:0) (Keys:0) (Connections:0)" in line for line in credential_lines)
-    assert any("[+] airflow:airflow" in line for line in credential_lines)
+    assert any("[+] airflow:airflow (Dags:0) (Keys:0) (Connections:0)" in line for line in credential_lines)
     assert not any("service:service" in line for line in credential_lines)
     assert result.detected_count == 1 and result.operational_failure_count == 0
 

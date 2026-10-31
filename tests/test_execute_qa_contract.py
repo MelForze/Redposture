@@ -27,6 +27,7 @@ def test_portainer_stand_never_mounts_a_host_docker_socket() -> None:
     assert "/var/run/docker.sock" not in text
     assert "portainer-engine:" in text
     assert "127.0.0.1:19237:2375" in text
+    assert '"python:3.12.14-alpine"' in RUNNER.read_text(encoding="utf-8")
 
 
 def test_execute_runner_covers_all_surfaces_and_always_cleans_up() -> None:
@@ -84,8 +85,43 @@ def test_execute_report_never_claims_clean_when_module_cleanup_failed(monkeypatc
     monkeypatch.setattr(
         run_execute_qa,
         "run_module",
-        lambda *_args: {"module": "kafka", "status": "failed", "cleaned": False, "error": "cleanup failed"},
+        lambda *_args, **_kwargs: {"module": "kafka", "status": "failed", "cleaned": False, "error": "cleanup failed"},
     )
     assert run_execute_qa.main() == 1
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["cleaned"] is False
+
+
+def test_os_shell_command_reuses_selected_stand_without_one_shot_output(tmp_path: Path) -> None:
+    command = run_execute_qa._shell_cli_command("portainer", tmp_path / "result.jsonl")
+    assert "--os-shell" in command
+    assert "--execute" not in command
+    assert "--format" not in command
+    assert "-o" not in command
+    assert "--endpoint" in command
+    assert "--container" in command
+
+
+def test_os_shell_result_requires_two_distinct_commands_and_exit_statuses() -> None:
+    module = "consul"
+    output = (
+        "CONSUL 127.0.0.1 19500 [*] Consul Agent\n"
+        "consul-os> printf redposture-consul-shell-first; exit 0\n"
+        "[+] exit:0  stdout:30 B  stderr:0 B\n"
+        "redposture-consul-shell-first\n"
+        "consul-os> printf redposture-consul-shell-second; exit 7\n"
+        "[-] exit:7  stdout:31 B  stderr:0 B\n"
+        "redposture-consul-shell-second\n"
+    )
+    assert run_execute_qa._validate_shell_result(module, output)["exit_codes"] == [0, 7]
+    for wrong in (
+        output.replace("exit:7", "exit:0"),
+        output.replace("shell-second", "shell-first"),
+        output.replace("CONSUL 127.0.0.1 19500 [*] Consul Agent\n", ""),
+    ):
+        try:
+            run_execute_qa._validate_shell_result(module, wrong)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("incomplete interactive result was accepted")

@@ -2,6 +2,11 @@
   {
     "attempted_credentials": [
       {
+        "credential_capabilities": {
+          "datasource_count": 11,
+          "datasource_error": null,
+          "datasource_http_status": 200
+        },
         "error": "",
         "ok": true,
         "password": "admin",
@@ -12,6 +17,11 @@
     "attempted_credentials_count": 1,
     "auth_attempts": [
       {
+        "credential_capabilities": {
+          "datasource_count": 11,
+          "datasource_error": null,
+          "datasource_http_status": 200
+        },
         "error": "",
         "ok": true,
         "password": "admin",
@@ -42,13 +52,24 @@
     ],
     "credential_attempts": [
       {
+        "credential_capabilities": {
+          "datasource_count": 11,
+          "datasource_error": null,
+          "datasource_http_status": 200
+        },
         "error": null,
         "ok": true,
         "password": "admin",
+        "source": "provided",
         "token": null,
         "username": "admin"
       }
     ],
+    "credential_capabilities": {
+      "datasource_count": 11,
+      "datasource_error": null,
+      "datasource_http_status": 200
+    },
     "credential_verification_status": "available",
     "credentials_source": "provided",
     "datasource_count": 11,

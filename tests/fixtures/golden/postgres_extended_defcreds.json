@@ -213,6 +213,14 @@
       },
       {
         "auth_method": "scram-sha-256",
+        "credential_capabilities": {
+          "can_execute_commands": true,
+          "can_read_tables": true,
+          "database_count": 1,
+          "query_error": null,
+          "readable_tables": 7,
+          "superuser": true
+        },
         "credential_verification": "verified",
         "credential_verified": true,
         "error": null,

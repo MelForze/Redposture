@@ -19,6 +19,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "wrong",
+        "source": "spray",
         "token": null,
         "username": "redposture"
       },
@@ -26,6 +27,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "wrong",
+        "source": "spray",
         "token": null,
         "username": "limited"
       },
@@ -33,6 +35,7 @@
         "error": null,
         "ok": true,
         "password": "OracleLab!2026",
+        "source": "spray",
         "token": null,
         "username": "redposture"
       },
@@ -40,6 +43,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "OracleLab!2026",
+        "source": "spray",
         "token": null,
         "username": "limited"
       }

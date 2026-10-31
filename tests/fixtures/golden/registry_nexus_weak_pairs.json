@@ -218,6 +218,8 @@
     "provided_credentials": true,
     "provided_credentials_ok": false,
     "provided_username": "service",
+    "rce": false,
+    "rce_probe_performed": true,
     "repository": null,
     "repository_tag_errors": null,
     "repository_tags": null,

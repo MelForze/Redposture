@@ -155,12 +155,22 @@ def test_discovery_error_keeps_successful_sql_and_closes_all_sessions(
     extra.client.disconnect.assert_called_once()
 
 
-def test_cached_discovery_is_reused_and_runtime_auth_attempts_merge(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("evidence", [{}, {"read_capability": True, "database_count": 7}])
+def test_cached_discovery_is_reused_and_runtime_auth_attempts_merge(
+    monkeypatch: pytest.MonkeyPatch, evidence: dict[str, object]
+) -> None:
     session = _session()
     ctx = _context(session)
     report = {"status": "partial", "finding_count": 2}
     ctx.lifecycle_state.discovery_report = report
-    actual = {"username": "audit", "password": "pw", "source": "provided", "ok": True, "error": ""}
+    actual = {
+        "username": "audit",
+        "password": "pw",
+        "source": "provided",
+        "ok": True,
+        "error": "",
+        "credential_capabilities": dict(evidence),
+    }
     ctx.lifecycle_state.auth_attempts = [actual]
     discover = Mock(side_effect=AssertionError("cached discovery repeated"))
     monkeypatch.setattr(ch, "run_discovery", discover)
@@ -174,11 +184,12 @@ def test_cached_discovery_is_reused_and_runtime_auth_attempts_merge(monkeypatch:
         ctx, {"status": "valid_credentials", "attempted_credentials": attempts}, _options(discover=True)
     )
     assert result["credential_attempts"] == [
-        actual,
+        {**actual, "credential_capabilities": evidence},
         {"username": "default", "password": "", "source": "default", "ok": True, "error": ""},
         {"username": "wrong", "password": "bad", "source": "provided", "ok": False, "error": "denied"},
     ]
     assert result["credential_attempt_count"] == 3 and result["defcreds_enabled"] is True
+    assert result["credential_capabilities"] == evidence
     assert result["discover_report"] is report and result["requested_operation_failure"] is True
     assert "attempted_credentials" not in result
     discover.assert_not_called()

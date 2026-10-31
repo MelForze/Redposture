@@ -212,6 +212,20 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
 }
 
 
+# Interactive sessions have a separate sequential real-stand campaign; they
+# cannot be represented by run_case's non-interactive JSON result contract.
+for _command in ("consul", "jenkins", "jupyter", "kafka", "nexus", "nomad", "portainer"):
+    _COMMAND_EXCLUDED_DESTS.setdefault(_command, {})["os_shell"] = (
+        "Interactive OS shell is covered by tests/test_execute_os_shell.py and the dedicated isolated "
+        "shell QA; it is excluded from this non-interactive JSON matrix, like PostgreSQL/ClickHouse shell."
+    )
+for _command in ("spark", "yarn"):
+    _COMMAND_EXCLUDED_DESTS.setdefault(_command, {})["os_shell"] = (
+        "Interactive OS shell is explicitly rejected because per-command results cannot be verified; "
+        "tests/test_execute_os_shell.py checks that refusal without submitting work."
+    )
+
+
 # These are focused contract/loopback emulator mappings, not vendor stands.
 # Keep destinations explicit so newly added flags still fail the static gate.
 _FOCUSED_COMMON = frozenset(

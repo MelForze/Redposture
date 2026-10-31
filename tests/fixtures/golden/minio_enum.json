@@ -35,6 +35,17 @@
       }
     ],
     "console_endpoint": null,
+    "credential_capabilities": {
+      "admin_capability": "partial",
+      "admin_evidence": {
+        "accountinfo": "ok",
+        "list_canned_policies": "ok",
+        "list_users": "unknown"
+      },
+      "bucket_count": 7,
+      "identity_kind": "delegated_admin",
+      "objects_count": 10
+    },
     "credential_results": [
       {
         "access_key": "minioadmin",

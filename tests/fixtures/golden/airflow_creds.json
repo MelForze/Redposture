@@ -15,6 +15,17 @@
     "authenticated_keys_count": 1,
     "authenticated_keys_http_status": 200,
     "connections_allowed": false,
+    "credential_capabilities": {
+      "authenticated_connections_access": "allowed",
+      "authenticated_connections_count": 1,
+      "authenticated_connections_http_status": 200,
+      "authenticated_dags_access": "allowed",
+      "authenticated_dags_count": 1,
+      "authenticated_dags_http_status": 200,
+      "authenticated_keys_access": "allowed",
+      "authenticated_keys_count": 1,
+      "authenticated_keys_http_status": 200
+    },
     "credential_results": [
       {
         "error_code": null,

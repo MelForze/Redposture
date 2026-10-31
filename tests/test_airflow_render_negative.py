@@ -272,20 +272,23 @@ def test_attempts_accepted_non_winner_rendered_with_password():
         ],
     )
     lines = render._format_credential_attempts_records(record, "txt")
-    assert lines == [f"{_PFX} [+] admin:admin"]
+    assert lines == [f"{_PFX} [+] admin:admin (Dags:Unknown) (Keys:Unknown) (Connections:Unknown)"]
 
 
 def test_attempts_winner_skipped_only_once():
-    # Two accepted entries with the winner's username: the first is the winner
-    # (already rendered elsewhere), the duplicate must still surface.
+    # Only the exact selected pair was rendered elsewhere; another accepted
+    # password for the same username must still surface.
     record = _record(
+        credential_password="airflow",
         credential_results=[{"username": "airflow", "state": "valid"}],
         attempted_credentials=[
             {"username": "airflow", "password": "airflow", "credential_state": "valid"},
             {"username": "airflow", "password": "other", "credential_state": "valid"},
         ],
     )
-    assert render._format_credential_attempts_records(record, "txt") == [f"{_PFX} [+] airflow:other"]
+    assert render._format_credential_attempts_records(record, "txt") == [
+        f"{_PFX} [+] airflow:other (Dags:Unknown) (Keys:Unknown) (Connections:Unknown)"
+    ]
 
 
 def test_attempts_accepted_restricted_counts_as_accepted():
@@ -297,7 +300,7 @@ def test_attempts_accepted_restricted_counts_as_accepted():
         ],
     )
     lines = render._format_credential_attempts_records(record, "txt")
-    assert lines == [f"{_PFX} [+] u:p", f"{_PFX} [-] x:y"]
+    assert lines == [f"{_PFX} [+] u:p (Dags:Unknown) (Keys:Unknown) (Connections:Unknown)", f"{_PFX} [-] x:y"]
 
 
 def test_attempts_missing_username_renders_empty_user():

@@ -18,13 +18,30 @@
     "credential_attempt_count": 1,
     "credential_attempts": [
       {
+        "credential_capabilities": {
+          "admin_capability": false,
+          "capability_error": null,
+          "database_count": 7,
+          "execute_capability": true,
+          "execute_capability_reason": "active capability probe complete",
+          "read_capability": true
+        },
         "error": null,
         "ok": true,
         "password": "default",
+        "source": "provided",
         "token": null,
         "username": "default"
       }
     ],
+    "credential_capabilities": {
+      "admin_capability": false,
+      "capability_error": null,
+      "database_count": 7,
+      "execute_capability": true,
+      "execute_capability_reason": "active capability probe complete",
+      "read_capability": true
+    },
     "credentials_source": "provided",
     "database": "default",
     "database_count": 7,

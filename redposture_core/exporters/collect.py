@@ -17,6 +17,7 @@ from ..utils import utc_now_iso
 from . import discover
 from .artifacts import save_collect_body
 from .detection import build_scan_error_record
+from .discovery_logic import prepare_exporter_catalog
 from .http_client import activate_exporter_tls_context, build_http_url, http_get_details
 from .http_pool import HTTPConnectionPool, activate_http_pool
 from .output import emit_line as emit_output_line
@@ -281,7 +282,7 @@ def collect_exporter_debug_data(
     streaming = scan_work_items is not None
     discovery_checks = discovery_found = discovery_errors = 0
     scan_task = scan_task_fn or discover.scan_presence_port_task
-    scan_exporters = list(discovery_exporters or discover.DISCOVERY_EXPORTERS)
+    scan_exporters = prepare_exporter_catalog(list(discovery_exporters or discover.DISCOVERY_EXPORTERS))
     enabled_exporters = {str(item.get("name") or "") for item in exporters}
     discovered_targets = 0
 
@@ -470,13 +471,35 @@ def collect_exporter_debug_data(
             collect_progress = start_audit_progress("COLLECT", estimated_jobs, enabled=True, owner=progress_owner)
 
             def _run_job(job: tuple[Any, ...]) -> Any:
-                kind, host, exporter_name, port, endpoint, item_scheme = job
+                kind, host, exporter_name, port, endpoint, item_scheme = job[:6]
                 if kind == "scan":
                     try:
                         return scan_task(host, port, scan_exporters, timeout, retries, scheme=item_scheme)
                     except Exception as exc:
                         return build_scan_error_record(host, port, exc), None
                 if kind == "plan":
+                    snapshots = job[6] if len(job) > 6 else {}
+                    if snapshots and collect_task_fn is collect_task and plan_collect_fn is None:
+                        prefetched = {}
+                        for endpoint in endpoints:
+                            observation = snapshots.get(build_http_url(host, port, endpoint, scheme=item_scheme))
+                            if (
+                                observation is not None
+                                and not observation.get("error")
+                                and not observation.get("truncated")
+                                and 200 <= int(observation.get("status") or 0) < 300
+                            ):
+                                prefetched[endpoint] = collect_task(
+                                    host,
+                                    exporter_name,
+                                    port,
+                                    endpoint,
+                                    timeout,
+                                    retries,
+                                    scheme=item_scheme,
+                                    http_get_details_fn=lambda *a, _value=observation, **kw: _value,
+                                )
+                        return endpoints, prefetched
                     if not preflight_enabled:
                         return endpoints, {}
                     args = (
@@ -503,7 +526,7 @@ def collect_exporter_debug_data(
             def _child_jobs(job: tuple[Any, ...], result: Any) -> Iterator[tuple[Any, ...]]:
                 nonlocal scheduled_jobs, skipped_jobs, estimated_jobs, discovered_targets
                 nonlocal discovery_checks, discovery_found, discovery_errors
-                kind, host, exporter_name, port, _endpoint, item_scheme = job
+                kind, host, exporter_name, port, _endpoint, item_scheme = job[:6]
                 if kind == "scan":
                     record, hit = result
                     discovery_checks += 1
@@ -531,7 +554,15 @@ def collect_exporter_debug_data(
                         collect_progress.set_total(estimated_jobs)
                     collect_progress.advance()
                     if eligible:
-                        yield "plan", host, str(hit["exporter"]), int(hit["port"]), None, item_scheme
+                        yield (
+                            "plan",
+                            host,
+                            str(hit["exporter"]),
+                            int(hit["port"]),
+                            None,
+                            item_scheme,
+                            getattr(record, "responses", {}),
+                        )
                     return
                 if kind != "plan":
                     return
@@ -564,7 +595,12 @@ def collect_exporter_debug_data(
                 max_workers=max_workers,
                 max_inflight=max_inflight,
             )
-            from ..async_detection import AsyncDetectScheduler, async_detection_allowed, automatic_detect_concurrency
+            from ..async_detection import (
+                AsyncDetectScheduler,
+                adaptive_detect_ceiling,
+                async_detection_allowed,
+                automatic_detect_concurrency,
+            )
 
             use_async_detect = (
                 streaming
@@ -588,9 +624,19 @@ def collect_exporter_debug_data(
                 use_async_detect = detect_concurrency > 0
             if use_async_detect:
                 from ..clients.async_http_detect import AsyncHttpFallback
-                from .async_detect import prefetch_metrics, scan_with_prefetched_metrics
+                from .async_detect import prefetch_discovery
 
-                async_inflight = detect_concurrency + max_workers * 2
+                adaptive_limit = (
+                    adaptive_detect_ceiling(
+                        scan_work_items_count,
+                        initial=detect_concurrency,
+                        deep_workers=max_workers,
+                        retained_fds=pool._max_idle_total,
+                    )
+                    if max_inflight_requests is None
+                    else None
+                )
+                async_inflight = max(detect_concurrency, adaptive_limit or 0) + max_workers * 2
                 if max_inflight_requests is not None:
                     async_inflight = min(max_inflight, async_inflight)
 
@@ -598,24 +644,34 @@ def collect_exporter_debug_data(
                     if job[0] != "scan":
                         return None
                     try:
-                        return await prefetch_metrics(job[1], job[3], job[5], timeout, retries, tls_context)
+                        return await prefetch_discovery(
+                            job[1], job[3], job[5], timeout, retries, scan_exporters, tls_context
+                        )
                     except AsyncHttpFallback:
                         return None
+                    except Exception as exc:
+                        return build_scan_error_record(job[1], job[3], exc), None
 
                 def _finish_job(job: tuple[Any, ...], prepared: Any) -> Any:
                     if job[0] != "scan" or prepared is None:
                         return _run_job(job)
-                    try:
-                        return scan_with_prefetched_metrics(
-                            job[1], job[3], scan_exporters, timeout, retries, job[5], prepared
+                    return prepared
+
+                def _limit_changed(limit: int, _reason: str) -> None:
+                    if stats_sink is not None:
+                        stats_sink["detect_concurrency_current"] = limit
+                        stats_sink["detect_concurrency_peak"] = max(
+                            detect_concurrency, int(stats_sink.get("detect_concurrency_peak", 0)), limit
                         )
-                    except Exception as exc:
-                        return build_scan_error_record(job[1], job[3], exc), None
+                        stats_sink["detect_adaptations"] = stats_sink.get("detect_adaptations", 0) + 1
 
                 outcomes = AsyncDetectScheduler[tuple[Any, ...], Any, Any](
                     detect_workers=detect_concurrency,
                     deep_workers=max_workers,
                     max_inflight=async_inflight,
+                    adaptive_max=adaptive_limit,
+                    retained_fds=pool._max_idle_total,
+                    on_limit_change=_limit_changed,
                 ).iter_completed(
                     roots,
                     _prepare_job,
@@ -624,7 +680,7 @@ def collect_exporter_debug_data(
                     inline_finish=lambda job, prepared: (
                         job[0] == "scan"
                         and prepared is not None
-                        and not (200 <= int(prepared.get("status") or 0) < 300)
+                        and not (200 <= int(prepared[0].get("status") or 0) < 300)
                     ),
                 )
             else:

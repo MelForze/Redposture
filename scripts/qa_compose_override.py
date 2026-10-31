@@ -8,12 +8,14 @@ fixture project that happens to use those names.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import sys
+from pathlib import Path
 
 
-def build_override(config: object, project: str) -> dict[str, object]:
+def build_override(config: object, project: str) -> dict[str, dict[str, dict[str, str]]]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", project):
         raise ValueError("invalid QA Compose project name")
     if not isinstance(config, dict) or not isinstance(config.get("services"), dict):
@@ -32,9 +34,18 @@ def build_override(config: object, project: str) -> dict[str, object]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True)
+    parser.add_argument("--config-output", type=Path)
     args = parser.parse_args()
     try:
-        result = build_override(json.load(sys.stdin), args.project)
+        config = json.load(sys.stdin)
+        result = build_override(config, args.project)
+        if args.config_output is not None:
+            merged = copy.deepcopy(config)
+            for service, override in result["services"].items():
+                merged["services"][service].update(override)
+            temporary = args.config_output.with_suffix(".tmp")
+            temporary.write_text(json.dumps(merged) + "\n", encoding="utf-8")
+            temporary.replace(args.config_output)
     except (ValueError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
     json.dump(result, sys.stdout)

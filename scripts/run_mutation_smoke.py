@@ -366,8 +366,8 @@ MUTATIONS = (
     Mutation(
         name="Exporter pool accepts one idle connection beyond per-host cap",
         source="redposture_core/exporters/http_pool.py",
-        original="if len(bucket) >= self._max_idle_per_host:",
-        replacement="if len(bucket) > self._max_idle_per_host:",
+        original="if self._closed or len(bucket) >= self._max_idle_per_host:",
+        replacement="if self._closed or len(bucket) > self._max_idle_per_host:",
         tests=("tests/test_quality_exporter_pool.py::test_pool_per_origin_cap_and_context_cleanup",),
     ),
     Mutation(

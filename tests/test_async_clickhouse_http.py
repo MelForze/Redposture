@@ -37,8 +37,11 @@ def native(columns, rows):
 BLOCK_INFO = b"\x01\x00\x02\xff\xff\xff\xff\x00"
 
 
-@pytest.mark.parametrize("protocol,enum_cve", [("http", False), ("http", True), ("auto", False)])
-def test_http_original_initializer_and_same_socket_worker_query(monkeypatch, protocol, enum_cve):
+@pytest.mark.parametrize(
+    "protocol,enum_cve,recover",
+    [("http", False, False), ("http", True, False), ("auto", False, False), ("auto", False, True)],
+)
+def test_http_original_initializer_and_same_socket_worker_query(monkeypatch, protocol, enum_cve, recover):
     import urllib3
 
     original = urllib3.PoolManager.request
@@ -123,7 +126,12 @@ def test_http_original_initializer_and_same_socket_worker_query(monkeypatch, pro
                 run_deep_checks=False,
                 lifecycle_state=actions.ClickHouseLifecycleState(),
             )
-            record = await async_detect.detect(ctx, None, stage._build_clickhouse_host_stage_options(args))
+            if recover:
+                from tests.test_native_detect_timeout_retries import recover_real_protocol
+
+                record, ctx = await recover_real_protocol(stage.build_clickhouse_spec(args), ctx, monkeypatch)
+            else:
+                record = await async_detect.detect(ctx, None, stage._build_clickhouse_host_stage_options(args))
             assert record.status == "open_no_auth"
             assert record.extra["protocol"] == "http"
             if enum_cve:

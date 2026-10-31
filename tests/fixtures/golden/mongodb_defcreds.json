@@ -151,6 +151,11 @@
         "username": "root"
       },
       {
+        "credential_capabilities": {
+          "collection_count": 8,
+          "database_count": 5,
+          "database_error": null
+        },
         "error": null,
         "ok": true,
         "password": "root",
@@ -179,6 +184,11 @@
         "username": "user"
       }
     ],
+    "credential_capabilities": {
+      "collection_count": 8,
+      "database_count": 5,
+      "database_error": null
+    },
     "credential_state": null,
     "database": null,
     "database_count": 5,

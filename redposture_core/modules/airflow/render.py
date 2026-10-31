@@ -14,6 +14,7 @@ from typing import Any
 
 from ...auth_detection import auth_required_text
 from ...console import Console
+from ...credential_evidence import attempt_capabilities
 from ...discovery_rendering import discovery_color_spans, format_discovery_finding_line
 from ...discovery_spool import SpoolingFindings
 from ...rendering import (
@@ -123,7 +124,12 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             continue
         username = str(attempt.get("username") or "")
         accepted = str(attempt.get("credential_state") or "") in {"valid", "valid_but_restricted"}
-        if accepted and not winner_skipped and username == selected:
+        selected_password_matches = (
+            attempt.get("password") == record["credential_password"]
+            if "credential_password" in record
+            else sum(item.get("username") == selected for item in attempts if isinstance(item, dict)) == 1
+        )
+        if accepted and not winner_skipped and username == selected and selected_password_matches:
             winner_skipped = True
             continue
         # Show the password on both outcomes: several defaults can share a
@@ -131,7 +137,11 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         # some default worked. Mirrors _format_record and the other cred modules.
         pair = f"{username}:{_password_text(attempt.get('password'))}"
         if accepted:
-            lines.append(f"{prefix} [+] {pair}")
+            capabilities = attempt_capabilities(record, attempt)
+            suffix = "".join(
+                f" ({resource}:{_access_text(capabilities, resource)})" for resource in _AUTHENTICATED_RESOURCES
+            )
+            lines.append(f"{prefix} [+] {pair}{suffix}")
         elif str(attempt.get("credential_state") or "") == "invalid":
             lines.append(f"{prefix} [-] {pair}")
         # A proxy or SSO page that did not verify the pair is diagnostic
@@ -416,7 +426,8 @@ def _render_colored_airflow_line(console: Console, line: str) -> bool:
                 rule
                 for resource in _AUTHENTICATED_RESOURCES
                 for rule in (
-                    RegexColorRule(rf"\({resource}:\d+\)", "true_red"),
+                    RegexColorRule(rf"\({resource}:0\)", "bright_green"),
+                    RegexColorRule(rf"\({resource}:[1-9]\d*\)", "true_red"),
                     RegexColorRule(rf"\({resource}:Access Denied\)", "bright_green"),
                     RegexColorRule(rf"\({resource}:Unknown\)", "orange"),
                 )

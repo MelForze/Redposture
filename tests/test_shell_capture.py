@@ -31,6 +31,38 @@ from redposture_core.shell_capture import (
 )
 
 
+def test_shell_input_echoes_piped_command_after_prompt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from redposture_core.shell_capture import read_shell_command
+
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+
+    def fake_input(prompt: str) -> str:
+        print(prompt, end="")
+        return "id"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert read_shell_command("postgres-os> ") == "id"
+    assert capsys.readouterr().out == "postgres-os> id\n"
+
+
+def test_shell_input_does_not_duplicate_terminal_echo(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from redposture_core.shell_capture import read_shell_command
+
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+
+    def fake_input(prompt: str) -> str:
+        print(prompt + "id")
+        return "id"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert read_shell_command("postgres-os> ") == "id"
+    assert capsys.readouterr().out == "postgres-os> id\n"
+
+
 def _encoded_lines(token: str, stdout: bytes, stderr: bytes, *, code: int = 0) -> list[str]:
     return [
         f"RP:{token}:STATUS:{code}",

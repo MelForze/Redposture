@@ -1368,7 +1368,7 @@ def test_spray_postgres_suffix_uses_verified_privilege_results() -> None:
         }
     )
     assert _credential_detail(spec, record, Candidate("pair", "postgres", "secret")) == (
-        "(superuser:True) (execute:True) (read:False) (DBs:2)"
+        "(superuser:True) (rce:True) (read:False) (DBs:2)"
     )
 
 

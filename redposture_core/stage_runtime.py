@@ -173,6 +173,33 @@ def format_pass_marker(pass_no: int, phase: str, event: str, **fields: Any) -> s
     return f"{base} {suffix}".rstrip()
 
 
+# These adapters preserve the complete sync detection decision tree on retry.
+# Compatibility fallbacks (framing, redirects, drivers, proxies) remain sync.
+_NATIVE_TIMEOUT_RECOVERY_MODULES = frozenset(
+    {
+        "postgres",
+        "grafana",
+        "qdrant",
+        "rabbitmq",
+        "etcd",
+        "proxmox",
+        "docker-registry",
+        "consul",
+        "kubeapi",
+        "minio",
+        "elastic",
+        "gitlab",
+        "redis",
+        "zookeeper",
+        "grpc",
+        "clickhouse",
+        "kafka",
+        "keeper",
+        "mongodb",
+    }
+)
+
+
 _PHASE_STAGE_NAMES: dict[AuditPhase, str] = {
     "detect": "detect_protocol",
     "auth": "auth_inference_credentials",
@@ -691,6 +718,9 @@ class ModuleAuditSpec:
     # A module may distinguish successful identity verification from a record
     # that merely remains usable through anonymous access.
     credential_gate: Callable[[AuditCredentialRun, AuditRecord], tuple[bool, str]] | None = None
+    # Optional active, bounded harmless command proof. Modules that opt in
+    # defer their initial text line until this hook has a truthful result.
+    rce_probe: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
     # Preserve every credential that was actually tried, including a
     # successful final candidate. Default-off keeps other module payloads
     # unchanged.
@@ -2864,7 +2894,12 @@ class AuditCommandRunner:
 
         total_deep_candidates = 0
         processed_deep = 0
-        from .async_detection import AsyncDetectScheduler, async_detection_allowed, automatic_detect_concurrency
+        from .async_detection import (
+            AsyncDetectScheduler,
+            adaptive_detect_ceiling,
+            async_detection_allowed,
+            automatic_detect_concurrency,
+        )
 
         use_async_detect = (
             getattr(self.spec, "detect_async", None) is not None
@@ -2881,6 +2916,15 @@ class AuditCommandRunner:
                 else automatic_detect_concurrency(target_count, deep_workers=worker_count)
             )
         if use_async_detect and detect_concurrency > 0:
+            adaptive_limit = (
+                adaptive_detect_ceiling(target_count, initial=detect_concurrency, deep_workers=worker_count)
+                if override is None
+                else None
+            )
+
+            def _detect_limit_changed(limit: int, reason: str) -> None:
+                if debug_emit is not None:
+                    debug_emit(f"detection admission: concurrency={limit} reason={reason} deep_workers={worker_count}")
 
             async def _detect_item(item: tuple[int, str, int, ScanTargetSpec | None]) -> _AuditDetectOutcome | None:
                 started_at = time.monotonic()
@@ -2892,7 +2936,12 @@ class AuditCommandRunner:
 
             outcomes = AsyncDetectScheduler[
                 tuple[int, str, int, ScanTargetSpec | None], _AuditDetectOutcome | None, _AuditPipelineOutcome
-            ](detect_workers=detect_concurrency, deep_workers=worker_count).iter_completed(
+            ](
+                detect_workers=detect_concurrency,
+                deep_workers=worker_count,
+                adaptive_max=adaptive_limit,
+                on_limit_change=_detect_limit_changed,
+            ).iter_completed(
                 plan.iter_target_specs(),
                 _detect_item,
                 _run_target,
@@ -3236,6 +3285,74 @@ class AuditCommandRunner:
         target: ScanTargetSpec | None,
         debug_emit: Callable[[str], None] | None,
     ) -> _AuditDetectOutcome | None:
+        # Verified native adapters can repeat the same complete detection
+        # without occupying an auth/data worker. Keep the existing
+        # native + sync + escalated-sync attempt budgets, now all native.
+        if self.spec.module not in _NATIVE_TIMEOUT_RECOVERY_MODULES:
+            return await self._run_async_detect_attempt(
+                host, port, target, debug_emit, self.args, sync_timeout_fallback=True
+            )
+        configured = float(getattr(self.args, "timeout", 3))
+        started = time.monotonic()
+        detect_args = self.args
+        for attempt, timeout in enumerate((configured, configured, 7.0), start=1):
+            if attempt > 1:
+                detect_args = copy.copy(self.args)
+                try:
+                    detect_args.timeout = timeout
+                except (AttributeError, TypeError):
+                    return None  # Preserve the sync fallback for embedded callers.
+                if debug_emit is not None:
+                    debug_emit(f"detect_timeout_retry host={host} port={port} attempt={attempt} timeout={timeout}")
+            outcome = await self._run_async_detect_attempt(
+                host, port, target, debug_emit, detect_args, sync_timeout_fallback=False
+            )
+            if outcome is None:
+                return None  # Unsupported native semantics still use the sync detector.
+            noise = _record_noise_text(outcome.record)
+            if (
+                configured >= 7
+                or attempt == 3
+                or self._is_detected(outcome.record)
+                or ("timed out" not in noise and "connection timeout" not in noise)
+            ):
+                if attempt > 1 and outcome.runtime_stage_telemetry:
+                    duration = max(1, int((time.monotonic() - started) * 1000))
+                    record = replace(
+                        outcome.record,
+                        stages=tuple(
+                            replace(trace, attempt=attempt, duration_ms=duration)
+                            if trace.stage_name == "detect_protocol"
+                            else trace
+                            for trace in outcome.record.stages
+                        ),
+                        extra={
+                            **outcome.record.extra,
+                            "stage_durations_ms": {
+                                **outcome.record.extra.get("stage_durations_ms", {}),
+                                "detect_protocol": duration,
+                            },
+                            "stage_attempts": {
+                                **outcome.record.extra.get("stage_attempts", {}),
+                                "detect_protocol": attempt,
+                            },
+                        },
+                    )
+                    outcome = replace(outcome, record=record)
+                return replace(outcome, started_at=started)
+            self._close_lifecycle_state(outcome.lifecycle_state)
+        raise AssertionError("unreachable detect retry state")
+
+    async def _run_async_detect_attempt(
+        self,
+        host: str,
+        port: int,
+        target: ScanTargetSpec | None,
+        debug_emit: Callable[[str], None] | None,
+        detect_args: Any,
+        *,
+        sync_timeout_fallback: bool,
+    ) -> _AuditDetectOutcome | None:
         import asyncio
 
         from .clients.async_http_detect import AsyncDetectionHttp, AsyncHttpFallback
@@ -3251,19 +3368,20 @@ class AuditCommandRunner:
             run_deep_checks=False,
             debug_emit=debug_emit,
         )
+        base_ctx = replace(base_ctx, args=detect_args)
         factory = self.spec.lifecycle_state_factory
         state = factory(base_ctx) if factory is not None else None
         self._register_lifecycle_state(state)
         ctx = replace(base_ctx, lifecycle_state=state)
         http = AsyncDetectionHttp(
-            timeout=float(getattr(self.args, "timeout", 3)),
-            retries=int(getattr(self.args, "retries", 0)),
+            timeout=float(getattr(detect_args, "timeout", 3)),
+            retries=int(getattr(detect_args, "retries", 0)),
             max_bytes=NATIVE_DETECT_BODY_MAX_BYTES,
             ssl_context=shared_client_ssl_context(
-                insecure=not bool(getattr(self.args, "tls_ca", None)),
-                ca_file=getattr(self.args, "tls_ca", None),
-                cert_file=getattr(self.args, "tls_cert", None),
-                key_file=getattr(self.args, "tls_key", None),
+                insecure=not bool(getattr(detect_args, "tls_ca", None)),
+                ca_file=getattr(detect_args, "tls_ca", None),
+                cert_file=getattr(detect_args, "tls_cert", None),
+                key_file=getattr(detect_args, "tls_key", None),
             ),
         )
         from .clients.async_resolver import resolver_fallbacks
@@ -3277,7 +3395,11 @@ class AuditCommandRunner:
             if resolution_failures:
                 raise AsyncHttpFallback("driver resolver failure: " + resolution_failures[0])
             # Preserve the existing synchronous timeout escalation policy.
-            if not self._is_detected(record) and float(getattr(self.args, "timeout", 3)) < 7:
+            if (
+                sync_timeout_fallback
+                and not self._is_detected(record)
+                and float(getattr(detect_args, "timeout", 3)) < 7
+            ):
                 noise = _record_noise_text(record)
                 if "timed out" in noise or "connection timeout" in noise:
                     self._close_lifecycle_state(state)
@@ -3343,6 +3465,11 @@ class AuditCommandRunner:
         discovery_started_at = _TARGET_DISCOVERY_STARTED_AT.get() or time.monotonic()
 
         phase_emit: Callable[..., None] | None = None
+
+        def _ignore_rce_record(_record: AuditRecord) -> None:
+            return None
+
+        emit_rce_record: Callable[[AuditRecord], None] = _ignore_rce_record
         phase_line_counts: Counter[str] = Counter()
         if self.spec.record_skipped_credential_attempts:
             with self._credential_ledger_lock:
@@ -3571,6 +3698,23 @@ class AuditCommandRunner:
             else:
                 phase_emit = _emit_phase
 
+            raw_phase_emit = phase_emit
+            rce_output_ready = self.spec.rce_probe is None
+            if callable(raw_phase_emit) and self.spec.rce_probe is not None:
+
+                def _deferred_rce_phase(record: AuditRecord, *args: Any, **kwargs: Any) -> None:
+                    if rce_output_ready:
+                        raw_phase_emit(record, *args, **kwargs)
+
+                phase_emit = _deferred_rce_phase
+
+                def emit_rce_record(record: AuditRecord) -> None:
+                    nonlocal rce_output_ready
+                    rce_output_ready = True
+                    raw_phase_emit(record, False)
+            else:
+                emit_rce_record = _ignore_rce_record
+
         detect_outcome = (
             prepared_detect
             if prepared_detect is not None
@@ -3596,7 +3740,9 @@ class AuditCommandRunner:
             any(value is not None for value in (credential.username, credential.password, credential.token))
             for credential in credential_runs
         )
-        defer_detect_output = bool(self.spec.defer_detect_output_until_auth and has_credential_candidate)
+        defer_detect_output = bool(
+            self.spec.rce_probe is not None or (self.spec.defer_detect_output_until_auth and has_credential_candidate)
+        )
         if detected and phase_emit is not None and not defer_detect_output:
             phase_emit(detect_record, False)
         if debug_emit is not None:
@@ -3642,7 +3788,13 @@ class AuditCommandRunner:
             credential_runs,
             debug_emit,
             phase_emit,
+            emit_rce_record if self.spec.rce_probe is not None else None,
         )
+        if self.spec.rce_probe is not None and "rce" not in final_record.extra:
+            final_record = replace(
+                final_record, extra={**final_record.extra, "rce": None, "rce_probe_performed": False}
+            )
+            emit_rce_record(final_record)
         if bool(getattr(self.args, "discover", False)) and self.spec.module in data_discovery.DISCOVERY_MODULES:
             payload = final_record.to_dict()
             if not isinstance(payload.get("content_discovery"), dict):
@@ -3723,6 +3875,7 @@ class AuditCommandRunner:
         credential_runs: tuple[AuditCredentialRun, ...],
         debug_emit: Callable[[str], None] | None,
         phase_emit: Callable[..., None] | None = None,
+        emit_rce_record: Callable[[AuditRecord], None] | None = None,
     ) -> AuditRecord:
         try:
             return self._safe_record(
@@ -3738,6 +3891,7 @@ class AuditCommandRunner:
                     lifecycle_state=detect_outcome.lifecycle_state,
                     runtime_stage_telemetry=detect_outcome.runtime_stage_telemetry,
                     phase_emit=phase_emit,
+                    emit_rce_record=emit_rce_record,
                 ),
                 prior_record=detect_outcome.record,
             )
@@ -3830,6 +3984,7 @@ class AuditCommandRunner:
         lifecycle_state: Any = None,
         runtime_stage_telemetry: bool = False,
         phase_emit: Callable[..., None] | None = None,
+        emit_rce_record: Callable[[AuditRecord], None] | None = None,
     ) -> AuditRecord:
         if self._host_stage_is_monolithic:
             return self._run_monolithic_deep_lifecycle(
@@ -4001,6 +4156,26 @@ class AuditCommandRunner:
         )
         if retain_all_attempts:
             selected_record = self._with_attempted_credentials(selected_record, auth_records, force=True)
+        if self.spec.rce_probe is not None:
+            probe_ctx = self._ctx(
+                host,
+                port,
+                target,
+                selected_credential,
+                phase="capabilities",
+                run_deep_checks=True,
+                debug_emit=debug_emit,
+                credential_runs=(selected_credential,),
+                lifecycle_state=lifecycle_state,
+            )
+            try:
+                selected_record = self.spec.rce_probe(probe_ctx, selected_record)
+            except Exception as exc:  # noqa: BLE001 - keep a failed proof inconclusive
+                selected_record = replace(
+                    selected_record, extra={**selected_record.extra, "rce": None, "rce_probe_error": str(exc)}
+                )
+            if emit_rce_record is not None:
+                emit_rce_record(selected_record)
         if self.spec.record_skipped_credential_attempts and stop_reason in {
             "cancelled",
             "rate_limited",
@@ -5031,6 +5206,11 @@ def run_basic_host_audit(
     except ValueError as exc:
         console.error(str(exc))
         return 2
+    if bool(getattr(args, "os_shell", False)):
+        from .modules.execution_api import validate_os_shell_plan
+
+        if validate_os_shell_plan(plan, console) is not None:
+            return 2
     if cfg.debug and not getattr(args, "debug_emit", None):
         args.debug_emit = console.info
     if cfg.debug:

@@ -98,46 +98,40 @@ collect_lab_ports() {
       echo "[error] failed to resolve published ports for lab service ${service}" >&2
       return 2
     fi
-    printf "%s" "${compose_json}" | "${PYTHON_BIN}" "${ROOT_DIR}/scripts/compose_published_ports.py"
+    printf "%s" "${compose_json}" | "${PYTHON_BIN}" "${ROOT_DIR}/scripts/compose_published_ports.py" || return 2
   done | sort -un
 }
 
 preflight_lab_environment() {
-  echo "== pre-run: stopping isolated redposture lab stacks (preserving volumes) =="
-  local service
-  for service in "${MATRIX_SERVICES[@]}"; do
-    compose_service "${service}" down >/dev/null 2>&1 || true
-  done
-
-  echo "== pre-run: verifying lab ports are free =="
-  local lab_ports
-  if ! lab_ports="$(collect_lab_ports)"; then
+  local existing_containers existing_networks service
+  if ! existing_containers="$(docker ps -aq --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}")" ||
+     ! existing_networks="$(docker network ls -q --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}")"; then
+    echo "[error] cannot inspect isolated QA project: ${COMPOSE_PROJECT_NAME}" >&2
     return 2
   fi
-  if [ -z "${lab_ports}" ]; then
+  if [ -n "${existing_containers}${existing_networks}" ]; then
+    echo "== pre-run: stopping isolated redposture lab stacks (preserving volumes) =="
+    for service in "${MATRIX_SERVICES[@]}"; do
+      if ! compose_service "${service}" down >/dev/null 2>&1; then
+        echo "[error] cannot clean isolated QA service: ${service}" >&2
+        return 2
+      fi
+    done
+  else
+    echo "== pre-run: isolated QA project is empty; no stacks to stop =="
+  fi
+
+  echo "== pre-run: verifying lab ports are free =="
+  local ports_file="${OUT_DIR}/logs/lab-ports.txt"
+  if ! collect_lab_ports >"${ports_file}"; then
+    return 2
+  fi
+  if [ ! -s "${ports_file}" ]; then
     echo "[error] resolved lab port set is empty" >&2
     return 2
   fi
-  local conflicts=0
-  local port
-  for port in ${lab_ports}; do
-    local cids
-    cids="$(docker ps -q --filter "publish=${port}" 2>/dev/null || true)"
-    if [ -z "${cids}" ]; then
-      continue
-    fi
-    local cid
-    for cid in ${cids}; do
-      local name
-      name="$(docker inspect -f '{{.Name}}' "${cid}" 2>/dev/null | sed 's|^/||')"
-      echo "[error] lab port conflict: port=${port} container=${cid:0:12} name=${name:-unknown}" >&2
-      conflicts=$((conflicts + 1))
-    done
-  done
-  if [ "${conflicts}" -ne 0 ]; then
-    echo "[error] refusing to remove ${conflicts} external port occupant(s); stop or reconfigure them first" >&2
-    return 2
-  fi
+  "${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_port_conflicts.py" --ports-file "${ports_file}" \
+    --snapshot "${OUT_DIR}/logs/preflight-containers.json"
 }
 
 is_extended_matrix() {
@@ -160,6 +154,10 @@ compose_service() {
       >>"${OUT_DIR}/logs/harbor-prepare.log" 2>&1 || return 1
     local override
     override="$(qa_compose_override "${service}" "${compose_file}")" || return 1
+    if [ "$#" -eq 3 ] && [ "$1" = config ] && [ "$2" = --format ] && [ "$3" = json ]; then
+      cat "${OUT_DIR}/logs/${service}-compose.json"
+      return
+    fi
     docker compose -p "${COMPOSE_PROJECT_NAME:-redposture-matrix-harbor}" -f "${compose_file}" -f "${override}" "$@"
     return
   fi
@@ -169,6 +167,10 @@ compose_service() {
   fi
   local override
   override="$(qa_compose_override "${service}" "${compose_file}")" || return 1
+  if [ "$#" -eq 3 ] && [ "$1" = config ] && [ "$2" = --format ] && [ "$3" = json ]; then
+    cat "${OUT_DIR}/logs/${service}-compose.json"
+    return
+  fi
   docker compose -f "${compose_file}" -f "${override}" "$@"
 }
 
@@ -176,10 +178,12 @@ qa_compose_override() {
   local service="$1"
   local compose_file="$2"
   local override="${OUT_DIR}/logs/${service}-container-names.json"
-  if [ ! -f "${override}" ]; then
+  local config="${OUT_DIR}/logs/${service}-compose.json"
+  if [ ! -f "${override}" ] || [ ! -f "${config}" ]; then
     docker compose -f "${compose_file}" config --format json \
       | "${PYTHON_BIN}" "${ROOT_DIR}/scripts/qa_compose_override.py" \
-          --project "${COMPOSE_PROJECT_NAME}" >"${override}" || return 1
+          --project "${COMPOSE_PROJECT_NAME}" --config-output "${config}" >"${override}.tmp" || return 1
+    mv "${override}.tmp" "${override}" || return 1
   fi
   printf '%s\n' "${override}"
 }
@@ -257,24 +261,23 @@ wait_healthy_service() {
   local service="$1"
   local timeout="${2:-180}"
   local elapsed=0
+  local ps_error_file="${OUT_DIR}/logs/${service}-readiness.stderr"
   while [ "${elapsed}" -lt "${timeout}" ]; do
-    local ps_output
+    local container_ids
     set +e
-    ps_output="$(compose_service "${service}" ps --all 2>&1)"
+    container_ids="$(compose_service "${service}" ps --all -q 2>"${ps_error_file}")"
     local ps_rc=$?
     set -e
     if [ "${ps_rc}" -ne 0 ]; then
-      if printf "%s" "${ps_output}" | grep -qi "failed to connect to the docker API"; then
+      if grep -qi "failed to connect to the docker API" "${ps_error_file}"; then
         echo "[error] docker daemon is unavailable while checking service ${service}" >&2
-        printf "%s\n" "${ps_output}" >&2
+        cat "${ps_error_file}" >&2
         return 1
       fi
       sleep 2
       elapsed=$((elapsed + 2))
       continue
     fi
-    local container_ids
-    container_ids="$(compose_service "${service}" ps --all -q 2>/dev/null || true)"
     if [ -z "${container_ids}" ]; then
       sleep 2
       elapsed=$((elapsed + 2))

@@ -7,10 +7,11 @@ cd "$ROOT_DIR" || exit 2
 OUT_DIR=""
 REUSE_VENVS=0
 ALLOW_MISSING=0
+PARALLEL_TESTS=1
 
 usage() {
   cat <<'EOF'
-Usage: bash scripts/check_before_push.sh [--reuse-venvs] [--allow-missing] [--out DIR]
+Usage: bash scripts/check_before_push.sh [--reuse-venvs] [--allow-missing] [--parallel-tests|--sequential-tests] [--out DIR]
 
 Check the current uncommitted tree before your own commit/push. Runs
 git diff --check and the same lint/test jobs as GitHub CI on Python 3.12–3.14.
@@ -18,6 +19,8 @@ Logs and a short report are saved under .redposture/qa/ by default.
 
   --reuse-venvs   Reuse installed .ci-venvs (faster; dependencies are not refreshed).
   --allow-missing Report a partial check if a Python version is unavailable.
+  --parallel-tests Run the per-version CI tests concurrently with separate logs and a RAM guard (default).
+  --sequential-tests Run the per-version CI tests sequentially if machine resources are constrained.
   --out DIR       Choose the report directory.
 
 Does not commit, tag, push, or start Docker QA.
@@ -28,6 +31,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --reuse-venvs) REUSE_VENVS=1; shift ;;
     --allow-missing) ALLOW_MISSING=1; shift ;;
+    --parallel-tests) PARALLEL_TESTS=1; shift ;;
+    --sequential-tests) PARALLEL_TESTS=0; shift ;;
     --out)
       if [[ $# -lt 2 || -z "$2" ]]; then
         echo "--out requires a directory" >&2
@@ -117,6 +122,10 @@ if [[ "$REUSE_VENVS" -eq 1 ]]; then
 fi
 if [[ "$ALLOW_MISSING" -eq 1 ]]; then
   matrix+=(--allow-missing)
+fi
+if [[ "$PARALLEL_TESTS" -eq 1 ]]; then
+  matrix+=(--parallel-tests)
+  export REDPOSTURE_CI_PARALLEL_LOG_DIR="$OUT_DIR/parallel-tests"
 fi
 run_step ci-matrix "${matrix[@]}" || exit $?
 printf '\nAll requested checks passed. No commit, tag, or push was created.\n' >> "$REPORT"

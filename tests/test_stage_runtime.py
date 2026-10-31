@@ -542,6 +542,65 @@ def test_opt_in_live_phase_output_shows_service_before_interactive_data(tmp_path
     assert output_path.read_text(encoding="utf-8").splitlines() == emitted
 
 
+def test_rce_probe_runs_after_auth_and_before_first_live_service_line(tmp_path: Path) -> None:
+    emitted: list[str] = []
+    output_path = tmp_path / "rce-before-data.txt"
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            {"host": ctx.host, "port": ctx.port, "status": "auth_required", "is_demo": True},
+            module="demo",
+            service="demo",
+        )
+
+    def auth(_ctx, record: AuditRecord) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            {**record.to_dict(), "status": "valid_credentials"}, module="demo", service="demo"
+        )
+
+    def rce_probe(_ctx, record: AuditRecord) -> AuditRecord:
+        assert emitted == []
+        return AuditRecord.from_mapping({**record.to_dict(), "rce": True}, module="demo", service="demo")
+
+    def render(record: AuditRecord) -> list[str]:
+        lines = [f"DEMO {record.host} service (rce:{record.extra.get('rce', 'unknown')})"]
+        if record.extra.get("data_done"):
+            lines.append(f"DEMO {record.host} data")
+        return lines
+
+    def data(_ctx, record: AuditRecord) -> AuditRecord:
+        assert emitted == ["DEMO host service (rce:True)"]
+        return AuditRecord.from_mapping({**record.to_dict(), "data_done": True}, module="demo", service="demo")
+
+    runner = AuditCommandRunner(
+        args=SimpleNamespace(discover=True, debug=False),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            auth=auth,
+            data=data,
+            rce_probe=rce_probe,
+            render=render,
+            is_detected=lambda record: record.extra.get("is_demo") is True,
+            live_phase_output=True,
+        ),
+        emit_line=emitted.append,
+    )
+    runner.run_plan(
+        AuditCommandPlan(
+            targets_by_port={1234: ("host",)},
+            output_path=str(output_path),
+            output_format="txt",
+            workers=1,
+        )
+    )
+
+    assert emitted == ["DEMO host service (rce:True)", "DEMO host data"]
+    assert output_path.read_text(encoding="utf-8").splitlines() == emitted
+
+
 def test_discover_streams_detection_and_auth_before_data_and_avoids_final_duplicates(tmp_path: Path) -> None:
     emitted: list[str] = []
     output_path = tmp_path / "discover.txt"

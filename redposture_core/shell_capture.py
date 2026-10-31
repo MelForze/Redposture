@@ -6,6 +6,7 @@ import base64
 import binascii
 import importlib
 import shlex
+import sys
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,14 @@ from typing import Any
 
 DEFAULT_CAPTURE_BYTES = 8 * 1024 * 1024
 MAX_CAPTURE_BYTES = 50 * 1024 * 1024
+
+
+def read_shell_command(prompt: str) -> str:
+    """Echo piped input so its result starts on a separate transcript line."""
+    command = input(prompt)
+    if not sys.stdin.isatty():
+        print(command, flush=True)
+    return command
 
 
 @dataclass(frozen=True)
@@ -23,12 +32,17 @@ class CommandResult:
     duration_ms: int | None = None
     stdout_total: int | None = None
     stderr_total: int | None = None
+    capture_truncated: bool = False
     error: str | None = None
     outcome_unknown: bool = False
 
     @property
     def truncated(self) -> bool:
-        return (self.stdout_total or 0) > len(self.stdout) or (self.stderr_total or 0) > len(self.stderr)
+        return (
+            self.capture_truncated
+            or (self.stdout_total or 0) > len(self.stdout)
+            or (self.stderr_total or 0) > len(self.stderr)
+        )
 
 
 def build_capture_command(command: str, token: str, *, max_bytes: int = DEFAULT_CAPTURE_BYTES) -> str:
@@ -266,8 +280,7 @@ class ShellView:
                 console.plain(f"[-] Save failed: {exc}", color="orange")
             else:
                 console.plain(f"[+] Saved {written} B to {args[0]}", color="true_red")
-                total = self.last.stdout_total if stream == "stdout" else self.last.stderr_total
-                if total is not None and total > written:
+                if self.last.truncated:
                     console.plain("[!] Saved data is partial because capture was truncated", color="orange")
             return True, False
         try:

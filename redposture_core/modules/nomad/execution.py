@@ -137,7 +137,9 @@ def _allocation(ctx: Any, prior: dict[str, Any], output: dict[str, Any]) -> dict
                     output[channel] += raw.decode("utf-8", errors="replace")
             if message.get("exited") is True:
                 terminal = message.get("result")
-                code = terminal.get("exit_code") if isinstance(terminal, dict) else None
+                # Nomad's stream uses protobuf JSON: a successful exit may be
+                # encoded as result:{} because the numeric zero is omitted.
+                code = terminal.get("exit_code", 0) if isinstance(terminal, dict) else None
                 if type(code) is not int:
                     raise ValueError("allocation exit frame has no exit code")
                 output.update(executed=True, exit_code=code, status="complete")

@@ -204,6 +204,7 @@ def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
         suppress_undetected_records_in_text=True,
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
+        credential_attempt_detail_fields=("credential_capabilities",),
     )
 
 
@@ -472,7 +473,6 @@ def _run_clickhouse_os_shell(args: Any, logger: Any, console: Any) -> int:
     shell_password = "" if effective_password is None else str(effective_password)
     shell_protocol = str(record.get("protocol") or protocol)
     readline_module = actions._load_readline_module()
-    console.success("clickhouse os-shell ready; type 'exit' or 'quit' to stop")
     shell_session: actions._ChSession | None = None
     shell_view = ShellView()
     try:

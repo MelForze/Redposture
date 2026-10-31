@@ -53,7 +53,7 @@ def configure_jenkins_parser(
         "--show-jobs", **optional_show_count_kwargs("List jobs visible to the selected identity or anonymously.")
     )
     execution = parser.add_argument_group("Execution")
-    add_execution_flags(execution)
+    add_execution_flags(execution, include_os_shell=True)
     inventory.add_argument(
         "--show-builds", **optional_show_count_kwargs("List recent builds of visible jobs; implies --show-jobs.")
     )

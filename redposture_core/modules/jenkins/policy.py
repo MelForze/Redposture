@@ -6,11 +6,29 @@ from pathlib import Path
 from typing import Any
 
 from ..execution_api import validate as validate_execution
+from ..execution_api import validate_os_shell
 
 
 def validate_args(args: Any, console: Any) -> int | None:
     if (execution_rc := validate_execution(args, console)) is not None:
         return execution_rc
+    if (
+        shell_rc := validate_os_shell(
+            args,
+            console,
+            forbidden=(
+                "show_builds",
+                "show_jobs",
+                "show_plugins",
+                "show_nodes",
+                "show_queue",
+                "show_artifacts",
+                "discover",
+                "enum_cve",
+            ),
+        )
+    ) is not None:
+        return shell_rc
     token = getattr(args, "api_token", None)
     token_file = getattr(args, "api_token_file", None)
     if token_file:

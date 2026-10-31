@@ -21,6 +21,7 @@ from typing import Any
 from ...clients import transport
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
+from ...credential_evidence import attempt_capabilities
 from ...discovery_spool import SpoolingValues
 from ...discovery_values import DiskBackedText
 from ...rendering import (
@@ -2954,7 +2955,7 @@ def _caps_suffix(record: dict[str, Any]) -> str:
     return " ".join(
         (
             f"(superuser:{superuser_text})",
-            f"(execute:{execute_text})",
+            f"(rce:{execute_text})",
             f"(read:{read_tables_text})",
             f"(DBs:{databases_text})",
         )
@@ -3677,10 +3678,15 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             and status in {"valid_credentials", "weak_default_creds"}
         )
         if ok:
-            suffix = ""
-            if not selected_success_rendered:
-                suffix = f" {_caps_suffix(record)}"
-                selected_success_rendered = True
+            selected = (
+                not selected_success_rendered
+                and attempt.get("startup_complete") is not False
+                and (not record.get("effective_username") or username == record["effective_username"])
+                and (record.get("provided_password") is None or password == record["provided_password"])
+            )
+            capabilities = attempt_capabilities(record, attempt, selected=selected)
+            suffix = f" {_caps_suffix(capabilities)}"
+            selected_success_rendered = selected_success_rendered or selected
             if attempt.get("startup_complete") is False:
                 suffix += _pg_failed_startup_suffix(attempt)
             lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
@@ -3714,7 +3720,7 @@ def _render_colored_postgres_line(console: Console, line: str) -> bool:
         regexes=((r"\(version:[^)]+\)", "orange"),),
         booleans=(
             BooleanColorRule("superuser", unknown_color="orange"),
-            BooleanColorRule("execute", unknown_color="orange"),
+            BooleanColorRule("rce", unknown_color="orange"),
             BooleanColorRule("read", unknown_color="orange"),
             BooleanColorRule("partial", true_color="orange", false_color="bright_green"),
         ),

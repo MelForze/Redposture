@@ -688,8 +688,9 @@ def test_audit_etcd_authenticated_reads_propagate_token_and_render_selected_defa
     assert record["effective_username"] == "admin"
     assert record["effective_password"] == "changeme"
     assert "candidate transport failure" in str(record["credential_attempts"][0]["error"])
-    assert len(token_calls) == 3
-    assert all(token == "token-123" for _payload, token in token_calls)
+    assert len(token_calls) == 4
+    assert [token for _payload, token in token_calls].count("token-later") == 1
+    assert [token for _payload, token in token_calls].count("token-123") == 3
     assert _format_record(record, "txt") == ""
     rendered = _format_credential_attempts_records(record, "txt")
     assert len(rendered) == len(etcd._ETCD_DEFAULT_CREDS) - 1
@@ -697,7 +698,7 @@ def test_audit_etcd_authenticated_reads_propagate_token_and_render_selected_defa
     selected_line = next(line for line in rendered if "[+] admin:changeme" in line)
     later_success_line = next(line for line in rendered if "[+] root:etcd" in line)
     assert selected_line.endswith("[+] admin:changeme (keys:0)")
-    assert later_success_line.endswith("[+] root:etcd")
+    assert later_success_line.endswith("[+] root:etcd (keys:0)")
 
 
 def test_audit_etcd_defcreds_full_failure_renders_each_pair_once(monkeypatch) -> None:

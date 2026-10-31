@@ -131,7 +131,8 @@ def _run(mode, tls, deny, tmp_path, material):
                     },
                 }
                 if path.endswith("/allocations"):
-                    return self.reply(200, [{"ID": "owned", "JobID": state["job"], "ClientStatus": "complete"}])
+                    requested_job = path.split("/")[-2]
+                    return self.reply(200, [{"ID": "owned", "JobID": requested_job, "ClientStatus": "complete"}])
                 if path.startswith("/v1/client/fs/logs/"):
                     return self.reply(200, b"emulated-output\n", raw=True)
                 return self.reply(200, routes[path]) if path in routes else self.reply(404, {})
@@ -156,9 +157,11 @@ def _run(mode, tls, deny, tmp_path, material):
             if deny:
                 return self.reply(403, {"message": "Forbidden"})
             if module == "nomad":
-                state["job"] = body["Job"]["ID"]
-                assert body["Job"]["Stop"] is (action == "probe")
-                state["created"].append(state["job"])
+                job_id = body["Job"]["ID"]
+                assert body["Job"]["Stop"] is job_id.startswith("redposture-submit-")
+                if body["Job"]["Stop"]:
+                    state["job"] = job_id
+                state["created"].append(job_id)
                 return self.reply(200, {"EvalID": "eval", "JobModifyIndex": 5})
             state["created"].append("owned")
             return self.reply(201, {"id": "owned"}) if path == "/api/kernels" else self.reply(200, {"name": "owned"})
@@ -206,7 +209,7 @@ def _run(mode, tls, deny, tmp_path, material):
         record = next(r for r in records if r.get("is_" + module))
         if deny:
             assert not record["execution"]["executed"]
-            assert not state["created"] and len(state["posts"]) == 1
+            assert not state["created"] and len(state["posts"]) == (2 if action != "probe" else 1)
             assert completed.returncode != 0
         elif action == "probe":
             assert record["submit_probe"]["access"] == "allowed"

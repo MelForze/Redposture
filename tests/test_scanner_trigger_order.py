@@ -6,10 +6,10 @@ from urllib.parse import urlparse
 from redposture_core.scanner import scan_exporters_and_trigger
 
 
-def test_scan_then_trigger_phase_order(monkeypatch) -> None:
+def test_trigger_requires_its_own_detection_before_callback(monkeypatch) -> None:
     detect_calls: list[str] = []
     trigger_calls: list[str] = []
-    emitted_phases: list[str] = []
+    emitted_events: list[dict[str, object]] = []
 
     def fake_http_get_text(url: str, timeout: float, retries: int = 1) -> tuple[int, str]:
         parsed = urlparse(url)
@@ -45,8 +45,7 @@ def test_scan_then_trigger_phase_order(monkeypatch) -> None:
     ]
 
     def emit(event: dict[str, object]) -> None:
-        phase = str(event.get("phase") or "")
-        emitted_phases.append(phase)
+        emitted_events.append(event)
 
     summary = scan_exporters_and_trigger(
         logger=None,
@@ -66,10 +65,16 @@ def test_scan_then_trigger_phase_order(monkeypatch) -> None:
     assert len(detect_calls) == 2
     assert len(trigger_calls) == 2
 
-    # Two-phase guarantee: all detect events must happen before callback attempts.
-    assert emitted_phases
-    first_callback_idx = emitted_phases.index("callback_attempt")
-    assert all(phase == "detect_hit" for phase in emitted_phases[:first_callback_idx])
+    # Each exporter is confirmed before its callbacks; other exporters may
+    # still be in detection while those callbacks run.
+    detected = set()
+    for event in emitted_events:
+        identity = (event.get("host"), event.get("exporter"))
+        if event.get("phase") == "detect_hit":
+            detected.add(identity)
+        elif event.get("phase") == "callback_attempt":
+            assert identity in detected
+    assert len(detected) == 2
 
 
 def test_trigger_progress_callbacks_cover_detect_and_deep(monkeypatch) -> None:

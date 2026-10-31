@@ -96,6 +96,8 @@
     "provided_username": "metrics",
     "query_topic": null,
     "query_topic_value": null,
+    "rce": false,
+    "rce_probe_performed": true,
     "service": "kafka",
     "show_topics": true,
     "show_topics_limit": null,

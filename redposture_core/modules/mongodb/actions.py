@@ -25,6 +25,7 @@ from ...clients.mongodb import (
     probe_legacy_mongodb_hello,
 )
 from ...console import Console
+from ...credential_evidence import attempt_capabilities
 from ...discovery_spool import SpoolingRecords
 from ...discovery_values import iter_json_chunks
 from ...rendering import (
@@ -326,6 +327,20 @@ def _try_credentials(
                 "error": None,
                 "credential_state": "valid",
             }
+            evidence: dict[str, Any] = {}
+            try:
+                names, database_error = _try_list_databases(mongo)
+                evidence["database_count"] = len(names) if names is not None else None
+                evidence["database_error"] = database_error
+                count = 0
+                if names is not None:
+                    for database_name in names:
+                        count += len(mongo.list_collection_names(database_name))
+                evidence["collection_count"] = count if names is not None else None
+            except Exception as exc:
+                evidence["collection_count"] = None
+                evidence["capability_error"] = normalize_mongodb_error(exc)
+            attempt["credential_capabilities"] = evidence
             attempts.append(attempt)
             if selected is None:
                 selected = attempt
@@ -692,6 +707,7 @@ def _base_record(
         "defcreds_enabled": False,
         "effective_username": None,
         "credential_attempts": [],
+        "credential_capabilities": {},
         "server_version": None,
         "hello": None,
         "show_databases": show_databases,
@@ -964,6 +980,9 @@ def _audit_mongodb_host(
                     "defcreds_enabled": any(bool(item.get("default")) for item in credential_attempts),
                     "effective_username": effective_username,
                     "credential_attempts": credential_attempts,
+                    "credential_capabilities": dict(selected_credential.get("credential_capabilities") or {})
+                    if selected_credential is not None
+                    else {},
                     "provided_credentials_ok": (
                         True if credential_state == "valid" else False if credential_state == "invalid" else None
                     ),
@@ -1150,7 +1169,9 @@ def _nxc_prefix(record: dict[str, Any]) -> str:
 def _caps_suffix(record: dict[str, Any]) -> str:
     database_count = record.get("database_count")
     collections = record.get("collections")
-    collection_count = len(collections) if isinstance(collections, list) else None
+    collection_count = record.get("collection_count")
+    if not isinstance(collection_count, int):
+        collection_count = len(collections) if isinstance(collections, list) else None
     return f"(DBs:{format_count_value(database_count)}) (collections:{format_count_value(collection_count)})"
 
 
@@ -1223,6 +1244,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
 
 def _credential_attempt_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
+    runtime_attempts = record.get("attempted_credentials")
+    if isinstance(runtime_attempts, list) and runtime_attempts:
+        return _generic_credential_attempt_rows(runtime_attempts)
     attempts = record.get("credential_attempts")
     if isinstance(attempts, list) and attempts:
         return [item for item in attempts if isinstance(item, dict)]
@@ -1241,6 +1265,8 @@ def _generic_credential_attempt_rows(attempted_credentials: Any) -> list[dict[st
             {
                 "username": item.get("username"),
                 "password": item.get("password"),
+                "source": item.get("source", "provided"),
+                "credential_capabilities": item.get("credential_capabilities"),
                 "ok": status in {"open_no_auth", "valid_credentials", "weak_default_creds"},
                 "default": item.get("source") == "default",
                 "error": status or None,
@@ -1278,8 +1304,8 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         password_text = "<empty>" if password == "" else str(password or "")
         if attempt.get("ok"):
             selected = attempt.get("username") == selected_username and password == selected_password
-            suffix = _caps_suffix(record) if selected else ""
-            lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
+            suffix = _caps_suffix(attempt_capabilities(record, attempt, selected=selected))
+            lines.append(f"{prefix} [+] {username}:{password_text} {suffix}")
         else:
             lines.append(f"{prefix} [-] {username}:{password_text}")
     if inconclusive:

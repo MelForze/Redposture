@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from ..execution_api import validate
+from ..execution_api import validate, validate_os_shell
 from ..token_api import safe_path, validate_token_args
 
 
@@ -11,6 +11,21 @@ def validate_args(args: Any, console: Any) -> int | None:
     if result is not None:
         return result
     if (result := validate(args, console)) is not None:
+        return result
+    if (
+        result := validate_os_shell(
+            args,
+            console,
+            forbidden=(
+                "show_kernels",
+                "show_contents",
+                "show_terminals",
+                "show_sessions",
+                "discover",
+                "enum_cve",
+            ),
+        )
+    ) is not None:
         return result
     kernel = getattr(args, "kernel", "python3")
     if not kernel or not safe_path(kernel) or "/" in kernel:

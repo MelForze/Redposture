@@ -15,6 +15,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "admin",
+        "source": "default",
         "token": null,
         "username": "admin"
       },
@@ -22,6 +23,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "changeme",
+        "source": "default",
         "token": null,
         "username": "admin"
       },
@@ -29,6 +31,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "etcd",
+        "source": "default",
         "token": null,
         "username": "admin"
       },
@@ -36,6 +39,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "password",
+        "source": "default",
         "token": null,
         "username": "admin"
       },
@@ -43,6 +47,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "etcd",
+        "source": "default",
         "token": null,
         "username": "etcd"
       },
@@ -50,6 +55,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "password",
+        "source": "default",
         "token": null,
         "username": "etcd"
       },
@@ -57,6 +63,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "12345678",
+        "source": "default",
         "token": null,
         "username": "root"
       },
@@ -64,6 +71,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "admin",
+        "source": "default",
         "token": null,
         "username": "root"
       },
@@ -71,6 +79,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "etcd",
+        "source": "default",
         "token": null,
         "username": "root"
       },
@@ -78,6 +87,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "password",
+        "source": "default",
         "token": null,
         "username": "root"
       },
@@ -85,13 +95,19 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "root",
+        "source": "default",
         "token": null,
         "username": "root"
       },
       {
+        "credential_capabilities": {
+          "key_count": 2,
+          "key_count_error": null
+        },
         "error": null,
         "ok": true,
         "password": "rootpass",
+        "source": "default",
         "token": null,
         "username": "root"
       },
@@ -99,6 +115,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "service",
+        "source": "default",
         "token": null,
         "username": "service"
       },
@@ -106,6 +123,7 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "password",
+        "source": "default",
         "token": null,
         "username": "user"
       },
@@ -113,10 +131,20 @@
         "error": "invalid credentials",
         "ok": false,
         "password": "user",
+        "source": "default",
         "token": null,
         "username": "user"
       }
     ],
+    "credential_capabilities": {
+      "key_count": 4,
+      "key_count_by_api": {
+        "v2": 2,
+        "v3": 2
+      },
+      "key_count_error": null,
+      "key_count_state": "known"
+    },
     "defcreds_enabled": true,
     "detection_signals": [
       "etcd.probe",

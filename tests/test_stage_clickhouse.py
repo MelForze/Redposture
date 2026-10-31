@@ -1107,7 +1107,7 @@ def test_run_clickhouse_stage_os_shell_executes_command(
     assert captured["command"] == "id"
     assert captured["session"] is shell_session
     stdout = capsys.readouterr().out
-    assert "clickhouse os-shell ready" in stdout
+    assert "os-shell ready" not in stdout
     assert "uid=1000(redposture)" in stdout
 
 
@@ -1826,7 +1826,7 @@ def test_render_colored_clickhouse_line_smoke() -> None:
     rendered = clickhouse_stage._render_colored_clickhouse_line(
         painter,
         "CLICKHOUSE\t127.0.0.1\t9000\t [+] anonymous access (auth required:False) "
-        "(read:true) (execute:false) (admin:unknown) (DBs:2)",
+        "(read:true) (rce:false) (admin:unknown) (DBs:2)",
     )
     assert rendered is True
     assert painter.lines and "auth required:False" in painter.lines[0]
@@ -1996,6 +1996,18 @@ def test_clickhouse_lifecycle_renders_every_attempt_until_first_success_without_
 
     monkeypatch.setattr(clickhouse_stage, "_open_operational_session", fake_auth)
     monkeypatch.setattr(clickhouse_stage, "_run_clickhouse_actions_on_session", fake_actions)
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "_collect_capabilities",
+        lambda session, **_kwargs: (
+            session.username == "admin",
+            False,
+            False,
+            7 if session.username == "admin" else 0,
+            None,
+            None,
+        ),
+    )
     monkeypatch.setattr(clickhouse_stage, "_close_client", lambda *_args: None)
 
     args = parse_args(["clickhouse", "-t", "127.0.0.1", "--port", "9000", "--defcreds"])
@@ -2033,7 +2045,7 @@ def test_clickhouse_lifecycle_renders_every_attempt_until_first_success_without_
     selected_line = next(line for line in attempt_lines if "[+] admin:admin" in line)
     later_success_line = next(line for line in attempt_lines if "[+] default:default" in line)
     assert "(read:true)" in selected_line
-    assert "(read:" not in later_success_line
+    assert "(read:false) (rce:false) (admin:false) (DBs:0)" in later_success_line
 
 
 def test_clickhouse_auth_retries_transient_failure_without_repeating_detect(

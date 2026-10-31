@@ -29,7 +29,7 @@ def configure_consul_parser(
     execution_options = parser.add_argument_group("Execution")
 
     add_output_flags(common)
-    add_execution_flags(execution_options)
+    add_execution_flags(execution_options, include_os_shell=True)
     add_log_flag(common)
     add_scan_host_flags(common, include_profiles=False)
     common.add_argument(

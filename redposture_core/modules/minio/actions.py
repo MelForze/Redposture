@@ -903,8 +903,8 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     )
     if merged["provided_credentials_ok"]:
         # TXT-only echo of the accepted secret so the detail line can show the
-        # working access-key:secret pair. Redacted from JSON (see stage spec),
-        # matching how minio already keeps attempted_credentials out of JSON.
+        # working access-key:secret pair. The duplicate root field is omitted
+        # from JSON; the per-pair ledger retains credentials and their evidence.
         merged["credential_secret"] = getattr(credential, "password", None)
         # The auth phase can be emitted immediately for --enum-cve/--discover.
         # Probe read-only Admin API access now so that its first result already
@@ -920,6 +920,47 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         merged["admin_capability"] = cap.capability
         merged["identity_kind"] = cap.identity_kind
         merged["admin_evidence"] = cap.evidence
+        evidence: dict[str, Any] = {
+            "admin_capability": cap.capability,
+            "identity_kind": cap.identity_kind,
+            "admin_evidence": cap.evidence,
+        }
+        if getattr(ctx.args, "show_buckets", False) or getattr(ctx.args, "show_objects", False):
+            from . import enumerate as enumeration
+
+            errors: list[str] = []
+            try:
+                bucket_count = 0
+                object_count = 0
+                selected_bucket = getattr(ctx.args, "bucket", None)
+                buckets = (
+                    enumeration.iter_buckets(client, on_error=errors.append)
+                    if getattr(ctx.args, "show_buckets", False) or not selected_bucket
+                    else ()
+                )
+                if getattr(ctx.args, "show_objects", False) and selected_bucket:
+                    object_count = sum(
+                        1 for _obj in enumeration.iter_objects(client, str(selected_bucket), on_error=errors.append)
+                    )
+                for bucket_info in buckets:
+                    bucket_count += 1
+                    if getattr(ctx.args, "show_objects", False) and not selected_bucket:
+                        object_count += sum(
+                            1 for _obj in enumeration.iter_objects(client, bucket_info.name, on_error=errors.append)
+                        )
+                if getattr(ctx.args, "show_buckets", False):
+                    evidence["bucket_count"] = None if errors else bucket_count
+                if getattr(ctx.args, "show_objects", False):
+                    evidence["objects_count"] = None if errors else object_count
+            except Exception as exc:
+                errors.append(str(exc))
+                if getattr(ctx.args, "show_buckets", False):
+                    evidence["bucket_count"] = None
+                if getattr(ctx.args, "show_objects", False):
+                    evidence["objects_count"] = None
+            if errors:
+                evidence["inventory_error"] = "; ".join(errors)
+        merged["credential_capabilities"] = evidence
     return merged
 
 
@@ -1319,6 +1360,16 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     if listing_errors:
         merged["listing_errors"] = list(dict.fromkeys(listing_errors))
         merged["inventory_coverage"] = "partial"
+    evidence = dict(merged.get("credential_capabilities") or {})
+    if want_buckets:
+        evidence["bucket_count"] = None if listing_errors else len(merged.get("buckets") or [])
+    if want_objects:
+        evidence["objects_count"] = None if listing_errors else merged.get("objects_count")
+    if listing_errors:
+        evidence["inventory_error"] = "; ".join(list(dict.fromkeys(listing_errors)))
+    else:
+        evidence.pop("inventory_error", None)
+    merged["credential_capabilities"] = evidence
     return merged
 
 

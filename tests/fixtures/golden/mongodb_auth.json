@@ -46,6 +46,11 @@
     ],
     "credential_attempts": [
       {
+        "credential_capabilities": {
+          "collection_count": 8,
+          "database_count": 5,
+          "database_error": null
+        },
         "error": null,
         "ok": true,
         "password": "root",
@@ -53,6 +58,11 @@
         "username": "root"
       }
     ],
+    "credential_capabilities": {
+      "collection_count": 8,
+      "database_count": 5,
+      "database_error": null
+    },
     "credential_state": "valid",
     "database": null,
     "database_count": 5,

@@ -124,6 +124,7 @@
       "source": "anonymous",
       "status": "complete"
     },
+    "credential_capabilities": {},
     "credential_state": null,
     "database": null,
     "database_count": 5,

@@ -22,6 +22,8 @@ from ...stage_runtime import (
     run_basic_host_audit,
     sort_default_audit_credential_runs,
 )
+from ..execution_api import run_os_shell
+from ..rce_probe import probe_execution
 from . import actions, execution, policy, render
 
 _DEFAULT_PORTS = (8080, 8443, 18080)
@@ -152,6 +154,16 @@ def build_jenkins_spec(args: Any) -> ModuleAuditSpec:
         return AuditRecord.from_mapping(value, module="jenkins", service="jenkins")
 
     def _data(ctx: Any, record: AuditRecord) -> AuditRecord:
+        if bool(getattr(ctx.args, "os_shell", False)):
+            run_os_shell(
+                ctx,
+                record,
+                ctx.lifecycle_state,
+                module="jenkins",
+                surface="Jenkins Script Console",
+                execute_once=execution.collect,
+            )
+            return record
         payload = execution.collect(ctx, record.to_dict(), ctx.lifecycle_state)
         if getattr(ctx.args, "execute", None) is not None and (
             not payload.get("execute_verified")
@@ -176,6 +188,9 @@ def build_jenkins_spec(args: Any) -> ModuleAuditSpec:
         _emit_discovery_inventory(ctx, payload)
         return AuditRecord.from_mapping(payload, module="jenkins", service="jenkins")
 
+    def _rce_probe(ctx: Any, record: AuditRecord) -> AuditRecord:
+        return probe_execution(ctx, record, ctx.lifecycle_state, execution.collect)
+
     spec = ModuleAuditSpec(
         module="jenkins",
         label="JENKINS",
@@ -188,6 +203,7 @@ def build_jenkins_spec(args: Any) -> ModuleAuditSpec:
         render_module=render,
         colorize=render._render_colored_jenkins_line,
         is_detected=lambda record: record.extra.get("is_jenkins") is True,
+        rce_probe=_rce_probe,
         credential_gate=lambda _credential, record: (
             record.extra.get("provided_credentials_ok") is True,
             "Jenkins identity verified"

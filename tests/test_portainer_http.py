@@ -18,7 +18,7 @@ from redposture_core.cli import main
 
 @contextmanager
 def portainer_server(
-    material=None, *, anonymous=False, blocked=False, mismatch=False, accepted_pair=("admin", "secret")
+    material=None, *, anonymous=False, blocked=False, mismatch=False, accepted_pair=("admin", "secret"), exec_status=403
 ):
     calls = []
     connect = socket.create_connection
@@ -114,6 +114,12 @@ def portainer_server(
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
             calls.append(("POST", self.path, body))
+            if self.path == "/tenant/api/endpoints/1/docker/containers/abc/exec":
+                authorized = (
+                    self.headers.get("Authorization") in {"Bearer issued", "Bearer eyJ.test.jwt"}
+                    or self.headers.get("X-API-Key") == "ptr_qa"
+                )
+                return self.send(exec_status if authorized else 401, {"message": "exec unavailable"})
             if self.path != "/tenant/api/auth":
                 return self.send(404, {})
             if blocked:
@@ -141,6 +147,30 @@ def portainer_server(
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=3)
+
+
+def assert_active_execution_probes(calls, count):
+    probes = [(method, path, body) for method, path, body in calls if path.endswith("/containers/abc/exec")]
+    assert len(probes) == count
+    for method, path, body in probes:
+        assert method == "POST"
+        assert path == "/tenant/api/endpoints/1/docker/containers/abc/exec"
+        assert body["AttachStdout"] is True and body["AttachStderr"] is True
+        assert body["Tty"] is False
+        assert body["Cmd"][:2] == ["/bin/sh", "-c"]
+        assert "echo REDPOSTURE_RCE_" in body["Cmd"][2]
+    assert all(
+        method == "GET"
+        or (
+            method == "POST"
+            and path
+            in {
+                "/tenant/api/auth",
+                "/tenant/api/endpoints/1/docker/containers/abc/exec",
+            }
+        )
+        for method, path, _ in calls
+    )
 
 
 @pytest.mark.parametrize("tls", [False, True])
@@ -175,6 +205,7 @@ def test_real_portainer_auth_inventory_prefix_tls_and_clean_files(tls, auth, mtl
         assert record["is_portainer"] is True
         assert record.get("is_docker") is not True
         assert record["provided_credentials_ok"] is True
+        assert record["rce"] is False
         assert record["ui"]["inventory"]["containers"]["count"] == 1
         assert record["ui"]["inventory"]["images"]["count"] == 0
         assert record["content_discovery"]["findings"]
@@ -187,9 +218,9 @@ def test_real_portainer_auth_inventory_prefix_tls_and_clean_files(tls, auth, mtl
         assert "Portainer" in txt.read_text()
         assert "Containers Enumeration (count:1)" in txt.read_text()
         assert "\x1b" not in output.read_text() + txt.read_text() + capsys.readouterr().out
-        assert all(method == "GET" or path == "/tenant/api/auth" for method, path, body in calls)
+        assert_active_execution_probes(calls, 2)
         if auth != "pair":
-            assert all(method == "GET" for method, path, body in calls)
+            assert not any(path == "/tenant/api/auth" for method, path, body in calls)
 
 
 def test_full_command_defcreds_stops_after_first_429(capsys):
@@ -218,9 +249,15 @@ def test_full_defcreds_sweep_finds_non_admin_identity_once(accepted_pair, capsys
             == 0
         )
         record = json.loads(target.read_text())
-        attempted = [(body["Username"], body["Password"]) for method, path, body in calls if method == "POST"]
+        attempted = [
+            (body["Username"], body["Password"])
+            for method, path, body in calls
+            if method == "POST" and path == "/tenant/api/auth"
+        ]
         assert attempted == list(default_pairs("portainer"))
         assert attempted.count(accepted_pair) == 1
+        assert_active_execution_probes(calls, 1)
+        assert record["rce"] is False
         assert record["provided_credentials_ok"] is True
         assert record["provided_username"] == accepted_pair[0]
         verified = [
@@ -231,6 +268,16 @@ def test_full_defcreds_sweep_finds_non_admin_identity_once(accepted_pair, capsys
         assert [(item["username"], item["password"]) for item in verified] == [accepted_pair]
         assert "issued" not in target.read_text()
         assert "\x1b" not in target.read_text() + capsys.readouterr().out
+
+
+@pytest.mark.parametrize("status,verdict", [(401, False), (403, False), (404, None), (500, None)])
+def test_active_probe_http_denial_keeps_valid_identity_and_never_starts_command(status, verdict, capsys):
+    with portainer_server(exec_status=status) as (url, calls):
+        assert main(["portainer", "-t", url, "--token", "ptr_qa", "--no-color", "--timeout", "1", "-f", "json"]) == 0
+        record = json.loads(capsys.readouterr().out)
+        assert record["provided_credentials_ok"] is True
+        assert record["rce"] is verdict
+        assert_active_execution_probes(calls, 1)
 
 
 def test_full_command_mismatched_identity_cannot_authenticate(capsys):

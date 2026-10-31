@@ -158,6 +158,8 @@
     "probe_status": 404,
     "provided_credentials": false,
     "provided_username": null,
+    "rce": null,
+    "rce_probe_performed": false,
     "repository": null,
     "repository_tag_errors": null,
     "repository_tags": null,

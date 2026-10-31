@@ -68,7 +68,7 @@ def test_trigger_native_detection_never_prefetches_callback_action(monkeypatch):
     assert all(row[3] == "redposture-async-detect" for row in seen)
 
 
-def test_trigger_closes_detection_iterator_if_callback_fails(monkeypatch):
+def test_trigger_closes_pipeline_iterator_if_callback_fails(monkeypatch):
     from redposture_core.async_detection import AsyncDetectScheduler
 
     class Results:
@@ -78,9 +78,14 @@ def test_trigger_closes_detection_iterator_if_callback_fails(monkeypatch):
             return self
 
         def __next__(self):
-            return ("127.0.0.1", {"name": "mysql_exporter", "port": 9104}), {
-                "detected": True,
+            return ("trigger", "127.0.0.1", {"name": "mysql_exporter", "port": 9104}), {
+                "host": "127.0.0.1",
                 "exporter": "mysql_exporter",
+                "attempted": 1,
+                "accepted": 0,
+                "unconfirmed": 0,
+                "success": 0,
+                "by_callback": {},
             }
 
         def close(self):

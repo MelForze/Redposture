@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import socketserver
 import struct
 import threading
@@ -39,8 +40,8 @@ def framed(payload):
     return struct.pack(">i", len(payload)) + payload
 
 
-def make_context(builder, port, target=None):
-    args = SimpleNamespace(timeout=1.0, retries=0)
+def make_context(builder, port, target=None, *, timeout=1.0):
+    args = SimpleNamespace(timeout=timeout, retries=0)
     spec = builder(args)
     ctx = AuditHookContext(
         args=args,
@@ -60,16 +61,20 @@ class ProtocolServer(socketserver.ThreadingTCPServer):
 
 
 @pytest.mark.parametrize(
-    "module,builder",
+    "module,builder,ddl_access",
     [
-        ("redis", build_redis_spec),
-        ("kafka", build_kafka_spec),
-        ("zookeeper", build_zookeeper_spec),
-        ("keeper", build_keeper_spec),
+        ("redis", build_redis_spec, "absent"),
+        ("kafka", build_kafka_spec, "absent"),
+        ("zookeeper", build_zookeeper_spec, "absent"),
+        ("keeper", build_keeper_spec, "absent"),
+        ("keeper", build_keeper_spec, "write"),
+        ("keeper", build_keeper_spec, "denied"),
     ],
 )
-def test_full_record_and_wire_request_parity(module, builder):
+@pytest.mark.parametrize("recover", [False, True])
+def test_full_record_and_wire_request_parity(module, builder, ddl_access, recover, monkeypatch):
     requests = []
+    markers = set()
     lock = threading.Lock()
 
     class Handler(socketserver.BaseRequestHandler):
@@ -146,16 +151,26 @@ def test_full_record_and_wire_request_parity(module, builder):
                     break
                 self.log(payload)
                 path, _ = _decode_zk_string(payload, 8)
-                err = -101 if path == "/clickhouse/task_queue/ddl" else 0
-                self.request.sendall(
-                    framed(struct.pack(">iqi", xid, 0, err) + (struct.pack(">i", 0) + bytes(68) if err == 0 else b""))
-                )
+                err, body = 0, struct.pack(">i", 0) + bytes(68)
+                if path == "/clickhouse/task_queue/ddl" and ddl_access == "absent":
+                    err, body = -101, b""
+                elif path.startswith("/clickhouse/task_queue/ddl/redposture-probe-"):
+                    body = b""
+                    if ddl_access == "denied":
+                        err = -102
+                    elif opcode == 1:
+                        assert path not in markers
+                        markers.add(path)
+                    elif opcode == 2:
+                        assert path in markers
+                        markers.remove(path)
+                self.request.sendall(framed(struct.pack(">iqi", xid, 0, err) + body))
 
     server = ProtocolServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        spec, ctx = make_context(builder, server.server_address[1])
+        spec, ctx = make_context(builder, server.server_address[1], timeout=7.0 if recover else 1.0)
         if module in {"zookeeper", "keeper"}:
             ctx.lifecycle_state.requested_config = replace(ctx.lifecycle_state.requested_config, mode="plaintext")
         sync = spec.detect(ctx).to_dict()
@@ -168,7 +183,12 @@ def test_full_record_and_wire_request_parity(module, builder):
             spec, ctx = make_context(builder, server.server_address[1])
             if module in {"zookeeper", "keeper"}:
                 ctx.lifecycle_state.requested_config = replace(ctx.lifecycle_state.requested_config, mode="plaintext")
-            record = await spec.detect_async(ctx, None)
+            if recover:
+                from tests.test_native_detect_timeout_retries import recover_real_protocol
+
+                record, ctx = await recover_real_protocol(spec, ctx, monkeypatch)
+            else:
+                record = await spec.detect_async(ctx, None)
             spec.lifecycle_state_close(ctx.lifecycle_state)
             return record.to_dict()
 
@@ -181,7 +201,18 @@ def test_full_record_and_wire_request_parity(module, builder):
             if "stage_timing_total_ms" in record:
                 assert isinstance(record["stage_timing_total_ms"], int) and record["stage_timing_total_ms"] >= 0
         assert normalize(actual) == normalize(sync)
-        assert native_requests == sync_requests
+
+        def stable_request(value):
+            if isinstance(value, bytes):
+                return re.sub(rb"redposture-probe-[0-9a-f]{24}", b"redposture-probe-" + b"0" * 24, value)
+            return value
+
+        assert [stable_request(value) for value in native_requests] == [
+            stable_request(value) for value in sync_requests
+        ]
+        assert not markers, "Keeper probe marker was not cleaned up"
+        if module == "keeper":
+            assert actual["ddl_access"] == {"absent": "Absent", "write": "Write", "denied": "Read"}[ddl_access]
     finally:
         server.shutdown()
         server.server_close()

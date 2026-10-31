@@ -1657,6 +1657,119 @@ def test_run_postgres_stage_shell_modes_and_main_flow(monkeypatch: pytest.Monkey
     assert captured[-1]["debug"] is True
 
 
+def test_postgres_os_shell_prints_detection_and_credentials_before_prompt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from redposture_core.console import Console
+    from redposture_core.modules.postgres import stage as pg_stage
+
+    monkeypatch.setattr(
+        pg_stage.actions,
+        "_audit_postgres_host",
+        lambda **_kwargs: {
+            "host": "127.0.0.1",
+            "port": 5432,
+            "is_postgres": True,
+            "status": "valid_credentials",
+            "auth_required": True,
+            "server_version": "16.15",
+            "effective_username": "postgres",
+            "provided_credentials": True,
+            "provided_password": "postgres",
+            "superuser": True,
+            "can_execute_commands": True,
+            "can_read_tables": True,
+            "database_count": 1,
+        },
+    )
+    prompts: list[str] = []
+
+    def read_command(prompt: str) -> str:
+        output = capsys.readouterr().out
+        assert "PostgreSQL-compatible endpoint" in output
+        assert "[+] postgres:postgres" in output
+        assert "\x1b[" not in output
+        assert output.index("PostgreSQL-compatible endpoint") < output.index("[+] postgres:postgres")
+        prompts.append(prompt)
+        return "exit"
+
+    monkeypatch.setattr("builtins.input", read_command)
+    assert (
+        pg_stage._run_postgres_shell(
+            _postgres_args(os_shell=True, username="postgres", password="postgres"), Console(no_color=True)
+        )
+        == 0
+    )
+    assert prompts == ["postgres-os> "]
+
+
+def test_postgres_os_shell_reports_rejected_credentials_without_prompt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from redposture_core.console import Console
+    from redposture_core.modules.postgres import stage as pg_stage
+
+    monkeypatch.setattr(
+        pg_stage.actions,
+        "_audit_postgres_host",
+        lambda **_kwargs: {
+            "host": "127.0.0.1",
+            "port": 5432,
+            "is_postgres": True,
+            "status": "auth_required",
+            "auth_required": True,
+            "server_version": "16.15",
+            "effective_username": "postgres",
+            "provided_credentials": True,
+            "provided_password": "wrong",
+        },
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("shell opened after rejected credentials"))
+    assert (
+        pg_stage._run_postgres_shell(
+            _postgres_args(os_shell=True, username="postgres", password="wrong"), Console(no_color=True)
+        )
+        == 1
+    )
+    output = capsys.readouterr().out
+    assert output.index("PostgreSQL-compatible endpoint") < output.index("[-] postgres:wrong")
+    assert "\x1b[" not in output
+
+
+def test_postgres_os_shell_intro_uses_detection_and_credential_colors(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from redposture_core.console import Console
+    from redposture_core.modules.postgres import stage as pg_stage
+
+    monkeypatch.setattr("redposture_core.console.should_use_color", lambda _stream: True)
+    monkeypatch.setattr(
+        pg_stage.actions,
+        "_audit_postgres_host",
+        lambda **_kwargs: {
+            "host": "127.0.0.1",
+            "port": 5432,
+            "is_postgres": True,
+            "status": "valid_credentials",
+            "auth_required": True,
+            "server_version": "16.15",
+            "effective_username": "postgres",
+            "provided_credentials": True,
+            "provided_password": "postgres",
+        },
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "exit")
+    assert (
+        pg_stage._run_postgres_shell(
+            _postgres_args(os_shell=True, username="postgres", password="postgres"), Console(no_color=False)
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "\x1b[1;38;5;208mversion:16.15\x1b[0m" in output
+    assert "\x1b[1;92m[+]\x1b[0m \x1b[1;38;5;196mpostgres:postgres\x1b[0m" in output
+
+
 def test_postgres_sql_shell_uses_late_winning_default_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3603,7 +3716,7 @@ def test_postgres_table_query_helpers_and_colored_renderer(monkeypatch: pytest.M
     assert postgres._render_colored_postgres_line(
         painter,
         "POSTGRES\t127.0.0.1\t5432\t [+] anonymous access (auth required:False) "
-        "(superuser:True) (execute:False) (read:unknown) (DBs:2)",
+        "(superuser:True) (rce:False) (read:unknown) (DBs:2)",
     )
     assert painter.lines and "auth required:False" in painter.lines[0]
     assert postgres._render_colored_postgres_line(
@@ -3623,11 +3736,12 @@ def test_postgres_table_query_helpers_and_colored_renderer(monkeypatch: pytest.M
     assert "<orange>partial:True</orange>" in painter.lines[-1]
     assert postgres._render_colored_postgres_line(
         painter,
-        "POSTGRES\t127.0.0.1\t5432\t [+] qa:password (superuser:True) (execute:True) (read:True) (DBs:2)",
+        "POSTGRES\t127.0.0.1\t5432\t [+] qa:password (superuser:True) (rce:True) (read:True) (DBs:2)",
     )
     assert "<bright_green>[+]</bright_green>" in painter.lines[-1]
     assert "<true_red>qa:password</true_red>" in painter.lines[-1]
     assert "<true_red>superuser:True</true_red>" in painter.lines[-1]
+    assert "<true_red>rce:True</true_red>" in painter.lines[-1]
     assert "<true_red>DBs:2</true_red>" in painter.lines[-1]
 
 

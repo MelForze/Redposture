@@ -82,8 +82,8 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
         ("/api/user", grafana._auth_header("good", "good")),
         ("/api/user", None),
         ("/api/user", invalid_control),
-        ("/api/health", grafana._auth_header("good", "good")),
         ("/api/datasources", grafana._auth_header("good", "good")),
+        ("/api/health", grafana._auth_header("good", "good")),
     ]
     assert result.records[0]["status"] == "valid_credentials"
 
@@ -132,7 +132,7 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     auth_headers: list[str | None] = []
-    datasource_headers: list[str] = []
+    datasource_headers: list[str | None] = []
     first_header = grafana._auth_header("admin", "admin")
     winning_header = grafana._auth_header("admin", "password")
     later_header = grafana._auth_header("grafana", "grafana")
@@ -158,6 +158,8 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
             )
         if path == "/api/datasources":
             datasource_headers.append(authorization)
+            if authorization == later_header:
+                return 200, '[{"id":2,"uid":"team-metrics","name":"Team metrics","type":"prometheus"}]', {}
             return (401, "{}", {}) if authorization is None else (200, "[]", {})
         raise AssertionError(path)
 
@@ -194,7 +196,7 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
     # Later accepted pairs reuse this baseline in the live lifecycle state.
     assert auth_headers.count(None) == 1
     assert auth_headers.index(None) < auth_headers.index(later_header)
-    assert datasource_headers == [None, winning_header]
+    assert datasource_headers == [None, winning_header, later_header]
     record = result.records[0]
     assert record["status"] == "weak_default_creds"
     assert record["effective_username"] == "admin"
@@ -214,7 +216,13 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
     selected_line = next(line for line in attempt_lines if "[+] admin:password" in line)
     later_success_line = next(line for line in attempt_lines if "[+] grafana:grafana" in line)
     assert "(datasources:0)" in selected_line
-    assert "(datasources:" not in later_success_line
+    assert "(datasources:1)" in later_success_line
+    successful_counts = {
+        (attempt["username"], attempt["password"]): attempt["credential_capabilities"]["datasource_count"]
+        for attempt in record["auth_attempts"]
+        if attempt.get("ok")
+    }
+    assert successful_counts == {("admin", "password"): 0, ("grafana", "grafana"): 1}
 
 
 def test_kubeapi_credential_file_reuses_anonymous_classification_and_selected_namespace_probe(

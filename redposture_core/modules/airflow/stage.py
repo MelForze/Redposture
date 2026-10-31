@@ -80,7 +80,6 @@ def build_airflow_spec(args: Any) -> ModuleAuditSpec:
         credential_gate=_airflow_credential_gate,
         skip_credentials_without_verifier=True,
         structured_output_redact_fields=(
-            "attempted_credentials",
             "credential_password",
             "_credential_capabilities_pending",
             "_inventory_streamed",
@@ -89,7 +88,7 @@ def build_airflow_spec(args: Any) -> ModuleAuditSpec:
         # `--defcreds` is exhaustive (house convention): try every default pair and
         # render each attempt, instead of stopping at the first accepted one.
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
-        credential_attempt_detail_fields=("credential_state",),
+        credential_attempt_detail_fields=("credential_state", "credential_capabilities"),
     )
 
     return with_async_io_detection(spec, actions, root_name="detect_record", options=None, api_prefixes=())

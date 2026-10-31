@@ -218,9 +218,10 @@ def collect(ctx: Any, record: dict[str, Any], state: Any) -> dict[str, Any]:
         return _fail(payload, output, "Portainer access is not verified; command was not sent")
     endpoint = str(getattr(ctx.args, "endpoint", "") or "").strip()
     container = str(getattr(ctx.args, "container", "") or "").strip()
-    if not endpoint:
+    auto_select = bool(getattr(ctx.args, "_rce_probe", False))
+    if not endpoint and not auto_select:
         return _fail(payload, output, "--execute requires an explicit --endpoint")
-    if not container:
+    if not container and not auto_select:
         return _fail(payload, output, "--execute requires an explicit --container")
     cached = getattr(state, "execution", None)
     if cached is not None:
@@ -268,6 +269,15 @@ def collect(ctx: Any, record: dict[str, Any], state: Any) -> dict[str, Any]:
             listed = _json(endpoints)
             if not isinstance(listed, list):
                 return _fail(payload, output, "Portainer environment list unavailable")
+            if not endpoint and auto_select:
+                first_endpoint = next(
+                    (item for item in listed if isinstance(item, dict) and type(item.get("Id")) is int),
+                    None,
+                )
+                if first_endpoint is None:
+                    return _fail(payload, output, "Portainer has no selectable environments")
+                endpoint = str(first_endpoint["Id"])
+                ctx.args.endpoint = endpoint
             selected = next(
                 (
                     item
@@ -280,6 +290,34 @@ def collect(ctx: Any, record: dict[str, Any], state: Any) -> dict[str, Any]:
             if not isinstance(selected, dict) or type(selected.get("Id")) is not int:
                 return _fail(payload, output, f"Portainer environment not found: {endpoint}")
             docker_base = f"{base}/api/endpoints/{selected['Id']}/docker"
+            if not container and auto_select:
+                containers = pool.request(
+                    "GET",
+                    docker_base + "/containers/json?all=false",
+                    headers=headers,
+                    timeout=timeout,
+                    response_size_cap=8 * 1024 * 1024,
+                    retries=0,
+                )
+                available = _json(containers)
+                first_container = (
+                    next(
+                        (
+                            item
+                            for item in available
+                            if isinstance(item, dict)
+                            and isinstance(item.get("Id"), str)
+                            and item.get("State") == "running"
+                        ),
+                        None,
+                    )
+                    if isinstance(available, list)
+                    else None
+                )
+                if first_container is None:
+                    return _fail(payload, output, "Portainer environment has no running container for execution probe")
+                container = first_container["Id"]
+                ctx.args.container = container
             create = pool.request_once(
                 "POST",
                 docker_base + "/containers/" + quote(container, safe="") + "/exec",
@@ -297,6 +335,8 @@ def collect(ctx: Any, record: dict[str, Any], state: Any) -> dict[str, Any]:
             )
             created = _json(create)
             if not isinstance(created, dict) or not isinstance(created.get("Id"), str) or not created["Id"]:
+                if create.status in {401, 403} and not create.error and not create.truncated:
+                    return _fail(payload, output, f"Portainer Docker exec create denied: HTTP {create.status}")
                 return _fail(payload, output, "Portainer Docker exec create returned no exec ID")
             exec_id = quote(created["Id"], safe="")
             output["cleanup"] = "unknown"

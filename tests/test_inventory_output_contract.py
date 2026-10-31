@@ -38,7 +38,7 @@ def test_minio_unknown_attempts_do_not_claim_a_credential_result_in_txt() -> Non
     attempts = minio._format_credential_attempts_records(record, "txt")
     assert attempts == [
         "MINIO\t10.0.0.1\t6443\t [-] admin:admin",
-        "MINIO\t10.0.0.1\t6443\t [+] minioadmin:minioadmin",
+        "MINIO\t10.0.0.1\t6443\t [+] minioadmin:minioadmin (admin:unverified)",
         "MINIO\t10.0.0.1\t6443\t [*] Credential verification unavailable (1 pair(s); signed response inconclusive)",
     ]
 

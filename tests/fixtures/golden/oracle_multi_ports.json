@@ -19,6 +19,7 @@
         "error": null,
         "ok": true,
         "password": "OracleLab!2026",
+        "source": "provided",
         "token": null,
         "username": "redposture"
       }
@@ -142,6 +143,7 @@
         "error": null,
         "ok": true,
         "password": "OracleLab!2026",
+        "source": "provided",
         "token": null,
         "username": "redposture"
       }
@@ -265,6 +267,7 @@
         "error": null,
         "ok": true,
         "password": "OracleLab!2026",
+        "source": "provided",
         "token": null,
         "username": "redposture"
       }
@@ -388,6 +391,7 @@
         "error": null,
         "ok": true,
         "password": "OracleLab!2026",
+        "source": "provided",
         "token": null,
         "username": "redposture"
       }
@@ -511,6 +515,7 @@
         "error": null,
         "ok": true,
         "password": "OracleLab!2026",
+        "source": "provided",
         "token": null,
         "username": "redposture"
       }

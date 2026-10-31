@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from ...console import Console
-from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line
+from ...rendering import BooleanColorRule, CountColorRule, RegexColorRule, render_colored_marker_line
 from ..execution_api import render as render_execution
 from . import actions
 from .http_surfaces import product_name
@@ -14,6 +14,14 @@ _nxc_prefix = actions._nxc_prefix
 
 
 def _render_colored_kafka_line(console: Console, line: str) -> bool:
+    if "(rce:" in line and render_colored_marker_line(
+        console,
+        line,
+        tag="KAFKA",
+        booleans=(BooleanColorRule("rce", true_color="true_red", false_color="bright_green"),),
+        regexes=(RegexColorRule(r"\(rce:unknown\)", "orange"),),
+    ):
+        return True
     if (
         "Kafka UI" in line
         or any(
@@ -42,6 +50,7 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
             tag="KAFKA",
             regexes=(
                 RegexColorRule(r"\(version:unknown\)", "orange"),
+                RegexColorRule(r"\(rce:unknown\)", "orange"),
                 RegexColorRule(r"coverage:partial", "orange"),
                 RegexColorRule(r"Dump completeness unverified:[^\n]+", "orange"),
                 RegexColorRule(r"\(reason:[^)]+\)", "orange"),
@@ -49,6 +58,7 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
                 RegexColorRule(r"executed:True", "true_red"),
                 RegexColorRule(r"status:(?:partial|timeout|unverified)", "orange"),
             ),
+            booleans=(BooleanColorRule("rce", true_color="true_red", false_color="bright_green"),),
             counts=tuple(
                 CountColorRule(name, "true_red", zero_color="bright_green")
                 for name in ("clusters", "brokers", "topics", "groups", "messages")
@@ -71,7 +81,13 @@ def _ui_suffix(record: dict) -> str:
 
 def _format_detect_record(record: dict, output_format: str) -> str:
     if not record.get("is_kafka_ui"):
-        return actions._format_detect_record(record, output_format)
+        line = actions._format_detect_record(record, output_format)
+        rce = record.get("rce")
+        if output_format == "txt" and line and "\trce:" not in line and "(rce:" not in line and "rce" in record:
+            suffix = f" (rce:{rce})" if type(rce) is bool else " (rce:unknown)"
+            version_offset = line.find(" (version:")
+            line = line[:version_offset] + suffix + line[version_offset:] if version_offset >= 0 else line + suffix
+        return line
     if output_format == "json":
         return ""
     vendor = record.get("ui_vendor")
@@ -81,7 +97,11 @@ def _format_detect_record(record: dict, output_format: str) -> str:
     required = record.get("auth_required")
     auth = "True" if required is True else "False" if required is False else "unknown"
     version = record.get("version") or "unknown"
-    return f"{_nxc_prefix(record)} [*] {product} (auth required:{auth}) (version:{version}){_ui_suffix(record)}"
+    rce = record.get("rce")
+    rce_text = f" (rce:{rce})" if type(rce) is bool else " (rce:unknown)" if "rce" in record else ""
+    return (
+        f"{_nxc_prefix(record)} [*] {product} (auth required:{auth}){rce_text} (version:{version}){_ui_suffix(record)}"
+    )
 
 
 def _format_record(record: dict, output_format: str) -> str:

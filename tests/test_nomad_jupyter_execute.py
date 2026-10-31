@@ -180,6 +180,33 @@ def test_nomad_allocation_exec_uses_exit_frame_and_preserves_nonzero_exit(monkey
     assert not any(c[0] in {"POST", "DELETE"} for c in ctx.lifecycle_state.http.calls)
 
 
+def test_nomad_allocation_exec_accepts_omitted_zero_exit_code(monkeypatch):
+    module = importlib.import_module("redposture_core.modules.nomad.execution")
+    # Nomad 1.10.1 sends result:{} for a successful command (protobuf zero omitted).
+    ws = WS([{"stdout": {"data": "cWEK"}}, {"exited": True, "result": {}}])
+    monkeypatch.setattr(module, "open_ws", lambda *a, **k: ws)
+    ctx = context(lambda m, p, b: (200, {"TaskStates": {"app": {"State": "running"}}}), allocation="allocation")
+
+    result = module.execute(ctx, PRIOR)
+
+    assert result["executed"] is True
+    assert result["exit_code"] == 0
+    assert result["stdout"] == "qa\n"
+
+
+@pytest.mark.parametrize("terminal", [None, {"exit_code": None}, {"exit_code": "0"}])
+def test_nomad_allocation_exec_rejects_missing_or_invalid_result(monkeypatch, terminal):
+    module = importlib.import_module("redposture_core.modules.nomad.execution")
+    ws = WS([{"exited": True, "result": terminal}])
+    monkeypatch.setattr(module, "open_ws", lambda *a, **k: ws)
+    ctx = context(lambda m, p, b: (200, {"TaskStates": {"app": {"State": "running"}}}), allocation="allocation")
+
+    result = module.execute(ctx, PRIOR)
+
+    assert result["executed"] is False
+    assert "exit code" in result["error"]
+
+
 def test_nomad_multiple_tasks_require_explicit_selection(monkeypatch):
     module = importlib.import_module("redposture_core.modules.nomad.execution")
     ctx = context(

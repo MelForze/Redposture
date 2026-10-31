@@ -732,6 +732,22 @@ def test_golden_comparison_re_normalizes_older_snapshots(tmp_path: Path, monkeyp
     verifier._validate_golden_snapshots([{"module": "rabbitmq", "label": "rabbitmq_case", "exit_code": "0"}])
 
 
+@pytest.mark.parametrize(
+    "field,old_value,new_value",
+    [("rce", False, True), ("rce", False, None), ("rce", None, False), ("rce_probe_performed", True, False)],
+)
+def test_golden_comparison_preserves_rce_verdict_and_probe_evidence(tmp_path, monkeypatch, field, old_value, new_value):
+    verifier = _load_postrun_verifier()
+    original = [{"module": "nexus", "rce": False, "rce_probe_performed": True, field: old_value}]
+    observed = [{**original[0], field: new_value}]
+    assert verifier._normalize_for_golden(original) != verifier._normalize_for_golden(observed)
+    (tmp_path / "nexus_rce.json").write_text(json.dumps(original))
+    monkeypatch.setattr(verifier, "_GOLDEN_DIR", tmp_path)
+    monkeypatch.setattr(verifier, "_golden_text_for_row", lambda _row: json.dumps(observed, indent=2, sort_keys=True))
+    with pytest.raises(SystemExit, match=field):
+        verifier._validate_golden_snapshots([{"module": "nexus", "label": "nexus_rce", "exit_code": "0"}])
+
+
 def test_rabbitmq_golden_ignores_queue_depth_but_preserves_queue_metadata() -> None:
     verifier = _load_postrun_verifier()
     left = {

@@ -14,6 +14,16 @@ from ..execution_api import render as render_execution
 def render_record(record: Any) -> list[str]:
     payload = record.to_dict() if hasattr(record, "to_dict") else dict(record)
     lines = web_panels.render_panel({**payload, "attempted_credentials": []}, "PORTAINER")
+    if lines and payload.get("is_portainer") is True and "rce" in payload:
+        rce = payload.get("rce")
+        value = str(rce) if type(rce) is bool else "unknown"
+        version_match = re.search(r" \(version:[^)]*\)", lines[0])
+        text = f" (rce:{value})"
+        lines[0] = (
+            lines[0][: version_match.start()] + text + lines[0][version_match.start() :]
+            if version_match
+            else lines[0] + text
+        )
     prefix = f"PORTAINER\t{payload.get('host')}\t{payload.get('port')}\t"
     attempts = payload.get("attempted_credentials")
     attempts = attempts if isinstance(attempts, list) and attempts else [payload]
@@ -62,7 +72,7 @@ def colorize(console: Any, line: str) -> bool:
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
-    return web_panels.render_panel(record, "PORTAINER")[0] if output_format == "txt" else ""
+    return render_record(record)[0] if output_format == "txt" else ""
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:

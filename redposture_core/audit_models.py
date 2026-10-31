@@ -81,15 +81,22 @@ class CredentialAttempt:
     token: str | None = None
     ok: bool | None = None
     error: str | None = None
+    source: str | None = None
+    credential_capabilities: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "username": self.username,
             "password": self.password,
             "token": self.token,
             "ok": self.ok,
             "error": self.error,
         }
+        if self.source is not None:
+            payload["source"] = self.source
+        if self.credential_capabilities is not None:
+            payload["credential_capabilities"] = dict(self.credential_capabilities)
+        return payload
 
     @classmethod
     def from_mapping(cls, payload: dict[str, Any]) -> CredentialAttempt:
@@ -101,6 +108,10 @@ class CredentialAttempt:
             token=_optional_str(payload.get("token")),
             ok=_optional_bool(payload.get("ok")),
             error=_optional_str(payload.get("error")),
+            source=_optional_str(payload.get("source")),
+            credential_capabilities=dict(payload["credential_capabilities"])
+            if isinstance(payload.get("credential_capabilities"), dict)
+            else None,
         )
 
 

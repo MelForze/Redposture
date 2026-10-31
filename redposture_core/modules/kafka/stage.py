@@ -25,6 +25,8 @@ from ...stage_runtime import (
     merge_audit_credential_runs,
     sort_default_audit_credential_runs,
 )
+from ..execution_api import run_os_shell, validate_os_shell_plan
+from ..rce_probe import probe_execution
 from . import actions, execution, policy, render, ui
 from . import http_surfaces as _native_surfaces
 
@@ -225,6 +227,27 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         )
 
     def _data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        if bool(getattr(ctx.args, "os_shell", False)):
+            run_os_shell(
+                ctx,
+                record,
+                ctx.lifecycle_state,
+                module="kafka",
+                surface="Provectus Kafka UI",
+                execute_once=execution.collect,
+                preflight=lambda current: (
+                    "--os-shell requires confirmed Provectus Kafka UI access; Kafka brokers, Kafbat and other UI surfaces are unsupported"
+                    if not (
+                        current.get("is_kafka_ui") is True
+                        and current.get("ui_vendor") == "provectus"
+                        and current.get("kafka_interface") == "ui"
+                        and current.get("detection_status") == "confirmed"
+                        and current.get("status") in {"open_no_auth", "valid_credentials", "weak_default_creds"}
+                    )
+                    else None
+                ),
+            )
+            return record
         if getattr(args, "execute", None) is not None:
             result = execution.collect(ctx, record.to_dict(), ctx.lifecycle_state)
             record = AuditRecord.from_mapping(result, module="kafka", service="kafka")
@@ -258,6 +281,9 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
             result["_kafka_dump_streamed"] = True
         return AuditRecord.from_mapping(result, module="kafka", service="kafka")
 
+    def _rce_probe(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        return probe_execution(ctx, record, ctx.lifecycle_state, execution.collect)
+
     spec = ModuleAuditSpec(
         module="kafka",
         label="KAFKA",
@@ -280,6 +306,9 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         render_module=render,
         colorize=render._render_colored_kafka_line,
         is_detected=lambda record: record.extra.get("is_kafka") is True,
+        rce_probe=_rce_probe,
+        live_phase_output=bool(getattr(args, "os_shell", False)),
+        defer_detect_output_until_auth=bool(getattr(args, "os_shell", False)),
     )
 
     return _with_native_detection(
@@ -306,6 +335,8 @@ def run_kafka_stage(args: Any, logger: Any) -> int:
         plan = build_kafka_plan(args)
     except ValueError as exc:
         console.error(str(exc))
+        return 2
+    if bool(getattr(args, "os_shell", False)) and validate_os_shell_plan(plan, console) is not None:
         return 2
     if cfg.debug and not getattr(args, "debug_emit", None):
         args.debug_emit = console.info

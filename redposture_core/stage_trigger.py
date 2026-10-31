@@ -223,7 +223,7 @@ def _render_trigger_check_row(
         ("(auth required:unknown)", "yellow"),
         ("(auth required:sso)", "bright_green"),
         ("(superuser:True)", "true_red"),
-        ("(execute:True)", "true_red"),
+        ("(rce:True)", "true_red"),
         ("(read:True)", "true_red"),
     ):
         idx = body.find(fragment)

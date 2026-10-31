@@ -15,7 +15,7 @@ from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...console import Console
 from ...discovery_spool import contains_spooled
-from ...shell_capture import CommandResult, ShellView
+from ...shell_capture import CommandResult, ShellView, read_shell_command
 from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -434,7 +434,7 @@ def _postgres_auth_probe_record(
 
 
 def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
-    """Probe one PostgreSQL credential without privilege or data queries."""
+    """Verify one identity and collect its read-only capability summary."""
 
     cfg = AuditConfig.from_namespace(ctx.args)
     target_database = str(getattr(ctx.args, "database", "") or "").strip() or "postgres"
@@ -462,23 +462,29 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
                         database=target_database,
                     )
                     capability_fields: dict[str, Any] = {}
-                    if bool(getattr(ctx.args, "_spray_capabilities", False)) and session.auth_required is not False:
+                    if session.auth_required is not False and (
+                        session.credential_verified is True or bool(getattr(ctx.args, "_spray_capabilities", False))
+                    ):
                         try:
                             superuser, can_execute, can_read, readable_tables, query_error = (
                                 actions._collect_postgres_privileges(sock, probe_readable_table_sample=False)
                             )
-                            databases, database_error = actions._pg_query_databases(sock)
                             capability_fields = {
                                 "superuser": superuser,
                                 "can_execute_commands": can_execute,
                                 "can_read_tables": can_read,
                                 "readable_tables": readable_tables,
-                                "database_count": len(databases) if isinstance(databases, list) else None,
-                                "query_error": "; ".join(error for error in (query_error, database_error) if error)
-                                or None,
+                                "query_error": query_error,
                             }
+                            databases, database_error = actions._pg_query_databases(sock)
+                            capability_fields["database_count"] = (
+                                len(databases) if isinstance(databases, list) else None
+                            )
+                            capability_fields["query_error"] = (
+                                "; ".join(error for error in (query_error, database_error) if error) or None
+                            )
                         except Exception as exc:
-                            capability_fields = {"query_error": f"capability probe: {type(exc).__name__}"}
+                            capability_fields["query_error"] = f"capability probe: {type(exc).__name__}: {exc}"
                 finally:
                     try:
                         actions._pg_send_terminate(sock)
@@ -521,6 +527,7 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
                         else actions._pg_credential_verification(credential_verified)
                     ),
                     **capability_fields,
+                    "credential_capabilities": dict(capability_fields),
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": None,
                 }
@@ -680,6 +687,7 @@ def build_postgres_spec(args: Any) -> ModuleAuditSpec:
         and not bool(getattr(args, "stop_on_success", False)),
         record_all_credential_attempts=bool(getattr(args, "defcreds", False)),
         credential_attempt_detail_fields=(
+            "credential_capabilities",
             "credential_verified",
             "credential_verification",
             "sqlstate",
@@ -810,6 +818,12 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
         credential_runs = merge_audit_credential_runs(supplied_runs, default_runs)
     record: dict[str, Any] | None = None
     winning_credential: AuditCredentialRun | None = None
+    detection_emitted = False
+
+    def emit(line: str) -> None:
+        if line and not (hasattr(console, "_paint") and render._render_colored_postgres_line(console, line)):
+            console.plain(line)
+
     coordinator = getattr(args, "_postgres_credential_coordinator", None)
     for credential in credential_runs:
         credential_slot: AbstractContextManager[float]
@@ -860,6 +874,19 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
                 "defcreds_enabled": True,
             }
         record = candidate_record
+        display_record = {**record, "host": str(host), "port": int(port)}
+        if bool(record.get("is_postgres")) and not detection_emitted:
+            emit(render._format_detect_record(display_record, "txt"))
+            detection_emitted = True
+        if credential.username is not None or credential.password is not None:
+            display_record.update(
+                effective_username=credential.username or record.get("effective_username") or "postgres",
+                provided_password=credential.password,
+                provided_credentials=True,
+            )
+            if display_record.get("status") == "weak_default_creds":
+                display_record["status"] = "valid_credentials"
+        emit(render._format_record(display_record, "txt"))
         if bool(record.get("is_postgres")) and str(record.get("status") or "") in {
             "open_no_auth",
             "valid_credentials",
@@ -876,7 +903,7 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
         shell_view = ShellView()
         while True:
             try:
-                command = input("pg-os> ")
+                command = read_shell_command("postgres-os> ")
             except (EOFError, KeyboardInterrupt):
                 console.plain("")
                 break

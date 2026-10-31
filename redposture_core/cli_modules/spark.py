@@ -58,7 +58,11 @@ def configure_spark_parser(
         action="store_true",
         help="POST an invalid create request without launch fields to test REST parser reachability; never submits an application or proves submission permission.",
     )
-    add_flags(execution)
+    add_flags(
+        execution,
+        include_os_shell=True,
+        os_shell_help="Unsupported: Spark command results depend on asynchronous worker logs.",
+    )
     execution.add_argument(
         "--execute-worker-url",
         metavar="url",

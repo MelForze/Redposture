@@ -86,12 +86,12 @@ def build_minio_spec(args: Any) -> ModuleAuditSpec:
         is_detected=lambda record: record.extra.get("is_minio") is True,
         credential_gate=_minio_credential_gate,
         skip_credentials_without_verifier=True,
-        structured_output_redact_fields=("attempted_credentials", "credential_secret"),
+        structured_output_redact_fields=("credential_secret",),
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         # `--defcreds` is exhaustive (house convention): try every default pair and
         # render each attempt, instead of stopping at the first accepted one.
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
-        credential_attempt_detail_fields=("credential_state",),
+        credential_attempt_detail_fields=("credential_state", "credential_capabilities"),
         defer_phase_output_until_final=True,
         emit_capabilities_before_data=bool(getattr(args, "discover", False)),
     )

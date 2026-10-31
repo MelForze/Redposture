@@ -44,6 +44,7 @@ def build_mongodb_spec(args: Any) -> ModuleAuditSpec:
         keep_anonymous_open_no_auth=True,
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
+        credential_attempt_detail_fields=("credential_capabilities",),
     )
 
 

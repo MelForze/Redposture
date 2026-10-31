@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import io
+import socket
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,21 +33,25 @@ def _partial_response() -> http.client.HTTPResponse:
 
 @pytest.mark.parametrize("exporter", [False, True])
 def test_r1_reused_socket_receives_new_timeout(exporter: bool) -> None:
-    connection = Mock()
+    left, right = socket.socketpair()
+    connection = Mock(sock=left)
     key = ("http", "fixture", 80)
-    if exporter:
-        pool: Any = HTTPConnectionPool()
-        pool._idle[key] = [connection]
-        pool._idle_total = 1
-        acquired = pool._acquire("http", "fixture", 80, 2.5)
-    else:
-        pool = HttpSessionPool(timeout=1)
-        pool._idle[key].append(connection)
-        acquired, reused = pool._acquire(key, 2.5)
-        assert reused
-    assert acquired is connection
-    connection.sock.settimeout.assert_called_once_with(2.5)
-    pool.close()
+    pool: Any = HTTPConnectionPool() if exporter else HttpSessionPool(timeout=1)
+    try:
+        if exporter:
+            pool._idle[key] = [connection]
+            pool._idle_total = 1
+            acquired = pool._acquire("http", "fixture", 80, 2.5)
+        else:
+            pool._idle[key].append(connection)
+            acquired, reused = pool._acquire(key, 2.5)
+            assert reused
+        assert acquired is connection
+        assert left.gettimeout() == 2.5
+    finally:
+        pool.close()
+        left.close()
+        right.close()
 
 
 def test_r2_exporter_rejects_short_content_length(monkeypatch: pytest.MonkeyPatch) -> None:

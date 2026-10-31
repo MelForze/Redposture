@@ -51,7 +51,11 @@ def configure_yarn_parser(
         action="store_true",
         help="Explicitly allocate an application ID through new-application; no application is submitted or executed. Submission permission remains unverified.",
     )
-    add_flags(execution)
+    add_flags(
+        execution,
+        include_os_shell=True,
+        os_shell_help="Unsupported: YARN command results depend on asynchronous node logs.",
+    )
     execution.add_argument(
         "--execute-node-url",
         metavar="url",

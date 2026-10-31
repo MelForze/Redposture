@@ -29,6 +29,7 @@ from ...clients.http_api import (
 )
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
+from ...credential_evidence import attempt_capabilities
 from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...stage_runtime import (
@@ -1595,7 +1596,7 @@ def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: s
                     and (not credentials_source or source == credentials_source)
                 )
             line = f"{prefix} [+] {credential_text}"
-            lines.append(_with_optional_datasources(record, line) if selected else line)
+            lines.append(_with_optional_datasources(attempt_capabilities(record, attempt, selected=selected), line))
             continue
         if ok is None:
             reason = _safe_excerpt(str(attempt.get("error") or "credential proof unavailable"), 120)
@@ -2020,7 +2021,7 @@ def authenticate_grafana(ctx: Any, detect_record: Any, options: dict[str, Any]) 
                 raise
             ok = None
             error = _friendly_error_from_exception(exc)
-        attempt = {"username": None, "password": None, "source": source, "ok": ok, "error": error or ""}
+        attempt: dict[str, Any] = {"username": None, "password": None, "source": source, "ok": ok, "error": error or ""}
         auth_header = f"Bearer {token}"
     else:
         effective_user = (username or "admin").strip() or "admin"
@@ -2048,6 +2049,24 @@ def authenticate_grafana(ctx: Any, detect_record: Any, options: dict[str, Any]) 
         auth_header = _auth_header(effective_user, effective_password)
         username, password = effective_user, effective_password
     state.auth_attempts.append(attempt)
+    datasource_probe = None
+    if ok:
+        selected_session = state.selected_session
+        state.selected_session = getattr(_THREAD_LOCAL_HTTP, "credential_result", {}).get("session")
+        try:
+            datasource_probe = _fetch_datasources(
+                str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), auth_header=auth_header
+            )
+            items, datasource_error, datasource_status = datasource_probe
+            attempt["credential_capabilities"] = {
+                "datasource_count": len(items) if isinstance(items, list) else None,
+                "datasource_error": datasource_error,
+                "datasource_http_status": datasource_status,
+            }
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+            attempt["credential_capabilities"] = {"datasource_count": None, "datasource_error": str(exc)}
+        finally:
+            state.selected_session = selected_session
     verification = getattr(_THREAD_LOCAL_HTTP, "credential_result", {})
     if ok and (state.auth_header is None or bool(getattr(ctx.args, "_spray_capabilities", False))):
         state.selected_session = verification.get("session")
@@ -2073,14 +2092,16 @@ def authenticate_grafana(ctx: Any, detect_record: Any, options: dict[str, Any]) 
         if bool(getattr(ctx.args, "_spray_capabilities", False)):
             state.deep_record = None
             state.prefetched_data = None
-        if bool(getattr(ctx.args, "defcreds", False)):
+        if (
+            bool(getattr(ctx.args, "defcreds", False))
+            or bool(getattr(ctx.args, "_spray_capabilities", False))
+            or not options.get("check_urls")
+        ):
             # Later rejected pairs can lock Basic Auth in Grafana. Preserve the
             # capabilities of this independently verified pair while still
             # checking every requested default credential.
             try:
-                datasources = _fetch_datasources(
-                    str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), auth_header=auth_header
-                )
+                datasources = datasource_probe if datasource_probe is not None else (None, "capability probe failed", 0)
                 checks = [
                     _run_temp_prometheus_check(
                         str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), auth_header, target_url
@@ -2129,6 +2150,7 @@ def authenticate_grafana(ctx: Any, detect_record: Any, options: dict[str, Any]) 
             "error": None if ok or anonymous_open else error,
             "auth_http_status": verification.get("auth_http_status"),
             "auth_error_detail": verification.get("auth_error_detail") or (error if ok is None else None),
+            "credential_capabilities": attempt.get("credential_capabilities", {}),
         }
     )
     return record

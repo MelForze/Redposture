@@ -59,7 +59,7 @@ def configure_portainer_parser(
         )
     add_discovery_budget_flags(inventory)
     execution = parser.add_argument_group("Execution")
-    add_execution_flags(execution)
+    add_execution_flags(execution, include_os_shell=True)
     append_selected_defaults(parser, "timeout", "workers", "retries", "port", "output_format")
 
 

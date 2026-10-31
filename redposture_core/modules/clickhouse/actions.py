@@ -20,6 +20,7 @@ from uuid import UUID
 from ...clients import transport
 from ...clients.http_api import infer_http_base_path
 from ...console import Console
+from ...credential_evidence import attempt_capabilities
 from ...detection_io import DetectCall, DetectDelay, run_sync
 from ...discovery_options import DEFAULT_DISCOVER_TIME
 from ...discovery_paths import concat_discovery_text
@@ -1174,6 +1175,7 @@ def _collect_capabilities(
     session: _ChSession,
     *,
     include_database_names: bool = True,
+    probe_execute: bool = True,
 ) -> tuple[bool | None, bool | None, bool | None, int | None, list[str] | None, str | None]:
     if include_database_names:
         db_names, db_error = _query_database_names(session)
@@ -1216,11 +1218,13 @@ def _collect_capabilities(
     if read_cap is None and read_probe_capability is False:
         read_probe_error = read_probe_error or "system.tables metadata probe denied"
 
-    exec_output, exec_error = _run_execute_command(session, "echo redposture_exec_probe")
-    if exec_error is None:
-        _ = exec_output
+    exec_error = None
+    execute_cap = None
+    if probe_execute:
+        exec_output, exec_error = _run_execute_command(session, "echo redposture_exec_probe")
+    if probe_execute and exec_error is None:
         execute_cap = True
-    else:
+    elif probe_execute:
         lowered_exec_error = str(exec_error).lower()
         if (
             _is_auth_error(exec_error)
@@ -1988,6 +1992,24 @@ def detect_clickhouse_steps(
     )
 
 
+def _credential_capabilities(session: _ChSession) -> dict[str, Any]:
+    """Read-only per-identity summary; execution stays with the selected session."""
+    try:
+        read, execute, admin, count, _names, error = _collect_capabilities(
+            session, include_database_names=False, probe_execute=False
+        )
+        return {
+            "read_capability": read,
+            "execute_capability": execute,
+            "execute_capability_reason": "active command proof is reserved for the selected identity",
+            "admin_capability": admin,
+            "database_count": count,
+            "capability_error": error,
+        }
+    except Exception as exc:
+        return {"capability_error": str(exc)}
+
+
 def authenticate_clickhouse(
     ctx: Any,
     detect_record: Any,
@@ -2035,7 +2057,9 @@ def authenticate_clickhouse(
             break
         time.sleep(_retry_delay(attempt))
     ok = session is not None
+    capability_evidence: dict[str, Any] = {}
     if session is not None:
+        capability_evidence = _credential_capabilities(session)
         if bool(getattr(ctx.args, "enum_cve", False)) and state.server_version is None:
             state.server_version = _read_clickhouse_version(session)
             payload["server_version"] = state.server_version
@@ -2050,6 +2074,7 @@ def authenticate_clickhouse(
             "source": source,
             "ok": ok,
             "error": str(error or ""),
+            "credential_capabilities": capability_evidence,
         }
     )
     detect_status = str(payload.get("status") or "")
@@ -2080,6 +2105,7 @@ def authenticate_clickhouse(
             "defcreds_enabled": source == "default",
             "default_credentials": bool(ok and source == "default"),
             "credential_attempt_count": len(state.auth_attempts),
+            "credential_capabilities": capability_evidence,
             "auth_transport_attempts": transport_attempts,
             "credentials_source": source if ok else None,
             "effective_username": username if ok else None,
@@ -2393,6 +2419,24 @@ def collect_clickhouse_data(
         ),
     }
     payload.update(payload_update)
+    for attempt in payload.get("credential_attempts") or []:
+        if (
+            attempt.get("ok")
+            and attempt.get("username") == (ctx.credential.username or "default")
+            and attempt.get("password") == (ctx.credential.password or "")
+            and attempt.get("source") == ctx.credential.source
+        ):
+            evidence = attempt.setdefault("credential_capabilities", {})
+            evidence.update(
+                {
+                    key: payload_update[key]
+                    for key in ("read_capability", "execute_capability", "admin_capability", "database_count")
+                    if key in payload_update and payload_update[key] is not None
+                }
+            )
+            payload["credential_capabilities"] = evidence
+            if payload_update.get("execute_capability") is not None:
+                evidence["execute_capability_reason"] = "active capability probe complete"
     payload["partial"] = bool(payload["partial_reasons"])
     return _normalize_clickhouse_record_schema(payload)
 
@@ -2509,6 +2553,9 @@ def _audit_clickhouse_host_on_protocol_legacy(
                     "source": source,
                     "ok": bool(ok),
                     "error": str(cred_error or ""),
+                    "credential_capabilities": _credential_capabilities(cred_session)
+                    if cred_session is not None
+                    else {},
                 }
             )
             if ok and effective_username is None:
@@ -2617,6 +2664,25 @@ def _audit_clickhouse_host_on_protocol_legacy(
                 )
             )
             _close_client(protocol, operation_session.client)
+
+        for credential_attempt in auth_attempts:
+            if (
+                credential_attempt.get("ok")
+                and credential_attempt.get("username") == effective_username
+                and credential_attempt.get("password") == effective_password
+                and credential_attempt.get("source") == credentials_source
+            ):
+                credential_attempt["credential_capabilities"].update(
+                    {
+                        key: action_result[key]
+                        for key in ("read_capability", "execute_capability", "admin_capability", "database_count")
+                        if action_result[key] is not None
+                    }
+                )
+                if action_result.get("execute_capability") is not None:
+                    credential_attempt["credential_capabilities"]["execute_capability_reason"] = (
+                        "active capability probe complete"
+                    )
 
         if effective_username is not None:
             status = "weak_default_creds" if credentials_source == "default" else "valid_credentials"
@@ -2972,7 +3038,7 @@ def _caps_suffix(record: dict[str, Any]) -> str:
         db_names = record.get("database_names")
         db_count = len(db_names) if isinstance(db_names, list) else None
     db_count_text = format_count_value(db_count)
-    return f"(read:{read_text}) (execute:{execute_text}) (admin:{admin_text}) (DBs:{db_count_text})"
+    return f"(read:{read_text}) (rce:{execute_text}) (admin:{admin_text}) (DBs:{db_count_text})"
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
@@ -3093,7 +3159,7 @@ def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: s
                     or str(attempt.get("source")) == credentials_source
                 )
             )
-            suffix = f" {_caps_suffix(record)}" if selected else ""
+            suffix = f" {_caps_suffix(attempt_capabilities(record, attempt, selected=selected))}"
             lines.append(f"{prefix} [+] {user}:{password}{suffix}")
         else:
             lines.append(f"{prefix} [-] {user}:{password}")
@@ -3519,7 +3585,7 @@ def _render_colored_clickhouse_line(console: Console, line: str) -> bool:
         tag="CLICKHOUSE",
         booleans=(
             BooleanColorRule("read", unknown_color="orange"),
-            BooleanColorRule("execute", unknown_color="orange"),
+            BooleanColorRule("rce", unknown_color="orange"),
             BooleanColorRule("admin", unknown_color="orange"),
         ),
         counts=(

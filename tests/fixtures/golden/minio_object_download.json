@@ -11,6 +11,15 @@
     "api_endpoint": "http://127.0.0.1:19000",
     "auth_required": true,
     "console_endpoint": null,
+    "credential_capabilities": {
+      "admin_capability": "partial",
+      "admin_evidence": {
+        "accountinfo": "ok",
+        "list_canned_policies": "ok",
+        "list_users": "unknown"
+      },
+      "identity_kind": "delegated_admin"
+    },
     "credential_results": [
       {
         "access_key": "minioadmin",

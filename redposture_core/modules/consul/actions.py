@@ -3774,8 +3774,10 @@ def _detect_line(record: dict[str, Any], output_format: str) -> str:
     anon_scopes = as_dict(record.get("anonymous_scopes"))
     auth_required = (not _all_scopes_ok(anon_scopes)) or _anonymous_acl_denied_with_filtered_empty(record, anon_scopes)
     version = str(record.get("version") or "-")
+    rce = record.get("rce")
+    rce_text = f" (rce:{rce})" if type(rce) is bool else " (rce:unknown)" if "rce" in record else ""
     inventory = f" {_detect_scope_counts_suffix(anon_scopes)}" if auth_required is False else ""
-    return f"{prefix} [*] Consul Agent (auth required:{_bool_text(auth_required)}){inventory} (version:{version})"
+    return f"{prefix} [*] Consul Agent (auth required:{_bool_text(auth_required)}){inventory}{rce_text} (version:{version})"
 
 
 def _summary_line(record: dict[str, Any]) -> str | None:
@@ -4290,6 +4292,9 @@ def _render_colored_consul_line(console: Console, line: str) -> bool:
         line,
         tag=_CONSUL_TAG,
         literals=(
+            ("(rce:True)", "true_red"),
+            ("(rce:False)", "bright_green"),
+            ("(rce:unknown)", "orange"),
             ("(Token not found)", "bright_green"),
             ("(EnableLocalScriptChecks:True)", "true_red"),
             ("(EnableRemoteScriptChecks:True)", "true_red"),

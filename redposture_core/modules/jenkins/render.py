@@ -30,10 +30,16 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth = auth_required_text(record.get("auth_required"), None)
     jobs = record.get("anonymous_jobs_access")
     jobs_text = str(jobs) if isinstance(jobs, bool) else "unknown"
-    return (
+    line = (
         f"{_prefix(record)} [*] Jenkins (auth required:{auth}) "
         f"(jobs allowed anonymously:{jobs_text}) (version:{record.get('version') or '-'}){_endpoint(record)}"
     )
+    rce = record.get("rce")
+    if type(rce) is bool:
+        line = line.replace(" (version:", f" (rce:{rce}) (version:")
+    elif "rce" in record:
+        line = line.replace(" (version:", " (rce:unknown) (version:")
+    return line
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
@@ -211,6 +217,7 @@ def _render_colored_jenkins_line(console: Console, line: str) -> bool:
             BooleanColorRule("auth required", true_color="bright_green", false_color="true_red"),
             BooleanColorRule("jobs allowed anonymously", true_color="true_red", false_color="bright_green"),
             BooleanColorRule("online", true_color="true_red", false_color="bright_green"),
+            BooleanColorRule("rce", true_color="true_red", false_color="bright_green"),
         ),
         regexes=(
             RegexColorRule(r"\((?:jobs|builds|plugins|nodes|queue|artifacts|Jobs):0\)", "bright_green"),
@@ -226,6 +233,7 @@ def _render_colored_jenkins_line(console: Console, line: str) -> bool:
             RegexColorRule(r"\(access:Access Denied\)", "bright_green"),
             RegexColorRule(r"\(access:Unknown\)", "orange"),
             RegexColorRule(r"\(version:-\)", "orange"),
+            RegexColorRule(r"\(rce:unknown\)", "orange"),
             RegexColorRule(r"\(status:partial\)", "orange"),
             RegexColorRule(r"\(status:(?:unverified|skipped|stopped)\)", "orange"),
             RegexColorRule(r"\((?:planned|performed|unverified|skipped):0\)", "bright_green"),

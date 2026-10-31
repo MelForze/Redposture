@@ -599,7 +599,7 @@ def test_nxc_prefix_and_caps_suffix() -> None:
             "database_names": ["a", "b"],
         }
     )
-    assert suffix == "(read:true) (execute:false) (admin:unknown) (DBs:2)"
+    assert suffix == "(read:true) (rce:false) (admin:unknown) (DBs:2)"
 
 
 def test_format_detect_record_json_and_format_record_json_redacts() -> None:
@@ -707,7 +707,7 @@ def test_render_colored_clickhouse_line_with_markers() -> None:
     console = _RecordingConsole()
     line = (
         "CLICKHOUSE\t127.0.0.1\t9000\t [+] default:<empty> "
-        "(read:true) (execute:false) (admin:unknown) (DBs:1) (auth required:unknown)"
+        "(read:true) (rce:false) (admin:unknown) (DBs:1) (auth required:unknown)"
     )
     assert clickhouse_stage._render_colored_clickhouse_line(console, line) is True
     assert any(marker == "[+]" and color == "bright_green" for marker, color in console.paint_calls)

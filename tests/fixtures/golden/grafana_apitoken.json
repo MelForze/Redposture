@@ -30,10 +30,12 @@
         "error": "invalid api token",
         "ok": false,
         "password": null,
+        "source": "provided",
         "token": null,
         "username": null
       }
     ],
+    "credential_capabilities": {},
     "credential_verification_status": "available",
     "credentials_source": null,
     "datasource_count": null,

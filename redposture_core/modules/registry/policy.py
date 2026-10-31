@@ -7,6 +7,7 @@ from typing import Any
 from ...discovery_options import validate_discovery_budget
 from ...stage_runtime import validate_basic_module_args
 from ..execution_api import validate as validate_execution
+from ..execution_api import validate_os_shell
 
 
 def validate_args(args: Any, console: Any, *, product: str = "registry") -> int | None:
@@ -19,6 +20,34 @@ def validate_args(args: Any, console: Any, *, product: str = "registry") -> int 
     if product == "nexus":
         if (execution_rc := validate_execution(args, console)) is not None:
             return execution_rc
+        if (
+            shell_rc := validate_os_shell(
+                args,
+                console,
+                forbidden=(
+                    "repositories",
+                    "show_repositories",
+                    "repository",
+                    "images",
+                    "show_images",
+                    "image",
+                    "tags",
+                    "show_tags",
+                    "tag",
+                    "manifest",
+                    "show_manifest",
+                    "metadata",
+                    "show_metadata",
+                    "assets",
+                    "show_assets",
+                    "asset",
+                    "download",
+                    "discover",
+                    "enum_cve",
+                ),
+            )
+        ) is not None:
+            return shell_rc
     if getattr(args, "token", None) and (
         getattr(args, "username", None) is not None or getattr(args, "password", None) is not None
     ):

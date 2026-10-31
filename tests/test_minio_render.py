@@ -398,7 +398,7 @@ def test_credential_attempts_render_accepted_non_selected():
     lines = render._format_credential_attempts_records(rec, "txt")
     # A second working default is surfaced with its password: several defaults can
     # share a username, so the operator needs the exact working pair.
-    assert f"{_PFX} [+] admin:admin" in lines
+    assert f"{_PFX} [+] admin:admin (admin:unverified)" in lines
     assert not any("minioadmin" in line for line in lines)  # winner skipped (shown by _format_record)
 
 

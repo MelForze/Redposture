@@ -245,7 +245,8 @@ def normalized(value):
 
 @pytest.mark.parametrize("secure", [False, True])
 @pytest.mark.parametrize("web", [False, True])
-def test_grpc_complete_record_and_order_parity(secure, web, mtls_material):
+@pytest.mark.parametrize("recover", [False, True])
+def test_grpc_complete_record_and_order_parity(secure, web, mtls_material, recover, monkeypatch):
     server, thread, requests, entered, closed, connections = native_server(
         secure=secure, material=mtls_material, web=web
     )
@@ -258,7 +259,12 @@ def test_grpc_complete_record_and_order_parity(secure, web, mtls_material):
 
         async def run():
             spec, ctx = context(server.server_address[1], secure)
-            result = await spec.detect_async(ctx, None)
+            if recover:
+                from tests.test_native_detect_timeout_retries import recover_real_protocol
+
+                result, ctx = await recover_real_protocol(spec, ctx, monkeypatch)
+            else:
+                result = await spec.detect_async(ctx, None)
             ctx.lifecycle_state.close()
             return result.to_dict()
 
