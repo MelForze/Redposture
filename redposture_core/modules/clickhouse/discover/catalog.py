@@ -48,7 +48,51 @@ class CatalogTree(_DiskValueReferences):
     def mapping(self, values=None):
         node = self._db.execute("INSERT INTO nodes(kind) VALUES ('map')").lastrowid
         result = CatalogMapping(self, node)
-        if values is not None:
+        if (
+            type(values) is dict
+            and values
+            and all(
+                isinstance(key, str)
+                and len(key) <= 4096
+                and (
+                    value is None
+                    or type(value) in (bool, int, float)
+                    or isinstance(value, str)
+                    and len(value) <= 65_536
+                )
+                for key, value in values.items()
+            )
+        ):
+            # Inventory/coverage records start empty and have unique string
+            # keys. Batch their scalar fields: per-field put() would repeat
+            # indexed lookups, ordinal allocation and a transaction for every
+            # field of every table. Large/referenced/nested values still use
+            # the arena-aware path below.
+            self._db.execute("SAVEPOINT catalog_mapping")
+            try:
+                self._db.executemany(
+                    "INSERT INTO entries VALUES (?,?,?,?,?,?)",
+                    (
+                        (
+                            node,
+                            self.key_identity(key),
+                            ordinal,
+                            "scalar",
+                            json.dumps(value, ensure_ascii=False),
+                            json.dumps(key, ensure_ascii=False),
+                        )
+                        for ordinal, (key, value) in enumerate(values.items())
+                    ),
+                )
+                self._db.execute("UPDATE nodes SET length=? WHERE id=?", (len(values), node))
+                self._db.execute("RELEASE catalog_mapping")
+            except BaseException as exc:
+                self._db.execute("ROLLBACK TO catalog_mapping")
+                self._db.execute("RELEASE catalog_mapping")
+                if isinstance(exc, sqlite3.Error):
+                    raise OSError(f"ClickHouse catalog storage failure: {exc}") from exc
+                raise
+        elif values is not None:
             result.update(values)
         return result
 
@@ -394,14 +438,14 @@ class ColumnSequence(list):
         from .models import ColumnInventory
 
         for value in self.payload:
-            yield ColumnInventory(**value)
+            yield ColumnInventory(**dict(value.items()))
 
     def __getitem__(self, index):
         from .models import ColumnInventory
 
         if isinstance(index, slice):
-            return [ColumnInventory(**value) for value in self.payload[index]]
-        return ColumnInventory(**self.payload[index])
+            return [ColumnInventory(**dict(value.items())) for value in self.payload[index]]
+        return ColumnInventory(**dict(self.payload[index].items()))
 
     def __setitem__(self, index, value):
         self.payload[index] = value.to_dict()
@@ -432,18 +476,21 @@ class InventoryCatalog(list):
     def _table(self, record):
         from .models import TableInventory
 
+        # Only the fixed-size metadata record is detached. Its children stay
+        # live disk views, so catalog width and data values are not copied.
+        fields = dict(record.items())
         return TableInventory(
-            database=record["database"],
-            name=record["table"],
-            engine=record["engine"],
-            partition_key=record["partition_key"],
-            sorting_key=record["sorting_key"],
-            primary_key=record["primary_key"],
-            total_rows=record["total_rows"],
-            total_bytes=record["total_bytes"],
-            columns=ColumnSequence(record["columns"]),
-            partitions=record["partitions"],
-            inventory_errors=record["inventory_errors"],
+            database=fields["database"],
+            name=fields["table"],
+            engine=fields["engine"],
+            partition_key=fields["partition_key"],
+            sorting_key=fields["sorting_key"],
+            primary_key=fields["primary_key"],
+            total_rows=fields["total_rows"],
+            total_bytes=fields["total_bytes"],
+            columns=ColumnSequence(fields["columns"]),
+            partitions=fields["partitions"],
+            inventory_errors=fields["inventory_errors"],
             _catalog_record=record,
         )
 

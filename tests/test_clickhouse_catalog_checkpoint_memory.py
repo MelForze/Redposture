@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import tracemalloc
 
+import pytest
+
 from redposture_core.modules.clickhouse.discover.checkpoint import CheckpointStore, InMemoryCheckpointStore
 from redposture_core.modules.clickhouse.discover.inventory import collect_inventory
 
@@ -151,6 +153,80 @@ def test_engine_catalog_report_keeps_10k_table_metadata_bounded():
     assert len(report["inventory"]) == len(report["coverage"]) == 10_000
     assert report["coverage"]["app.t09999.c00000"]["coverage_percent"] == 100.0
     assert peak < 6_000_000, f"engine retained {peak} bytes for 10k tables"
+
+
+def test_new_catalog_metadata_record_batches_scalar_inserts():
+    from redposture_core.modules.clickhouse.discover.catalog import CatalogTree
+
+    tree = CatalogTree()
+    fields = {
+        "status": "pending",
+        "type": "String",
+        "rows_scanned": 0,
+        "bytes_scanned": 0,
+        "approximate_total_rows": None,
+        "total_bytes": 2,
+        "total_partitions": 1,
+        "total_chunks": 0,
+        "completed_chunks": 0,
+        "failed_chunks": 0,
+        "coverage_percent": 0.0,
+        "scan_incomplete": False,
+        "описание": "данные",
+    }
+    statements: list[str] = []
+    tree._db.set_trace_callback(statements.append)
+    try:
+        record = tree.mapping(fields)
+    finally:
+        tree._db.set_trace_callback(None)
+
+    assert record == fields
+    assert list(record) == list(fields)
+    record["status"] = "complete"
+    assert record["status"] == "complete" and len(record) == len(fields)
+    # A newly created record needs no per-field lookup, MAX or transaction.
+    # Count SQL work rather than asserting machine-dependent wall time.
+    assert len(statements) <= len(fields) + 5, statements
+
+
+def test_catalog_metadata_batch_rolls_back_after_storage_error():
+    from redposture_core.modules.clickhouse.discover.catalog import CatalogTree
+
+    tree = CatalogTree()
+    existing = tree.mapping({"kept": 7})
+    tree._db.execute(
+        "CREATE TEMP TRIGGER fail_metadata BEFORE INSERT ON entries "
+        "WHEN NEW.payload='13' BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END"
+    )
+    with pytest.raises(OSError, match="catalog storage failure.*injected storage failure"):
+        tree.mapping({"first": 1, "failed": 13, "last": 3})
+    assert not tree._db.in_transaction
+    assert tree._db.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 1
+    assert existing == {"kept": 7}
+    assert tree.mapping({"next": 2}) == {"next": 2}
+
+
+def test_inventory_record_reads_batch_metadata_fields_and_keep_live_children():
+    from redposture_core.modules.clickhouse.discover.catalog import InventoryCatalog
+
+    tables, errors = collect_inventory(_catalog_query(1))
+    assert not errors and isinstance(tables, InventoryCatalog)
+    statements: list[str] = []
+    tables.tree._db.set_trace_callback(statements.append)
+    try:
+        table = tables[0]
+        columns = list(table.columns)
+    finally:
+        tables.tree._db.set_trace_callback(None)
+    assert table.full_name == "app.t00000" and table.total_rows == 0
+    assert len(columns) == 1 and columns[0].name == "c00000"
+    assert columns[0].type_name == "String" and columns[0].uncompressed_bytes == 2
+    # Fixed-size record metadata must be read together, rather than issuing
+    # one SELECT for every dataclass field on every catalog traversal.
+    assert len(statements) <= 12, statements
+    table.partitions.append({"partition_id": "p", "rows": 2})
+    assert tables[0].partitions[0]["partition_id"] == "p"
 
 
 def test_successful_scan_clears_previous_disk_coverage_error():

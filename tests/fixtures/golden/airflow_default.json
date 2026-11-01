@@ -104,7 +104,7 @@
         "username": "airflow"
       },
       {
-        "credential_state": "verification_unavailable",
+        "credential_state": "invalid",
         "error": null,
         "password": "dev",
         "source": "default",
@@ -112,7 +112,7 @@
         "username": "dev"
       },
       {
-        "credential_state": "verification_unavailable",
+        "credential_state": "invalid",
         "error": null,
         "password": "guest",
         "source": "default",
@@ -120,7 +120,7 @@
         "username": "guest"
       },
       {
-        "credential_state": "verification_unavailable",
+        "credential_state": "invalid",
         "error": null,
         "password": "password",
         "source": "default",

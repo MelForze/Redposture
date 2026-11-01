@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 
+import pytest
+
 from redposture_core.clients import airflow_api
 
 
@@ -109,6 +111,26 @@ def test_fab_login_rejects_sso_and_cross_origin_action_without_post():
         client = airflow_api.AirflowClient(pool, scheme="http", host="airflow.example", port=8080)
         assert client.verify_fab_login("admin", "pass") == "unverified"
         assert [call[0] for call in pool.calls] == ["GET"]
+
+
+@pytest.mark.parametrize("limited_step", ["form", "submit", "follow"])
+def test_fab_login_rate_limit_never_proves_or_rejects_credentials(limited_step):
+    form = _fab_response(200, _FAB_FORM, {"Content-Type": "text/html", "Set-Cookie": "session=one"})
+    posted = _fab_response(302, headers={"Location": "/login/", "Set-Cookie": "session=two"})
+    limited = _fab_response(429, b"Too Many Requests")
+    responses = {
+        "form": [limited],
+        "submit": [form, limited],
+        "follow": [form, posted, limited],
+    }[limited_step]
+    pool = _FabPool(responses)
+    client = airflow_api.AirflowClient(pool, scheme="http", host="airflow.example", port=8080)
+    assert client.verify_fab_login("admin", "pass") == "unverified"
+    assert [call[0] for call in pool.calls] == {
+        "form": ["GET"],
+        "submit": ["GET", "POST"],
+        "follow": ["GET", "POST", "GET"],
+    }[limited_step]
 
 
 def test_fab_login_does_not_treat_generic_redirect_as_success_or_failure():

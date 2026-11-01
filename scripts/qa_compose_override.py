@@ -1,4 +1,4 @@
-"""Give QA Compose services project-scoped container names.
+"""Give QA Compose services isolated names and deterministic fixture settings.
 
 The local fixture Compose files have fixed ``container_name`` values so they
 can be used by hand. A QA run must not collide with another stopped or running
@@ -15,12 +15,12 @@ import sys
 from pathlib import Path
 
 
-def build_override(config: object, project: str) -> dict[str, dict[str, dict[str, str]]]:
+def build_override(config: object, project: str) -> dict[str, dict[str, dict[str, object]]]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", project):
         raise ValueError("invalid QA Compose project name")
     if not isinstance(config, dict) or not isinstance(config.get("services"), dict):
         raise ValueError("Compose config has no services")
-    services = {
+    services: dict[str, dict[str, object]] = {
         service: {"container_name": f"{project}-{name}"}
         for service, details in config["services"].items()
         if isinstance(service, str)
@@ -28,6 +28,23 @@ def build_override(config: object, project: str) -> dict[str, dict[str, dict[str
         and isinstance(name := details.get("container_name"), str)
         and name
     }
+    airflow = config["services"].get("airflow-auth")
+    if isinstance(airflow, dict) and airflow.get("container_name") == "redposture-lab-airflow-auth":
+        target = "/opt/airflow/webserver_config.py"
+        services["airflow-auth"]["volumes"] = [
+            mount
+            for mount in airflow.get("volumes", [])
+            if not isinstance(mount, dict) or mount.get("target") != target
+        ] + [
+            {
+                "type": "bind",
+                "source": str(
+                    Path(__file__).resolve().parents[1] / "tests/fixtures/airflow_golden_lab/webserver_config.py"
+                ),
+                "target": target,
+                "read_only": True,
+            }
+        ]
     return {"services": services}
 
 
