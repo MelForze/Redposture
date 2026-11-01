@@ -406,6 +406,16 @@ def _minimum_json_size(value: Any, limit: int) -> int:
 def _bounded_json_size(value: Any, limit: int) -> int | None:
     if _minimum_json_size(value, limit) > limit:
         return None
+    # Mapping portions commonly contain one small string pair. The C encoder
+    # avoids a Python generator per JSON field, but only after bounding the
+    # input; larger/nested values retain the incremental path below.
+    small_text = type(value) is str and len(value) <= 65_536
+    if type(value) is dict and len(value) == 1:
+        key, child = next(iter(value.items()))
+        small_text = type(key) is str and type(child) is str and len(key) + len(child) <= 65_536
+    if small_text:
+        size = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+        return size if size <= limit else None
     size = 0
     for chunk in json.JSONEncoder(ensure_ascii=False, default=str).iterencode(value):
         if len(chunk) > limit - size:
@@ -754,7 +764,11 @@ def _scan_portioned_value(
                     pair_size = _bounded_json_size(pair, portion_bytes)
                 except (TypeError, ValueError):
                     pair_size = None
-                child_size = _bounded_json_size(child, portion_bytes) if isinstance(child, (str, bytes)) else None
+                child_size = (
+                    _bounded_json_size(child, portion_bytes)
+                    if pair_size is None and isinstance(child, (str, bytes))
+                    else None
+                )
                 if (pair_size is not None or child_size is not None) and not _small_encoded_blob(child):
                     matches.extend(scan_value(pair, object_path=path))
                     total += pair_size if pair_size is not None else int(child_size or 0)

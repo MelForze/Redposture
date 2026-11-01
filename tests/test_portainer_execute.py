@@ -116,6 +116,26 @@ def test_portainer_exec_uses_selected_environment_and_returns_streams(monkeypatc
     assert all(call[2]["headers"]["X-API-Key"] == "ptr_qa" for call in pool.calls)
 
 
+def test_portainer_cleanup_denial_keeps_output_but_reports_partial(monkeypatch) -> None:
+    injected = """
+import errno
+import os
+def denied_cleanup(pid, sig):
+    raise PermissionError(errno.EPERM, "injected cleanup denial")
+os.killpg = denied_cleanup
+"""
+    monkeypatch.setattr(execution, "_REMOTE_WRAPPER", injected + execution._REMOTE_WRAPPER)
+    pool = Pool()
+    monkeypatch.setattr(execution, "HttpSessionPool", lambda **_: pool)
+    ctx, record, state = _context(pool)
+    result = execution.collect(ctx, record.to_dict(), state)
+    output = result["execution"]
+    assert output["executed"] is True and output["exit_code"] == 7
+    assert output["stdout"] == "out" and output["stderr"] == "err"
+    assert output["status"] == "partial" and output["cleanup"] == "failed"
+    assert "injected cleanup denial" in output["cleanup_error"]
+
+
 def test_portainer_exec_caches_ambiguous_result_and_never_replays(monkeypatch) -> None:
     pool = Pool()
     monkeypatch.setattr(execution, "HttpSessionPool", lambda **_: pool)

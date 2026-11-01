@@ -7,6 +7,7 @@ import json
 import sqlite3
 import tempfile
 from collections.abc import Mapping
+from functools import lru_cache
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,37 @@ from ....discovery_containers import DiskMapping, DiskSequence
 from ....discovery_json import DiskJSONDocument
 from ....discovery_spool import _DiskValueReferences
 from ....discovery_values import DiskBackedText
+
+_SCALAR_TYPES = (str, int, float, bool, type(None))
+
+
+@lru_cache(maxsize=512, typed=True)
+def _cached_scalar_json(value):
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _scalar_json(value):
+    # Cache immutable, small metadata only: never retain a large value or an
+    # owned disk view, nor conflate False/0/0.0 in the serializer's cache.
+    if (
+        (type(value) is str and len(value) <= 256)
+        or value is None
+        or type(value) is bool
+        or (type(value) is int and value.bit_length() <= 128)
+    ):
+        return _cached_scalar_json(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
+@lru_cache(maxsize=512)
+def _cached_scalar_value(payload):
+    return json.loads(payload)
+
+
+@lru_cache(maxsize=512)
+def _cached_key_identity(text):
+    encoded = text.encode("utf-8")
+    return f"{len(encoded)}:{hashlib.sha256(encoded).hexdigest()}"
 
 
 class CatalogTree(_DiskValueReferences):
@@ -78,8 +110,8 @@ class CatalogTree(_DiskValueReferences):
                             self.key_identity(key),
                             ordinal,
                             "scalar",
-                            json.dumps(value, ensure_ascii=False),
-                            json.dumps(key, ensure_ascii=False),
+                            _scalar_json(value),
+                            _scalar_json(key),
                         )
                         for ordinal, (key, value) in enumerate(values.items())
                     ),
@@ -107,6 +139,8 @@ class CatalogTree(_DiskValueReferences):
         return CatalogMapping(self, node) if kind == "map" else CatalogSequence(self, node)
 
     def _encode(self, value, pending: dict[str, Any]):
+        if type(value) in _SCALAR_TYPES and (type(value) is not str or len(value) <= 65_536):
+            return "scalar", _scalar_json(value)
         if isinstance(value, (CatalogMapping, CatalogSequence)) and value._owner is self:
             return value._kind, str(value._node)
         if isinstance(value, (CatalogMapping, CatalogSequence)):
@@ -147,6 +181,29 @@ class CatalogTree(_DiskValueReferences):
             return self._foreign[key].restore((node_kind, node))
         if kind == "foreign":
             return self._foreign[payload]
+        return self._decode_scalar(payload)
+
+    def _decode_scalar(self, payload):
+        if len(payload) <= 256 and payload[:1] in (
+            '"',
+            "-",
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "t",
+            "f",
+            "n",
+            "I",
+            "N",
+        ):
+            return _cached_scalar_value(payload)
         return self._decode_disk_refs(json.loads(payload))
 
     @staticmethod
@@ -154,6 +211,8 @@ class CatalogTree(_DiskValueReferences):
         if isinstance(key, DiskBackedText):
             return f"{key.byte_length}:{key.digest}"
         text = key if isinstance(key, str) else str(key)
+        if type(text) is str and len(text) <= 256:
+            return _cached_key_identity(text)
         digest = hashlib.sha256()
         length = 0
         for offset in range(0, len(text), 65_536):
@@ -179,10 +238,10 @@ class CatalogTree(_DiskValueReferences):
                     encoded = self._encode_disk_refs(source, pending)
             else:
                 encoded = text
-        return json.dumps(encoded, ensure_ascii=False)
+        return _scalar_json(encoded)
 
     def decode_key(self, payload):
-        return self._decode_disk_refs(json.loads(payload))
+        return self._decode_scalar(payload)
 
     def put(self, parent, key, value):
         pending: dict[str, Any] = {}

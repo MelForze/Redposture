@@ -54,13 +54,19 @@ totals = {"stdout": 0, "stderr": 0}
 timed_out = False
 truncated = False
 cleanup_complete = True
+cleanup_error = None
+group_terminated = False
 deadline = time.monotonic() + timeout
 
 def kill_group():
+    global group_terminated
+    if group_terminated:
+        return
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    group_terminated = True
 
 try:
     for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
@@ -90,7 +96,11 @@ try:
 finally:
     # Also remove children left in our group after a shell backgrounds work and
     # exits normally. The surrounding selected container is never signalled.
-    kill_group()
+    try:
+        kill_group()
+    except OSError as error:
+        cleanup_complete = False
+        cleanup_error = "Command process-group cleanup failed: " + str(error)
     selector.close()
     for stream in (process.stdout, process.stderr):
         if not stream.closed:
@@ -105,6 +115,7 @@ emit({"exit_code": exit_code,
       "stderr_b64": base64.b64encode(buffers["stderr"]).decode("ascii"),
       "timed_out": timed_out,
       "cleanup_complete": cleanup_complete,
+      "cleanup_error": cleanup_error,
       "truncated": truncated or any(totals[name] > len(buffers[name]) for name in buffers)})
 """
 
@@ -388,7 +399,11 @@ def collect(ctx: Any, record: dict[str, Any], state: Any) -> dict[str, Any]:
                 stderr=proof["stderr"],
                 truncated=proof["truncated"],
                 cleanup="not_needed" if proof["cleanup_complete"] else "failed",
-                status="timeout" if timed_out else "partial" if proof["truncated"] else "complete",
+                status="timeout"
+                if timed_out
+                else "partial"
+                if proof["truncated"] or not proof["cleanup_complete"]
+                else "complete",
             )
             if timed_out:
                 output.update(
@@ -396,7 +411,9 @@ def collect(ctx: Any, record: dict[str, Any], state: Any) -> dict[str, Any]:
                     error="Remote command exceeded its execution deadline",
                 )
             if not proof["cleanup_complete"]:
-                output["cleanup_error"] = "A detached process retained command pipes after process-group termination"
+                output["cleanup_error"] = (
+                    proof.get("cleanup_error") or "Command process-group cleanup could not be confirmed"
+                )
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         output["error"] = str(exc)
     finish(output, max_bytes=limit)

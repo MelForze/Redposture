@@ -132,6 +132,8 @@ class _DiskValueReferences:
         return value
 
     def _decode_disk_refs(self, value: Any) -> Any:
+        if type(value) in _PLAIN_SCALAR_TYPES or _plain_scalar_record(value):
+            return value
         if isinstance(value, dict):
             if len(value) == 1 and _MAPPING_VALUE_REF in value:
                 return {

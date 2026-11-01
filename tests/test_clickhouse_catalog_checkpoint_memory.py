@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import tracemalloc
 
 import pytest
@@ -188,6 +189,84 @@ def test_new_catalog_metadata_record_batches_scalar_inserts():
     # A newly created record needs no per-field lookup, MAX or transaction.
     # Count SQL work rather than asserting machine-dependent wall time.
     assert len(statements) <= len(fields) + 5, statements
+
+
+def test_repeated_catalog_metadata_reads_do_not_reparse_and_rehash(monkeypatch):
+    from redposture_core.modules.clickhouse.discover import catalog
+
+    values = catalog.CatalogTree().mapping({"qa_hot_field": "qa-hot-metadata-value"})
+    loads = hashes = 0
+    original_loads, original_hash = catalog.json.loads, catalog.hashlib.sha256
+
+    def load(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        return original_loads(*args, **kwargs)
+
+    def digest(*args, **kwargs):
+        nonlocal hashes
+        hashes += 1
+        return original_hash(*args, **kwargs)
+
+    monkeypatch.setattr(catalog.json, "loads", load)
+    monkeypatch.setattr(catalog.hashlib, "sha256", digest)
+    for _ in range(1000):
+        assert values["qa_hot_field"] == "qa-hot-metadata-value"
+    assert loads <= 2 and hashes <= 2, (loads, hashes)
+    values["qa_hot_field"] = "changed"
+    assert values["qa_hot_field"] == "changed"
+
+
+def test_repeated_catalog_metadata_writes_preserve_scalar_types_without_reencoding(monkeypatch):
+    from redposture_core.modules.clickhouse.discover import catalog
+
+    tree = catalog.CatalogTree()
+    dumps = 0
+    original = catalog.json.dumps
+
+    def dump(*args, **kwargs):
+        nonlocal dumps
+        dumps += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(catalog.json, "dumps", dump)
+    for _ in range(100):
+        values = tree.mapping({"flag": False, "integer": 0, "empty": None})
+        assert values["flag"] is False and values["empty"] is None
+        assert type(values["integer"]) is int
+    assert dumps <= 16, dumps
+
+
+def test_catalog_preserves_both_float_zero_signs():
+    from redposture_core.modules.clickhouse.discover.catalog import CatalogTree
+
+    values = CatalogTree().mapping({"positive": 0.0, "negative": -0.0})
+    assert type(values["positive"]) is float and type(values["negative"]) is float
+    assert math.copysign(1.0, values["positive"]) == 1.0
+    assert math.copysign(1.0, values["negative"]) == -1.0
+
+
+def test_catalog_scalar_caches_are_bounded_and_skip_large_values():
+    from redposture_core.modules.clickhouse.discover import catalog
+
+    caches = (catalog._cached_scalar_json, catalog._cached_scalar_value, catalog._cached_key_identity)
+    for cache in caches:
+        cache.cache_clear()
+    tree = catalog.CatalogTree()
+    values = tree.mapping()
+    for number in range(1100):
+        key, value = f"qa-cache-key-{number}", f"qa-cache-value-{number}"
+        values[key] = value
+        assert values[key] == value
+    assert all(cache.cache_info().currsize <= 512 for cache in caches)
+    before_large_values = [cache.cache_info() for cache in caches]
+    values["long-key-" + "x" * 4096] = "long-value-" + "y" * 4096
+    assert values["long-key-" + "x" * 4096] == "long-value-" + "y" * 4096
+    assert [cache.cache_info() for cache in caches] == before_large_values
+    values["mutable"] = {"child": [1]}
+    first = values["mutable"]
+    first["child"].append(2)
+    assert values["mutable"]["child"] == [1, 2]
 
 
 def test_catalog_metadata_batch_rolls_back_after_storage_error():
