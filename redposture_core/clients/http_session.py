@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import io
+import ipaddress
 import socket
 import ssl
 import threading
@@ -12,7 +13,7 @@ import urllib.parse
 import zlib
 from collections import defaultdict
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from ..http_headers import merge_custom_http_headers
 from ..network_proxy import ProxyConfig, open_connection_via_proxy
@@ -174,6 +175,7 @@ class HttpSessionPool:
         self.default_retries = max(0, int(retries))
         self._idle: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = defaultdict(list)
         self._connections: set[http.client.HTTPConnection] = set()
+        self._retained_claims: dict[http.client.HTTPConnection, Callable[[], None]] = {}
         # A Connection: close response can detach the socket from HTTPConnection
         # before its body has been read. Keep it reachable for pool.close().
         self._active_sockets: set[Any] = set()
@@ -219,19 +221,108 @@ class HttpSessionPool:
             self._stats["connections"] += 1
         return connection
 
-    def _acquire(self, key: tuple[str, str, int], timeout: float) -> tuple[http.client.HTTPConnection, bool]:
+    @staticmethod
+    def _retained_socket_alive(sock: Any, timeout: float) -> bool:
+        if sock is None or sock.fileno() < 0:
+            return False
+        try:
+            sock.setblocking(False)
+            # EOF is stale; unsolicited application bytes are unsafe to adopt.
+            # SSL may consume control records before reporting WANT_READ.
+            sock.recv(1)
+            return False
+        except (BlockingIOError, ssl.SSLWantReadError):
+            return True
+        except OSError:
+            return False
+        finally:
+            if sock.fileno() >= 0:
+                sock.settimeout(timeout)
+
+    def _acquire(
+        self, key: tuple[str, str, int], timeout: float, allow_retained: bool = True
+    ) -> tuple[http.client.HTTPConnection, bool]:
         with self._lock:
             if self._closed:
                 raise RuntimeError("HTTP session pool is closed")
             bucket = self._idle.get(key)
-            if bucket:
+            while bucket:
                 connection = bucket.pop()
+                release = self._retained_claims.pop(connection, None)
+                if release is not None:
+                    release()
+                    if not allow_retained or not self._retained_socket_alive(connection.sock, timeout):
+                        self._connections.discard(connection)
+                        connection.close()
+                        continue
                 connection.timeout = timeout
                 if connection.sock is not None:
                     connection.sock.settimeout(timeout)
                 self._stats["reused"] += 1
                 return connection, True
         return self._new_connection(key, timeout), False
+
+    def adopt_socket(
+        self,
+        key: tuple[str, str, int],
+        sock: socket.socket,
+        *,
+        tls_context: ssl.SSLContext | None,
+        on_claim: Callable[[], None],
+    ) -> bool:
+        """Take one fully framed anonymous connection; headers/cookies stay request-local."""
+        scheme, host, port = key
+        if self.proxy is not None or scheme not in {"http", "https"} or sock.fileno() < 0:
+            return False
+        try:
+            peer = sock.getpeername()
+            if int(peer[1]) != port or ipaddress.ip_address(peer[0]) != ipaddress.ip_address(host):
+                return False
+        except (OSError, ValueError):
+            return False
+        if scheme == "https":
+            if not isinstance(sock, ssl.SSLSocket) or tls_context is not self._target_context():
+                return False
+            if sock.context is not tls_context or (sock.server_hostname or "").lower() != host.lower():
+                return False
+            connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+                host, port, timeout=self.timeout, context=tls_context
+            )
+        else:
+            if isinstance(sock, ssl.SSLSocket) or tls_context is not None:
+                return False
+            connection = http.client.HTTPConnection(host, port, timeout=self.timeout)
+        with self._lock:
+            if self._closed or len(self._idle.get(key, ())) >= self.max_idle_per_origin:
+                return False
+            sock.settimeout(self.timeout)
+            connection.sock = sock
+            cast(Any, connection)._detect_handoff = True
+            self._connections.add(connection)
+            self._idle[key].append(connection)
+            self._retained_claims[connection] = on_claim
+            # The async client already counted the actual TCP/TLS opening.
+            return True
+
+    def take_handoff(
+        self, key: tuple[str, str, int], *, timeout: float, method: str
+    ) -> http.client.HTTPConnection | None:
+        """Give a thread-confined HTTP client its anonymous detect connection."""
+        with self._lock:
+            bucket = self._idle.get(key, [])
+            for index, connection in enumerate(bucket):
+                if connection not in self._retained_claims:
+                    continue
+                bucket.pop(index)
+                self._retained_claims.pop(connection)()
+                # Keep the terminal-close backstop during the tiny gap before
+                # a thread-confined caller assigns its own connection field.
+                if method.upper() in {"GET", "HEAD"} and self._retained_socket_alive(connection.sock, timeout):
+                    return connection
+                self._connections.discard(connection)
+                connection.close()
+                return None
+        return None
 
     def _release(self, key: tuple[str, str, int], connection: http.client.HTTPConnection, reusable: bool) -> None:
         close_connection = not reusable
@@ -251,6 +342,21 @@ class HttpSessionPool:
             except OSError:
                 pass
 
+    @staticmethod
+    def _claim_handoff(connection: Any) -> bool:
+        handed_off = bool(getattr(connection, "_detect_handoff", False))
+        if handed_off:
+            connection._detect_handoff = False
+        return handed_off
+
+    @staticmethod
+    def _handoff_disconnected(method: str, handed_off: bool, error: BaseException | None) -> bool:
+        return (
+            handed_off
+            and method.upper() in {"GET", "HEAD"}
+            and isinstance(error, (ConnectionError, ssl.SSLEOFError, http.client.IncompleteRead))
+        )
+
     def _request_once(
         self,
         method: str,
@@ -263,15 +369,46 @@ class HttpSessionPool:
         preserve_partial_body: bool = False,
         deadline: float | None = None,
     ) -> tuple[HttpResponse, BaseException | None, bool]:
+        options: dict[str, Any] = dict(
+            headers=headers,
+            body=body,
+            timeout=timeout,
+            response_size_cap=response_size_cap,
+            preserve_partial_body=preserve_partial_body,
+            deadline=deadline,
+        )
+        response, error, reused, handed_off = self._request_attempt(method, url, **options)
+        if not response.body and self._handoff_disconnected(method, handed_off, error):
+            # One explicitly permitted reconnect of an anonymously detected
+            # socket. No POST, timeout retry, or replay of accepted body data.
+            with self._lock:
+                self._stats["retries"] += 1
+            response, error, reused, _ = self._request_attempt(method, url, **options)
+        return response, error, reused
+
+    def _request_attempt(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None,
+        timeout: float,
+        response_size_cap: int,
+        preserve_partial_body: bool = False,
+        deadline: float | None = None,
+    ) -> tuple[HttpResponse, BaseException | None, bool, bool]:
         key = _origin(url)
         connection: http.client.HTTPConnection | None = None
         reused = False
+        handed_off = False
         response: http.client.HTTPResponse | None = None
         reusable = False
         active_sock: Any | None = None
         received = bytearray()
         try:
-            connection, reused = self._acquire(key, timeout)
+            connection, reused = self._acquire(key, timeout, method.upper() in {"GET", "HEAD"})
+            handed_off = self._claim_handoff(connection)
 
             def apply_deadline() -> None:
                 if deadline is None:
@@ -337,6 +474,7 @@ class HttpSessionPool:
                 ),
                 None,
                 reused,
+                handed_off,
             )
         except BaseException as exc:  # noqa: BLE001 - normalized for callers
             if preserve_partial_body and response is not None and received:
@@ -360,8 +498,14 @@ class HttpSessionPool:
                     ),
                     exc,
                     reused,
+                    handed_off,
                 )
-            return HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc)), exc, reused
+            return (
+                HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc)),
+                exc,
+                reused,
+                handed_off,
+            )
         finally:
             if active_sock is not None:
                 with self._lock:
@@ -499,19 +643,21 @@ class HttpSessionPool:
         read_size = max(1, int(chunk_size))
         idle_timeout = self.timeout if timeout is None else max(0.001, float(timeout))
 
-        def send(
+        def send_once(
             method_value: str, current_url: str, headers_value: dict[str, str], body_value: bytes | None
-        ) -> HttpResponse:
+        ) -> tuple[HttpResponse, bool]:
             key = _origin(current_url)
             connection: http.client.HTTPConnection | None = None
             response: http.client.HTTPResponse | None = None
             active_sock: Any | None = None
             reusable = False
             received = 0
+            handed_off = False
             status = 0
             response_headers: dict[str, str] = {}
             try:
-                connection, _reused = self._acquire(key, idle_timeout)
+                connection, _reused = self._acquire(key, idle_timeout, method_value.upper() in {"GET", "HEAD"})
+                handed_off = self._claim_handoff(connection)
 
                 def apply_deadline() -> None:
                     assert connection is not None
@@ -544,7 +690,7 @@ class HttpSessionPool:
                 encoding = str(response.getheader("Content-Encoding") or "").strip().lower()
                 if 200 <= status < 300 and not redirect:
                     if encoding not in {"", "identity"}:
-                        return HttpResponse(status, b"", response_headers, error="unsupported_content_encoding")
+                        return HttpResponse(status, b"", response_headers, error="unsupported_content_encoding"), False
                     while True:
                         apply_deadline()
                         chunk = response.read1(read_size)
@@ -556,10 +702,13 @@ class HttpSessionPool:
                     if isinstance(remaining_length, int) and remaining_length > 0:
                         raise ConnectionError("unexpected EOF: incomplete HTTP stream")
                     reusable = not response.will_close
-                return HttpResponse(status, b"", response_headers)
+                return HttpResponse(status, b"", response_headers), False
             except Exception as exc:
-                return HttpResponse(
-                    status, b"", response_headers, error=normalize_http_error(exc), truncated=received > 0
+                return (
+                    HttpResponse(
+                        status, b"", response_headers, error=normalize_http_error(exc), truncated=received > 0
+                    ),
+                    status == 0 and received == 0 and self._handoff_disconnected(method_value, handed_off, exc),
                 )
             finally:
                 if active_sock is not None:
@@ -572,6 +721,16 @@ class HttpSessionPool:
                         reusable = False
                 if connection is not None:
                     self._release(key, connection, reusable)
+
+        def send(
+            method_value: str, current_url: str, headers_value: dict[str, str], body_value: bytes | None
+        ) -> HttpResponse:
+            result, reconnect = send_once(method_value, current_url, headers_value, body_value)
+            if reconnect:
+                with self._lock:
+                    self._stats["retries"] += 1
+                result, _ = send_once(method_value, current_url, headers_value, body_value)
+            return result
 
         result = follow_redirects(
             send,
@@ -627,6 +786,10 @@ class HttpSessionPool:
             self._connections.clear()
             self._active_sockets.clear()
             self._idle.clear()
+            releases = list(self._retained_claims.values())
+            self._retained_claims.clear()
+        for release in releases:
+            release()
         for sock in active_sockets:
             try:
                 sock.shutdown(socket.SHUT_RDWR)

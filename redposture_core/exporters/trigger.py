@@ -604,7 +604,12 @@ def _scan_exporters_and_trigger(
     def finish(job: tuple[str, str, dict[str, Any]], details: Any = None) -> dict[str, Any]:
         kind, host, exporter = job
         if kind == "detect":
-            return detect_job(host, exporter, details)
+            result = detect_job(host, exporter, details)
+            if not result.get("detected"):
+                release = getattr(details, "release_handoff", None)
+                if release is not None:
+                    release()
+            return result
         return trigger_detected_exporter_task(
             logger,
             host,

@@ -388,6 +388,7 @@ def test_mongodb_recovery_uses_real_async_driver_and_complete_wire_proof(recover
     import struct
     import threading
 
+    import pymongo
     from bson import BSON
 
     from redposture_core.clients.async_mongodb_detect import AsyncMongoDetectClient
@@ -490,11 +491,17 @@ def test_mongodb_recovery_uses_real_async_driver_and_complete_wire_proof(recover
     monkeypatch.setattr(AsyncMongoDetectClient, "close", tracked_close)
     try:
         result = asyncio.run(runner._run_async_detect_with_state("127.0.0.1", server.server_address[1], None, None))
+        supports_async = callable(getattr(pymongo, "AsyncMongoClient", None))
+        if not supports_async:
+            # PyMongo 4.7 is supported through the real sync fallback; it has
+            # no native AsyncMongoClient. Verify the same wire proof there.
+            assert result is None
+            result = runner._run_detect_with_state("127.0.0.1", server.server_address[1], None, None)
         assert result is not None and runner._is_detected(result.record)
         assert result.record.status == ("open_no_auth" if authorized else "auth_required")
         assert result.record.auth_required is not authorized
         assert result.record.extra["server_version"] == "7.0.1"
-        assert len(attempts) == (3 if recover else 1)
+        assert len(attempts) == ((3 if recover else 1) if supports_async else 0)
         assert attempts == closed
         assert "buildinfo" in requests and requests.count("listdatabases") == 1
         assert not failures

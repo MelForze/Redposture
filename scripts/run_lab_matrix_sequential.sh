@@ -756,6 +756,9 @@ run_rabbitmq_cases() {
 }
 
 run_minio_cases() {
+  # Local lab/ is ignored and may still contain an older /dev/urandom seed.
+  # Normalize only this known QA negative control before collecting snapshots.
+  compose_service minio exec -T minio sh -s < "${ROOT_DIR}/scripts/seed_minio_binary_control.sh" || return 1
   run_case minio minio_default 1 minio -t 127.0.0.1 --debug --defcreds
   run_case minio minio_creds 0 minio --targets 127.0.0.1 --port 19000 --ports 19000,19001 -u minioadmin -p minioadmin --session-token fake-token --probe-write
   run_case minio minio_tls 1 minio -t 127.0.0.1 --port 443 -ot excluded.invalid

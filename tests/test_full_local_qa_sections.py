@@ -88,11 +88,29 @@ def test_selected_qa_sections_write_independent_logs_without_docker(tmp_path: Pa
 
 
 def test_hypothesis_section_records_timeout_and_current_test(tmp_path: Path) -> None:
+    # Exercise the real section and timeout supervisor with a deterministic
+    # hanging test process. Real pytest collection can exceed this deliberately
+    # short deadline before it prints any node ID on a busy CI runner.
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        "if sys.argv[1:3] == ['-m', 'pytest']:\n"
+        "    assert os.environ['REDPOSTURE_HYPOTHESIS_PROFILE'] == 'redposture-local'\n"
+        "    assert 'tests/test_detection_cve_hypothesis.py' in sys.argv\n"
+        "    assert '-vv' in sys.argv\n"
+        "    print('tests/test_detection_cve_hypothesis.py::test_hanging_probe', flush=True)\n"
+        "    time.sleep(60)\n"
+        "else:\n"
+        "    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
     destination = tmp_path / "hypothesis-timeout"
     result = subprocess.run(
         ["bash", str(SCRIPT), str(destination), "--section", "hypothesis"],
         cwd=ROOT,
-        env=dict(os.environ, PYTHON_BIN=sys.executable, QA_HYPOTHESIS_TIMEOUT_SECONDS="2"),
+        env=dict(os.environ, PYTHON_BIN=str(fake_python), QA_HYPOTHESIS_TIMEOUT_SECONDS="2"),
         capture_output=True,
         text=True,
         timeout=10,
@@ -101,7 +119,7 @@ def test_hypothesis_section_records_timeout_and_current_test(tmp_path: Path) -> 
     assert result.returncode == 1
     log = (destination / "sections" / "hypothesis.log").read_text()
     assert "[timeout] QA command timed out after 2 seconds" in log
-    assert "tests/test_" in log
+    assert "tests/test_detection_cve_hypothesis.py::test_hanging_probe" in log
     summary = (destination / "sections" / "summary.tsv").read_text()
     assert "hypothesis\tfailed\t124\t" in summary
 

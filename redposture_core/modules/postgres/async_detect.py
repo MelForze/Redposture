@@ -136,6 +136,80 @@ async def _probe(
             await close_stream(writer, terminate=b"X\x00\x00\x00\x04" if startup else None)
 
 
+async def _probe_retained(
+    host: str, port: int, timeout: float, config: actions._PgTlsConfig, database: str, cache: Any
+) -> actions._PgSession:
+    from ...clients.async_retained_socket import RetainedSocketIO
+    from .session import session_key
+
+    io = RetainedSocketIO()
+    io.check_supported()
+    sock = await io.open((host, port), timeout)
+    startup = False
+    try:
+        if config.sslmode != "disable":
+            await io.sendall(sock, (8).to_bytes(4, "big") + (80877103).to_bytes(4, "big"))
+            response = await io.recv_exact(sock, 1)
+            if response == b"S":
+                verify = config.sslmode in {"verify-ca", "verify-full"} or bool(config.ca_file)
+                context = actions.shared_client_ssl_context(
+                    insecure=not verify,
+                    ca_file=config.ca_file,
+                    cert_file=config.cert_file,
+                    key_file=config.key_file,
+                    check_hostname=config.sslmode == "verify-full",
+                )
+                sock = await io.wrap(context, sock, server_hostname=config.server_name or host)
+            elif response != b"N" or config.sslmode != "prefer":
+                raise actions._PgAuditError(
+                    "PostgreSQL server refused TLS"
+                    if response == b"N"
+                    else f"invalid PostgreSQL SSL negotiation response: {response!r}",
+                    detected=response == b"N",
+                    failure_phase="tls",
+                    error_kind="tls_required" if response == b"N" else "protocol_error",
+                )
+
+        class Reader:
+            async def read(self, size: int) -> bytes:
+                return await io.recv(sock, size)
+
+        class Writer:
+            def __init__(self) -> None:
+                self.pending = bytearray()
+
+            def write(self, data: bytes) -> None:
+                self.pending.extend(data)
+
+            async def drain(self) -> None:
+                await io.sendall(sock, bytes(self.pending))
+                self.pending.clear()
+
+        startup = True
+        session = await _startup(cast(Any, Reader()), cast(Any, Writer()), database, timeout)
+        sock.settimeout(timeout)
+
+        def close() -> None:
+            try:
+                actions._pg_send_terminate(sock)
+            except Exception:
+                pass
+            sock.close()
+
+        lease = cache.track(session_key(host, port, "postgres", None, database, config), (sock, session), close)
+        # cache owns the close callback even when the bounded slot is refused.
+        io.sockets.pop(sock, None)
+        cache.finish(lease, keep=True)
+        return session
+    finally:
+        if startup and sock in io.sockets:
+            try:
+                await io.sendall(sock, b"X\x00\x00\x00\x04")
+            except BaseException:
+                pass
+        io.close()
+
+
 async def detect(ctx: Any, _http: Any) -> AuditRecord:
     from . import stage
 
@@ -158,9 +232,20 @@ async def detect(ctx: Any, _http: Any) -> AuditRecord:
     last_error: str | None = None
     for attempt in range(max(1, cfg.retries + 1)):
         try:
-            session = await _probe(
-                ctx.host, ctx.port, cfg.timeout, stage._postgres_tls_config_from_args(ctx.args), database
+            cache = getattr(getattr(ctx, "lifecycle_state", None), "sessions", None)
+            requested_credentials = (
+                bool(getattr(ctx, "credential_runs", ()))
+                or any(getattr(ctx.args, name, None) is not None for name in ("username", "password"))
+                or bool(getattr(ctx.args, "defcreds", False))
             )
+            if cache is not None and not requested_credentials and getattr(ctx, "reuse_http", False):
+                session = await _probe_retained(
+                    ctx.host, ctx.port, cfg.timeout, stage._postgres_tls_config_from_args(ctx.args), database, cache
+                )
+            else:
+                session = await _probe(
+                    ctx.host, ctx.port, cfg.timeout, stage._postgres_tls_config_from_args(ctx.args), database
+                )
             payload = {
                 **base,
                 "is_postgres": True,

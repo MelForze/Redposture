@@ -96,10 +96,10 @@ def test_http_original_initializer_and_same_socket_worker_query(monkeypatch, pro
                         if "client_protocol_version" in params:
                             response = BLOCK_INFO + response
                     writer.write(
-                        b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: "
-                        + str(len(response)).encode()
-                        + b"\r\n\r\n"
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+                        + f"{len(response):x}\r\n".encode()
                         + response
+                        + b"\r\n0\r\n\r\n"
                     )
                     await writer.drain()
                     if "SELECT 2" in sql:
@@ -209,7 +209,10 @@ def test_http_original_exception_evidence(error_code, phase, status):
                     else:
                         payload = native([("name", "String"), ("value", "String"), ("readonly", "UInt8")], [])
                     writer.write(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(payload)).encode() + b"\r\n\r\n" + payload
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                        + f"{len(payload):x}\r\n".encode()
+                        + payload
+                        + b"\r\n0\r\n\r\n"
                     )
                     await writer.drain()
             finally:
@@ -230,7 +233,7 @@ def test_http_original_exception_evidence(error_code, phase, status):
                 lifecycle_state=actions.ClickHouseLifecycleState(),
             )
             record = await async_detect.detect(ctx, None, stage._build_clickhouse_host_stage_options(args))
-            assert record.status == status
+            assert record.status == status, record.to_dict()
             assert record.extra["is_clickhouse"] is (error_code is not None)
             assert record.auth_required is (True if error_code == 516 else False if phase == "query" else None)
             assert requests[0] == "SELECT version(), timezone()"

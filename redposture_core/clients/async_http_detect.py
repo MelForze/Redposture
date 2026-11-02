@@ -207,12 +207,7 @@ class AsyncDetectionHttp:
             raise AsyncHttpFallback("invalid request path")
         if self._connection is None:
             tls = self.ssl_context or shared_client_ssl_context(insecure=False) if scheme == "https" else None
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(
-                    host, port, ssl=tls, server_hostname=host if tls else None, limit=_HEADER_CAP + 4
-                ),
-                timeout,
-            )
+            reader, writer = await self._open(host, port, tls, timeout)
             self._connection = (key, reader, writer)
             self._stats["connections"] += 1
         else:
@@ -297,3 +292,11 @@ class AsyncDetectionHttp:
             final_url=url,
         )
         return decode_http_content(response, max_bytes=self.max_bytes) if self.decode_content else response
+
+    async def _open(
+        self, host: str, port: int, tls: ssl.SSLContext | None, timeout: float
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        return await asyncio.wait_for(
+            asyncio.open_connection(host, port, ssl=tls, server_hostname=host if tls else None, limit=_HEADER_CAP + 4),
+            timeout,
+        )

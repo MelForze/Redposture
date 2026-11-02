@@ -425,7 +425,12 @@ def _classify_clickhouse_exception(exc: BaseException, protocol: str) -> _ChProb
         if class_name in {"SocketTimeoutError", "NetworkError"}:
             return _ChProbeError(text, kind="transport", retryable=True, code=code)
 
-    if protocol == "http" and _CLICKHOUSE_HTTP_EXCEPTION_MARKER in lower:
+    legacy_http_exception = (
+        module_name.startswith("clickhouse_connect")
+        and class_name in {"DatabaseError", "OperationalError"}
+        and re.search(r"\bCode:\s*\d+\.\s*DB::Exception:", str(exc), re.IGNORECASE) is not None
+    )
+    if protocol == "http" and (_CLICKHOUSE_HTTP_EXCEPTION_MARKER in lower or legacy_http_exception):
         access_limited = code == _CLICKHOUSE_ACCESS_DENIED_CODE
         auth_required = True if code in _CLICKHOUSE_AUTH_ERROR_CODES else None
         return _ChProbeError(

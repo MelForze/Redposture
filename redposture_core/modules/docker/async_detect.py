@@ -9,7 +9,7 @@ from ...audit_models import AuditRecord
 from ...clients.async_http_detect import AsyncHttpFallback
 from ...clients.docker_engine import DockerEngineClient, DockerEngineHTTPError, DockerHTTPResponse
 from ...clients.http_session import HttpSessionPool
-from ...detection_io import HttpRead, run_async
+from ...detection_io import HttpRead, detection_thread_locals, run_async
 from ...stage_runtime import _prepare_host_stage_call
 from . import actions
 
@@ -19,6 +19,8 @@ def bind(spec: Any) -> Any:
         function, positional, keyword = _prepare_host_stage_call(
             spec.host_stage, module="docker", ctx=ctx, run_deep_checks=False
         )
+        keyword.pop("lifecycle_state", None)
+        state = getattr(ctx, "lifecycle_state", None) or actions._DockerHttpLifecycle()
         registry = dict(actions._ASYNC_DETECT_STEPS)
         if function not in registry:
             raise AsyncHttpFallback("Docker host-stage override")
@@ -47,7 +49,7 @@ def bind(spec: Any) -> Any:
                 "Accept": "application/json",
                 **(headers or {}),
             }
-            pool = HttpSessionPool(
+            pool = client._detect_pool or HttpSessionPool(
                 timeout=client.timeout,
                 insecure=client.insecure,
                 ca_file=client.ca_file,
@@ -68,10 +70,30 @@ def bind(spec: Any) -> Any:
                     raise DockerEngineHTTPError(response.status, reason, response.body, normalized_headers)
                 return DockerHTTPResponse(response.status, reason, normalized_headers, response.body)
             finally:
-                pool.close()
+                if client._detect_pool is None:
+                    pool.close()
 
         registry[DockerEngineClient.request] = request
-        result = await run_async(registry[function](*positional, **keyword), http, registry)
-        return AuditRecord.from_mapping(result, module="docker", service="docker")
 
-    return replace(spec, detect_async=detect)
+        def activate() -> None:
+            actions._DOCKER_HTTP_LOCAL.state = state
+
+        try:
+            result = await run_async(
+                registry[function](*positional, **keyword),
+                http,
+                registry,
+                activate=activate,
+                thread_locals=detection_thread_locals(actions),
+            )
+            return AuditRecord.from_mapping(result, module="docker", service="docker")
+        finally:
+            if getattr(ctx, "lifecycle_state", None) is None:
+                state.close()
+
+    return replace(
+        spec,
+        detect_async=detect,
+        lifecycle_state_factory=lambda ctx: actions._DockerHttpLifecycle(),
+        lifecycle_state_close=lambda state: state.close(),
+    )

@@ -99,8 +99,11 @@ async def read_http(step: HttpRead, http: Any) -> HttpResponse:
     if options.get("prepare_request") is not None or set(options) - allowed:
         raise AsyncHttpFallback("unsupported detection request options")
     tls = pool._target_context()
+    bind = getattr(http, "bind_pool", None)
+    if bind is not None:
+        await bind(pool)
     saved = (http.timeout, http.retries, http.max_bytes, http.ssl_context)
-    if tls is not http.ssl_context:
+    if bind is None and tls is not http.ssl_context:
         await http.close()
     http.timeout = max(0.1, float(options.get("timeout") or pool.timeout))
     http.retries = max(0, int(pool.default_retries if options.get("retries") is None else options["retries"]))
@@ -123,7 +126,7 @@ async def read_http(step: HttpRead, http: Any) -> HttpResponse:
     finally:
         # All requests belonging to a target normally share this pool's TLS
         # identity. Close only when restoring a different transport policy.
-        if http.ssl_context is not saved[3]:
+        if bind is None and http.ssl_context is not saved[3]:
             await http.close()
         http.timeout, http.retries, http.max_bytes, http.ssl_context = saved
 

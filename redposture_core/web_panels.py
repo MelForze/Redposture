@@ -12,9 +12,10 @@ import json
 import re
 import secrets
 import tempfile
+import threading
 import time
 from collections.abc import Mapping
-from contextlib import closing
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
@@ -349,17 +350,58 @@ def _candidate(ctx: Any, module: str) -> bool:
     )
 
 
+_PANEL_POOL_LOCK = threading.Lock()
+
+
+def close_panel_http(state: Any) -> None:
+    """Serialize terminal cleanup with late UI pool creation."""
+    with _PANEL_POOL_LOCK:
+        pool = getattr(state, "_panel_http", None)
+        try:
+            state._panel_http_closed = True
+        except (AttributeError, TypeError):
+            pass
+        if pool is not None:
+            pool.close()
+            state._panel_http = None
+
+
+@contextmanager
+def _panel_http_scope(ctx: Any, *, detect: bool = False) -> Any:
+    timeout = max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0))
+    if detect:
+        timeout = min(3.0, timeout)
+    state = getattr(ctx, "lifecycle_state", None)
+    owned = bool(getattr(ctx, "reuse_http", False)) and state is not None
+    with _PANEL_POOL_LOCK:
+        pool = getattr(state, "_panel_http", None) if owned else None
+        if pool is None:
+            pool = HttpSessionPool(
+                timeout=timeout,
+                insecure=not bool(getattr(ctx.args, "secure", False)),
+                proxy=getattr(ctx.args, "_proxy_config", None),
+                retries=0,
+                max_idle_per_origin=1,
+            )
+            if owned and state is not None:
+                try:
+                    state._panel_http = pool
+                except (AttributeError, TypeError):
+                    owned = False
+        pool.timeout = timeout
+        if owned and getattr(state, "_panel_http_closed", False):
+            pool.close()
+    try:
+        yield pool
+    finally:
+        if not owned:
+            pool.close()
+
+
 def detect_panel(module: str, ctx: Any, *, report_failure: bool = False) -> dict[str, Any] | None:
     if not _candidate(ctx, module):
         return None
-    with closing(
-        HttpSessionPool(
-            timeout=min(3.0, max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0))),
-            insecure=not bool(getattr(ctx.args, "secure", False)),
-            proxy=getattr(ctx.args, "_proxy_config", None),
-            retries=0,
-        )
-    ) as pool:
+    with _panel_http_scope(ctx, detect=True) as pool:
         return run_requests(
             panel_requests(module, ctx, report_failure=report_failure),
             lambda base, path, options=None: _get(pool, base, path, **(options or {})),
@@ -486,25 +528,31 @@ async def detect_panel_async(
 
     if not _candidate(ctx, module):
         return None
-    saved = (http.timeout, http.retries, http.max_bytes, http.ssl_context)
-    # A backend connection must never be reused under a different UI TLS policy.
-    await http.close()
-    http.timeout = min(3.0, max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0)))
-    http.retries = 0
-    http.max_bytes = 128 * 1024
-    http.ssl_context = shared_client_ssl_context(insecure=not bool(getattr(ctx.args, "secure", False)))
-    try:
-
-        async def send(base: str, path: str, options: dict[str, Any] | None = None) -> HttpResponse:
-            response = await http.get(base + path, headers=(options or {}).get("headers", {}))
-            if response.truncated or (response.status > 0 and response.error):
-                raise AsyncHttpFallback("UI response requires synchronous verification")
-            return response
-
-        return await run_async_requests(panel_requests(module, ctx, report_failure=report_failure), send)
-    finally:
+    with _panel_http_scope(ctx, detect=True) as pool:
+        bind = getattr(http, "bind_pool", None)
+        managed = bind is not None and pool is getattr(getattr(ctx, "lifecycle_state", None), "_panel_http", None)
+        saved = (http.timeout, http.retries, http.max_bytes, http.ssl_context)
+        # Never reuse a backend connection under the independent UI policy.
         await http.close()
-        http.timeout, http.retries, http.max_bytes, http.ssl_context = saved
+        if bind is not None:
+            await bind(pool)
+        http.timeout = min(3.0, max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0)))
+        http.retries = 0
+        http.max_bytes = 128 * 1024
+        http.ssl_context = shared_client_ssl_context(insecure=not bool(getattr(ctx.args, "secure", False)))
+        try:
+
+            async def send(base: str, path: str, options: dict[str, Any] | None = None) -> HttpResponse:
+                response = await http.get(base + path, headers=(options or {}).get("headers", {}))
+                if response.truncated or (response.status > 0 and response.error):
+                    raise AsyncHttpFallback("UI response requires synchronous verification")
+                return response
+
+            return await run_async_requests(panel_requests(module, ctx, report_failure=report_failure), send)
+        finally:
+            if not managed:
+                await http.close()
+            http.timeout, http.retries, http.max_bytes, http.ssl_context = saved
 
 
 def _cookie(response: HttpResponse) -> str:
@@ -856,14 +904,7 @@ def authenticate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
     if username is None or password is None:
         return record
     username, password = str(username), str(password)
-    with closing(
-        HttpSessionPool(
-            timeout=max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0)),
-            insecure=not bool(getattr(ctx.args, "secure", False)),
-            proxy=getattr(ctx.args, "_proxy_config", None),
-            retries=0,
-        )
-    ) as pool:
+    with _panel_http_scope(ctx) as pool:
         if product == "portainer":
             response = _post(
                 pool,
@@ -1033,14 +1074,7 @@ def authenticate_portainer_token(ctx: Any, record: dict[str, Any], token: str) -
     base = str((record.get("ui") or {}).get("endpoint") or "")
     api_key = token.startswith("ptr_")
     headers = {"X-API-Key": token} if api_key else {"Authorization": "Bearer " + token}
-    with closing(
-        HttpSessionPool(
-            timeout=max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0)),
-            insecure=not bool(getattr(ctx.args, "secure", False)),
-            proxy=getattr(ctx.args, "_proxy_config", None),
-            retries=0,
-        )
-    ) as pool:
+    with _panel_http_scope(ctx) as pool:
         response = _get(pool, base, "/api/users/me", headers=headers)
         if _blocked(response):
             return _auth_result(record, "rate_limited", proof="Portainer blocked token verification")
@@ -1162,14 +1196,7 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
         else _DUMP_BYTES
     )
     portainer_bytes_read = 0
-    with closing(
-        HttpSessionPool(
-            timeout=max(0.2, float(getattr(ctx.args, "timeout", 5.0) or 5.0)),
-            insecure=not bool(getattr(ctx.args, "secure", False)),
-            proxy=getattr(ctx.args, "_proxy_config", None),
-            retries=0,
-        )
-    ) as pool:
+    with _panel_http_scope(ctx) as pool:
 
         def get(path: str, *, response_size_cap: int = 128 * 1024) -> HttpResponse:
             nonlocal portainer_bytes_read, portainer_remaining

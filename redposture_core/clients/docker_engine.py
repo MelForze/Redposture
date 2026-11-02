@@ -16,6 +16,7 @@ from ..http_headers import merge_custom_http_headers
 from ..shell_capture import is_binary
 from .http_api import HttpResponse, decode_http_content
 from .http_redirects import follow_redirects, http_origin
+from .http_session import HttpSessionPool
 from .tls_cache import shared_client_ssl_context
 
 
@@ -143,6 +144,7 @@ class DockerEngineClient:
         self._connection_origin = ("https" if self.transport == "tls" else "http", self.host, self.port)
         self._active_connection: http.client.HTTPConnection | None = None
         self._connection_lock = threading.Lock()
+        self._detect_pool: HttpSessionPool | None = None
 
     def _connection(self) -> http.client.HTTPConnection:
         with self._connection_lock:
@@ -164,6 +166,21 @@ class DockerEngineClient:
         with self._connection_lock:
             self._active_connection = connection
         return connection
+
+    def _connection_for_request(self, method: str) -> http.client.HTTPConnection:
+        if self._detect_pool is not None:
+            pool = self._detect_pool
+            if pool._closed:
+                raise DockerEngineConnectionError("HTTP session is closed")
+            retained = pool.take_handoff(self._connection_origin, timeout=self.timeout, method=method)
+            if retained is not None:
+                with self._connection_lock:
+                    if pool._closed:
+                        retained.close()
+                        raise DockerEngineConnectionError("HTTP session is closed")
+                    self._active_connection = retained
+                return retained
+        return self._connection()
 
     def close(self) -> None:
         with self._connection_lock:
@@ -219,9 +236,18 @@ class DockerEngineClient:
             parsed = urlsplit(url)
             path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
             try:
-                conn = self._connection()
-                conn.request(method, path, body=body, headers=headers)
-                response = conn.getresponse()
+                conn = self._connection_for_request(method)
+                handed_off = HttpSessionPool._claim_handoff(conn)
+                try:
+                    conn.request(method, path, body=body, headers=headers)
+                    response = conn.getresponse()
+                except (ConnectionError, ssl.SSLEOFError, http.client.IncompleteRead):
+                    if not handed_off or method.upper() not in {"GET", "HEAD"}:
+                        raise
+                    self.close()
+                    conn = self._connection_for_request(method)
+                    conn.request(method, path, body=body, headers=headers)
+                    response = conn.getresponse()
                 try:
                     try:
                         raw = response.read(max(0, int(response_size_cap)) + 1)

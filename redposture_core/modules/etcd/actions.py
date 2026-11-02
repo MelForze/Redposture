@@ -93,6 +93,9 @@ class _EtcdHttpLifecycle:
     port: int | None = None
     origin_resolved: bool = False
 
+    def close(self) -> None:
+        self.pool.close()
+
 
 @dataclass
 class _EtcdDiscoveryBudget:
@@ -2394,6 +2397,7 @@ def _call_audit_etcd_host_with_stage_debug(
     discover_time: float | None = None,
     discover_max_bytes: int | None = None,
     discover_ctx: Any | None = None,
+    lifecycle_state: Any | None = None,
 ) -> dict[str, Any]:
     return run_sync(
         _detect_call_audit_etcd_host_with_stage_debug_steps(
@@ -2421,6 +2425,7 @@ def _call_audit_etcd_host_with_stage_debug(
             discover_time=discover_time,
             discover_max_bytes=discover_max_bytes,
             discover_ctx=discover_ctx,
+            lifecycle_state=lifecycle_state,
         )
     )
 
@@ -2451,6 +2456,7 @@ def _detect_call_audit_etcd_host_with_stage_debug_steps(
     discover_time: float | None = None,
     discover_max_bytes: int | None = None,
     discover_ctx: Any | None = None,
+    lifecycle_state: Any | None = None,
 ) -> Any:
     started = time.monotonic()
     audit_limit_kwargs: dict[str, Any] = (
@@ -2479,14 +2485,23 @@ def _detect_call_audit_etcd_host_with_stage_debug_steps(
     # `_audit_etcd_host` owns the command retry budget. The reusable transport
     # must not retry again inside every outer attempt (which would square the
     # number of sockets and TLS handshakes).
-    transport_state = getattr(_ETCD_HTTP_LOCAL, "native_state", None) or _EtcdHttpLifecycle(
-        pool=HttpSessionPool(timeout=timeout, insecure=True, proxy=proxy),
-        scheme=target_scheme if target_scheme in {"http", "https"} else None,
-        host=str(host),
-        port=int(port),
+    external_state = lifecycle_state if isinstance(lifecycle_state, _EtcdHttpLifecycle) else None
+    transport_state = (
+        external_state
+        or getattr(_ETCD_HTTP_LOCAL, "native_state", None)
+        or _EtcdHttpLifecycle(
+            pool=HttpSessionPool(timeout=timeout, insecure=True, proxy=proxy),
+            scheme=target_scheme if target_scheme in {"http", "https"} else None,
+            host=str(host),
+            port=int(port),
+        )
     )
     _ETCD_HTTP_LOCAL.state = transport_state
-    with http_target_context(target_spec, api_prefixes=("/version", "/v2", "/v3", "/v3beta", "/v3alpha")):
+    with http_target_context(
+        target_spec,
+        api_prefixes=("/version", "/v2", "/v3", "/v3beta", "/v3alpha"),
+        route_state=transport_state,
+    ):
         try:
             try:
                 record = yield DetectCall(
@@ -2525,7 +2540,8 @@ def _detect_call_audit_etcd_host_with_stage_debug_steps(
                     {**audit_kwargs},
                 )
         finally:
-            transport_state.pool.close()
+            if external_state is None:
+                transport_state.pool.close()
             try:
                 delattr(_ETCD_HTTP_LOCAL, "state")
             except AttributeError:

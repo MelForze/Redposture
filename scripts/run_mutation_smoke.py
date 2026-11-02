@@ -373,8 +373,8 @@ MUTATIONS = (
     Mutation(
         name="Exporter pool accepts one idle connection beyond total cap",
         source="redposture_core/exporters/http_pool.py",
-        original="while self._idle_total >= self._max_idle_total:",
-        replacement="while self._idle_total > self._max_idle_total:",
+        original="while self._idle_total + self._handoff_budget.active >= self._max_idle_total:",
+        replacement="while self._idle_total + self._handoff_budget.active > self._max_idle_total:",
         tests=(
             "tests/test_quality_exporter_pool.py::test_pool_evicts_oldest_origin_and_never_reuses_dropped_connection",
         ),

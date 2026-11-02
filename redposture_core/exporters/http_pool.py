@@ -12,12 +12,72 @@ from contextlib import contextmanager
 from typing import Any
 
 from ..clients.http_api import HttpResponse, check_http_body_complete
+from ..clients.http_handoff import HttpHandoffBudget
 from ..clients.http_redirects import follow_redirects
+from ..clients.http_session import HttpSessionPool
 from ..clients.tls_cache import shared_client_ssl_context
 from ..http_headers import merge_custom_http_headers
 
 HTTP_POOL_MAX_IDLE_TOTAL = 512
 HTTP_POOL_MAX_IDLE_PER_HOST = 4
+
+
+class _DetectionPool(HttpSessionPool):
+    def __init__(self, owner: Any) -> None:
+        self.owner = owner
+        super().__init__(timeout=1, max_idle_per_origin=owner._max_idle_per_host)
+
+    def _target_context(self) -> ssl.SSLContext:
+        return self.owner._tls_context
+
+    def adopt_socket(self, *args: Any, **kwargs: Any) -> bool:
+        owner = self.owner
+        with owner._lock:
+            if owner._closed:
+                return False
+            key = args[0]
+            with self._lock:
+                pending = len(self._idle.get(key, ()))
+            ordinary = owner._idle.get(key, [])
+            while len(ordinary) + pending >= owner._max_idle_per_host and ordinary:
+                victim = ordinary.pop(0)
+                owner._connections.discard(victim)
+                owner._idle_total -= 1
+                victim.close()
+            if not ordinary:
+                owner._idle.pop(key, None)
+            if len(ordinary) + pending >= owner._max_idle_per_host:
+                return False
+            while owner._idle_total + owner._handoff_budget.active > owner._max_idle_total and owner._idle_total:
+                owner._evict_one()
+            if owner._idle_total + owner._handoff_budget.active > owner._max_idle_total:
+                return False
+            return super().adopt_socket(*args, **kwargs)
+
+    def take_handoff(
+        self, key: tuple[str, str, int], *, timeout: float, method: str
+    ) -> http.client.HTTPConnection | None:
+        try:
+            return super().take_handoff(key, timeout=timeout, method=method)
+        finally:
+            with self._lock:
+                if not self._idle.get(key):
+                    self._idle.pop(key, None)
+
+    def discard_socket(self, sock: Any) -> None:
+        with self._lock:
+            for connection, release in list(self._retained_claims.items()):
+                if connection.sock is sock:
+                    self._retained_claims.pop(connection)
+                    self._connections.discard(connection)
+                    for key, bucket in list(self._idle.items()):
+                        if connection in bucket:
+                            bucket.remove(connection)
+                            if not bucket:
+                                self._idle.pop(key, None)
+                    release()
+                    connection.close()
+                    return
 
 
 class HTTPConnectionPool:
@@ -37,6 +97,8 @@ class HTTPConnectionPool:
         self._connections: set[http.client.HTTPConnection] = set()
         self._active_sockets: set[Any] = set()
         self._lock = threading.Lock()
+        self._handoff_budget = HttpHandoffBudget(min(64, self._max_idle_total))
+        self._handoff_policy = _DetectionPool(self)
 
     @staticmethod
     def _target_from_url(url: str) -> tuple[str, str, int, str]:
@@ -70,6 +132,19 @@ class HTTPConnectionPool:
         host = str(host)
         port = int(port)
         key = (scheme, host, port)
+        retained = self._handoff_policy.take_handoff(key, timeout=timeout, method="GET")
+        if retained is not None:
+            with self._lock:
+                if self._closed:
+                    retained.close()
+                    raise ValueError("HTTP connection pool is closed")
+                self._connections.add(retained)
+                # Ownership is now atomic with terminal close of this pool.
+                # Do not retain one HTTPConnection object for every scanned host.
+                with self._handoff_policy._lock:
+                    self._handoff_policy._connections.discard(retained)
+            HttpSessionPool._claim_handoff(retained)
+            return retained
         with self._lock:
             if self._closed:
                 raise ValueError("HTTP connection pool is closed")
@@ -161,11 +236,11 @@ class HTTPConnectionPool:
                 except OSError:
                     pass
                 return
-            while self._idle_total >= self._max_idle_total:
+            while self._idle_total + self._handoff_budget.active >= self._max_idle_total:
                 self._evict_one()
-                if self._idle_total < self._max_idle_total:
+                if self._idle_total + self._handoff_budget.active < self._max_idle_total or not self._idle_total:
                     break
-            if self._idle_total >= self._max_idle_total:
+            if self._idle_total + self._handoff_budget.active >= self._max_idle_total:
                 self._connections.discard(conn)
                 try:
                     conn.close()
@@ -279,6 +354,7 @@ class HTTPConnectionPool:
             self._active_sockets.clear()
             self._idle.clear()
             self._idle_total = 0
+        self._handoff_policy.close()
         for sock in active_sockets:
             try:
                 sock.shutdown(socket.SHUT_RDWR)

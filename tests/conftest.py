@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -29,6 +30,21 @@ settings.register_profile(
     suppress_health_check=(HealthCheck.too_slow,),
 )
 settings.load_profile(os.environ.get("REDPOSTURE_HYPOTHESIS_PROFILE", "redposture-ci"))
+
+
+def pytest_make_parametrize_id(config, val, argname):
+    """Keep verbose CI/JUnit identifiers bounded without changing test inputs."""
+    if isinstance(val, (str, bytes)) and len(val) > 128:
+        digest = hashlib.sha256()
+        if isinstance(val, bytes):
+            digest.update(val)
+            kind = "bytes"
+        else:
+            for offset in range(0, len(val), 65536):
+                digest.update(val[offset : offset + 65536].encode("utf-8", errors="surrogatepass"))
+            kind = "text"
+        return f"{argname}-{kind}-len{len(val)}-sha256-{digest.hexdigest()[:16]}"
+    return None
 
 
 class ExternalDnsBlockedError(RuntimeError):

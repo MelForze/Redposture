@@ -13,25 +13,14 @@ from .http_session import KubeApiHttpSession
 def http_response_steps(client: Any, method: str, url: str, **options: Any) -> Steps[Any]:
     """Leave a lifecycle's thread-confined session unclaimed for auth/data.
 
-    The temporary pool describes timeout and TLS policy only. Its synchronous
-    request method is never invoked by the native interpreter.
+    The session owns its policy pool through the final handoff/close. Its
+    synchronous request method is never invoked by the native interpreter.
     """
-    owned = False
     if isinstance(client, KubeApiHttpSession):
-        pool = HttpSessionPool(
-            timeout=client.timeout,
-            insecure=client.insecure,
-            ca_file=client.ca_file,
-            retries=0,
-        )
-        owned = True
+        pool = client.detection_pool()
     elif isinstance(client, HttpSessionPool):
         pool = client
     else:
         raise AsyncHttpFallback("Kube detection transport override")
-    try:
-        yield_options = {**options, "retries": 0}
-        return (yield HttpRead(pool, method, url, yield_options))
-    finally:
-        if owned:
-            pool.close()
+    yield_options = {**options, "retries": 0}
+    return (yield HttpRead(pool, method, url, yield_options))

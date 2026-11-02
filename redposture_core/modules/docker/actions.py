@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from ...clients.docker_engine import (
@@ -17,6 +19,7 @@ from ...clients.docker_engine import (
     normalize_docker_error,
 )
 from ...clients.http_api import http_response_requires_https, infer_http_base_path
+from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...detection_io import DetectCall, DetectDelay, run_sync
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
@@ -87,6 +90,57 @@ def _base_record(host: str, port: int) -> dict[str, Any]:
     }
 
 
+_DOCKER_HTTP_LOCAL = threading.local()
+
+
+class _DockerHttpLifecycle:
+    def __init__(self) -> None:
+        self.pools: dict[tuple[Any, ...], HttpSessionPool] = {}
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def policy(self, client: DockerEngineClient) -> HttpSessionPool:
+        key = (
+            client.host,
+            client.port,
+            client.transport,
+            client.timeout,
+            client.insecure,
+            client.ca_file,
+            client.cert_file,
+            client.key_file,
+        )
+        with self._lock:
+            if key not in self.pools:
+                pool = HttpSessionPool(
+                    timeout=client.timeout,
+                    insecure=client.insecure,
+                    ca_file=client.ca_file,
+                    cert_file=client.cert_file,
+                    key_file=client.key_file,
+                )
+                if self._closed:
+                    pool.close()
+                self.pools[key] = pool
+            return self.pools[key]
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            for pool in self.pools.values():
+                pool.close()
+
+
+@contextmanager
+def _docker_http_scope(state: Any) -> Iterator[None]:
+    previous = getattr(_DOCKER_HTTP_LOCAL, "state", None)
+    _DOCKER_HTTP_LOCAL.state = state
+    try:
+        yield
+    finally:
+        _DOCKER_HTTP_LOCAL.state = previous
+
+
 def _docker_client(
     host: str,
     port: int,
@@ -99,7 +153,7 @@ def _docker_client(
     tls_key: str | None,
     base_path: str = "",
 ) -> DockerEngineClient:
-    return DockerEngineClient(
+    client = DockerEngineClient(
         host,
         port,
         transport=transport,
@@ -110,6 +164,10 @@ def _docker_client(
         key_file=tls_key,
         base_path=base_path,
     )
+    state = getattr(_DOCKER_HTTP_LOCAL, "state", None)
+    if isinstance(state, _DockerHttpLifecycle):
+        client._detect_pool = state.policy(client)
+    return client
 
 
 def _close_docker_client(client: Any) -> None:
@@ -636,30 +694,32 @@ def _audit_docker_host_stage(
     debug: bool = False,
     debug_emit: Callable[[str], None] | None = None,
     target_path: str | None = None,
+    lifecycle_state: Any | None = None,
 ) -> dict[str, Any]:
-    return run_sync(
-        _detect_audit_docker_host_stage_steps(
-            host,
-            port,
-            timeout,
-            retries,
-            insecure=insecure,
-            tls_ca=tls_ca,
-            tls_cert=tls_cert,
-            tls_key=tls_key,
-            show_containers=show_containers,
-            show_images=show_images,
-            show_networks=show_networks,
-            show_volumes=show_volumes,
-            show_system=show_system,
-            container_selector=container_selector,
-            exec_cmd=exec_cmd,
-            run_deep_checks=run_deep_checks,
-            debug=debug,
-            debug_emit=debug_emit,
-            target_path=target_path,
+    with _docker_http_scope(lifecycle_state):
+        return run_sync(
+            _detect_audit_docker_host_stage_steps(
+                host,
+                port,
+                timeout,
+                retries,
+                insecure=insecure,
+                tls_ca=tls_ca,
+                tls_cert=tls_cert,
+                tls_key=tls_key,
+                show_containers=show_containers,
+                show_images=show_images,
+                show_networks=show_networks,
+                show_volumes=show_volumes,
+                show_system=show_system,
+                container_selector=container_selector,
+                exec_cmd=exec_cmd,
+                run_deep_checks=run_deep_checks,
+                debug=debug,
+                debug_emit=debug_emit,
+                target_path=target_path,
+            )
         )
-    )
 
 
 def _detect_audit_docker_host_stage_steps(

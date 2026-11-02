@@ -650,6 +650,8 @@ class AuditHookContext:
     live_discovery_value: Callable[..., None] | None = None
     discovery_started_at: float | None = None
     cancelled: Callable[[], bool] | None = None
+    reuse_http: bool = False
+    session_budget: Any = None
 
 
 @dataclass(frozen=True)
@@ -2248,6 +2250,9 @@ class AuditCommandRunner:
         self._transport_stats_lock = threading.Lock()
         self._transport_pool_ids: set[int] = set()
         self._transport_stats = {"connections": 0, "reused": 0, "requests": 0, "retries": 0}
+        from .clients.http_handoff import HttpHandoffBudget
+
+        self._http_handoff_budget = HttpHandoffBudget(64)
         self._nested_scheduler: SharedNestedScheduler | None = None
         self._cve_catalog: CveCatalog | None = None
         self._audit_cancelled = threading.Event()
@@ -2502,6 +2507,7 @@ class AuditCommandRunner:
             leave=False,
         )
         worker_count = max(1, int(plan.workers or getattr(self.args, "workers", 1) or 1))
+        self._http_handoff_budget.limit = min(64, worker_count)
         scheduler: BoundedScheduler[tuple[int, str, int, ScanTargetSpec | None], _AuditPipelineOutcome] = (
             BoundedScheduler(max_workers=worker_count)
         )
@@ -2913,11 +2919,18 @@ class AuditCommandRunner:
             detect_concurrency = (
                 max(1, int(override))
                 if override is not None
-                else automatic_detect_concurrency(target_count, deep_workers=worker_count)
+                else automatic_detect_concurrency(
+                    target_count, deep_workers=worker_count, retained_fds=self._http_handoff_budget.limit
+                )
             )
         if use_async_detect and detect_concurrency > 0:
             adaptive_limit = (
-                adaptive_detect_ceiling(target_count, initial=detect_concurrency, deep_workers=worker_count)
+                adaptive_detect_ceiling(
+                    target_count,
+                    initial=detect_concurrency,
+                    deep_workers=worker_count,
+                    retained_fds=self._http_handoff_budget.limit,
+                )
                 if override is None
                 else None
             )
@@ -2940,6 +2953,7 @@ class AuditCommandRunner:
                 detect_workers=detect_concurrency,
                 deep_workers=worker_count,
                 adaptive_max=adaptive_limit,
+                retained_fds=self._http_handoff_budget.limit,
                 on_limit_change=_detect_limit_changed,
             ).iter_completed(
                 plan.iter_target_specs(),
@@ -3124,6 +3138,8 @@ class AuditCommandRunner:
             live_discovery_value=_TARGET_DISK_EMIT.get(),
             discovery_started_at=_TARGET_DISCOVERY_STARTED_AT.get(),
             cancelled=self._audit_cancelled.is_set,
+            reuse_http=True,
+            session_budget=self._http_handoff_budget,
         )
 
     def _register_lifecycle_state(self, state: Any) -> None:
@@ -3140,6 +3156,7 @@ class AuditCommandRunner:
         if registered is None:
             return
         self._capture_transport_stats(registered)
+        self._close_panel_http(registered)
         close = getattr(self.spec, "lifecycle_state_close", None)
         if close is None:
             return
@@ -3153,14 +3170,21 @@ class AuditCommandRunner:
             states = list(self._lifecycle_states.values())
             self._lifecycle_states.clear()
         close = getattr(self.spec, "lifecycle_state_close", None)
-        if close is None:
-            return
         for state in states:
             self._capture_transport_stats(state)
+            self._close_panel_http(state)
+            if close is None:
+                continue
             try:
                 close(state)
             except Exception:  # noqa: BLE001 - best-effort outer cleanup
                 continue
+
+    @staticmethod
+    def _close_panel_http(state: Any) -> None:
+        from .web_panels import close_panel_http
+
+        close_panel_http(state)
 
     def _capture_transport_stats(self, state: Any) -> None:
         for candidate in (
@@ -3169,6 +3193,7 @@ class AuditCommandRunner:
             getattr(state, "pool", None),
             getattr(state, "http_session", None),
             getattr(state, "http_pool", None),
+            getattr(state, "_panel_http", None),
         ):
             stats_fn = getattr(candidate, "stats", None)
             if candidate is None or not callable(stats_fn):
@@ -3355,7 +3380,8 @@ class AuditCommandRunner:
     ) -> _AuditDetectOutcome | None:
         import asyncio
 
-        from .clients.async_http_detect import AsyncDetectionHttp, AsyncHttpFallback
+        from .clients.async_http_detect import AsyncHttpFallback
+        from .clients.http_handoff import RetainedDetectionHttp
         from .clients.tls_cache import shared_client_ssl_context
         from .detection_steps import NATIVE_DETECT_BODY_MAX_BYTES
 
@@ -3373,7 +3399,8 @@ class AuditCommandRunner:
         state = factory(base_ctx) if factory is not None else None
         self._register_lifecycle_state(state)
         ctx = replace(base_ctx, lifecycle_state=state)
-        http = AsyncDetectionHttp(
+        http = RetainedDetectionHttp(
+            budget=self._http_handoff_budget,
             timeout=float(getattr(detect_args, "timeout", 3)),
             retries=int(getattr(detect_args, "retries", 0)),
             max_bytes=NATIVE_DETECT_BODY_MAX_BYTES,
@@ -3415,6 +3442,9 @@ class AuditCommandRunner:
                     error=error,
                     debug_emit=debug_emit,
                 )
+            handoff = getattr(http, "handoff", None)
+            if handoff is not None and state is not None and self._is_detected(record):
+                handoff()
             return _AuditDetectOutcome(
                 record=record, lifecycle_state=state, runtime_stage_telemetry=telemetry, started_at=started
             )

@@ -27,30 +27,22 @@ def no_direct_prefetch_steps(*_args: Any, **_kwargs: Any) -> Steps[None]:
 
 
 def session_response_steps(session: Any, scheme: str, method: str, path: str, **options: Any) -> Steps[Any]:
-    pool = HttpSessionPool(
-        timeout=session.timeout,
-        insecure=session._insecure,
-        ca_file=session._ca_file,
-        retries=0,
-    )
+    pool = session.detection_pool()
     url = f"{scheme}://{session._authority(scheme)}{join_http_target_path(path)}"
-    try:
-        return (
-            yield HttpRead(
-                pool,
-                method,
-                url,
-                {
-                    "headers": options.get("headers"),
-                    "body": options.get("data"),
-                    "timeout": session.timeout,
-                    "response_size_cap": session.response_cap,
-                    "retries": 0,
-                },
-            )
+    return (
+        yield HttpRead(
+            pool,
+            method,
+            url,
+            {
+                "headers": options.get("headers"),
+                "body": options.get("data"),
+                "timeout": session.timeout,
+                "response_size_cap": session.response_cap,
+                "retries": 0,
+            },
         )
-    finally:
-        pool.close()
+    )
 
 
 def generic_response_steps(config: HttpClientConfig, method: str, url: str, **options: Any) -> Steps[Any]:

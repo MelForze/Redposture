@@ -13,6 +13,7 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.session_handoff import SessionHandoff
 from ...console import Console
 from ...discovery_spool import contains_spooled
 from ...shell_capture import CommandResult, ShellView, read_shell_command
@@ -31,6 +32,7 @@ from ...stage_runtime import (
 )
 from ...utils import is_signature_compat_typeerror
 from . import actions, async_detect, policy, render
+from .session import session_scope
 
 _DEFAULT_PORT = 5432
 _DEFAULT_PORTS: tuple[int, ...] | None = (5432, 6432, 15432, 16432, 25432, 26432, 80, 443, 3000)
@@ -42,6 +44,7 @@ _POSTGRES_AUDIT_HOST_IMPL = actions._audit_postgres_host
 
 @dataclass
 class _PostgresLifecycleState:
+    sessions: SessionHandoff = field(default_factory=SessionHandoff)
     detect_record: AuditRecord | None = None
     deep_records: dict[tuple[str | None, str | None, str], AuditRecord] = field(default_factory=dict)
 
@@ -149,7 +152,7 @@ def _postgres_credential_key(ctx: AuditHookContext) -> tuple[str | None, str | N
 
 
 def _postgres_lifecycle_state_factory(_ctx: AuditHookContext) -> _PostgresLifecycleState:
-    return _PostgresLifecycleState()
+    return _PostgresLifecycleState(sessions=SessionHandoff(getattr(_ctx, "session_budget", None)))
 
 
 def _postgres_record(payload: AuditRecord | dict[str, Any]) -> AuditRecord:
@@ -211,24 +214,18 @@ def _postgres_detect(ctx: AuditHookContext) -> AuditRecord:
 
     for attempt in range(attempts):
         try:
-            with actions._pg_open_socket(
+            with session_scope(
                 ctx.host,
                 ctx.port,
                 cfg.timeout,
+                username="postgres",
+                password=None,
+                database=target_database,
                 tls_config=_postgres_tls_config_from_args(ctx.args),
-            ) as sock:
-                try:
-                    session = actions._pg_startup_and_auth(
-                        sock,
-                        username="postgres",
-                        password=None,
-                        database=target_database,
-                    )
-                finally:
-                    try:
-                        actions._pg_send_terminate(sock)
-                    except Exception:
-                        pass
+                cache=getattr(getattr(ctx, "lifecycle_state", None), "sessions", None),
+                retain=not bool(getattr(ctx, "credential_runs", ())),
+            ) as (_sock, session):
+                pass
             payload = {
                 "timestamp": actions.utc_now_iso(),
                 "host": ctx.host,
@@ -372,6 +369,11 @@ def _postgres_run_host_stage(
         debug_emit=ctx.debug_emit,
         **_postgres_tls_stage_kwargs(ctx.args),
         **discovery_kwargs,
+        **(
+            {"session_cache": ctx.lifecycle_state.sessions}
+            if isinstance(ctx.lifecycle_state, _PostgresLifecycleState) and not _postgres_host_stage_is_replaced()
+            else {}
+        ),
     )
     if (
         run_deep_checks
@@ -448,48 +450,45 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
 
     for attempt in range(attempts):
         try:
-            with actions._pg_open_socket(
+            capability_fields: dict[str, Any] = {}
+
+            def can_retain(fields: dict[str, Any] = capability_fields) -> bool:
+                return not bool(fields.get("query_error"))
+
+            with session_scope(
                 ctx.host,
                 ctx.port,
                 cfg.timeout,
+                username=username,
+                password=password,
+                database=target_database,
                 tls_config=_postgres_tls_config_from_args(ctx.args),
-            ) as sock:
-                try:
-                    session = actions._pg_startup_and_auth(
-                        sock,
-                        username=username,
-                        password=password,
-                        database=target_database,
-                    )
-                    capability_fields: dict[str, Any] = {}
-                    if session.auth_required is not False and (
-                        session.credential_verified is True or bool(getattr(ctx.args, "_spray_capabilities", False))
-                    ):
-                        try:
-                            superuser, can_execute, can_read, readable_tables, query_error = (
-                                actions._collect_postgres_privileges(sock, probe_readable_table_sample=False)
-                            )
-                            capability_fields = {
+                cache=getattr(getattr(ctx, "lifecycle_state", None), "sessions", None),
+                retain=can_retain,
+            ) as (sock, session):
+                if session.auth_required is not False and (
+                    session.credential_verified is True or bool(getattr(ctx.args, "_spray_capabilities", False))
+                ):
+                    try:
+                        superuser, can_execute, can_read, readable_tables, query_error = (
+                            actions._collect_postgres_privileges(sock, probe_readable_table_sample=False)
+                        )
+                        capability_fields.update(
+                            {
                                 "superuser": superuser,
                                 "can_execute_commands": can_execute,
                                 "can_read_tables": can_read,
                                 "readable_tables": readable_tables,
                                 "query_error": query_error,
                             }
-                            databases, database_error = actions._pg_query_databases(sock)
-                            capability_fields["database_count"] = (
-                                len(databases) if isinstance(databases, list) else None
-                            )
-                            capability_fields["query_error"] = (
-                                "; ".join(error for error in (query_error, database_error) if error) or None
-                            )
-                        except Exception as exc:
-                            capability_fields["query_error"] = f"capability probe: {type(exc).__name__}: {exc}"
-                finally:
-                    try:
-                        actions._pg_send_terminate(sock)
-                    except Exception:
-                        pass
+                        )
+                        databases, database_error = actions._pg_query_databases(sock)
+                        capability_fields["database_count"] = len(databases) if isinstance(databases, list) else None
+                        capability_fields["query_error"] = (
+                            "; ".join(error for error in (query_error, database_error) if error) or None
+                        )
+                    except Exception as exc:
+                        capability_fields["query_error"] = f"capability probe: {type(exc).__name__}: {exc}"
             credential_verified = session.credential_verified
             status = (
                 "invalid_credentials_anonymous"
@@ -676,6 +675,7 @@ def build_postgres_spec(args: Any) -> ModuleAuditSpec:
         auth=_postgres_auth,
         data=_postgres_data,
         lifecycle_state_factory=_postgres_lifecycle_state_factory,
+        lifecycle_state_close=lambda state: state.sessions.close(),
         render_module=render,
         colorize=render._render_colored_postgres_line,
         is_detected=lambda record: record.extra.get("is_postgres") is True,

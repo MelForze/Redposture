@@ -10,6 +10,7 @@ from __future__ import annotations
 import http.client
 import io
 import uuid
+from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlsplit
@@ -36,11 +37,24 @@ class _Response:
     reason: str
 
     def materialize(self, options: dict[str, Any]) -> Any:
+        from urllib3._collections import HTTPHeaderDict
         from urllib3.response import HTTPResponse
 
-        return HTTPResponse(
+        class BufferedResponse(HTTPResponse):
+            def read_chunked(
+                self, amt: int | None = None, decode_content: bool | None = None
+            ) -> Generator[bytes, None, None]:
+                # Connect 0.8 calls read_chunked even for fixed-length replies.
+                # The native reader has already consumed the HTTP framing;
+                # stream the buffered bytes through urllib3's normal decoder.
+                yield from super().stream(amt=amt or 65536, decode_content=decode_content)
+
+        headers = HTTPHeaderDict(self.headers)
+        headers.pop("transfer-encoding", None)
+        headers["Content-Length"] = str(len(self.body))
+        return BufferedResponse(
             body=io.BytesIO(self.body),
-            headers=self.headers,
+            headers=headers,
             status=self.status,
             reason=self.reason,
             preload_content=bool(options.get("preload_content", True)),

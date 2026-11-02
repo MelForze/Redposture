@@ -33,6 +33,10 @@ def build_mongodb_spec(args: Any) -> ModuleAuditSpec:
         label="MONGODB",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
+        # The native database client has its own lifecycle; this owner keeps
+        # the independent Mongo Express HTTP panel connection until auth/data.
+        lifecycle_state_factory=actions.MongoLifecycleState,
+        lifecycle_state_close=lambda state: state.close(),
         detect_async=async_detect.detect,
         render_module=render,
         colorize=render._render_colored_mongodb_line,

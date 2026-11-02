@@ -4612,9 +4612,12 @@ def detect_elastic_steps(ctx: Any, options: Mapping[str, Any]) -> Steps[dict[str
                 },
             )
     finally:
-        if session is not None:
-            session.close()
-        state.session = None
+        # Native detection has not claimed this thread-confined client. Keep
+        # its policy pool until the synchronous target worker takes the socket.
+        if session is None or not getattr(ctx, "reuse_http", False) or session._owner_thread_id is not None:
+            if session is not None:
+                session.close()
+            state.session = None
     state.detect_record = dict(record)
     return record
 

@@ -6,11 +6,15 @@ import copy
 import importlib
 import queue
 import threading
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import Any
 
 from .async_detection import AsyncDetectScheduler, async_detection_allowed
+from .clients.http_handoff import HttpHandoffBudget
 from .stage_runtime import AuditCommandRunner, AuditCredentialRun, AuditHookContext
+
+_SHARED_HANDOFF_BUDGET: ContextVar[Any] = ContextVar("spray_handoff_budget", default=None)
 
 
 async def prepare_target(job: Any, logger: Any) -> Any:
@@ -67,6 +71,9 @@ async def prepare_target(job: Any, logger: Any) -> Any:
 
         spec = replace(spec, detect_async=guarded_oracle)
     runner = AuditCommandRunner(args=ns, spec=spec, logger=logger, emit_line=lambda _line: None)
+    budget = _SHARED_HANDOFF_BUDGET.get()
+    if budget is not None:
+        runner._http_handoff_budget = budget
     try:
         outcome = await runner._run_async_detect_with_state(host, port, target, None)
         if outcome is None:
@@ -82,6 +89,8 @@ async def prepare_target(job: Any, logger: Any) -> Any:
             run_deep_checks=False,
             phase="detect",
             lifecycle_state=outcome.lifecycle_state,
+            reuse_http=True,
+            session_budget=runner._http_handoff_budget,
         )
         return ns, spec, runner, ctx, outcome
     except BaseException:
@@ -96,6 +105,7 @@ class PreparedSource:
     """Pollable bounded source; waiting for I/O never blocks spray cooldowns."""
 
     def __init__(self, items: Any, logger: Any, gate: Any, journal: Any, limit: int, workers: int):
+        self._handoff_budget = HttpHandoffBudget(min(64, max(1, workers)))
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, workers * 2))
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -116,7 +126,11 @@ class PreparedSource:
 
             if gate.cancelled.is_set() or journal.job_finished(_attempt_id(job[0], job[4], job[3], -1)):
                 return None
-            value = await prepare_target(job, logger)
+            token = _SHARED_HANDOFF_BUDGET.set(self._handoff_budget)
+            try:
+                value = await prepare_target(job, logger)
+            finally:
+                _SHARED_HANDOFF_BUDGET.reset(token)
             if value is not None:
                 with self._lock:
                     self._active[id(value)] = value
@@ -124,7 +138,10 @@ class PreparedSource:
 
         def producer() -> None:
             outcomes: Any = AsyncDetectScheduler[Any, Any, Any](
-                detect_workers=limit, deep_workers=1, max_inflight=limit + workers * 2
+                detect_workers=limit,
+                deep_workers=1,
+                max_inflight=limit + workers * 2,
+                retained_fds=self._handoff_budget.limit,
             ).iter_completed(items, prepare, lambda _job, value: value, cancel_event=self._stop)
             try:
                 for job, value in outcomes:

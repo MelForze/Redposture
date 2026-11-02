@@ -54,6 +54,10 @@ def with_async_http_detection(spec: Any, actions: Any, *, api_prefixes: tuple[st
     async def detect_async(ctx: Any, http: Any) -> AuditRecord:
         if actions.detect_record is not original:
             raise AsyncHttpFallback("detector override")
+        pool = getattr(getattr(ctx, "lifecycle_state", None), "http", None)
+        bind = getattr(http, "bind_pool", None)
+        if bind is not None and pool is not None:
+            await bind(pool)
         with http_target_context(ctx.target, route_state=ctx.lifecycle_state, api_prefixes=api_prefixes):
 
             async def send(base: str, path: str) -> HttpResponse:

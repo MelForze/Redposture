@@ -973,7 +973,16 @@ def _run_target_steps(
         runner = AuditCommandRunner(args=ns, spec=spec, logger=logger, emit_line=lambda _line: None)
         anonymous = AuditCredentialRun(source="anonymous")
         context = AuditHookContext(
-            ns, logger, host, port, anonymous, target=target, run_deep_checks=False, phase="detect"
+            ns,
+            logger,
+            host,
+            port,
+            anonymous,
+            target=target,
+            run_deep_checks=False,
+            phase="detect",
+            reuse_http=True,
+            session_budget=runner._http_handoff_budget,
         )
         state = None
     else:
@@ -984,6 +993,7 @@ def _run_target_steps(
         if prepared is None and spec.lifecycle_state_factory is not None:
             state = spec.lifecycle_state_factory(context)
             context = replace(context, lifecycle_state=state)
+            runner._register_lifecycle_state(state)
         try:
             detection = (
                 native.record
@@ -1095,8 +1105,8 @@ def _run_target_steps(
     finally:
         if prepared is not None:
             runner._close_all_lifecycle_states()
-        elif state is not None and spec.lifecycle_state_close is not None:
-            spec.lifecycle_state_close(state)
+        elif state is not None:
+            runner._close_all_lifecycle_states()
     if (
         detection is not None
         and runner._is_detected(detection)

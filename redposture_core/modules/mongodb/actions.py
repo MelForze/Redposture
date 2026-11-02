@@ -24,6 +24,7 @@ from ...clients.mongodb import (
     open_mongodb_client,
     probe_legacy_mongodb_hello,
 )
+from ...clients.session_handoff import SessionHandoff, SessionLease
 from ...console import Console
 from ...credential_evidence import attempt_capabilities
 from ...discovery_spool import SpoolingRecords
@@ -213,6 +214,30 @@ def _group_collection_targets(
     return normalized, grouped, None
 
 
+class MongoLifecycleState:
+    def __init__(self, ctx: Any) -> None:
+        # A PyMongo client also owns monitoring sockets. Reserve conservatively.
+        self.sessions = SessionHandoff(getattr(ctx, "session_budget", None), budget_units=3)
+
+    def close(self) -> None:
+        self.sessions.close()
+
+
+def _mongo_session_key(
+    host: str,
+    port: int,
+    timeout: float,
+    username: Any,
+    password: Any,
+    auth_db: str,
+    tls: bool,
+    tls_ca: Any,
+    tls_cert_key: Any,
+    tls_insecure: bool,
+) -> tuple[Any, ...]:
+    return host, port, timeout, str(username or ""), password, auth_db, tls, tls_ca, tls_cert_key, tls_insecure
+
+
 def _open_client(
     host: str,
     port: int,
@@ -284,6 +309,8 @@ def _try_credentials(
     tls_ca: str | None = None,
     tls_cert_key: str | None = None,
     tls_insecure: bool = False,
+    selected_clients: list[tuple[Any, Any]] | None = None,
+    session_cache: SessionHandoff | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Try every candidate; return the first success + the complete attempt log.
 
@@ -301,15 +328,24 @@ def _try_credentials(
         username = candidate.get("username")
         password = candidate.get("password")
         raw_client: Any = None
+        lease: SessionLease | None = None
         try:
-            mongo = _open_client(
-                host,
-                port,
-                timeout,
-                username=str(username or ""),
-                password=None if password is None else str(password),
-                auth_db=auth_db,
-                **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
+            key = _mongo_session_key(
+                host, port, timeout, username, password, auth_db, tls, tls_ca, tls_cert_key, tls_insecure
+            )
+            lease = session_cache.take(key) if session_cache is not None else None
+            mongo = (
+                lease.value
+                if lease is not None
+                else _open_client(
+                    host,
+                    port,
+                    timeout,
+                    username=str(username or ""),
+                    password=None if password is None else str(password),
+                    auth_db=auth_db,
+                    **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
+                )
             )
             raw_client = mongo.client
             mongo.hello()
@@ -341,9 +377,15 @@ def _try_credentials(
                 evidence["collection_count"] = None
                 evidence["capability_error"] = normalize_mongodb_error(exc)
             attempt["credential_capabilities"] = evidence
+            if selected is None and selected_clients is not None and lease is None and session_cache is not None:
+                lease = session_cache.track(key, mongo, mongo.close)
             attempts.append(attempt)
             if selected is None:
                 selected = attempt
+                if selected_clients is not None:
+                    selected_clients.append((mongo, lease))
+                    lease = None
+                    raw_client = None
         except Exception as exc:
             transient = is_transient_network_error(exc) and not is_auth_error(exc)
             rejection = getattr(exc, "code", None) == 18 or "authentication failed" in str(exc).lower()
@@ -359,8 +401,14 @@ def _try_credentials(
                 }
             )
         finally:
-            close_quietly(raw_client)
+            if lease is not None and session_cache is not None:
+                session_cache.finish(lease)
+            else:
+                close_quietly(raw_client)
     return selected, attempts
+
+
+_TRY_CREDENTIALS_ORIGINAL = _try_credentials
 
 
 def _selected_databases(
@@ -767,6 +815,7 @@ def _audit_mongodb_host(
     tls_insecure: bool = False,
     discover: bool = False,
     audit_ctx: Any | None = None,
+    session_cache: SessionHandoff | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, int(retries) + 1)
     last_error: str | None = None
@@ -800,6 +849,9 @@ def _audit_mongodb_host(
         client: MongoAuditClient | None = None
         active_client_ref: MongoAuditClient | None = None
         active_client_owned_ref = False
+        selected_clients: list[tuple[Any, Any]] = []
+        active_lease: SessionLease | None = None
+        audit_complete = False
         try:
             client = _open_client(
                 host,
@@ -828,15 +880,20 @@ def _audit_mongodb_host(
             credential_attempts: list[dict[str, Any]] = []
             selected_credential: dict[str, Any] | None = None
             active_client = client
-            active_client_owned = False
 
             if credential_candidates:
+                ownership_options: dict[str, Any] = (
+                    {"selected_clients": selected_clients, "session_cache": session_cache}
+                    if _try_credentials is _TRY_CREDENTIALS_ORIGINAL
+                    else {}
+                )
                 selected_credential, credential_attempts = _try_credentials(
                     host,
                     port,
                     timeout,
                     auth_db=auth_database,
                     credential_candidates=credential_candidates,
+                    **ownership_options,
                     **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
                 )
                 # A12: cache the attempt log immediately after _try_credentials
@@ -844,18 +901,23 @@ def _audit_mongodb_host(
                 if credential_attempts:
                     persisted_credential_attempts = list(credential_attempts)
                 if selected_credential is not None:
-                    active_client = _open_client(
-                        host,
-                        port,
-                        timeout,
-                        username=str(selected_credential.get("username") or ""),
-                        password=None
-                        if selected_credential.get("password") is None
-                        else str(selected_credential.get("password")),
-                        auth_db=auth_database,
-                        **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
+                    retained = selected_clients.pop(0) if selected_clients else None
+                    active_lease = retained[1] if retained is not None else None
+                    active_client = (
+                        retained[0]
+                        if retained is not None
+                        else _open_client(
+                            host,
+                            port,
+                            timeout,
+                            username=str(selected_credential.get("username") or ""),
+                            password=None
+                            if selected_credential.get("password") is None
+                            else str(selected_credential.get("password")),
+                            auth_db=auth_database,
+                            **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
+                        )
                     )
-                    active_client_owned = True
                     # A10 fix: mirror ownership onto the outer refs so the finally
                     # block can close the credentialed client if _collect_mongodb_data
                     # (or anything after it) raises. Without this, active_client
@@ -945,13 +1007,6 @@ def _audit_mongodb_host(
                 nosql_command=nosql_command if allow_data_actions else None,
                 discovery_collector=discovery_collector,
             )
-            if active_client_owned:
-                active_client.close()
-                # Ownership transferred to caller frame — cancel the
-                # finally-block backup close for this attempt.
-                active_client_owned_ref = False
-                active_client_ref = None
-
             explicit_attempts = [item for item in credential_attempts if not item.get("default")]
             credential_state = (
                 "valid"
@@ -993,6 +1048,7 @@ def _audit_mongodb_host(
                     "error": data.get("query_error") or data.get("nosql_command_error") or database_error,
                 }
             )
+            audit_complete = True
             return record
         except (MongoNotMongoError, MongoDependencyError) as exc:
             # A9 fix: fail-fast on terminal classifications. A non-MongoDB
@@ -1043,10 +1099,15 @@ def _audit_mongodb_host(
             if client is not None:
                 client.close()
             if active_client_owned_ref and active_client_ref is not None:
-                try:
-                    active_client_ref.close()
-                except Exception:
-                    pass
+                if active_lease is not None and session_cache is not None:
+                    session_cache.finish(active_lease, keep=audit_complete)
+                else:
+                    close_quietly(active_client_ref)
+            for unused_client, unused_lease in selected_clients:
+                if unused_lease is not None and session_cache is not None:
+                    session_cache.finish(unused_lease)
+                else:
+                    close_quietly(unused_client)
 
     record = dict(record_template)
     record.update(
@@ -1097,6 +1158,7 @@ def _audit_mongodb_host_stage(
     debug_emit: Callable[[str], None] | None,
     discover: bool = False,
     audit_ctx: Any | None = None,
+    lifecycle_state: Any | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     record = _audit_mongodb_host(
@@ -1125,6 +1187,7 @@ def _audit_mongodb_host_stage(
         tls_insecure=tls_insecure,
         discover=discover and run_deep_checks,
         audit_ctx=audit_ctx,
+        **({"session_cache": lifecycle_state.sessions} if isinstance(lifecycle_state, MongoLifecycleState) else {}),
     )
     record["show_databases_limit"] = show_databases_limit if run_deep_checks else None
     record["show_collections_limit"] = show_collections_limit if run_deep_checks else None

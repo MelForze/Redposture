@@ -343,7 +343,13 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
                 thread_locals=detection_thread_locals(actions),
             )
         assert registry_spec.detect_async is not None
+        pin = getattr(http, "pin_pool", None)
+        if pin is not None and web.get("is_gitlab") is True and state.web.http is not None:
+            pin(state.web.http)
         registry = (await registry_spec.detect_async(_surface_ctx(ctx, state.registry), http)).to_dict()
+        prefer = getattr(http, "prefer_pinned_pool", None)
+        if prefer is not None:
+            prefer()
         return _merge_detected_surfaces(ctx, web, registry)
 
     return replace(spec, detect_async=detect_async, async_detect_sync_hook=spec.detect)

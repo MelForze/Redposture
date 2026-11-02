@@ -20,6 +20,7 @@ from ...clients.http_api import (
     pin_http_redirect_path,
 )
 from ...clients.http_redirects import follow_redirects, http_origin
+from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import clear_tls_context_cache, shared_client_ssl_context
 from ...http_headers import merge_custom_http_headers
 
@@ -105,6 +106,7 @@ class KubeApiHttpSession:
         self.ca_file = ca_file
         self._connection_origin = ("https" if use_https else "http", self.host, self.port)
         self._connection: http.client.HTTPConnection | None = None
+        self._detect_pool: HttpSessionPool | None = None
         self._owner_thread_id: int | None = None
         self._closed = False
         self._stats = {"connections": 0, "reused": 0, "requests": 0, "retries": 0}
@@ -140,6 +142,16 @@ class KubeApiHttpSession:
     def close(self) -> None:
         self._closed = True
         self._close_connection()
+        if self._detect_pool is not None:
+            self._detect_pool.close()
+            self._detect_pool = None
+
+    def detection_pool(self) -> HttpSessionPool:
+        if self._detect_pool is None:
+            self._detect_pool = HttpSessionPool(
+                timeout=self.timeout, insecure=self.insecure, ca_file=self.ca_file, retries=0
+            )
+        return self._detect_pool
 
     def stats(self) -> dict[str, int]:
         return dict(self._stats)
@@ -187,7 +199,17 @@ class KubeApiHttpSession:
         response_size_cap: int,
     ) -> HttpResponse:
         response: http.client.HTTPResponse | None = None
+        handed_off = False
         try:
+            if self._connection is None and self._detect_pool is not None:
+                self._connection = self._detect_pool.take_handoff(
+                    self._connection_origin,
+                    timeout=float(timeout if timeout is not None else self.timeout),
+                    method=method,
+                )
+                handed_off = self._connection is not None
+            if self._closed:
+                raise RuntimeError("KubeApiHttpSession is closed")
             if self._connection is None:
                 self._connection = self._new_connection()
             else:
@@ -221,6 +243,11 @@ class KubeApiHttpSession:
             return result
         except Exception as exc:
             self._close_connection()
+            if HttpSessionPool._handoff_disconnected(method, handed_off, exc):
+                self._stats["retries"] += 1
+                return self._request_once(
+                    method, path, headers, body, timeout=timeout, response_size_cap=response_size_cap
+                )
             return HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc))
         finally:
             if response is not None:

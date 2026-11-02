@@ -7,18 +7,35 @@ import http.client
 import ssl
 import time
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, cast
 
 from ..clients.async_http_detect import AsyncDetectionHttp
+from ..clients.http_handoff import RetainedDetectionHttp
 from ..detection_io import DetectCall
 from . import discover
 from .http_client import HTTPResponseDetails, build_http_url, http_get_details, retry_delay, should_retry_http_exception
+from .http_pool import HTTPConnectionPool, get_active_http_pool
 
 _PREFETCH_CLIENT: ContextVar[AsyncDetectionHttp | None] = ContextVar("exporter_prefetch_client", default=None)
 
 
 class PrefetchedResponse(HTTPResponseDetails):
     exception: BaseException | None = None
+
+
+def _detection_client(**options: Any) -> AsyncDetectionHttp:
+    pool = get_active_http_pool()
+    if isinstance(pool, HTTPConnectionPool):
+        return RetainedDetectionHttp(budget=pool._handoff_budget, **options)
+    return AsyncDetectionHttp(**options)
+
+
+def _retain(client: AsyncDetectionHttp, details: Any = None) -> None:
+    pool = get_active_http_pool()
+    if isinstance(pool, HTTPConnectionPool) and isinstance(client, RetainedDetectionHttp) and client._connection:
+        sock = cast(Any, client._connection[2]).sock
+        if client.handoff(pool._handoff_policy) and details is not None:
+            details.release_handoff = lambda: pool._handoff_policy.discard_socket(sock)
 
 
 async def _prefetch_response(
@@ -72,7 +89,7 @@ async def prefetch_metrics(
     if active is not None:
         return await _prefetch_response(active, url, timeout, retries, max_bytes)
     # Constant per-attempt timeout matches the exporter transport policy.
-    async with AsyncDetectionHttp(
+    async with _detection_client(
         timeout=timeout,
         retries=0,
         max_bytes=max_bytes,
@@ -80,7 +97,10 @@ async def prefetch_metrics(
         decode_content=False,
         escalate_timeouts=False,
     ) as client:
-        return await _prefetch_response(client, url, timeout, retries, max_bytes)
+        result = await _prefetch_response(client, url, timeout, retries, max_bytes)
+        if not result.get("error") and not result.get("truncated") and 200 <= int(result.get("status") or 0) < 300:
+            _retain(client, result)
+        return result
 
 
 class DiscoveryRecord(dict[str, Any]):
@@ -119,7 +139,7 @@ async def prefetch_discovery(
         http_get_details_fn=metrics_read,
         fetch_fingerprint_bodies_fn=fingerprint_read,
     )
-    async with AsyncDetectionHttp(
+    async with _detection_client(
         timeout=timeout,
         retries=0,
         max_bytes=discover.SCAN_RESPONSE_BODY_MAX_BYTES,
@@ -152,6 +172,8 @@ async def prefetch_discovery(
                 step = steps.send(value)
         except StopIteration as result:
             record, hit = result.value
+            if hit is not None:
+                _retain(client)
             return DiscoveryRecord(record, responses), hit
         finally:
             steps.close()

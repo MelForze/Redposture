@@ -26,14 +26,7 @@ def bind(spec: Any) -> Any:
         factory = registry.get(function)
         if factory is None:
             raise AsyncHttpFallback("etcd host-stage override")
-        state = actions._EtcdHttpLifecycle(
-            pool=HttpSessionPool(
-                timeout=float(getattr(ctx.args, "timeout", 5)), insecure=True, proxy=getattr(ctx.args, "proxy", None)
-            ),
-            scheme=getattr(ctx.target, "scheme", None),
-            host=ctx.host,
-            port=ctx.port,
-        )
+        state = getattr(ctx, "lifecycle_state", None) or state_factory(ctx)
 
         def activate() -> None:
             actions._ETCD_HTTP_LOCAL.native_state = state
@@ -49,6 +42,24 @@ def bind(spec: Any) -> Any:
             )
             return AuditRecord.from_mapping(result, module="etcd", service="etcd")
         finally:
-            state.pool.close()
+            if getattr(ctx, "lifecycle_state", None) is None:
+                state.pool.close()
 
-    return replace(spec, detect_async=detect)
+    def state_factory(ctx: Any) -> Any:
+        return actions._EtcdHttpLifecycle(
+            pool=HttpSessionPool(
+                timeout=float(getattr(ctx.args, "timeout", 5)),
+                insecure=True,
+                proxy=getattr(ctx.args, "_proxy_config", getattr(ctx.args, "proxy", None)),
+            ),
+            scheme=getattr(ctx.target, "scheme", None),
+            host=ctx.host,
+            port=ctx.port,
+        )
+
+    return replace(
+        spec,
+        detect_async=detect,
+        lifecycle_state_factory=state_factory,
+        lifecycle_state_close=lambda state: state.close(),
+    )

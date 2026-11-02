@@ -6,6 +6,7 @@ import sys as _sys
 import types as _types
 
 from . import stage_runtime as _stage_runtime
+from .module_facade import bind_runtime_properties as _bind_runtime_properties
 from .modules.oracle import actions as _actions
 from .modules.oracle import policy as _policy
 from .modules.oracle import render as _render
@@ -54,6 +55,8 @@ class _StageFacadeModule(_types.ModuleType):
                 setattr(module_obj, name, value)
 
 
+_bind_runtime_properties(_StageFacadeModule, _RUNTIME_COMPAT_NAMES)
+del _bind_runtime_properties
 _sys.modules[__name__].__class__ = _StageFacadeModule
 
 __all__ = [

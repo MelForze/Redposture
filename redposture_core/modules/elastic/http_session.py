@@ -24,6 +24,7 @@ from ...clients.http_api import (
     pin_http_redirect_path,
 )
 from ...clients.http_redirects import follow_redirects, http_origin
+from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...http_headers import merge_custom_http_headers
 
@@ -125,6 +126,7 @@ class ElasticHttpSession:
         self._ca_file = ca_file
         self._ssl_context: ssl.SSLContext | None = None
         self._connection: http.client.HTTPConnection | None = None
+        self._detect_pool: HttpSessionPool | None = None
         self._scheme: str | None = None
         self._requests_on_connection = 0
         self._owner_thread_id: int | None = None
@@ -211,6 +213,17 @@ class ElasticHttpSession:
         data: bytes | None,
         response_size_cap: int | None = None,
     ) -> tuple[HttpResponse, BaseException | None, bool]:
+        if self._connection is None and self._detect_pool is not None:
+            self._connection = self._detect_pool.take_handoff(
+                (scheme, self._connect_host, self._connect_port), timeout=self.timeout, method=method
+            )
+            if self._connection is not None:
+                self._scheme = scheme
+                self._requests_on_connection = 1
+        if self._closed:
+            self._close_connection_unchecked()
+            error = RuntimeError("ElasticHttpSession is closed")
+            return HttpResponse(0, b"", {}, error=str(error)), error, False
         connection, reused = self._ensure_connection(scheme)
         response: http.client.HTTPResponse | None = None
         try:
@@ -340,6 +353,16 @@ class ElasticHttpSession:
         # request; that request will return its normalized transport error.
         self._closed = True
         self._close_connection_unchecked()
+        if self._detect_pool is not None:
+            self._detect_pool.close()
+            self._detect_pool = None
+
+    def detection_pool(self) -> HttpSessionPool:
+        if self._detect_pool is None:
+            self._detect_pool = HttpSessionPool(
+                timeout=self.timeout, insecure=self._insecure, ca_file=self._ca_file, retries=0
+            )
+        return self._detect_pool
 
     def __enter__(self) -> ElasticHttpSession:
         self._claim_thread()

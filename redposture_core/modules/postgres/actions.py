@@ -2429,6 +2429,7 @@ def _audit_postgres_host(
     ssl_server_name: str | None = None,
     discover_ctx: Any | None = None,
     discover_implicit_dump: bool = False,
+    session_cache: Any = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -2453,19 +2454,25 @@ def _audit_postgres_host(
     for attempt in range(attempts):
         started = time.monotonic()
         try:
-            with _pg_open_socket(host, port, timeout, tls_config=tls_config) as sock:
-                target_database = str(database or "").strip() or None
-                startup_database = target_database or "postgres"
+            from .session import session_scope
+
+            target_database = str(database or "").strip() or None
+            startup_database = target_database or "postgres"
+            with session_scope(
+                host,
+                port,
+                timeout,
+                username=effective_username,
+                password=effective_password,
+                database=startup_database,
+                tls_config=tls_config,
+                cache=session_cache,
+                reuse=True,
+            ) as (sock, session):
                 effective_table_targets_by_database = dict(table_targets_by_database)
                 if table_targets and not effective_table_targets_by_database:
                     effective_table_targets_by_database = {target_database: list(table_targets)}
 
-                session = _pg_startup_and_auth(
-                    sock,
-                    username=effective_username,
-                    password=effective_password,
-                    database=startup_database,
-                )
                 discovery_collector = (
                     DiscoveryCollector(
                         "postgres",
@@ -2670,11 +2677,6 @@ def _audit_postgres_host(
                 if privesc_check:
                     privesc_checks, privesc_summary = _pg_collect_privesc_checks(sock, superuser)
                     acl_inventory = _pg_collect_acl_inventory(sock)
-
-                try:
-                    _pg_send_terminate(sock)
-                except Exception:
-                    pass
 
                 # trust auth (auth_required=False) means the server never asked for a
                 # password — --defcreds cannot have "worked" against it. Always report
@@ -3776,6 +3778,7 @@ def _call_audit_postgres_host_with_stage_debug(
     debug_emit: Callable[[str], None] | None,
     discover_ctx: Any | None = None,
     discover_implicit_dump: bool = False,
+    session_cache: Any = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     record = _audit_postgres_host(
@@ -3810,6 +3813,7 @@ def _call_audit_postgres_host_with_stage_debug(
         ssl_server_name=ssl_server_name,
         discover_ctx=discover_ctx if run_deep_checks else None,
         discover_implicit_dump=discover_implicit_dump,
+        **({"session_cache": session_cache} if session_cache is not None else {}),
     )
 
     result: dict[str, Any] = dict(record)

@@ -25,8 +25,18 @@ def finish(server, thread):
     assert not thread.is_alive()
 
 
-def test_trigger_zero_retry_actions_discard_server_closed_idle_connection():
+def test_trigger_zero_retry_actions_discard_server_closed_idle_connection(monkeypatch):
     paths = []
+    peer_closed = threading.Condition()
+    closed_count = 0
+
+    class Server(ThreadingHTTPServer):
+        def shutdown_request(self, request):
+            nonlocal closed_count
+            super().shutdown_request(request)
+            with peer_closed:
+                closed_count += 1
+                peer_closed.notify_all()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -45,7 +55,21 @@ def test_trigger_zero_retry_actions_discard_server_closed_idle_connection():
             # No Connection: close header: the client cached a once-live socket.
             self.close_connection = True
 
-    server, thread = server_for(Handler)
+    original_acquire = HTTPConnectionPool._acquire
+
+    def acquire(pool, *args, **kwargs):
+        # This scenario is about an already closed idle peer. Coordinate its
+        # FIN before checkout; a close racing with a new request is a separate
+        # ambiguous action and cannot be safely retried with retries=0.
+        expected_closes = len(paths)
+        with peer_closed:
+            assert peer_closed.wait_for(lambda: closed_count >= expected_closes, timeout=2)
+        return original_acquire(pool, *args, **kwargs)
+
+    monkeypatch.setattr(HTTPConnectionPool, "_acquire", acquire)
+    server = Server(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
+    thread.start()
     try:
         result = scan_exporters_and_trigger(
             None,

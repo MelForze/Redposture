@@ -311,6 +311,42 @@ def test_driver_response_materialization_preserves_gzip_decode_errors(valid):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("wire_headers", [{"Content-Length": "6"}, {"Transfer-Encoding": "chunked"}])
+@pytest.mark.parametrize("compressed", [False, True])
+def test_materialized_response_supports_old_sdk_chunk_reader(wire_headers, compressed):
+    expected = b"alpha\nbeta\n"
+    body = gzip.compress(expected) if compressed else expected
+    headers = {**wire_headers, **({"Content-Encoding": "gzip"} if compressed else {})}
+    response = http_detect._Response(200, headers, body, "OK").materialize({"preload_content": False})
+    try:
+        assert b"".join(response.read_chunked(amt=3, decode_content=True)) == expected
+        assert response.read() == b""
+    finally:
+        response.close()
+
+
+@pytest.mark.parametrize(
+    "message,confirmed",
+    [
+        ("HTTPDriver returned response code 500)\n Code: 516. DB::Exception: access denied", True),
+        ("HTTPDriver returned response code 500)\n Code: 516. foreign endpoint", False),
+        ("HTTPDriver returned response code 500)\n DB::Exception: foreign endpoint", False),
+        ("HTTPDriver returned response code 500)", False),
+    ],
+)
+def test_legacy_sdk_error_requires_full_clickhouse_exception_signature(message, confirmed):
+    from clickhouse_connect.driver.exceptions import DatabaseError
+
+    from redposture_core.modules.clickhouse.actions import _classify_clickhouse_exception
+
+    evidence = _classify_clickhouse_exception(DatabaseError(message), "http")
+    assert evidence.confirms_service is confirmed
+    if confirmed:
+        assert evidence.auth_required is True
+        assert evidence.code == 516
+    assert not _classify_clickhouse_exception(RuntimeError(message), "http").confirms_service
+
+
 def test_tls_certifi_alias_and_explicit_server_name_are_used_on_real_handshake(monkeypatch, mtls_material):
     import certifi
 
