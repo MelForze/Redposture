@@ -24,7 +24,7 @@ class FindingStore(_DiskValueReferences, MutableMapping[str, dict[str, Any]]):
         self._db.execute("PRAGMA synchronous=OFF")
         self._db.execute(
             "CREATE TABLE findings (ordinal INTEGER PRIMARY KEY, identity TEXT UNIQUE NOT NULL, "
-            "sort_type TEXT NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL)"
+            "sort_type TEXT NOT NULL, fingerprint TEXT NOT NULL, occurrences INTEGER NOT NULL, payload TEXT NOT NULL)"
         )
         self._disk_refs = {}
         self._spool_refs = {}
@@ -49,9 +49,15 @@ class FindingStore(_DiskValueReferences, MutableMapping[str, dict[str, Any]]):
         encoded = self._encode_disk_refs(value, pending)
         try:
             self._db.execute(
-                "INSERT INTO findings(identity,sort_type,fingerprint,payload) VALUES (?,?,?,?) "
-                "ON CONFLICT(identity) DO UPDATE SET payload=excluded.payload",
-                (key, str(value.get("type") or ""), str(value.get("fingerprint") or ""), json.dumps(encoded)),
+                "INSERT INTO findings(identity,sort_type,fingerprint,occurrences,payload) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(identity) DO UPDATE SET occurrences=excluded.occurrences,payload=excluded.payload",
+                (
+                    key,
+                    str(value.get("type") or ""),
+                    str(value.get("fingerprint") or ""),
+                    int(value.get("occurrences") or 0),
+                    json.dumps(encoded),
+                ),
             )
         except sqlite3.Error as exc:
             raise OSError(f"ClickHouse finding storage failure: {exc}") from exc
@@ -69,15 +75,15 @@ class FindingStore(_DiskValueReferences, MutableMapping[str, dict[str, Any]]):
     def __len__(self) -> int:
         return self._db.execute("SELECT COUNT(*) FROM findings").fetchone()[0]
 
+    def occurrence_count(self) -> int:
+        """Aggregate a scalar without reading and decoding all secret values."""
+        return self._db.execute("SELECT COALESCE(SUM(occurrences),0) FROM findings").fetchone()[0]
+
     def created_after(self, ordinal: int) -> SpoolingRecords:
         """Copy this chunk's new final records, without a growing key snapshot."""
-        records = SpoolingRecords()
-        for (payload,) in self._db.execute("SELECT payload FROM findings WHERE ordinal>? ORDER BY ordinal", (ordinal,)):
-            records.append(self._decode_disk_refs(json.loads(payload)))
-        return records
+        rows = self._db.execute("SELECT payload FROM findings WHERE ordinal>? ORDER BY ordinal", (ordinal,))
+        return SpoolingRecords._from_encoded_records((payload for (payload,) in rows), self)
 
     def sorted_values(self) -> SpoolingRecords:
-        records = SpoolingRecords()
-        for (payload,) in self._db.execute("SELECT payload FROM findings ORDER BY sort_type,fingerprint"):
-            records.append(self._decode_disk_refs(json.loads(payload)))
-        return records
+        rows = self._db.execute("SELECT payload FROM findings ORDER BY sort_type,fingerprint")
+        return SpoolingRecords._from_encoded_records((payload for (payload,) in rows), self)

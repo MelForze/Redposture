@@ -556,6 +556,33 @@ class SpoolingRecords(_DiskValueReferences, list[Any]):
         self._disk_refs = {}
         self._spool_refs = {}
 
+    @classmethod
+    def _from_encoded_records(cls, payloads: Iterable[str], source: _DiskValueReferences) -> SpoolingRecords:
+        """Snapshot already encoded records, retaining their reference owners.
+
+        Only internal stores using the same disk-reference codec can supply
+        these payloads. Copying their JSON bytes avoids reconstructing every
+        nested finding merely to move it between two disposable databases.
+        """
+        records = cls()
+        if _OBJECT_OWNER_KEY in source._spool_refs:
+            # Mutable imported object trees need the ordinary codec's deep
+            # adoption into a separate owner. Text arenas and nested source
+            # spools retain the same ownership semantics on the fast path.
+            for payload in payloads:
+                records.append(source._decode_disk_refs(json.loads(payload)))
+            return records
+        db = records._db
+        assert db is not None
+        try:
+            db.executemany("INSERT INTO records(sort_key,payload) VALUES ('',?)", ((payload,) for payload in payloads))
+        except sqlite3.Error as exc:
+            raise OSError(f"discovery record storage failure: {exc}") from exc
+        records._count = db.total_changes
+        records._disk_refs.update(source._disk_refs)
+        records._spool_refs.update(source._spool_refs)
+        return records
+
     def __del__(self) -> None:
         db = getattr(self, "_db", None)
         if db is not None:

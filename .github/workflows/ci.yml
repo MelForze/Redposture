@@ -43,7 +43,9 @@ jobs:
   tests:
     name: Tests (py${{ matrix.python-version }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The full branch-coverage suite may exceed 30m on hosted runners.
+    # run_ci_job.sh still aborts an individual stalled test after 180s.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

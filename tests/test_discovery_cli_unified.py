@@ -74,10 +74,12 @@ def test_discovery_defaults_and_overrides(module: str) -> None:
 
 
 @pytest.mark.parametrize("component", ["airflow", "clickhouse", "elastic", "minio", "storage", "token_api"])
-def test_discovery_engine_defaults_after_removing_cli_byte_limit(component: str) -> None:
+@pytest.mark.parametrize("started", [0.0, 124.1, 1024.0, 1_000_000.125])
+def test_discovery_engine_defaults_after_removing_cli_byte_limit(component: str, started: float) -> None:
     from redposture_core.discovery_options import DEFAULT_DISCOVER_MAX_BYTES, UNLIMITED_DISCOVER_BYTES
 
     limits: tuple[float | None, int | None]
+    expected_time = 900.0
     if component == "airflow":
         from redposture_core.modules.airflow.discover import DiscoverConfig as AirflowConfig
 
@@ -99,19 +101,19 @@ def test_discovery_engine_defaults_after_removing_cli_byte_limit(component: str)
         minio = Budget()
         limits = (minio.time_budget, minio.max_total_bytes)
     else:
-        import time
-
         from redposture_core.modules.token_api import ReadBudget
         from redposture_core.storage_discovery import DiscoveryCollector
 
         args = SimpleNamespace(discover_time=None, discover_max_bytes=None)
-        started = time.monotonic()
+        # Compare the absolute deadline. Subtracting the start again can lose
+        # precision for legitimate monotonic clock values such as 124.1.
+        expected_time = started + 900.0
         if component == "storage":
             storage = DiscoveryCollector("gitlab", SimpleNamespace(args=args, discovery_started_at=started), {})
-            limits = (storage.deadline - started, storage.remaining)
+            limits = (storage.deadline, storage.remaining)
         else:
             token_api = ReadBudget(args, started_at=started)
-            limits = (token_api.deadline - started, token_api.remaining)
+            limits = (token_api.deadline, token_api.remaining)
     expected_bytes = {
         "airflow": UNLIMITED_DISCOVER_BYTES,
         "clickhouse": None,
@@ -120,7 +122,7 @@ def test_discovery_engine_defaults_after_removing_cli_byte_limit(component: str)
         "storage": UNLIMITED_DISCOVER_BYTES,
         "token_api": UNLIMITED_DISCOVER_BYTES,
     }
-    assert limits == (900.0, expected_bytes[component])
+    assert limits == (expected_time, expected_bytes[component])
 
 
 @pytest.mark.parametrize("module", list(_POLICIES))

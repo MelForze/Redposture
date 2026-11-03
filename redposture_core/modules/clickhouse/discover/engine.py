@@ -816,7 +816,7 @@ def run_discovery(
         "tables_scanned": len(table_jobs),
         "findings": findings.sorted_values(),
         "finding_count": len(findings),
-        "occurrence_count": sum(int(item.get("occurrences") or 0) for item in findings.values()),
+        "occurrence_count": findings.occurrence_count(),
         "coverage": coverage,
         "coverage_percent": coverage_percent,
         "scan_errors": scan_errors,

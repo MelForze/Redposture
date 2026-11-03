@@ -65,7 +65,7 @@ def test_ci_pytest_reports_and_exits_on_a_stalled_test() -> None:
     assert "python -u -m pytest -vv" in runner
     assert "-o faulthandler_timeout=180" in runner
     assert "-o faulthandler_exit_on_timeout=true" in runner
-    assert "timeout-minutes: 30" in workflow
+    assert "timeout-minutes: 60" in workflow
 
 
 def test_supported_python_versions_match_metadata_and_ci() -> None:
