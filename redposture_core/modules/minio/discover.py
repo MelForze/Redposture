@@ -225,7 +225,8 @@ def _read_and_scan(
     content_kind: str | None = None
     probe_open: int | None = None
     json_value: _Value | None = None
-    replay = tempfile.SpooledTemporaryFile(max_size=65536)
+    replay = None
+    json_parser: _JSONDocuments | None = None
     semantic_portion = max(64, min(budget.chunk_size, 65536))
 
     def publish(value: Any, object_path: Text = "$") -> None:
@@ -281,27 +282,9 @@ def _read_and_scan(
 
     scanner = DiscoveryTextStream(publish, result._partial, portion=budget.chunk_size)
 
-    def publish_json(path: JSONPath, value: Any) -> None:
-        named = bool(path) and isinstance(path[-1], (str, DiskBackedText))
-        publish({path[-1]: value} if named else value, json_discovery_path(path[:-1] if named else path))
-
-    def json_string(path: JSONPath, text: str, final: bool) -> None:
-        nonlocal json_value
-        if json_value is None:
-            json_value = _Value(semantic_portion)
-        json_value.append(text)
-        if final:
-            value = json_value.finish()
-            json_value = None
-            publish_json(path, value)
-
-    json_parser = _JSONDocuments(
-        json_string,
-        on_primitive=lambda item: publish_json(*item),
-        deadline=budget._started + budget.time_budget if budget.time_budget is not None else None,
-    )
-
     def replay_chunks() -> Iterator[bytes]:
+        if replay is None:
+            return
         replay.seek(0)
         while chunk := replay.read(65536):
             if budget.expired():
@@ -318,16 +301,40 @@ def _read_and_scan(
         if invalid_json and (obj.key.lower().endswith(".json") or "json" in str(obj.content_type or "").lower()):
             result._partial("parse_failure")
         content_kind = "text"
-        json_parser.close()
+        if json_parser is not None:
+            json_parser.close()
         if json_value is not None:
             json_value.close()
             json_value = None
         for chunk in replay_chunks():
             scanner.feed(decoder.decode(chunk))
-        replay.close()
+        if replay is not None:
+            replay.close()
 
     def feed_json(chunk: bytes) -> bool:
+        nonlocal json_parser
         try:
+            if json_parser is None:
+
+                def publish_json(path: JSONPath, value: Any) -> None:
+                    named = bool(path) and isinstance(path[-1], (str, DiskBackedText))
+                    publish({path[-1]: value} if named else value, json_discovery_path(path[:-1] if named else path))
+
+                def json_string(path: JSONPath, text: str, final: bool) -> None:
+                    nonlocal json_value
+                    if json_value is None:
+                        json_value = _Value(semantic_portion)
+                    json_value.append(text)
+                    if final:
+                        value = json_value.finish()
+                        json_value = None
+                        publish_json(path, value)
+
+                json_parser = _JSONDocuments(
+                    json_string,
+                    on_primitive=lambda item: publish_json(*item),
+                    deadline=budget._started + budget.time_budget if budget.time_budget is not None else None,
+                )
             json_parser.feed(chunk)
             return True
         except (ValueError, UnicodeError):
@@ -335,16 +342,24 @@ def _read_and_scan(
             return False
 
     def feed(chunk: bytes) -> None:
-        nonlocal content_kind, probe_open
+        nonlocal content_kind, probe_open, replay
         if content_kind == "text":
             scanner.feed(decoder.decode(chunk))
             return
+        prefix = chunk.lstrip(b" \t\r\n")
+        if replay is None and probe_open is None and prefix and prefix[0] not in b"{[":
+            # No undecided prefix needs replay and no JSON parser was used.
+            # Feed the exact bytes, including leading whitespace, as before.
+            content_kind = "text"
+            scanner.feed(decoder.decode(chunk))
+            return
+        if replay is None:
+            replay = tempfile.SpooledTemporaryFile(max_size=65536)
         replay.seek(0, 2)
         replay.write(chunk)
         if content_kind == "json":
             feed_json(chunk)
             return
-        prefix = chunk.lstrip(b" \t\r\n")
         if probe_open is None:
             if not prefix:
                 return
@@ -427,6 +442,7 @@ def _read_and_scan(
         if complete:
             if content_kind == "json":
                 try:
+                    assert json_parser is not None
                     json_parser.finish()
                 except (ValueError, UnicodeError):
                     plain_fallback(invalid_json=True)
@@ -450,8 +466,10 @@ def _read_and_scan(
         result._partial("storage_failure")
         return True
     finally:
-        replay.close()
-        json_parser.close()
+        if replay is not None:
+            replay.close()
+        if json_parser is not None:
+            json_parser.close()
         if json_value is not None:
             json_value.close()
         scanner.close()

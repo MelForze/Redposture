@@ -13,6 +13,7 @@ from redposture_core.modules.minio import discover
 from redposture_core.modules.minio.discover import Budget, discover_secrets
 from redposture_core.modules.minio.enumerate import ObjectInfo
 from redposture_core.scheduler import SharedNestedScheduler
+from scripts.qa_memory_workload import run_memory_workload
 
 
 def test_minio_sqlite_full_keeps_earlier_findings_and_reads_next_object(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,8 +140,7 @@ def test_parallel_minio_publishes_fast_findings_while_first_object_is_blocked() 
     assert [item["key"] for item in result.findings] == ["slow.env", "fast.env"]
 
 
-def test_minio_many_objects_do_not_accumulate_candidates_and_findings_in_ram() -> None:
-    count = 100_000
+def _check_many_objects(count: int) -> dict[str, int]:
 
     class Client:
         def get_object_range(self, _bucket, key, *, start, length, signed):
@@ -158,8 +158,17 @@ def test_minio_many_objects_do_not_accumulate_candidates_and_findings_in_ram() -
     assert result.coverage_complete and result.objects_scanned == count
     assert len(result.candidates) == len(result.findings) == count
     assert result.findings[0]["value"] == "secret-00000000"
-    assert result.findings[-1]["value"] == "secret-00099999"
+    assert result.findings[-1]["value"] == f"secret-{count - 1:08d}"
     assert peak < 12_000_000, f"MinIO retained {peak} bytes across objects"
+    return {"count": count, "peak": peak}
+
+
+def test_minio_many_objects_do_not_accumulate_candidates_and_findings_in_ram() -> None:
+    # Cover the same reader/serialization branches in the parent. Cardinality
+    # and tracemalloc are measured in a clean process, without the coverage
+    # tracer's allocation/CPU overhead or retained state from earlier tests.
+    _check_many_objects(3)
+    run_memory_workload(__file__, "_check_many_objects", 100_000)
 
 
 def test_minio_many_findings_in_one_object_spill_dedup_and_keep_late_duplicate_out() -> None:

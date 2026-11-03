@@ -12,6 +12,7 @@ from redposture_core.discovery_matches import SpoolingSecretMatches, prefer_spec
 from redposture_core.discovery_values import DiskBackedText
 from redposture_core.secret_detection import SecretMatch
 from redposture_core.storage_discovery import DiscoveryCollector
+from scripts.qa_memory_workload import run_memory_workload
 
 
 def test_many_text_findings_are_retained_without_one_large_memory_list() -> None:
@@ -78,8 +79,7 @@ def test_match_spool_preserves_order_duplicates_slices_and_disk_values() -> None
     assert "".join(restored.iter_text_chunks()) == "full-secret-value"
 
 
-def test_specific_detector_filter_does_not_rebuild_large_lists_or_fingerprint_sets() -> None:
-    count = 100_000
+def _check_specific_filter(count: int) -> dict[str, int]:
     source = {f"secret_{number}": "glpat-" + format(number, "032x") for number in range(count)}
     ctx = SimpleNamespace(args=SimpleNamespace(discover_time=900), host="qa", port=80)
     collector = DiscoveryCollector("gitlab", ctx, {"status": "open_no_auth"})
@@ -94,6 +94,14 @@ def test_specific_detector_filter_does_not_rebuild_large_lists_or_fingerprint_se
     assert len(report["findings"]) == count
     assert all(item["type"] == "gitlab_token" for item in report["findings"])
     assert peak < 12_000_000, f"specific detector filter retained {peak} bytes"
+    return {"count": count, "peak": peak}
+
+
+def test_specific_detector_filter_does_not_rebuild_large_lists_or_fingerprint_sets() -> None:
+    # This parent input also exercises both disk-spill thresholds under branch
+    # coverage; the isolated child still checks the full 100k cardinality.
+    _check_specific_filter(8192)
+    run_memory_workload(__file__, "_check_specific_filter", 100_000)
 
 
 @pytest.mark.parametrize("inline_limit", [0, 2048])

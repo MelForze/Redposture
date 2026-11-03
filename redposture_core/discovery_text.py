@@ -21,6 +21,10 @@ _BASIC_END = re.compile(r"[^A-Za-z0-9+/]")
 _XML_HEAD = re.compile(r"<([A-Za-z][\w:.-]{0,79})(?=[\s/>])")
 _XML_HEADER_CHAR = re.compile(r"[\"'>]")
 _PEM = re.compile(r"-----BEGIN ((?:[A-Z0-9 ]+ )?PRIVATE KEY|CERTIFICATE)-----")
+_SINGLE_ASSIGNMENT_LINE = re.compile(
+    r"[ \t]*(?:--)?([A-Za-z][A-Za-z0-9._-]{0,127})[ \t]*(?:=>|[:=])[ \t]*"
+    r"""(?:"(?:[^"\\\r\n]|\\[^\r\n])*"|'(?:[^'\\\r\n]|\\[^\r\n])*')[ \t]*\r?\n"""
+)
 
 
 class _Value:
@@ -161,6 +165,23 @@ class DiscoveryTextStream:
 
     def _drain(self) -> None:
         while self.pending:
+            if (
+                not self.mode
+                and self.value is None
+                and not self.attributes
+                and len(self.pending) <= self.limit
+                and self.pending.endswith("\n")
+                and "<" not in self.pending
+                and "-----BEGIN" not in self.pending
+            ):
+                line_match = _SINGLE_ASSIGNMENT_LINE.fullmatch(self.pending)
+                if line_match is not None and is_secret_field_name(line_match.group(1)):
+                    # The normal state machine emits exactly this one closed
+                    # line. Keep multi-line batches and contextual syntax on
+                    # that path so callback order and partials stay identical.
+                    completed, self.pending = self.pending, ""
+                    self.emit(completed)
+                    continue
             if self.mode == "xml_header":
                 end = -1
                 for marker in _XML_HEADER_CHAR.finditer(self.pending):

@@ -18,6 +18,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
+from itertools import chain
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -287,11 +288,15 @@ def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
             # excluded by explicit_values. Keep assignment/structured cases
             # on the original path, where a different substring may be found.
             return found
+        words = _WORD_RE.finditer(text)
+        first_word = next(words, None)
+        if first_word is None:
+            return found
         pem_spans = [match.span() for match in _PEM_BLOCK_RE.finditer(text)]
         # Candidate length is bounded at256. Substring membership therefore
         # depends on that bound, not on the number of earlier findings.
         value_lengths = sorted({len(value) for value in explicit_values if len(value) <= 256})
-        for token_match in _WORD_RE.finditer(text):
+        for token_match in chain((first_word,), words):
             candidate = token_match.group(0)
             if "=" in candidate:
                 key, assigned = candidate.split("=", 1)
