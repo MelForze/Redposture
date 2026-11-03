@@ -91,6 +91,59 @@ _PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
     ),
 )
 
+# Necessary literal starts only: these select candidates, never confirm a
+# secret. Keep shared starts together (access_token matches two detectors).
+_PATTERN_STARTERS = (
+    (r"password|passwd|pwd", ("password",)),
+    (r"-----BEGIN", ("private_key", "certificate")),
+    (r"bearer", ("bearer_token",)),
+    (r"basic", ("basic_auth",)),
+    (r"eyJ", ("jwt",)),
+    (r"AKIA|ASIA|AIDA|AROA", ("aws_access_key",)),
+    (r"gh[pousr]_|github_pat_", ("github_token",)),
+    (r"glpat-", ("gitlab_token",)),
+    (r"xox[baprs]-", ("slack_token",)),
+    (r"(?:sk|rk)_(?:live|test)_", ("stripe_key",)),
+    (r"sk-", ("api_token",)),
+    (r"glsa_", ("grafana_token",)),
+    (r"dop_v1_", ("digitalocean_token",)),
+    (r"shpat_", ("shopify_token",)),
+    (r"dckr_pat_", ("docker_token",)),
+    (r"pypi-AgEI", ("pypi_token",)),
+    (r"SG\.", ("sendgrid_token",)),
+    (r"SK(?=[0-9a-f])", ("twilio_token",)),
+    (r":AA", ("telegram_token",)),
+    (r"https://", ("webhook",)),
+    (r"\$", ("password_hash",)),
+    (r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|clickhouse)://", ("connection_string",)),
+    (r"user(?:name)?|login", ("credential_pair",)),
+    (r"client[_-]?secret", ("client_secret",)),
+    (r"(?:access|refresh)[_-]?token", ("access_token", "api_key")),
+    (r"api[_-]?key|secret[_-]?key", ("api_key",)),
+    (r"session(?:id)?|sid|auth_token", ("session_cookie",)),
+)
+_INDEXED_PATTERNS = _PATTERNS
+_STARTER_RE = re.compile("|".join(f"(?P<t{i}>{start.lower()})" for i, (start, _) in enumerate(_PATTERN_STARTERS)))
+_STARTER_INDICES = tuple(
+    tuple(i for i, (name, _, _) in enumerate(_INDEXED_PATTERNS) if name in names) for _, names in _PATTERN_STARTERS
+)
+_UNINDEXED_PATTERNS = tuple(
+    i for i, (name, _, _) in enumerate(_INDEXED_PATTERNS) if not any(name in names for _, names in _PATTERN_STARTERS)
+)
+
+
+def _candidate_patterns(text: str) -> tuple[tuple[str, str, re.Pattern[str]], ...]:
+    # Case-fold only bounded ASCII strings. Unicode IGNORECASE has additional
+    # equivalences (e.g. dotted I) which must retain the full original path.
+    if _PATTERNS is not _INDEXED_PATTERNS or len(text) > 65_536 or not text.isascii():
+        return _PATTERNS
+    indices = set(_UNINDEXED_PATTERNS)
+    for match in _STARTER_RE.finditer(text.lower()):
+        assert match.lastgroup is not None
+        indices.update(_STARTER_INDICES[int(match.lastgroup[1:])])
+    return tuple(_INDEXED_PATTERNS[i] for i in sorted(indices))
+
+
 _SECRET_KEY_RE = re.compile(
     r"(?i)(?:^|[_\-.])(password|passwd|pwd|passphrase|pass|credential|credentials|cred|creds|secret|apisecret|token|api[_-]?key|access[_-]?key|client[_-]?secret|session|cookie|private[_-]?key)(?:$|[_\-.])"
 )
@@ -186,7 +239,7 @@ def _is_secret_sentinel(value: Any) -> bool:
 
 def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
     found: list[SecretMatch] = []
-    for name, confidence, pattern in _PATTERNS:
+    for name, confidence, pattern in _candidate_patterns(text):
         if name not in enabled:
             continue
         for match in pattern.finditer(text):
@@ -229,6 +282,11 @@ def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
     path_field = _normalize_secret_key(path.rsplit(".", 1)[-1])
     if "high_entropy" in enabled and not _NON_SECRET_FIELD_RE.search(path_field):
         explicit_values = {match.value for match in found if isinstance(match.value, str)}
+        if "=" not in text and text in explicit_values and _WORD_RE.fullmatch(text):
+            # The entropy loop has exactly one unmodified candidate, already
+            # excluded by explicit_values. Keep assignment/structured cases
+            # on the original path, where a different substring may be found.
+            return found
         pem_spans = [match.span() for match in _PEM_BLOCK_RE.finditer(text)]
         # Candidate length is bounded at256. Substring membership therefore
         # depends on that bound, not on the number of earlier findings.

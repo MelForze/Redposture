@@ -98,3 +98,19 @@ def test_oversized_text_is_rejected_before_serialization(value, monkeypatch):
 
     monkeypatch.setattr(json, "dumps", no_dump)
     assert data_discovery._bounded_json_size(value, 65_536) is None
+
+
+def test_ordinary_nested_json_needs_no_reference_restoration(monkeypatch):
+    records = module.SpoolingRecords()
+    expected = {"nested": [{"value": "ordinary", "flag": False, "count": 0}], "path": "é.🍰"}
+    records.append(expected)
+
+    def no_decode(*args):
+        raise AssertionError("ordinary JSON must not revisit every scalar after json.loads")
+
+    monkeypatch.setattr(module._DiskValueReferences, "_decode_disk_refs", no_decode)
+    assert list(records) == [expected]
+    first = records[0]
+    first["nested"][0]["value"] = "edited"
+    assert records[0] == expected
+    assert list(reversed(records)) == [expected]

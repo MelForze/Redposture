@@ -548,7 +548,10 @@ def _redirect_server(
             try:
                 request = bytearray()
                 while b"\r\n\r\n" not in request and len(request) < 65536:
-                    request.extend(self.request.recv(4096))
+                    portion = self.request.recv(4096)
+                    if not portion:
+                        return
+                    request.extend(portion)
                 path = request.split(b" ", 2)[1].decode("ascii", "replace")
                 paths.append(path)
                 if captured_requests is not None:
@@ -582,7 +585,10 @@ def _fixed_http_server(status: int, body: bytes, content_type: str, *, compresse
             try:
                 request = bytearray()
                 while b"\r\n\r\n" not in request and len(request) < 65536:
-                    request.extend(self.request.recv(4096))
+                    portion = self.request.recv(4096)
+                    if not portion:
+                        return
+                    request.extend(portion)
                 reply = (
                     f"HTTP/1.1 {status} QA\r\nServer: nginx\r\nContent-Type: {content_type}\r\n"
                     f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()

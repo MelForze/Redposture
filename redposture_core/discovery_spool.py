@@ -69,6 +69,13 @@ class _DiskValueReferences:
     _disk_refs: dict[str, DiskBackedText]
     _spool_refs: dict[str, Any]
 
+    def _load_record(self, payload: str) -> Any:
+        value = json.loads(payload)
+        # Our encoder always escapes NUL, including in ensure_ascii=False
+        # payloads. Without this prefix there cannot be a reference marker at
+        # any depth; ordinary JSON needs no recursive reference restoration.
+        return self._decode_disk_refs(value) if "\\u0000redposture_" in payload else value
+
     def _encode_disk_refs(self, value: Any, pending: dict[str, Any]) -> Any:
         if isinstance(value, DiskBackedPath):
             return {
@@ -296,7 +303,7 @@ class SpoolingFindings(_DiskValueReferences, list[dict[str, Any]]):
                 query += " WHERE emitted=0"
             query += " ORDER BY ordinal DESC" if reverse else " ORDER BY ordinal"
             for (payload,) in db.execute(query):
-                value = self._decode_disk_refs(json.loads(payload))
+                value = self._load_record(payload)
                 if isinstance(value, dict):
                     yield value
 
@@ -307,7 +314,7 @@ class SpoolingFindings(_DiskValueReferences, list[dict[str, Any]]):
         self.finish()
         with closing(sqlite3.connect(self._path)) as db:
             for payload, emitted in db.execute("SELECT payload, emitted FROM findings ORDER BY ordinal"):
-                value = self._decode_disk_refs(json.loads(payload))
+                value = self._load_record(payload)
                 if isinstance(value, dict):
                     yield value, bool(emitted)
 
@@ -361,7 +368,7 @@ class SpoolingFindings(_DiskValueReferences, list[dict[str, Any]]):
             row = db.execute("SELECT payload FROM findings ORDER BY ordinal LIMIT 1 OFFSET ?", (index,)).fetchone()
         if row is None:
             raise IndexError(index)
-        return self._decode_disk_refs(json.loads(row[0]))
+        return self._load_record(row[0])
 
 
 class SpoolingFingerprints(list[str]):
@@ -622,17 +629,17 @@ class SpoolingRecords(_DiskValueReferences, list[Any]):
         db = self._db
         if db is not None:
             for (payload,) in db.execute(query, (after,)):
-                yield self._decode_disk_refs(json.loads(payload))
+                yield self._load_record(payload)
         else:
             with closing(sqlite3.connect(self._path)) as reader:
                 for (payload,) in reader.execute(query, (after,)):
-                    yield self._decode_disk_refs(json.loads(payload))
+                    yield self._load_record(payload)
 
     def __iter__(self) -> Iterator[JSONRecord]:
         self.finish()
         with closing(sqlite3.connect(self._path)) as db:
             for (payload,) in db.execute("SELECT payload FROM records ORDER BY sort_key, ordinal"):
-                value = self._decode_disk_refs(json.loads(payload))
+                value = self._load_record(payload)
                 if isinstance(value, Mapping):
                     yield value
 
@@ -643,7 +650,7 @@ class SpoolingRecords(_DiskValueReferences, list[Any]):
         self.finish()
         with closing(sqlite3.connect(self._path)) as db:
             for (payload,) in db.execute("SELECT payload FROM records ORDER BY sort_key DESC, ordinal DESC"):
-                yield self._decode_disk_refs(json.loads(payload))
+                yield self._load_record(payload)
 
     def __reversed__(self) -> Iterator[JSONRecord]:
         return self.iter_reversed()
@@ -683,7 +690,7 @@ class SpoolingRecords(_DiskValueReferences, list[Any]):
                 row = db.execute(query, (position,)).fetchone()
         if row is None:
             raise IndexError(position)
-        value = self._decode_disk_refs(json.loads(row[0]))
+        value = self._load_record(row[0])
         if not isinstance(value, Mapping):
             raise ValueError("record spool contains a non-object")
         return value

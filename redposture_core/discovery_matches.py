@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterable, Iterator
+from contextlib import closing
 from itertools import zip_longest
 from typing import Any, SupportsIndex, overload
 
@@ -104,25 +106,88 @@ class SpoolingSecretMatches(list[SecretMatch]):
     def __repr__(self) -> str:
         return f"SpoolingSecretMatches(count={self._count})"
 
+    def _prefer_specific_on_disk(self, inline_limit: int) -> SpoolingSecretMatches | None:
+        """Filter ordinary JSON matches without rebuilding every Python row.
+
+        References and embedded NUL values use the fingerprint-based codec
+        below. Plain UTF-8 strings compare exactly in SQLite's BINARY index.
+        """
+        records = self._records
+        if records is None:
+            return None
+        records.finish()
+        try:
+            with closing(sqlite3.connect(records._path)) as db:
+                try:
+                    db.execute("SELECT json_type('{}')")
+                except sqlite3.OperationalError as exc:
+                    if "no such function" in str(exc):
+                        return None  # SQLite builds explicitly omitting JSON.
+                    raise
+                if db.execute(
+                    "SELECT 1 FROM records WHERE instr(payload,?)>0 "
+                    "OR json_type(payload,'$.value') IS NOT 'text' "
+                    "OR json_type(payload,'$.detector') IS NOT 'text' LIMIT 1",
+                    ("\\u0000",),
+                ).fetchone():
+                    return None
+                fallback = ("generic_secret", "high_entropy")
+                if (
+                    db.execute(
+                        "SELECT 1 FROM records WHERE json_extract(payload,'$.detector') IN (?,?) LIMIT 1", fallback
+                    ).fetchone()
+                    is None
+                ):
+                    return self
+                db.execute("PRAGMA temp_store=FILE")
+                db.execute("CREATE TEMP TABLE specific_values(value TEXT PRIMARY KEY) WITHOUT ROWID")
+                db.execute(
+                    "INSERT OR IGNORE INTO specific_values SELECT json_extract(payload,'$.value') "
+                    "FROM records WHERE json_extract(payload,'$.detector') NOT IN (?,?)",
+                    fallback,
+                )
+                rows = db.execute(
+                    "SELECT payload FROM records WHERE json_extract(payload,'$.detector') NOT IN (?,?) "
+                    "OR NOT EXISTS (SELECT 1 FROM specific_values "
+                    "WHERE value=json_extract(records.payload,'$.value')) ORDER BY ordinal",
+                    fallback,
+                )
+                filtered = SpoolingSecretMatches(inline_limit=inline_limit)
+                filtered._records = SpoolingRecords._from_encoded_records((payload for (payload,) in rows), records)
+                filtered._count = len(filtered._records)
+                filtered.incomplete_reason = self.incomplete_reason
+                return filtered
+        except sqlite3.Error as exc:
+            raise OSError(f"discovery match filtering storage failure: {exc}") from exc
+
 
 def prefer_specific_matches(matches: list[SecretMatch], *, inline_limit: int = 2048) -> list[SecretMatch]:
     """Suppress heuristic duplicates when a specific detector found the same value."""
     fallback_detectors = {"generic_secret", "high_entropy"}
+    if isinstance(matches, SpoolingSecretMatches):
+        filtered = matches._prefer_specific_on_disk(inline_limit)
+        if filtered is not None:
+            return filtered
     if not any(match.detector in fallback_detectors for match in matches):
         return matches
     in_memory = not isinstance(matches, SpoolingSecretMatches) or matches._records is None
     if len(matches) <= inline_limit and in_memory:
         specific = {fingerprint(match.value) for match in matches if match.detector not in fallback_detectors}
-        return [
+        preferred = [
             match
             for match in matches
             if match.detector not in fallback_detectors or fingerprint(match.value) not in specific
         ]
+        if reason := getattr(matches, "incomplete_reason", None):
+            partial = SpoolingSecretMatches(preferred, inline_limit=inline_limit)
+            partial.incomplete_reason = reason
+            return partial
+        return preferred
     with DiscoveryFrontier() as specific_values:
         for match in matches:
             if match.detector not in fallback_detectors:
                 specific_values.claim(fingerprint(match.value))
-        return SpoolingSecretMatches(
+        result = SpoolingSecretMatches(
             (
                 match
                 for match in matches
@@ -130,3 +195,5 @@ def prefer_specific_matches(matches: list[SecretMatch], *, inline_limit: int = 2
             ),
             inline_limit=inline_limit,
         )
+        result.incomplete_reason = getattr(matches, "incomplete_reason", None)
+        return result

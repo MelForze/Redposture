@@ -57,7 +57,10 @@ def native_server(*, secure=False, material=None, web=False, stall=False):
                 if not bytes(prefix).startswith(b"PRI * HTTP/2.0"):
                     data = bytes(prefix)
                     while b"\r\n\r\n" not in data:
-                        data += self.request.recv(65536)
+                        portion = self.request.recv(65536)
+                        if not portion:
+                            return
+                        data += portion
                     headers, body = data.split(b"\r\n\r\n", 1)
                     size = next(
                         int(line.split(b":", 1)[1])
@@ -65,7 +68,10 @@ def native_server(*, secure=False, material=None, web=False, stall=False):
                         if line.lower().startswith(b"content-length:")
                     )
                     while len(body) < size:
-                        body += self.request.recv(65536)
+                        portion = self.request.recv(65536)
+                        if not portion:
+                            return
+                        body += portion
                     requests.append((0, headers.split(b"\r\n", 1)[0].decode()))
                     health = grpc._encode_grpc_frame(grpc_health_pb2.HealthCheckResponse(status=1).SerializeToString())
                     trailers = b"grpc-status: 0\r\n"
@@ -292,7 +298,10 @@ def test_native_grpc_web_requires_complete_valid_trailer_status(body, declared_e
         def handle(self):
             data = b""
             while b"\r\n\r\n" not in data:
-                data += self.request.recv(65536)
+                portion = self.request.recv(65536)
+                if not portion:
+                    return
+                data += portion
             self.request.sendall(
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/grpc-web+proto\r\nContent-Length: "
                 + str(len(body) + declared_extra).encode()

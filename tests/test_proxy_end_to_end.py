@@ -187,7 +187,10 @@ class _TunnelHandler(socketserver.BaseRequestHandler):
             else:
                 request = bytearray()
                 while b"\r\n\r\n" not in request and len(request) < 64 * 1024:
-                    request.extend(client.recv(4096))
+                    portion = client.recv(4096)
+                    if not portion:
+                        return
+                    request.extend(portion)
                 first_line = bytes(request).partition(b"\r\n")[0].decode("ascii")
                 method, authority, _version = first_line.split(" ", 2)
                 assert method == "CONNECT"
