@@ -120,17 +120,6 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
                 or "identity unavailable"
             )
             lines.append(f"{_prefix(record)} [*] {pair} (status:{verdict}) reason={reason}{_endpoint(record)}")
-    if isinstance(record.get("credential_attempts_planned"), int):
-        stop = record.get("credential_stop_reason")
-        lines.append(
-            f"{_prefix(record)} [*] Credential checks "
-            f"(planned:{record['credential_attempts_planned']}) "
-            f"(performed:{record.get('credential_attempts_executed', 0)}) "
-            f"(unverified:{record.get('credential_attempts_unverified', 0)}) "
-            f"(skipped:{record.get('credential_attempts_skipped', 0)})"
-            + (f" (status:stopped) reason={stop}" if stop else "")
-            + _endpoint(record)
-        )
     return lines
 
 
@@ -236,8 +225,6 @@ def _render_colored_jenkins_line(console: Console, line: str) -> bool:
             RegexColorRule(r"\(rce:unknown\)", "orange"),
             RegexColorRule(r"\(status:partial\)", "orange"),
             RegexColorRule(r"\(status:(?:unverified|skipped|stopped)\)", "orange"),
-            RegexColorRule(r"\((?:planned|performed|unverified|skipped):0\)", "bright_green"),
-            RegexColorRule(r"\((?:planned|performed|unverified|skipped):[1-9]\d*\)", "true_red"),
             RegexColorRule(r"\(endpoint:.*\)$", "orange"),
             RegexColorRule(r"reason=.*", "orange"),
         ),

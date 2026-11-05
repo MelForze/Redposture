@@ -34,11 +34,11 @@ All 32 modules, their UI probes, `spray` discovery and exporters `collect/trigge
 | --- | ---: |
 | 32–999 | 64 |
 | 1,000–9,999 | 128 |
-| 10,000–99,999 | 256 |
-| 100,000–999,999 | 512 |
-| 1,000,000+ | 1,024 |
+| 10,000–49,999 | 256 |
+| 50,000–99,999 | 512 |
+| 100,000+ | 1,024 |
 
-The limit also respects the target count and available file descriptors. `--workers` controls synchronous work; smaller lists, hostnames, active proxies and unsupported responses use the original client. The higher limits are scheduling limits, not a claim that a million hosts have been tested.
+The limit is selected once at startup, respecting the target count, available file descriptors and any explicit inflight cap. It does not change in response to CPU load, memory growth or event-loop delays. `--workers` controls synchronous work; smaller lists, hostnames, active proxies and unsupported responses use the original client. The higher limits are scheduling limits, not a claim that a million hosts have been tested.
 
 Supported HTTP modules and UIs can pass an anonymous keep-alive connection from async detection to synchronous authentication or data reads. At most 64 connections wait for this handoff per command, also bounded by the synchronous worker count and available file descriptors. Connections carrying credentials or cookies are excluded. If a transferred connection closes, only its first GET/HEAD may reconnect once; POST and execution requests are never replayed by this mechanism. PostgreSQL can keep a completed session for subsequent reads under the same user, database and TLS policy; each credential candidate still authenticates independently. MongoDB reuses the verified synchronous client. Spray shares the handoff budget across queued targets, and exporters reuse prefetch connections without adding callback retries.
 

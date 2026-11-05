@@ -535,7 +535,6 @@ def _scan_exporters_and_trigger(
 
     from ..async_detection import (
         AsyncDetectScheduler,
-        adaptive_detect_ceiling,
         async_detection_allowed,
         automatic_detect_concurrency,
     )
@@ -688,13 +687,6 @@ def _scan_exporters_and_trigger(
         outcomes = AsyncDetectScheduler[tuple[str, str, dict[str, Any]], Any, Any](
             detect_workers=detect_limit,
             deep_workers=max(1, workers),
-            adaptive_max=adaptive_detect_ceiling(
-                detect_total,
-                initial=detect_limit,
-                deep_workers=max(1, workers),
-                retained_fds=pool._max_idle_total if pool else 0,
-            ),
-            retained_fds=pool._max_idle_total if pool else 0,
         ).iter_completed(
             roots,
             prepare,

@@ -1,4 +1,4 @@
-"""Known-answer product corpora must survive real admission increases."""
+"""Known-answer product corpora must survive fixed concurrency changes."""
 
 import asyncio
 import contextvars
@@ -9,7 +9,6 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from redposture_core.adaptive_detection import AdaptiveDetectLimit, DetectResources
 from redposture_core.async_detection import AsyncDetectScheduler
 from redposture_core.clients.async_http_detect import AsyncDetectionHttp
 from redposture_core.clients.http_api import HttpResponse
@@ -19,24 +18,15 @@ from tests.http_detect_fixtures import detection_response
 from tests.test_async_http_timeout_retries import MODULES, make_runner
 
 
-def run_corpus(module, scheduler_class=AsyncDetectScheduler, *, adaptive=False):
-    """Virtualize control/backoff time, not product decisions or attempt budgets."""
+def run_corpus(module, scheduler_class=AsyncDetectScheduler, *, concurrency=4):
+    """Virtualize backoff time, not product decisions or attempt budgets."""
     with pytest.MonkeyPatch.context() as patch:
         real_sleep = asyncio.sleep
-        real_observe = AdaptiveDetectLimit.observe
 
         async def sleep(delay, *args, **kw):
             return await real_sleep(delay / 100 if delay >= 0.2 else delay, *args, **kw)
 
-        def observe(self, **kw):
-            kw.update(
-                elapsed=kw["elapsed"] * 100, latency=kw["latency"] * 100, cpu=0, lag=0, rss_growth=0, fd_limit=10000
-            )
-            return real_observe(self, **kw)
-
         patch.setattr(asyncio, "sleep", sleep)
-        patch.setattr(AdaptiveDetectLimit, "observe", observe)
-        patch.setattr(DetectResources, "sample", lambda self, elapsed: (0, 0))
         attempts, calls = Counter(), Counter()
         attempt = contextvars.ContextVar("accuracy_attempt", default=0)
         first_ip = int(ipaddress.IPv4Address("198.18.0.0"))
@@ -96,7 +86,7 @@ def run_corpus(module, scheduler_class=AsyncDetectScheduler, *, adaptive=False):
         args, spec = make_runner(module)
         runner = Runner(args=args, spec=spec, emit_line=lambda _: None)
         jobs = [(str(ipaddress.IPv4Address(first_ip + i)), spec.default_port + i % 2) for i in range(120)]
-        seen, changes = {}, []
+        seen = {}
 
         async def prepare(job):
             target = ScanTargetSpec(host=job[0], explicit_port=job[1], scheme="http")
@@ -118,9 +108,7 @@ def run_corpus(module, scheduler_class=AsyncDetectScheduler, *, adaptive=False):
             finally:
                 runner._close_lifecycle_state(outcome.lifecycle_state)
 
-        options = dict(detect_workers=4, deep_workers=2)
-        if adaptive:
-            options.update(adaptive_max=8, on_limit_change=lambda n, r: changes.append((n, r)))
+        options = dict(detect_workers=concurrency, deep_workers=2)
         try:
             for job, result in scheduler_class(**options).iter_completed(jobs, prepare, finish):
                 assert job not in seen
@@ -138,8 +126,6 @@ def run_corpus(module, scheduler_class=AsyncDetectScheduler, *, adaptive=False):
                 assert seen[job][2] is (i % 6 == 1)
             if i % 6 in {0, 1, 4} and module == "minio":
                 assert seen[job][2] is True
-        if adaptive:
-            assert any(n > 4 for n, _ in changes), (module, changes)
         return {
             "module": module,
             "targets": len(seen),
@@ -151,14 +137,13 @@ def run_corpus(module, scheduler_class=AsyncDetectScheduler, *, adaptive=False):
             "attempts": sum(attempts.values()),
             "results_sha256": hashlib.sha256(repr(sorted(seen.items())).encode()).hexdigest(),
             "requests_sha256": hashlib.sha256(repr(sorted(calls.items())).encode()).hexdigest(),
-            "changes": changes,
         }
 
 
 @pytest.mark.parametrize("module", MODULES)
-def test_adaptive_detection_preserves_product_auth_ports_and_recovery(module):
-    fixed = run_corpus(module)
-    adaptive = run_corpus(module, adaptive=True)
-    assert adaptive["results_sha256"] == fixed["results_sha256"]
-    assert adaptive["requests_sha256"] == fixed["requests_sha256"]
-    assert adaptive["attempts"] == fixed["attempts"]
+def test_fixed_detection_preserves_product_auth_ports_and_recovery(module):
+    serial = run_corpus(module, concurrency=1)
+    concurrent = run_corpus(module, concurrency=8)
+    assert concurrent["results_sha256"] == serial["results_sha256"]
+    assert concurrent["requests_sha256"] == serial["requests_sha256"]
+    assert concurrent["attempts"] == serial["attempts"]

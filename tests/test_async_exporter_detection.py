@@ -143,6 +143,9 @@ def test_collect_scales_detect_only_and_respects_explicit_inflight(monkeypatch, 
     assert result == (40, 40)
     assert 2 < peak <= (6 if max_inflight else 40)
     assert deep_peak == 2
+    assert stats["detect_concurrency"] == (6 if max_inflight else 40)
+    assert stats["detect_concurrency_current"] == stats["detect_concurrency_peak"] == stats["detect_concurrency"]
+    assert stats["detect_adaptations"] == 0
     records = [json.loads(line) for line in output.read_text().splitlines()]
     hosts = [r["host"] for r in records if "host" in r]
     assert len(hosts) == len(set(hosts)) == 40

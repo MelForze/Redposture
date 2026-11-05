@@ -432,7 +432,7 @@ def test_h12_kube_pool_response_cap_matches_direct_transport(monkeypatch: pytest
         pool.close()
 
 
-def test_h13_unknown_txt_preserves_negative_marker_and_explains_uncertainty() -> None:
+def test_h13_unknown_txt_uses_module_marker_and_explains_uncertainty() -> None:
     lines = grafana._format_auth_attempt_detail_records(
         {
             "host": "h",
@@ -442,9 +442,11 @@ def test_h13_unknown_txt_preserves_negative_marker_and_explains_uncertainty() ->
         "txt",
     )
     other = consul._auth_summary_line({"auth_mode": "token", "auth_valid": None, "auth_error": "backend timeout"})
-    for line in [*lines, other]:
-        assert line and "[-]" in line and "unverified" in line.lower() and "backend timeout" in line
+    assert len(lines) == 1
+    for line, marker in [(lines[0], "[*]"), (other, "[-]")]:
+        assert line and marker in line and "unverified" in line.lower() and "backend timeout" in line
         assert "\x1b" not in line
+    assert "[-]" not in lines[0] and "[+]" not in lines[0]
 
 
 def test_h13_consul_missing_proof_has_default_reason() -> None:
@@ -465,7 +467,7 @@ class RecordingConsole:
 
 
 @pytest.mark.parametrize("module", ["grafana", "consul"])
-def test_h13_uncertainty_color_keeps_negative_marker(module: str) -> None:
+def test_h13_uncertainty_color_matches_module_marker(module: str) -> None:
     record = {
         "host": "h",
         "port": 1234,
@@ -484,7 +486,10 @@ def test_h13_uncertainty_color_keeps_negative_marker(module: str) -> None:
     )
     console = RecordingConsole()
     assert colorize(console, line)
-    assert ("[-]", "true_red") in console.paints
+    marker, color = ("[*]", "cyan") if module == "grafana" else ("[-]", "true_red")
+    assert (marker, color) in console.paints
+    if module == "grafana":
+        assert ("[-]", "true_red") not in console.paints
     assert any(
         ("u:p" if module == "grafana" else "basic auth") in text and color == "white" for text, color in console.paints
     )

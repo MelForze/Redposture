@@ -28,6 +28,26 @@ def build_override(config: object, project: str) -> dict[str, dict[str, dict[str
         and isinstance(name := details.get("container_name"), str)
         and name
     }
+    for service, details in config["services"].items():
+        if service not in services:
+            continue
+        name = str(details.get("container_name") or "")
+        image = str(details.get("image") or "").split("@", 1)[0].split(":", 1)[0]
+        if not re.fullmatch(r"redposture-lab-grafana(?:-\d+)?", name) or image not in {
+            "grafana/grafana",
+            "grafana/grafana-oss",
+            "grafana/grafana-enterprise",
+        }:
+            continue
+        # Independent auth cases and pair-specific controls share this fixture.
+        # Prevent earlier cases from locking only the first replica before the
+        # multi-target check. Normal/manual labs keep their original policy.
+        # Include the full environment: --config-output caches a shallow merge.
+        environment = details.get("environment")
+        services[service]["environment"] = {
+            **(environment if isinstance(environment, dict) else {}),
+            "GF_SECURITY_BRUTE_FORCE_LOGIN_PROTECTION_MAX_ATTEMPTS": "1000",
+        }
     airflow = config["services"].get("airflow-auth")
     if isinstance(airflow, dict) and airflow.get("container_name") == "redposture-lab-airflow-auth":
         target = "/opt/airflow/webserver_config.py"

@@ -141,7 +141,6 @@ class PreparedSource:
                 detect_workers=limit,
                 deep_workers=1,
                 max_inflight=limit + workers * 2,
-                retained_fds=self._handoff_budget.limit,
             ).iter_completed(items, prepare, lambda _job, value: value, cancel_event=self._stop)
             try:
                 for job, value in outcomes:

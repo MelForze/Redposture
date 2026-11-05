@@ -74,6 +74,7 @@ class GrafanaLifecycleState:
     invalid_responses: dict[str, tuple[int, str, dict[str, str]]] = field(default_factory=dict)
     invalid_username: str = field(default_factory=lambda: f"redposture-invalid-{uuid.uuid4().hex}")
     invalid_login_response: tuple[int, str, dict[str, str]] | None = None
+    invalid_password_responses: dict[tuple[str, str], tuple[int, str, dict[str, str]]] = field(default_factory=dict)
     selected_session: dict[str, str] | None = None
     prefetched_data: dict[str, Any] | None = None
 
@@ -81,6 +82,7 @@ class GrafanaLifecycleState:
         self.anonymous_responses.clear()
         self.invalid_responses.clear()
         self.invalid_login_response = None
+        self.invalid_password_responses.clear()
         self.selected_session = None
         self.prefetched_data = None
         if self.http is not None:
@@ -198,7 +200,11 @@ def _http_request_steps(
     if headers:
         req_headers.update(headers)
     state = getattr(_THREAD_LOCAL_HTTP, "state", None)
-    cap = _DETECT_RESPONSE_CAP if path in {"/api/health", "/login", "/api/user", "/api/org"} else 10 * 1024 * 1024
+    cap = (
+        _DETECT_RESPONSE_CAP
+        if path in {"/api/health", "/login", "/api/user", "/api/org", "/api/login/ping"}
+        else 10 * 1024 * 1024
+    )
     if isinstance(state, GrafanaLifecycleState) and state.http is not None:
         request_host = state.host or str(host)
         request_port = state.port or int(port)
@@ -456,6 +462,70 @@ def _looks_like_grafana_org(body: str) -> bool:
     )
 
 
+def _looks_like_grafana_login_ping(body: str) -> bool:
+    payload = _load_json_dict(body)
+    return bool(payload is not None and str(payload.get("message") or "").strip().casefold() == "logged in")
+
+
+def _grafana_password_control(
+    host: str, port: int, timeout: float, username: str, password: str, *, path: str, login: bool = False
+) -> tuple[bool, str | None]:
+    """A known username alone must not be mistaken for password verification."""
+    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    cache = state.invalid_password_responses if isinstance(state, GrafanaLifecycleState) else {}
+    key = (("POST " if login else "GET ") + path, username)
+    if key not in cache:
+        invalid_password = uuid.uuid4().hex
+        if invalid_password == password:
+            invalid_password += "!"
+        if login:
+            cache[key] = _http_request(
+                host,
+                port,
+                path,
+                timeout,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps({"user": username, "password": invalid_password}).encode("utf-8"),
+            )
+        else:
+            cache[key] = _http_request(
+                host, port, path, timeout, headers={"Authorization": _auth_header(username, invalid_password)}
+            )
+    status, body, _headers = cache[key]
+    limited = _grafana_auth_limited(status, body)
+    if limited:
+        return False, limited
+    message = str((_load_json_dict(body) or {}).get("message") or "").strip().lower()
+    rejected = (
+        status == 401
+        and message
+        in {
+            "invalid username or password",
+            "invalid username or password.",
+            "invalid credentials",
+        }
+        if login
+        else status in {401, 403}
+    )
+    if rejected:
+        return True, None
+    return False, "same-user invalid-password control was not rejected; credential unverified"
+
+
+def _verify_grafana_ping(
+    host: str, port: int, timeout: float, headers: dict[str, str]
+) -> tuple[bool | None, str | None]:
+    path = "/api/login/ping"
+    status, body, _headers = _http_request(host, port, path, timeout, headers=headers)
+    limited = _grafana_auth_limited(status, body)
+    if limited:
+        return None, limited
+    if status == 200 and _looks_like_grafana_login_ping(body):
+        return _grafana_pair_access(host, port, timeout, path, body)
+    return None, f"{path} verification unavailable status={status}"
+
+
 def _grafana_pair_access(host: str, port: int, timeout: float, path: str, body: str) -> tuple[bool | None, str | None]:
     """Both anonymous and a nonexistent user must fail to reproduce access."""
     state = getattr(_THREAD_LOCAL_HTTP, "state", None)
@@ -464,7 +534,13 @@ def _grafana_pair_access(host: str, port: int, timeout: float, path: str, body: 
     invalid_user = (
         state.invalid_username if isinstance(state, GrafanaLifecycleState) else f"redposture-invalid-{uuid.uuid4().hex}"
     )
-    validator = _looks_like_grafana_user if path == "/api/user" else _looks_like_grafana_org
+    validator = (
+        _looks_like_grafana_user
+        if path == "/api/user"
+        else _looks_like_grafana_login_ping
+        if path == "/api/login/ping"
+        else _looks_like_grafana_org
+    )
     observed = _load_json_dict(body) or {}
 
     def differs(status: int, other_body: str) -> bool:
@@ -542,15 +618,19 @@ def _verify_grafana_pair(
 ) -> tuple[bool | None, str | None]:
     basic_headers = {"Authorization": _auth_header(username, password)}
     failures: list[str] = []
+    legacy_unavailable = True
     for path, validator in (("/api/user", _looks_like_grafana_user), ("/api/org", _looks_like_grafana_org)):
         status, body, _headers = _http_request(host, port, path, timeout, headers=basic_headers)
+        legacy_unavailable = legacy_unavailable and status in {404, 405}
         limited = _grafana_auth_limited(status, body)
         if limited:
             return None, limited
         if status == 200 and validator(body):
             ok, reason = _grafana_pair_access(host, port, timeout, path, body)
             if ok:
-                return True, None
+                controlled, reason = _grafana_password_control(host, port, timeout, username, password, path=path)
+                if controlled:
+                    return True, None
             if getattr(_THREAD_LOCAL_HTTP, "credential_result", {}).get("auth_error_detail"):
                 return None, reason
             failures.append(reason or "credential proof unavailable")
@@ -564,6 +644,17 @@ def _verify_grafana_pair(
             failures.append(f"{path} access denied without credential evidence")
         else:
             failures.append(f"{path} verification unavailable status={status}")
+    if legacy_unavailable:
+        ok, reason = _verify_grafana_ping(host, port, timeout, basic_headers)
+        if ok:
+            controlled, reason = _grafana_password_control(
+                host, port, timeout, username, password, path="/api/login/ping"
+            )
+            if controlled:
+                return True, None
+        if getattr(_THREAD_LOCAL_HTTP, "credential_result", {}).get("auth_error_detail"):
+            return None, reason
+        failures.append(reason or "signed-in proof unavailable")
     status, body, headers = _http_request(
         host,
         port,
@@ -623,8 +714,13 @@ def _verify_grafana_pair(
         "invalid credentials",
     }:
         return None, "login invalid-pair control was not rejected; credential unverified"
+    controlled, reason = _grafana_password_control(host, port, timeout, username, password, path="/login", login=True)
+    if not controlled:
+        return None, reason
+    legacy_unavailable = True
     for path, validator in (("/api/user", _looks_like_grafana_user), ("/api/org", _looks_like_grafana_org)):
         status, body, _headers = _http_request(host, port, path, timeout, headers={"Cookie": session["cookie"]})
+        legacy_unavailable = legacy_unavailable and status in {404, 405}
         limited = _grafana_auth_limited(status, body)
         if limited:
             return None, limited
@@ -638,6 +734,16 @@ def _verify_grafana_pair(
                 return True, None
             if getattr(_THREAD_LOCAL_HTTP, "credential_result", {}).get("auth_error_detail"):
                 return None, reason
+    if legacy_unavailable:
+        ok, reason = _verify_grafana_ping(host, port, timeout, {"Cookie": session["cookie"]})
+        if ok:
+            _THREAD_LOCAL_HTTP.credential_result["session"] = {
+                **session,
+                "authorization": basic_headers["Authorization"],
+            }
+            return True, None
+        if getattr(_THREAD_LOCAL_HTTP, "credential_result", {}).get("auth_error_detail"):
+            return None, reason
     return None, "login session has no pair-specific authenticated API proof; credential unverified"
 
 
@@ -751,6 +857,22 @@ def _infer_grafana_auth_required_steps(
         return True
     if status == 200 and datasources is not None:
         return False
+    if status in {404, 405}:
+        for path, validator in (
+            ("/api/user", _looks_like_grafana_user),
+            ("/api/org", _looks_like_grafana_org),
+            ("/api/login/ping", _looks_like_grafana_login_ping),
+        ):
+            try:
+                response_status, body, _headers = yield DetectCall(_http_request, (host, port, path, timeout), {})
+            except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+                return None
+            if response_status in {401, 403}:
+                return True
+            if response_status == 200 and validator(body):
+                return False
+            if response_status == 429:
+                return None
     return None
 
 
@@ -1600,7 +1722,7 @@ def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: s
             continue
         if ok is None:
             reason = _safe_excerpt(str(attempt.get("error") or "credential proof unavailable"), 120)
-            lines.append(f"{prefix} [-] {credential_text} (unverified: {reason})")
+            lines.append(f"{prefix} [*] {credential_text} (unverified: {reason})")
         else:
             lines.append(f"{prefix} [-] {credential_text}")
     return lines
@@ -1734,8 +1856,8 @@ def _render_colored_grafana_line(console: Console, line: str) -> bool:
         literals=(("auth required:sso", "bright_green"), ("provider:keycloak", "cyan")),
         counts=(CountColorRule("datasources", "true_red", unknown_color="orange", zero_color="bright_green"),),
         extra_spans=lambda marker, payload: (
-            [(payload.index("(unverified:"), len(payload), "orange")]
-            if marker == "[-]" and "(unverified:" in payload
+            [(payload.index("(unverified:") + 1, len(payload) - int(payload.endswith(")")), "orange")]
+            if marker == "[*]" and "(unverified:" in payload
             else []
         ),
     ):

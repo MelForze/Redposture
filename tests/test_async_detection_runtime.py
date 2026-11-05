@@ -293,3 +293,34 @@ def test_negative_retained_lifecycle_close_stays_off_native_event_loop():
     runner.run_plan(plan)
     assert len(closed) == 40
     assert "redposture-async-detect" not in closed
+
+
+def test_debug_reports_fixed_limit_without_admission_changes():
+    messages = []
+
+    def sync_detect(ctx):
+        raise AssertionError("unexpected sync fallback")
+
+    async def native(ctx, http):
+        await asyncio.sleep(0.001)
+        return AuditRecord(host=ctx.host, port=9999, module="probe", service="probe", status="not_service")
+
+    spec = ModuleAuditSpec(
+        module="probe",
+        label="PROBE",
+        default_port=9999,
+        detect=sync_detect,
+        detect_async=native,
+        async_detect_sync_hook=sync_detect,
+    )
+    result = AuditCommandRunner(
+        args=SimpleNamespace(timeout=1, retries=0, debug=True, debug_emit=messages.append),
+        spec=spec,
+        emit_line=lambda _: None,
+    ).run_plan(
+        AuditCommandPlan(targets_by_port={9999: tuple(str(i) for i in range(40))}, workers=2, output_format="json")
+    )
+    assert result.record_count == 40
+    engine = [line for line in messages if "detection engine:" in line]
+    assert engine == ["detection engine: native_async concurrency=40 deep_workers=2 policy=fixed"]
+    assert not any("detection admission:" in line for line in messages)

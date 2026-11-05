@@ -458,7 +458,6 @@ def scan_exporter_presence(
                 )
                 from ..async_detection import (
                     AsyncDetectScheduler,
-                    adaptive_detect_ceiling,
                     async_detection_allowed,
                     automatic_detect_concurrency,
                 )
@@ -500,16 +499,12 @@ def scan_exporter_presence(
                     outcomes = AsyncDetectScheduler[tuple[str, int, str], Any, Any](
                         detect_workers=detect_limit,
                         deep_workers=max_workers,
-                        adaptive_max=adaptive_detect_ceiling(
-                            work_item_count,
-                            initial=detect_limit,
-                            deep_workers=max_workers,
-                            retained_fds=pool._max_idle_total,
-                        ),
-                        retained_fds=pool._max_idle_total,
                     ).iter_completed(items, prepare, finish)
                     if stats_sink is not None:
                         stats_sink["detect_concurrency"] = detect_limit
+                        stats_sink["detect_concurrency_current"] = detect_limit
+                        stats_sink["detect_concurrency_peak"] = detect_limit
+                        stats_sink["detect_adaptations"] = 0
                         stats_sink["deep_workers"] = max_workers
                 else:
                     outcomes = scheduler.iter_completed(items, _scan_item)

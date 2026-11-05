@@ -28,13 +28,24 @@ def test_scan_presence_uses_native_prefetch_with_exact_results(monkeypatch):
     monkeypatch.setattr(async_detection, "async_detection_allowed", lambda _args: True)
     hosts = [f"127.0.0.{i + 1}" for i in range(40)]
     exporter = {"name": "node_exporter", "port": 9100, "markers": ["node_exporter_build_info"]}
+    stats = {}
     got = discover.scan_exporter_presence(
-        hosts, 1, None, workers=2, retries=0, discovery_exporters=[exporter], show_progress=False, emit_summary=False
+        hosts,
+        1,
+        None,
+        workers=2,
+        retries=0,
+        discovery_exporters=[exporter],
+        show_progress=False,
+        emit_summary=False,
+        stats_sink=stats,
     )
     assert got[:2] == (40, 40)
     assert set(got[2]) == set(hosts)
     assert len(seen) == 40
     assert all(name == "redposture-async-detect" for _, name in seen)
+    assert stats["detect_concurrency_current"] == stats["detect_concurrency_peak"] == stats["detect_concurrency"] == 40
+    assert stats["detect_adaptations"] == 0
 
 
 def test_trigger_native_detection_never_prefetches_callback_action(monkeypatch):

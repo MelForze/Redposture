@@ -80,6 +80,7 @@ _TARGET_LIVE_EMIT: ContextVar[Callable[[Iterable[str]], None] | None] = ContextV
 )
 _TARGET_DISK_EMIT: ContextVar[Callable[..., None] | None] = ContextVar("audit_target_disk_emit", default=None)
 _TARGET_DISCOVERY_STARTED_AT: ContextVar[float | None] = ContextVar("audit_target_discovery_started_at", default=None)
+_CREDENTIAL_PHASE_EMIT_ACTIVE: ContextVar[bool] = ContextVar("audit_credential_phase_emit_active", default=False)
 
 
 def _merge_debug_events(*records: dict[str, Any]) -> list[str]:
@@ -1140,7 +1141,7 @@ def build_basic_audit_plan(
         output_format=cfg.output_format,
         workers=cfg.workers,
     )
-    # CLI defaults are adaptive. Explicit -w/--workers values and programmatic
+    # CLI defaults depend on plan size. Explicit -w/--workers values and programmatic
     # Namespace callers without provenance remain untouched.
     if getattr(args, "_workers_option_provided", None) is False:
         effective_workers = (
@@ -2170,6 +2171,9 @@ def _with_http_detection_diagnostics(record: AuditRecord, *, confirmed: bool) ->
     extra = dict(record.extra)
     if confirmed:
         status = "confirmed"
+    elif record.status == "cancelled":
+        # An unfinished probe is not a conclusive negative fingerprint.
+        status = "cancelled"
     elif (
         str(record.status or "").lower() == "probable" or str(extra.get("detection_status") or "").lower() == "probable"
     ):
@@ -2530,11 +2534,14 @@ class AuditCommandRunner:
             # A long-running target must publish its confirmed findings while
             # other targets are still active. The sink serializes each batch
             # across threads and tees it to the console and TXT output.
-            if not cancelled.is_set():
+            # A ledger phase holds _credential_ledger_lock until its counted
+            # output is written. Cancellation waits for that lock before
+            # flushing the remainder; dropping this batch would lose lines.
+            if not cancelled.is_set() or _CREDENTIAL_PHASE_EMIT_ACTIVE.get():
                 sink.emit_many(lines)
 
         def _emit_target_disk(*args: Any, **kwargs: Any) -> None:
-            if not cancelled.is_set():
+            if not cancelled.is_set() or _CREDENTIAL_PHASE_EMIT_ACTIVE.get():
                 sink.emit_discovery_value(*args, **kwargs)
 
         def _run_target(
@@ -2902,7 +2909,6 @@ class AuditCommandRunner:
         processed_deep = 0
         from .async_detection import (
             AsyncDetectScheduler,
-            adaptive_detect_ceiling,
             async_detection_allowed,
             automatic_detect_concurrency,
         )
@@ -2924,20 +2930,6 @@ class AuditCommandRunner:
                 )
             )
         if use_async_detect and detect_concurrency > 0:
-            adaptive_limit = (
-                adaptive_detect_ceiling(
-                    target_count,
-                    initial=detect_concurrency,
-                    deep_workers=worker_count,
-                    retained_fds=self._http_handoff_budget.limit,
-                )
-                if override is None
-                else None
-            )
-
-            def _detect_limit_changed(limit: int, reason: str) -> None:
-                if debug_emit is not None:
-                    debug_emit(f"detection admission: concurrency={limit} reason={reason} deep_workers={worker_count}")
 
             async def _detect_item(item: tuple[int, str, int, ScanTargetSpec | None]) -> _AuditDetectOutcome | None:
                 started_at = time.monotonic()
@@ -2952,9 +2944,6 @@ class AuditCommandRunner:
             ](
                 detect_workers=detect_concurrency,
                 deep_workers=worker_count,
-                adaptive_max=adaptive_limit,
-                retained_fds=self._http_handoff_budget.limit,
-                on_limit_change=_detect_limit_changed,
             ).iter_completed(
                 plan.iter_target_specs(),
                 _detect_item,
@@ -2965,7 +2954,8 @@ class AuditCommandRunner:
             )
             if debug_emit is not None:
                 debug_emit(
-                    f"detection engine: native_async concurrency={detect_concurrency} deep_workers={worker_count}"
+                    f"detection engine: native_async concurrency={detect_concurrency} "
+                    f"deep_workers={worker_count} policy=fixed"
                 )
         else:
             outcomes = scheduler.iter_completed(plan.iter_target_specs(), _run_target)
@@ -3508,7 +3498,10 @@ class AuditCommandRunner:
                     "detect": AuditRecord(
                         host=host, port=port, module=self.spec.module, service=self.spec.module, status="unknown"
                     ),
-                    "candidates": merge_audit_credential_runs(credential_runs),
+                    # Detection has not proved this product yet. Publishing
+                    # candidate identities here invents an auth history if
+                    # cancellation interrupts detection.
+                    "candidates": (),
                     "attempts": [],
                     "current": None,
                     "debug_count": 0,
@@ -3722,7 +3715,11 @@ class AuditCommandRunner:
                 def _emit_locked_phase(*args: Any, **kwargs: Any) -> None:
                     with self._credential_ledger_lock:
                         if not self._audit_cancelled.is_set():
-                            _emit_phase(*args, **kwargs)
+                            token = _CREDENTIAL_PHASE_EMIT_ACTIVE.set(True)
+                            try:
+                                _emit_phase(*args, **kwargs)
+                            finally:
+                                _CREDENTIAL_PHASE_EMIT_ACTIVE.reset(token)
 
                 phase_emit = _emit_locked_phase
             else:
@@ -3752,6 +3749,15 @@ class AuditCommandRunner:
         )
         detect_record = detect_outcome.record
         detected = self._is_detected(detect_record)
+        if self.spec.record_skipped_credential_attempts:
+            with self._credential_ledger_lock:
+                ledger = self._active_credential_ledgers.get(threading.get_ident())
+                if ledger is not None:
+                    # Preserve proof even if cancellation happens before the
+                    # deep lifecycle installs its auth ledger.
+                    ledger["detect"] = detect_record
+                    if detected:
+                        ledger["candidates"] = merge_audit_credential_runs(credential_runs)
         if detected and self.spec.logical_target_key is not None:
             logical_key = self.spec.logical_target_key(detect_record)
             if logical_key is not None:
@@ -5061,6 +5067,21 @@ class AuditCommandRunner:
             self._completed_credential_ledgers.clear()
             for worker_id, ledger in self._active_credential_ledgers.items():
                 detect = ledger["detect"]
+                if not self._is_detected(detect):
+                    # Keep a structured cancellation diagnostic, without
+                    # claiming any credential phase for an unproven target.
+                    records.append(
+                        (
+                            replace(
+                                detect,
+                                status="cancelled",
+                                extra={**detect.extra, "reason": "cancelled", "cancelled_stage": "detect"},
+                            ),
+                            self._credential_phase_counts.get(worker_id, Counter()).copy(),
+                            ledger["debug_count"],
+                        )
+                    )
+                    continue
                 attempts = list(ledger["attempts"])
                 current = ledger["current"]
                 if current is not None:

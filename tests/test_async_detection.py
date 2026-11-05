@@ -10,7 +10,21 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    "targets,want", [(32, 32), (999, 64), (1000, 128), (9999, 128), (10000, 256), (100000, 512), (1000000, 1024)]
+    "targets,want",
+    [
+        (1, 1),
+        (32, 32),
+        (999, 64),
+        (1000, 128),
+        (9999, 128),
+        (10000, 256),
+        (49999, 256),
+        (50000, 512),
+        (99999, 512),
+        (100000, 1024),
+        (874666, 1024),
+        (1000000, 1024),
+    ],
 )
 def test_automatic_detect_scales_input_without_scaling_sync_workers(monkeypatch, targets, want):
     import resource
@@ -282,3 +296,31 @@ def test_cancel_after_source_exhaustion_interrupts_blocked_finish(monkeypatch):
     finally:
         release_finish.set()
         thread.join(3)
+
+
+@pytest.mark.parametrize(
+    "module,cidr,expected_count,want",
+    [
+        ("postgres", "198.18.0.0/19", (8192 - 2) * 9, 512),
+        ("postgres", "198.18.0.0/18", (16384 - 2) * 9, 1024),
+        ("kafka", "198.18.0.0/20", (4096 - 2) * 14, 512),
+        ("kafka", "198.18.0.0/19", (8192 - 2) * 14, 1024),
+    ],
+)
+def test_profile_counts_expanded_endpoints_without_changing_ports_or_sync_workers(
+    monkeypatch, module, cidr, expected_count, want
+):
+    import importlib
+    import resource
+
+    from redposture_core.async_detection import automatic_detect_concurrency
+    from redposture_core.cli_args import parse_args
+
+    monkeypatch.setattr(resource, "getrlimit", lambda _: (100000, 100000))
+    args = parse_args([module, "-t", cidr, "-w", "7"])
+    stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
+    plan = getattr(stage, f"build_{module}_plan")(args)
+    assert plan.target_count == expected_count
+    assert plan.ports == stage._DEFAULT_PORTS
+    assert plan.workers == args.workers == 7
+    assert automatic_detect_concurrency(plan.target_count, deep_workers=plan.workers) == want

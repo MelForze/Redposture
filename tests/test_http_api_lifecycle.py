@@ -72,6 +72,10 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
     invalid_control = events[8][1]
     assert invalid_control is not None and invalid_control.startswith("Basic ")
     assert base64.b64decode(invalid_control.split()[1]).decode().split(":", 1)[0].startswith("redposture-invalid-")
+    password_control = events[9][1]
+    assert password_control is not None and password_control.startswith("Basic ")
+    control_username, control_password = base64.b64decode(password_control.split()[1]).decode().split(":", 1)
+    assert control_username == "good" and control_password != "good"
     assert events == [
         ("/api/health", None),
         ("/login", None),
@@ -82,6 +86,7 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
         ("/api/user", grafana._auth_header("good", "good")),
         ("/api/user", None),
         ("/api/user", invalid_control),
+        ("/api/user", password_control),
         ("/api/datasources", grafana._auth_header("good", "good")),
         ("/api/health", grafana._auth_header("good", "good")),
     ]
@@ -186,14 +191,20 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
         grafana._auth_header(run.username or "admin", run.password or "") for run in plan.credential_runs
     ]
     controls = [header for header in auth_headers if header is not None and header not in expected_headers]
-    assert len(controls) == 1 and controls[0].startswith("Basic ")
-    assert base64.b64decode(controls[0].split()[1]).decode().split(":", 1)[0].startswith("redposture-invalid-")
+    assert len(controls) == 3 and all(header.startswith("Basic ") for header in controls)
+    decoded_controls = [base64.b64decode(header.split()[1]).decode().split(":", 1) for header in controls]
+    assert decoded_controls[0][0].startswith("redposture-invalid-")
+    assert decoded_controls[1][0] == "admin" and decoded_controls[1][1] not in {"admin", "password"}
+    assert decoded_controls[2][0] == "grafana" and decoded_controls[2][1] != "grafana"
     # The same endpoint must reject both anonymous and a nonexistent user;
     # neither an earlier datasource denial nor arbitrary Basic-header access proves a pair.
     expected_headers.insert(expected_headers.index(winning_header) + 1, None)
     expected_headers.insert(expected_headers.index(winning_header) + 2, controls[0])
+    expected_headers.insert(expected_headers.index(winning_header) + 3, controls[1])
+    expected_headers.insert(expected_headers.index(later_header) + 1, controls[2])
     assert auth_headers == expected_headers
-    # Later accepted pairs reuse this baseline in the live lifecycle state.
+    # Later accepted pairs reuse the anonymous/nonexistent-user baseline;
+    # each accepted username also gets a wrong-password control.
     assert auth_headers.count(None) == 1
     assert auth_headers.index(None) < auth_headers.index(later_header)
     assert datasource_headers == [None, winning_header, later_header]
@@ -211,8 +222,17 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
         "ok": None,
         "error": "candidate transport failure",
     }
-    attempt_lines = [line for line in emitted if " [+] " in line or " [-] " in line]
+    attempt_lines = [
+        line
+        for line in emitted
+        if any(
+            f" {marker} {run.username}:{run.password}" in line
+            for run in plan.credential_runs
+            for marker in ("[+]", "[-]", "[*]")
+        )
+    ]
     assert len(attempt_lines) == len(plan.credential_runs)
+    assert any("[*] admin:admin (unverified: candidate transport failure)" in line for line in attempt_lines)
     selected_line = next(line for line in attempt_lines if "[+] admin:password" in line)
     later_success_line = next(line for line in attempt_lines if "[+] grafana:grafana" in line)
     assert "(datasources:0)" in selected_line

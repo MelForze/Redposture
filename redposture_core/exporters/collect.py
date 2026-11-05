@@ -597,7 +597,6 @@ def collect_exporter_debug_data(
             )
             from ..async_detection import (
                 AsyncDetectScheduler,
-                adaptive_detect_ceiling,
                 async_detection_allowed,
                 automatic_detect_concurrency,
             )
@@ -620,23 +619,16 @@ def collect_exporter_debug_data(
                 )
                 if stats_sink is not None:
                     stats_sink["detect_concurrency"] = detect_concurrency
+                    stats_sink["detect_concurrency_current"] = detect_concurrency
+                    stats_sink["detect_concurrency_peak"] = detect_concurrency
+                    stats_sink["detect_adaptations"] = 0
                     stats_sink["deep_workers"] = max_workers
                 use_async_detect = detect_concurrency > 0
             if use_async_detect:
                 from ..clients.async_http_detect import AsyncHttpFallback
                 from .async_detect import prefetch_discovery
 
-                adaptive_limit = (
-                    adaptive_detect_ceiling(
-                        scan_work_items_count,
-                        initial=detect_concurrency,
-                        deep_workers=max_workers,
-                        retained_fds=pool._max_idle_total,
-                    )
-                    if max_inflight_requests is None
-                    else None
-                )
-                async_inflight = max(detect_concurrency, adaptive_limit or 0) + max_workers * 2
+                async_inflight = detect_concurrency * 2 + max_workers * 2
                 if max_inflight_requests is not None:
                     async_inflight = min(max_inflight, async_inflight)
 
@@ -657,21 +649,10 @@ def collect_exporter_debug_data(
                         return _run_job(job)
                     return prepared
 
-                def _limit_changed(limit: int, _reason: str) -> None:
-                    if stats_sink is not None:
-                        stats_sink["detect_concurrency_current"] = limit
-                        stats_sink["detect_concurrency_peak"] = max(
-                            detect_concurrency, int(stats_sink.get("detect_concurrency_peak", 0)), limit
-                        )
-                        stats_sink["detect_adaptations"] = stats_sink.get("detect_adaptations", 0) + 1
-
                 outcomes = AsyncDetectScheduler[tuple[Any, ...], Any, Any](
                     detect_workers=detect_concurrency,
                     deep_workers=max_workers,
                     max_inflight=async_inflight,
-                    adaptive_max=adaptive_limit,
-                    retained_fds=pool._max_idle_total,
-                    on_limit_change=_limit_changed,
                 ).iter_completed(
                     roots,
                     _prepare_job,
