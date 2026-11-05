@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from typing import Any
 
 import pytest
@@ -148,6 +149,8 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
             return 401, "", {}
         if path == "/login":
             if method == "POST":
+                if json.loads(_kwargs.get("data") or b"{}") == {"user": "admin", "password": "admin"}:
+                    raise OSError("candidate transport failure")
                 return 401, '{"message":"Invalid username or password"}', {}
             return 200, "<title>Grafana</title>", {}
         if path == "/api/org":
@@ -166,6 +169,8 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
             if authorization == later_header:
                 return 200, '[{"id":2,"uid":"team-metrics","name":"Team metrics","type":"prometheus"}]', {}
             return (401, "{}", {}) if authorization is None else (200, "[]", {})
+        if path in {"/api/login/ping", *grafana._GRAFANA_AUTH_FALLBACK_PATHS}:
+            return 404, '{"message":"Not found"}', {}
         raise AssertionError(path)
 
     monkeypatch.setattr(grafana, "_http_request", fake_http)
@@ -232,7 +237,7 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
         )
     ]
     assert len(attempt_lines) == len(plan.credential_runs)
-    assert any("[*] admin:admin (unverified: candidate transport failure)" in line for line in attempt_lines)
+    assert any("[*] admin:admin (unverified: api's unavailable)" in line for line in attempt_lines)
     selected_line = next(line for line in attempt_lines if "[+] admin:password" in line)
     later_success_line = next(line for line in attempt_lines if "[+] grafana:grafana" in line)
     assert "(datasources:0)" in selected_line

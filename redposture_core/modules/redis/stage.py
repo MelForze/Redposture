@@ -77,6 +77,7 @@ def build_redis_spec(args: Any) -> ModuleAuditSpec:
         # E3 opt-in: Redis anon-open (no AUTH required) makes the defcreds
         # loop redundant — the audit already succeeded without credentials.
         keep_anonymous_open_no_auth=True,
+        skip_credentials_without_verifier=True,
         continue_after_credential_success=exhaustive_credentials,
         continue_after_credential_error=exhaustive_credentials,
         fallback_to_anonymous_detect_record=exhaustive_credentials,

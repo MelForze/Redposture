@@ -77,6 +77,7 @@ class GrafanaLifecycleState:
     invalid_password_responses: dict[tuple[str, str], tuple[int, str, dict[str, str]]] = field(default_factory=dict)
     selected_session: dict[str, str] | None = None
     prefetched_data: dict[str, Any] | None = None
+    debug_emit: Callable[[str], None] | None = None
 
     def close(self) -> None:
         self.anonymous_responses.clear()
@@ -85,6 +86,7 @@ class GrafanaLifecycleState:
         self.invalid_password_responses.clear()
         self.selected_session = None
         self.prefetched_data = None
+        self.debug_emit = None
         if self.http is not None:
             self.http.close()
             self.http = None
@@ -133,6 +135,7 @@ def grafana_lifecycle_state_factory(ctx: Any) -> GrafanaLifecycleState:
         scheme=target_scheme if target_scheme in {"http", "https"} else None,
         host=str(getattr(ctx, "host", "") or "") or None,
         port=int(ctx.port) if getattr(ctx, "port", None) is not None else None,
+        debug_emit=getattr(ctx, "debug_emit", None) if bool(getattr(ctx.args, "debug", False)) else None,
     )
 
 
@@ -232,23 +235,60 @@ def _http_request_steps(
                     "body": data,
                     "timeout": timeout,
                     "response_size_cap": cap,
-                    "allow_cross_origin_redirects": method.upper() in {"GET", "HEAD"}
+                    "allow_cross_origin_redirects": path != "/login"
+                    and method.upper() in {"GET", "HEAD"}
                     and not bool(_header_lookup(outgoing_headers, "Cookie")),
                 },
             )
+            if (
+                path == "/login"
+                and method.upper() == "GET"
+                and str(response.error or "").startswith("cross-origin redirect blocked:")
+            ):
+                if _grafana_http_sso(response) is not None:
+                    break
+                # Preserve canonical redirects which are not external login providers.
+                response = yield HttpRead(
+                    state.http,
+                    method,
+                    url,
+                    {
+                        "headers": outgoing_headers,
+                        "body": data,
+                        "timeout": timeout,
+                        "response_size_cap": cap,
+                        "allow_cross_origin_redirects": not bool(_header_lookup(outgoing_headers, "Cookie")),
+                    },
+                )
             if response.error is None and not (
                 scheme == "http"
                 and http_response_requires_https(
                     response.status, getattr(response, "body", getattr(response, "text", ""))
                 )
             ):
-                state.scheme, state.host, state.port = http_response_origin(
+                final_origin = http_response_origin(
                     response,
                     fallback_scheme=str(scheme),
                     fallback_host=request_host,
                     fallback_port=request_port,
                 )
-                state.origin_resolved = True
+                # A login provider or WAF page must never replace the Grafana API origin.
+                final_path = urllib.parse.urlsplit(getattr(response, "final_url", None) or url).path.rstrip("/")
+                requested_path = urllib.parse.urlsplit(path).path.rstrip("/")
+                canonical_route = (
+                    bool(requested_path)
+                    and final_path.endswith(requested_path)
+                    and (
+                        path != "/login" or _looks_like_grafana_login(response.status, response.text, response.headers)
+                    )
+                )
+                if (
+                    str(final_origin[1]).casefold() == request_host.casefold()
+                    or canonical_route
+                    or (path == "/api/health" and _is_grafana_health_api_response(response.status, response.text))
+                ) and _grafana_http_sso(response) is None:
+                    state.scheme, state.host, state.port = final_origin
+                    state.origin_resolved = True
                 break
         assert response is not None
     else:
@@ -260,17 +300,54 @@ def _http_request_steps(
                 timeout=timeout,
                 response_size_cap=cap,
                 insecure=True,
-                allow_cross_origin_redirects=method.upper() in {"GET", "HEAD"}
+                allow_cross_origin_redirects=path != "/login"
+                and method.upper() in {"GET", "HEAD"}
                 and not bool(_header_lookup(outgoing_headers, "Cookie")),
             )
         )
         response = yield DetectCall(
             client.request, (method, url), {"headers": outgoing_headers, "body": data, "timeout": timeout}
         )
+        if (
+            path == "/login"
+            and method.upper() == "GET"
+            and str(response.error or "").startswith("cross-origin redirect blocked:")
+            and _grafana_http_sso(response) is None
+            and not _header_lookup(outgoing_headers, "Cookie")
+        ):
+            client = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True))
+            response = yield DetectCall(
+                client.request, (method, url), {"headers": outgoing_headers, "body": data, "timeout": timeout}
+            )
     _THREAD_LOCAL_HTTP.last_response_url = getattr(response, "final_url", None) or url
-    if response.error:
+    response_text = response.text
+    if path == "/login" and method.upper() == "GET":
+        _THREAD_LOCAL_HTTP.last_login_response = (response_text, response.headers, response)
+    if isinstance(state, GrafanaLifecycleState) and callable(state.debug_emit):
+        state.debug_emit(
+            "grafana_http "
+            + json.dumps(
+                {
+                    "method": method,
+                    "url": _THREAD_LOCAL_HTTP.last_response_url,
+                    "status": int(response.status),
+                    "headers": response.headers,
+                    "body": response_text,
+                    "error": response.error,
+                    "truncated": bool(getattr(response, "truncated", False)),
+                    "response_size_cap": cap,
+                },
+                ensure_ascii=False,
+            )
+        )
+    if response.error and not (
+        path == "/login"
+        and method.upper() == "GET"
+        and str(response.error).startswith("cross-origin redirect blocked:")
+        and _grafana_http_sso(response) is not None
+    ):
         raise urllib.error.URLError(response.error)
-    return int(response.status), response.text, response.headers
+    return int(response.status), response_text, response.headers
 
 
 def _load_json_dict(body: str) -> dict[str, Any] | None:
@@ -339,7 +416,19 @@ def _looks_like_grafana_login(status: int, body: str, headers: dict[str, str]) -
     return bool(re.search(r"<title[^>]*>[^<]*\bgrafana\b[^<]*</title\s*>", text))
 
 
+def _grafana_http_sso(response: Any) -> SsoDetection | None:
+    return detect_browser_sso(
+        final_url=getattr(response, "final_url", None),
+        redirect_history=getattr(response, "redirect_history", ()),
+        headers=response.headers,
+        body=response.text,
+    )
+
+
 def _grafana_sso_response(body: str, headers: dict[str, str]) -> SsoDetection | None:
+    last = getattr(_THREAD_LOCAL_HTTP, "last_login_response", None)
+    if last is not None and last[0] == body and last[1] is headers:
+        return _grafana_http_sso(last[2])
     return detect_browser_sso(headers=headers, body=body)
 
 
@@ -432,7 +521,8 @@ def _verify_credentials(
 
 
 def _grafana_auth_limited(status: int, body: str) -> str | None:
-    message = str((_load_json_dict(body) or {}).get("message") or body).lower()
+    detail = str((_load_json_dict(body) or {}).get("message") or body)
+    message = detail.lower()
     if status == 429 or any(
         text in message
         for text in (
@@ -443,8 +533,12 @@ def _grafana_auth_limited(status: int, body: str) -> str | None:
             "account has been locked",
         )
     ):
-        reason = f"Grafana authentication stopped: status={status}; {_safe_excerpt(message)}"
-        _THREAD_LOCAL_HTTP.credential_result.update(auth_http_status=status, auth_error_detail=reason)
+        reason = f"Grafana authentication stopped: status={status}; {detail}"
+        metadata = getattr(_THREAD_LOCAL_HTTP, "credential_result", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+            _THREAD_LOCAL_HTTP.credential_result = metadata
+        metadata.update(auth_http_status=status, auth_error_detail=reason)
         return reason
     return None
 
@@ -465,6 +559,120 @@ def _looks_like_grafana_org(body: str) -> bool:
 def _looks_like_grafana_login_ping(body: str) -> bool:
     payload = _load_json_dict(body)
     return bool(payload is not None and str(payload.get("message") or "").strip().casefold() == "logged in")
+
+
+def _looks_like_grafana_auth_fallback(path: str, body: str) -> bool:
+    """Validate documented, authenticated API schemas, never just HTTP 200."""
+
+    def positive_id(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+    def text(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    if path == "/api/user/preferences":
+        payload = _load_json_dict(body)
+        return bool(
+            payload is not None and isinstance(payload.get("theme"), str) and isinstance(payload.get("timezone"), str)
+        )
+    if path == "/api/access-control/user/permissions":
+        payload = _load_json_dict(body)
+        return bool(payload) and all(
+            isinstance(action, str)
+            and (":" in action or "." in action)
+            and isinstance(scopes, list)
+            and all(isinstance(scope, str) for scope in scopes)
+            for action, scopes in (payload or {}).items()
+        )
+    items = _load_json_list(body)
+    if not items or not all(isinstance(item, dict) for item in items):
+        return False
+    if path == "/api/user/orgs":
+        return all(
+            positive_id(item.get("orgId")) and text(item.get("name")) and text(item.get("role")) for item in items
+        )
+    if path == "/api/user/teams":
+        return all(
+            positive_id(item.get("id"))
+            and positive_id(item.get("orgId"))
+            and text(item.get("name"))
+            and isinstance(item.get("email"), str)
+            for item in items
+        )
+    if path == "/api/org/users":
+        return all(
+            positive_id(item.get("orgId"))
+            and positive_id(item.get("userId"))
+            and text(item.get("login"))
+            and text(item.get("role"))
+            for item in items
+        )
+    return False
+
+
+_GRAFANA_AUTH_FALLBACK_PATHS = (
+    "/api/user/orgs",
+    "/api/user/preferences",
+    "/api/access-control/user/permissions",
+    "/api/user/teams",
+    "/api/org/users",
+)
+
+
+def _verify_grafana_fallbacks(
+    host: str,
+    port: int,
+    timeout: float,
+    headers: dict[str, str],
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    token: bool = False,
+) -> tuple[bool | None, str | None]:
+    reasons: list[str] = []
+    for path in _GRAFANA_AUTH_FALLBACK_PATHS:
+        try:
+            status, body, _headers = _http_request(host, port, path, timeout, headers=headers)
+            limited = _grafana_auth_limited(status, body)
+            if limited:
+                return None, limited
+            if status != 200 or not _looks_like_grafana_auth_fallback(path, body):
+                reasons.append(f"{path} verification unavailable status={status}")
+                continue
+            if token:
+                # A public endpoint or a proxy accepting any Bearer token is not proof.
+                ok, reason = _grafana_token_access(host, port, timeout, path)
+            else:
+                ok, reason = _grafana_pair_access(host, port, timeout, path, body)
+            if ok and username is not None and password is not None:
+                ok, reason = _grafana_password_control(host, port, timeout, username, password, path=path)
+            if ok:
+                return True, None
+            if getattr(_THREAD_LOCAL_HTTP, "credential_result", {}).get("auth_error_detail"):
+                return None, reason
+            reasons.append(reason or f"{path} credential proof unavailable")
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+            reasons.append(f"{path} verification unavailable: {exc}")
+    return None, "; ".join(reasons)
+
+
+def _grafana_token_access(host: str, port: int, timeout: float, path: str) -> tuple[bool | None, str | None]:
+    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    anonymous = state.anonymous_responses if isinstance(state, GrafanaLifecycleState) else {}
+    invalid = state.invalid_responses if isinstance(state, GrafanaLifecycleState) else {}
+    for cache, key, headers, label in (
+        (anonymous, path, None, "anonymous"),
+        (invalid, "Bearer " + path, {"Authorization": "Bearer " + uuid.uuid4().hex}, "invalid-token"),
+    ):
+        if key not in cache:
+            cache[key] = _http_request(host, port, path, timeout, headers=headers)
+        status, body, _headers = cache[key]
+        limited = _grafana_auth_limited(status, body)
+        if limited:
+            return None, limited
+        if status not in {401, 403}:
+            return None, f"{path} access is not token-specific ({label} baseline); token unverified"
+    return True, None
 
 
 def _grafana_password_control(
@@ -517,7 +725,10 @@ def _verify_grafana_ping(
     host: str, port: int, timeout: float, headers: dict[str, str]
 ) -> tuple[bool | None, str | None]:
     path = "/api/login/ping"
-    status, body, _headers = _http_request(host, port, path, timeout, headers=headers)
+    try:
+        status, body, _headers = _http_request(host, port, path, timeout, headers=headers)
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+        return None, f"{path} verification unavailable: {exc}"
     limited = _grafana_auth_limited(status, body)
     if limited:
         return None, limited
@@ -546,7 +757,7 @@ def _grafana_pair_access(host: str, port: int, timeout: float, path: str, body: 
     def differs(status: int, other_body: str) -> bool:
         if status in {401, 403}:
             return True
-        if status == 200 and validator(other_body):
+        if path in {"/api/user", "/api/org"} and status == 200 and validator(other_body):
             other = _load_json_dict(other_body) or {}
             fields = ("id", "login") if path == "/api/user" else ("id", "name")
             return tuple(observed.get(key) for key in fields) != tuple(other.get(key) for key in fields)
@@ -618,10 +829,15 @@ def _verify_grafana_pair(
 ) -> tuple[bool | None, str | None]:
     basic_headers = {"Authorization": _auth_header(username, password)}
     failures: list[str] = []
-    legacy_unavailable = True
+    fallback_needed = False
     for path, validator in (("/api/user", _looks_like_grafana_user), ("/api/org", _looks_like_grafana_org)):
-        status, body, _headers = _http_request(host, port, path, timeout, headers=basic_headers)
-        legacy_unavailable = legacy_unavailable and status in {404, 405}
+        try:
+            status, body, _headers = _http_request(host, port, path, timeout, headers=basic_headers)
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+            failures.append(f"{path} verification unavailable: {exc}")
+            fallback_needed = True
+            continue
+        fallback_needed = fallback_needed or status != 401
         limited = _grafana_auth_limited(status, body)
         if limited:
             return None, limited
@@ -644,7 +860,7 @@ def _verify_grafana_pair(
             failures.append(f"{path} access denied without credential evidence")
         else:
             failures.append(f"{path} verification unavailable status={status}")
-    if legacy_unavailable:
+    if fallback_needed:
         ok, reason = _verify_grafana_ping(host, port, timeout, basic_headers)
         if ok:
             controlled, reason = _grafana_password_control(
@@ -655,6 +871,12 @@ def _verify_grafana_pair(
         if getattr(_THREAD_LOCAL_HTTP, "credential_result", {}).get("auth_error_detail"):
             return None, reason
         failures.append(reason or "signed-in proof unavailable")
+        ok, reason = _verify_grafana_fallbacks(host, port, timeout, basic_headers, username=username, password=password)
+        if ok:
+            return True, None
+        if getattr(_THREAD_LOCAL_HTTP, "credential_result", {}).get("auth_error_detail"):
+            return None, reason
+        failures.append(reason or "authenticated API proof unavailable")
     status, body, headers = _http_request(
         host,
         port,
@@ -717,10 +939,14 @@ def _verify_grafana_pair(
     controlled, reason = _grafana_password_control(host, port, timeout, username, password, path="/login", login=True)
     if not controlled:
         return None, reason
-    legacy_unavailable = True
+    fallback_needed = False
     for path, validator in (("/api/user", _looks_like_grafana_user), ("/api/org", _looks_like_grafana_org)):
-        status, body, _headers = _http_request(host, port, path, timeout, headers={"Cookie": session["cookie"]})
-        legacy_unavailable = legacy_unavailable and status in {404, 405}
+        try:
+            status, body, _headers = _http_request(host, port, path, timeout, headers={"Cookie": session["cookie"]})
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+            fallback_needed = True
+            continue
+        fallback_needed = fallback_needed or status != 401
         limited = _grafana_auth_limited(status, body)
         if limited:
             return None, limited
@@ -734,7 +960,7 @@ def _verify_grafana_pair(
                 return True, None
             if getattr(_THREAD_LOCAL_HTTP, "credential_result", {}).get("auth_error_detail"):
                 return None, reason
-    if legacy_unavailable:
+    if fallback_needed:
         ok, reason = _verify_grafana_ping(host, port, timeout, {"Cookie": session["cookie"]})
         if ok:
             _THREAD_LOCAL_HTTP.credential_result["session"] = {
@@ -744,7 +970,11 @@ def _verify_grafana_pair(
             return True, None
         if getattr(_THREAD_LOCAL_HTTP, "credential_result", {}).get("auth_error_detail"):
             return None, reason
-    return None, "login session has no pair-specific authenticated API proof; credential unverified"
+    ok, reason = _verify_grafana_fallbacks(host, port, timeout, {"Cookie": session["cookie"]})
+    if ok:
+        _THREAD_LOCAL_HTTP.credential_result["session"] = {**session, "authorization": basic_headers["Authorization"]}
+        return True, None
+    return None, reason or "login session has no pair-specific authenticated API proof; credential unverified"
 
 
 def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tuple[bool | None, str | None]:
@@ -756,6 +986,11 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
     bare 403 remains unverified.
     """
     headers = {"Authorization": f"Bearer {apitoken}"}
+
+    def fallback(context: str) -> tuple[bool | None, str | None]:
+        ok, reason = _verify_grafana_fallbacks(host, port, timeout, headers, token=True)
+        return ok, None if ok else context + "; " + str(reason or "")
+
     status, body, _headers = _http_request(
         host,
         port,
@@ -763,6 +998,9 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
         timeout,
         headers=headers,
     )
+    limited = _grafana_auth_limited(status, body)
+    if limited:
+        return None, limited
     if status == 200 and _looks_like_grafana_user(body):
         return _new_grafana_access(host, port, timeout, "/api/user", identity_body=body)
     if status == 200:
@@ -773,13 +1011,17 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
             timeout,
             headers=headers,
         )
+        limited = _grafana_auth_limited(capability_status, capability_body)
+        if limited:
+            return None, limited
         if capability_status == 200 and _load_json_list(capability_body) is not None:
             return _new_grafana_access(host, port, timeout, "/api/datasources")
         if capability_status == 403:
-            return None, "datasource access denied without token evidence"
-        return None, "/api/user returned an invalid identity payload"
+            return fallback("datasource access denied without token evidence")
+        return fallback("/api/user returned an invalid identity payload")
     if status == 403:
-        return None, "identity access denied without token evidence"
+        ok, reason = _verify_grafana_fallbacks(host, port, timeout, headers, token=True)
+        return ok, None if ok else "identity access denied without token evidence; " + str(reason or "")
     if status == 401:
         capability_status, capability_body, _capability_headers = _http_request(
             host,
@@ -788,16 +1030,19 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
             timeout,
             headers=headers,
         )
+        limited = _grafana_auth_limited(capability_status, capability_body)
+        if limited:
+            return None, limited
         if capability_status == 200 and _load_json_list(capability_body) is not None:
             return _new_grafana_access(host, port, timeout, "/api/datasources")
         if capability_status == 200:
-            return None, "/api/datasources returned an invalid capability payload"
+            return fallback("/api/datasources returned an invalid capability payload")
         if capability_status == 403:
-            return None, "datasource access denied without token evidence"
+            return fallback("datasource access denied without token evidence")
         if capability_status == 401:
             return False, "invalid api token"
-        return None, f"datasource verification unavailable status={capability_status}"
-    return None, f"/api/user returned status {status}"
+        return fallback(f"datasource verification unavailable status={capability_status}")
+    return _verify_grafana_fallbacks(host, port, timeout, headers, token=True)
 
 
 def _fetch_datasources(
@@ -852,21 +1097,25 @@ def _infer_grafana_auth_required_steps(
     try:
         datasources, _error, status = yield DetectCall(_fetch_datasources, (host, port, timeout), {})
     except (urllib.error.URLError, OSError, TimeoutError, ValueError):
-        return None
+        status, datasources = 0, None
     if status in {401, 403}:
         return True
     if status == 200 and datasources is not None:
         return False
-    if status in {404, 405}:
+    if status != 429:
         for path, validator in (
             ("/api/user", _looks_like_grafana_user),
             ("/api/org", _looks_like_grafana_org),
             ("/api/login/ping", _looks_like_grafana_login_ping),
+            *(
+                (path, lambda body, path=path: _looks_like_grafana_auth_fallback(path, body))
+                for path in _GRAFANA_AUTH_FALLBACK_PATHS
+            ),
         ):
             try:
                 response_status, body, _headers = yield DetectCall(_http_request, (host, port, path, timeout), {})
             except (urllib.error.URLError, OSError, TimeoutError, ValueError):
-                return None
+                continue
             if response_status in {401, 403}:
                 return True
             if response_status == 200 and validator(body):
@@ -1308,8 +1557,12 @@ def _audit_grafana_host(
                     # IdP must not turn that positive detection into a failure.
                     login_status, login_body, login_headers = 0, "", {}
             sso = _grafana_sso_response(login_body, login_headers)
-            auth_required = _infer_grafana_auth_required(
-                host, port, timeout, health_status=health_status, health_api_ok=health_api_ok
+            auth_required = (
+                True
+                if sso is not None
+                else _infer_grafana_auth_required(
+                    host, port, timeout, health_status=health_status, health_api_ok=health_api_ok
+                )
             )
             auth_method = "sso" if sso is not None else None
             if sso is not None:
@@ -1667,10 +1920,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             return f"{prefix} [-] authentication required (credentials invalid)"
         return ""
     if status == "unknown_auth":
-        line = f"{prefix} [!] auth status unknown"
-        if err != "-":
-            return f"{line} err={err}"
-        return line
+        return ""
     line = f"{prefix} [!] connection failed"
     if err != "-":
         return f"{line} err={err}"
@@ -1721,8 +1971,7 @@ def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: s
             lines.append(_with_optional_datasources(attempt_capabilities(record, attempt, selected=selected), line))
             continue
         if ok is None:
-            reason = _safe_excerpt(str(attempt.get("error") or "credential proof unavailable"), 120)
-            lines.append(f"{prefix} [*] {credential_text} (unverified: {reason})")
+            lines.append(f"{prefix} [*] {credential_text} (unverified: api's unavailable)")
         else:
             lines.append(f"{prefix} [-] {credential_text}")
     return lines
@@ -1921,6 +2170,19 @@ def _call_audit_grafana_host_with_stage_debug(
     is_grafana = bool(result.get("is_grafana"))
     elapsed_ms = int((time.monotonic() - started) * 1000)
     telemetry = StageTelemetryBuilder(host=host, port=port, attempts=attempts, debug=debug, debug_emit=debug_emit)
+    if debug and (result.get("auth_required") is None or result.get("error")):
+        telemetry.debug(
+            "grafana_auth "
+            + json.dumps(
+                {
+                    "host": host,
+                    "port": port,
+                    "auth_required": result.get("auth_required"),
+                    "error": result.get("error"),
+                },
+                ensure_ascii=False,
+            )
+        )
     if attempts > 1 and status == "fail":
         telemetry.debug(format_retry_decision(_STAGE_DETECT_PROTOCOL, 1, attempts, _retry_delay(0), "error"))
 
@@ -2024,14 +2286,25 @@ def _detect_grafana_steps(ctx: Any, options: dict[str, Any]) -> Any:
                     # best-effort probe and cannot invalidate that result.
                     login_body, login_headers = "", {}
             sso = _grafana_sso_response(login_body, login_headers)
-            auth_required = yield DetectCall(
-                _infer_grafana_auth_required,
-                (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
-                {"health_status": health_status, "health_api_ok": health_api_ok},
+            auth_required = (
+                True
+                if sso is not None
+                else (
+                    yield DetectCall(
+                        _infer_grafana_auth_required,
+                        (str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0))),
+                        {"health_status": health_status, "health_api_ok": health_api_ok},
+                    )
+                )
             )
             auth_method = "sso" if sso is not None else None
             if sso is not None:
                 auth_required = True
+            if bool(getattr(ctx.args, "debug", False)) and callable(getattr(ctx, "debug_emit", None)):
+                ctx.debug_emit(
+                    "grafana_auth_inference "
+                    + json.dumps({"host": ctx.host, "port": ctx.port, "auth_required": auth_required})
+                )
             explicit_auth = bool(
                 str(getattr(ctx.args, "apitoken", "") or "").strip()
                 or getattr(ctx.args, "password", None) is not None
@@ -2171,6 +2444,21 @@ def authenticate_grafana(ctx: Any, detect_record: Any, options: dict[str, Any]) 
         auth_header = _auth_header(effective_user, effective_password)
         username, password = effective_user, effective_password
     state.auth_attempts.append(attempt)
+    if bool(getattr(ctx.args, "debug", False)) and callable(getattr(ctx, "debug_emit", None)):
+        ctx.debug_emit(
+            "grafana_auth "
+            + json.dumps(
+                {
+                    "host": ctx.host,
+                    "port": ctx.port,
+                    "username": username,
+                    "source": source,
+                    "verified": ok,
+                    "error": error,
+                },
+                ensure_ascii=False,
+            )
+        )
     datasource_probe = None
     if ok:
         selected_session = state.selected_session

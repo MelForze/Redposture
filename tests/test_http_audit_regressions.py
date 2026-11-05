@@ -444,7 +444,8 @@ def test_h13_unknown_txt_uses_module_marker_and_explains_uncertainty() -> None:
     other = consul._auth_summary_line({"auth_mode": "token", "auth_valid": None, "auth_error": "backend timeout"})
     assert len(lines) == 1
     for line, marker in [(lines[0], "[*]"), (other, "[-]")]:
-        assert line and marker in line and "unverified" in line.lower() and "backend timeout" in line
+        reason = "api's unavailable" if marker == "[*]" else "backend timeout"
+        assert line and marker in line and "unverified" in line.lower() and reason in line
         assert "\x1b" not in line
     assert "[-]" not in lines[0] and "[+]" not in lines[0]
 
@@ -493,9 +494,8 @@ def test_h13_uncertainty_color_matches_module_marker(module: str) -> None:
     assert any(
         ("u:p" if module == "grafana" else "basic auth") in text and color == "white" for text, color in console.paints
     )
-    assert any(
-        "unverified" in text and "backend timeout" in text and color == "orange" for text, color in console.paints
-    )
+    reason = "api's unavailable" if module == "grafana" else "backend timeout"
+    assert any("unverified" in text and reason in text and color == "orange" for text, color in console.paints)
 
 
 @pytest.mark.parametrize("module", ["keycloak", "kubeapi", "nomad"])

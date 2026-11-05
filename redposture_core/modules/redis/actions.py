@@ -150,8 +150,35 @@ def _send_cmd(sock: socket.socket, *parts: str | bytes) -> tuple[str, Any]:
 
 
 def _send_cmd_detect_steps(sock: socket.socket, *parts: str | bytes):
-    yield _DetectCall(sock.sendall, (_encode_resp_array(list(parts)),), {})
+    try:
+        yield _DetectCall(sock.sendall, (_encode_resp_array(list(parts)),), {})
+    except (BrokenPipeError, ConnectionResetError) as send_error:
+        # Protected mode sends an unsolicited DENIED frame and closes. The
+        # initial write can fail while that complete frame is still readable.
+        if len(parts) != 1 or parts[0] not in {"PING", b"PING"}:
+            raise
+        try:
+            response_type, response_value = yield _DetectCall(_read_resp, (sock,), {})
+        except (OSError, ValueError, ConnectionError) as read_error:
+            raise send_error from read_error
+        if response_type == "error" and _is_protected_mode_error(str(response_value)):
+            return response_type, response_value
+        raise send_error
     return (yield _DetectCall(_read_resp, (sock,), {}))
+
+
+def _is_protected_mode_error(message: str) -> bool:
+    prefix = "DENIED Redis is running in protected mode"
+    return message == prefix or message.startswith(prefix + " ") or message.startswith(prefix + ".")
+
+
+def _protected_mode_metadata() -> dict[str, Any]:
+    return {
+        "protected_mode": True,
+        "access_denied": True,
+        "credential_verification_status": "unavailable",
+        "credential_verification_reason": "Redis protected mode rejects non-loopback access",
+    }
 
 
 def _is_noauth_error(message: str) -> bool:
@@ -215,6 +242,8 @@ def _confirm_redis_error_response(sock: socket.socket, message: str) -> tuple[bo
 
 
 def _confirm_redis_error_response_detect_steps(sock: socket.socket, message: str):
+    if _is_protected_mode_error(message):
+        return (True, None)
     if _is_noauth_error(message):
         return (True, True)
     upper = message.upper()
@@ -623,6 +652,7 @@ class RedisAuditLifecycleState:
     sock: Any = None
     selected_sock: Any = None
     is_redis: bool = False
+    protected_mode: bool = False
     auth_required: bool | None = None
     status: str = "fail"
     error: str | None = None
@@ -783,6 +813,8 @@ def _redis_lifecycle_record(state: RedisAuditLifecycleState, *, include_data: bo
         "valkey_version": state.server_version if state.implementation == "valkey" else None,
         "tls_client_cert_used": bool(state.use_tls and state.tls_cert and state.tls_key),
     }
+    if state.protected_mode:
+        payload.update(_protected_mode_metadata())
     attempts = max(1, state.retries + 1)
     telemetry = StageTelemetryBuilder(
         host=state.host,
@@ -845,9 +877,12 @@ def _redis_detect_hook_detect_steps(ctx: Any):
                 )
                 if confirmed:
                     state.is_redis = True
+                    state.protected_mode = _is_protected_mode_error(str(ping_value))
                     state.auth_required = auth_required
                     state.status = "auth_required" if auth_required is True else "unknown_auth"
                     state.error = None
+                    if state.protected_mode:
+                        _close_redis_lifecycle_socket(state)
                     return _redis_lifecycle_record(state, include_data=False)
             state.is_redis = False
             state.auth_required = None
@@ -873,6 +908,8 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
     if not isinstance(state, RedisAuditLifecycleState):
         raise TypeError("redis lifecycle state is missing")
     if not state.is_redis or state.status == "fail":
+        return _redis_lifecycle_record(state, include_data=False)
+    if state.protected_mode:
         return _redis_lifecycle_record(state, include_data=False)
     credential = ctx.credential
     exhaustive_credentials = bool(getattr(ctx.args, "defcreds", False))
@@ -1073,6 +1110,8 @@ def redis_data_hook(ctx: Any, _auth_record: AuditRecord) -> AuditRecord:
     state = ctx.lifecycle_state
     if not isinstance(state, RedisAuditLifecycleState):
         raise TypeError("redis lifecycle state is missing")
+    if state.protected_mode:
+        return _redis_lifecycle_record(state, include_data=False)
     args = ctx.args
     # The shared state may currently reflect a later credential from an
     # exhaustive sweep. Deep actions deliberately use the first confirmed
@@ -1225,6 +1264,7 @@ def _audit_redis_host(
                         auth_required = inferred_auth is True
                         if inferred_auth is not True:
                             return {
+                                **(_protected_mode_metadata() if _is_protected_mode_error(str(ping_value)) else {}),
                                 "timestamp": utc_now_iso(),
                                 "host": host,
                                 "port": port,
@@ -1625,6 +1665,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     attempted_credentials = record.get("attempted_credentials")
     has_attempt_details = isinstance(attempted_credentials, list) and len(attempted_credentials) > 1
 
+    if record.get("protected_mode") is True:
+        return f"{prefix} [*] Protected Mode (access:denied)"
     if status == "open_no_auth":
         return ""
 
@@ -1735,7 +1777,10 @@ def _render_colored_redis_line(console: Console, line: str) -> bool:
         console,
         line,
         tag="REDIS",
-        regexes=(RegexColorRule(r"\(version:[^)]+\)", "orange"),),
+        regexes=(
+            RegexColorRule(r"\(version:[^)]+\)", "orange"),
+            RegexColorRule(r"\(access:denied\)", "bright_green"),
+        ),
         counts=(CountColorRule("keys", "true_red", unknown_color="orange", zero_color="bright_green"),),
     ):
         return True

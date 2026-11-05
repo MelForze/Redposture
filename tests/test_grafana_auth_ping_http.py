@@ -15,13 +15,20 @@ from redposture_core.console import Console
 from redposture_core.modules.grafana import stage
 from redposture_core.stage_runtime import AuditCommandRunner
 from tests.test_grafana_auth_ping import Peer
+from tests.test_grafana_extended_auth import PAYLOADS
+from tests.test_grafana_extended_auth import Peer as ExtendedPeer
 
 
 @pytest.mark.parametrize("redirect_mount", [False, True])
 @pytest.mark.parametrize("mode", ["basic", "cookie", "unavailable"])
+@pytest.mark.parametrize("fallback_path", [None, *PAYLOADS])
 @pytest.mark.parametrize("output_format", ["txt", "json"])
-def test_prefixed_live_http_verifier_and_saved_output(tmp_path, mode, output_format, redirect_mount):
-    peer = Peer(mode)
+def test_prefixed_live_http_verifier_and_saved_output(tmp_path, mode, output_format, redirect_mount, fallback_path):
+    peer = (
+        Peer(mode)
+        if fallback_path is None
+        else ExtendedPeer(fallback_path, mode if mode != "unavailable" else "unavailable")
+    )
     observed = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -47,6 +54,8 @@ def test_prefixed_live_http_verifier_and_saved_output(tmp_path, mode, output_for
                 result = peer.reply(200, {"database": "ok", "version": "13.0.1", "commit": "abcdef"})
             elif local_path == "/login" and self.command == "GET":
                 result = HttpResponse(200, b"<html><title>Grafana</title></html>", {"Content-Type": "text/html"})
+            elif fallback_path is not None and mode == "unavailable":
+                result = peer.reply(404, {})
             else:
                 result = peer.request(self.command, "http://local" + local_path, headers=dict(self.headers), body=body)
             self.send_response(result.status)
@@ -102,6 +111,8 @@ def test_prefixed_live_http_verifier_and_saved_output(tmp_path, mode, output_for
             for _, path in observed
         )
         assert ("GET", "/grafana/api/login/ping") in observed
+        if fallback_path is not None:
+            assert ("GET", "/grafana" + fallback_path) in observed
         if output_format == "json":
             saved = json.loads(text)
             assert saved["auth_required"] is record["auth_required"]

@@ -103,27 +103,47 @@ def test_bounded_scheduler_iter_completed_does_not_materialize_source() -> None:
 def test_bounded_scheduler_cancel_does_not_start_queued_work() -> None:
     scheduler: BoundedScheduler[int, int] = BoundedScheduler(max_workers=2, max_inflight=8)
     release_workers = threading.Event()
+    both_workers_blocked = threading.Event()
     started: list[int] = []
+    threads: set[threading.Thread] = set()
+    blocked = 0
     lock = threading.Lock()
 
     def worker(value: int) -> int:
+        nonlocal blocked
         with lock:
             started.append(value)
+            threads.add(threading.current_thread())
+            if value != 0:
+                blocked += 1
+                if blocked == 2:
+                    both_workers_blocked.set()
         if value == 0:
             return value
-        release_workers.wait(timeout=2)
+        assert release_workers.wait(timeout=5)
         return value
 
     iterator = scheduler.iter_completed(range(20), worker)
-    assert next(iterator) == (0, 0)
-
-    started_before_cancel = set(started)
-    started_at = time.monotonic()
-    iterator.close()
-    assert time.monotonic() - started_at < 0.5
-
-    release_workers.set()
-    time.sleep(0.1)
+    try:
+        assert next(iterator) == (0, 0)
+        # The worker that returned 0 may legally take another task before
+        # close() is called, especially without the GIL. Pin both slots before
+        # taking the snapshot so only genuinely queued work remains.
+        assert both_workers_blocked.wait(timeout=3)
+        with lock:
+            started_before_cancel = set(started)
+        assert started_before_cancel == {0, 1, 2}
+        started_at = time.monotonic()
+        iterator.close()
+        assert time.monotonic() - started_at < 0.5
+    finally:
+        iterator.close()
+        release_workers.set()
+        with lock:
+            active_threads = list(threads)
+        for thread in active_threads:
+            thread.join(timeout=3)
+            assert not thread.is_alive()
     assert set(started) == started_before_cancel
 
 

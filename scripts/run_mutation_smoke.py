@@ -52,9 +52,26 @@ MUTATIONS = (
     Mutation(
         name="Grafana treats a login page as rejected credentials",
         source="redposture_core/modules/grafana/actions.py",
-        original='return None, "/api/user returned an invalid identity payload"',
+        original='return fallback("/api/user returned an invalid identity payload")',
         replacement='return False, "/api/user returned an invalid identity payload"',
         tests=("tests/test_stage_grafana.py::test_grafana_auth_does_not_classify_login_page_as_invalid_password",),
+    ),
+    Mutation(
+        name="Grafana fallback accepts an unchecked password for a known username",
+        source="redposture_core/modules/grafana/actions.py",
+        original="if ok and username is not None and password is not None:",
+        replacement="if False:",
+        tests=("tests/test_grafana_extended_auth.py::test_public_or_unchecked_password_never_proves_pair",),
+    ),
+    Mutation(
+        name="Grafana fallback accepts public or arbitrary Bearer access",
+        source="redposture_core/modules/grafana/actions.py",
+        original=(
+            "if status not in {401, 403}:\n"
+            '            return None, f"{path} access is not token-specific ({label} baseline); token unverified"'
+        ),
+        replacement='if False:\n            return None, "token unverified"',
+        tests=("tests/test_grafana_extended_auth.py::test_token_fallback_needs_invalid_token_and_anonymous_controls",),
     ),
     Mutation(
         name="unknown Keycloak token becomes invalid",

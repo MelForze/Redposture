@@ -722,3 +722,35 @@ def test_color_contract() -> None:
     )
     assert '<orange>Artifact Name="report.txt"' in console.lines[0]
     assert "<true_red>size_bytes:512</true_red>" in console.lines[0]
+
+
+@pytest.mark.parametrize("status", ["valid_credentials", "invalid_credentials", "auth_required", "skipped"])
+def test_endpoint_is_not_rendered_but_identity_metadata_is_preserved(status: str) -> None:
+    payload = {
+        "host": "h",
+        "port": 80,
+        "is_jenkins": True,
+        "auth_required": True,
+        "version": "2.541.1",
+        "api_endpoint": "https://h/ci",
+        "attempted_credentials": [
+            {
+                "username": "admin",
+                "password": "pass",
+                "status": status,
+                "credential_jobs_access": "allowed",
+                "credential_jobs_count": 2,
+                "reason": "cancelled" if status == "skipped" else "identity API unavailable",
+            }
+        ],
+    }
+    detect = render._format_detect_record(payload, "txt")
+    attempts = render._format_credential_attempts_records(payload, "txt")
+    assert detect.endswith("(version:2.541.1)")
+    assert len(attempts) == 1 and "admin:pass" in attempts[0]
+    assert all("(endpoint:" not in line and "\x1b" not in line for line in [detect, *attempts])
+    assert payload["api_endpoint"] == "https://h/ci"
+    console = _Console()
+    assert render._render_colored_jenkins_line(console, attempts[0])
+    expected_color = "true_red" if status == "valid_credentials" else "white"
+    assert f"<{expected_color}>admin:pass" in console.lines[0]

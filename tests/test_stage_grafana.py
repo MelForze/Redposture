@@ -201,7 +201,13 @@ def test_grafana_unknown_health_uses_anonymous_api_evidence(
     monkeypatch: pytest.MonkeyPatch, status: int, body: str, expected: bool | None
 ) -> None:
     def fake_http_request(_host: str, _port: int, path: str, _timeout: float, **_kwargs):
-        assert path == "/api/datasources"
+        assert path in {
+            "/api/datasources",
+            "/api/user",
+            "/api/org",
+            "/api/login/ping",
+            *grafana_stage._GRAFANA_AUTH_FALLBACK_PATHS,
+        }
         return status, body, {}
 
     monkeypatch.setattr("redposture_core.stage_grafana._http_request", fake_http_request)
@@ -272,7 +278,7 @@ def test_grafana_keycloak_login_is_reported_as_sso(monkeypatch: pytest.MonkeyPat
     assert detected["auth_method"] == "sso"
     assert detected["sso_provider"] == "keycloak"
     assert detected["credential_verification_status"] == "unavailable"
-    assert paths == ["/api/health", "/login", "/api/datasources"]
+    assert paths == ["/api/health", "/login"]  # Strong SSO evidence needs no backend auth probes.
 
     line = grafana_stage._format_detect_record(detected, "txt")
     assert "Grafana Service (auth required:sso) (provider:keycloak)" in line
@@ -286,7 +292,7 @@ def test_grafana_keycloak_login_is_reported_as_sso(monkeypatch: pytest.MonkeyPat
     assert audited["status"] == "auth_required"
     assert audited["auth_required"] is True
     assert audited["auth_method"] == "sso"
-    assert paths == ["/api/health", "/login", "/api/datasources"]
+    assert paths == ["/api/health", "/login"]
 
 
 def test_slow_grafana_login_does_not_erase_health_detection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1463,7 +1469,7 @@ def test_grafana_defcreds_falls_back_after_api_token_transport_error(
     assert "token transport failure" in record["auth_attempts"][0]["error"]
     assert datasource_headers == [None, winning_header]
     lines = _format_auth_attempt_detail_records(record, "txt")
-    assert lines[0].endswith("[*] API token (source:apitoken) (unverified: token transport failure)")
+    assert lines[0].endswith("[*] API token (source:apitoken) (unverified: api's unavailable)")
     assert all("must-not-appear" not in line for line in lines)
 
 

@@ -437,5 +437,4 @@ def test_confirmed_aliases_have_one_record_but_distinct_prefixes_remain_visible(
     text = output.read_text(encoding="utf-8")
     attempts = [line for line in text.splitlines() if "admin:secret-admin" in line]
     assert len(attempts) == 2
-    assert any("endpoint:http://host:8080/ci" in line for line in attempts)
-    assert any("endpoint:http://host:8080/other" in line for line in attempts)
+    assert all("(endpoint:" not in line for line in text.splitlines())

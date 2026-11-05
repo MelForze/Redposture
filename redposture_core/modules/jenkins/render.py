@@ -16,10 +16,6 @@ def _prefix(record: dict[str, Any]) -> str:
     return f"JENKINS\t{record.get('host') or '?'}\t{int(record.get('port') or 0)}\t"
 
 
-def _endpoint(record: dict[str, Any]) -> str:
-    return f" (endpoint:{record['api_endpoint']})" if record.get("api_endpoint") else ""
-
-
 def _display(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -32,7 +28,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     jobs_text = str(jobs) if isinstance(jobs, bool) else "unknown"
     line = (
         f"{_prefix(record)} [*] Jenkins (auth required:{auth}) "
-        f"(jobs allowed anonymously:{jobs_text}) (version:{record.get('version') or '-'}){_endpoint(record)}"
+        f"(jobs allowed anonymously:{jobs_text}) (version:{record.get('version') or '-'})"
     )
     rce = record.get("rce")
     if type(rce) is bool:
@@ -65,7 +61,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         if jobs_access == "denied"
         else "Unknown"
     )
-    return f"{_prefix(record)} [+] {pair} (Jobs:{jobs}){_endpoint(record)}"
+    return f"{_prefix(record)} [+] {pair} (Jobs:{jobs})"
 
 
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -109,7 +105,7 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             }
             lines.append(_format_record(selected, output_format))
         elif status == "invalid_credentials":
-            lines.append(f"{_prefix(record)} [-] {pair}{_endpoint(record)}")
+            lines.append(f"{_prefix(record)} [-] {pair}")
         else:
             verdict = "skipped" if status == "skipped" else "unverified"
             reason = str(
@@ -119,7 +115,7 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
                 or status
                 or "identity unavailable"
             )
-            lines.append(f"{_prefix(record)} [*] {pair} (status:{verdict}) reason={reason}{_endpoint(record)}")
+            lines.append(f"{_prefix(record)} [*] {pair} (status:{verdict}) reason={reason}")
     return lines
 
 
@@ -225,7 +221,6 @@ def _render_colored_jenkins_line(console: Console, line: str) -> bool:
             RegexColorRule(r"\(rce:unknown\)", "orange"),
             RegexColorRule(r"\(status:partial\)", "orange"),
             RegexColorRule(r"\(status:(?:unverified|skipped|stopped)\)", "orange"),
-            RegexColorRule(r"\(endpoint:.*\)$", "orange"),
             RegexColorRule(r"reason=.*", "orange"),
         ),
         extra_spans=lambda marker, payload: (
