@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import json
 import os
 import subprocess
 import sys
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 
+from redposture_core import web_panels
+from redposture_core.cli_args import parse_args
+from redposture_core.clients.async_http_detect import AsyncDetectionHttp, AsyncHttpFallback
+from redposture_core.stage_runtime import AuditCommandRunner
+from redposture_core.targeting import ScanTargetSpec
 from scripts.bootstrap_ui_lab import onboard_redisinsight, wait_api
 from scripts.qa_owned_volumes import guarded_command
 
@@ -19,7 +28,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("product", ["mongo", "redis", "pgadmin"])
-def test_standard_fixture_inventory_dump_and_discovery_status(tmp_path: Path, product: str) -> None:
+def test_standard_fixture_inventory_dump_and_discovery_status(
+    tmp_path: Path, product: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     project = "rp-ui-fixture-" + uuid.uuid4().hex[:10]
     compose = [
         "docker",
@@ -72,6 +83,57 @@ def test_standard_fixture_inventory_dump_and_discovery_status(tmp_path: Path, pr
         if product == "redis":
             onboard_redisinsight(target)
             assert onboard_redisinsight(target)  # Idempotent on the real API, not just mocks.
+
+        parsed = urlsplit(target)
+        assert parsed.hostname is not None and parsed.port is not None
+        ctx = SimpleNamespace(
+            host=parsed.hostname,
+            port=parsed.port,
+            args=SimpleNamespace(timeout=8, retries=0),
+            target=ScanTargetSpec(host=parsed.hostname, explicit_port=parsed.port, scheme=parsed.scheme),
+        )
+        sync_proof = web_panels.detect_panel(module, ctx)
+
+        async def native_proof() -> dict | None:
+            monkeypatch.setattr(
+                asyncio.get_running_loop(),
+                "run_in_executor",
+                lambda *args, **kwargs: pytest.fail("native panel detection used an executor"),
+            )
+            async with AsyncDetectionHttp(timeout=8, retries=0, max_bytes=128 * 1024) as http:
+                return await web_panels.detect_panel_async(module, ctx, http)
+
+        fallback_reason = None
+        try:
+            async_proof = asyncio.run(native_proof())
+        except AsyncHttpFallback as exc:
+            # pgAdmin's browser access check redirects to login. Native HTTP
+            # deliberately delegates redirects to the original sync client.
+            # Verify the real runtime boundary rather than treating the
+            # unsupported transport shape as a negative product fingerprint.
+            fallback_reason = str(exc)
+            assert fallback_reason == "redirect or ambiguous framing"
+            args = parse_args([module, "-t", target, "--timeout", "8", "--retries", "0"])
+            stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
+            runner = AuditCommandRunner(
+                args=args, spec=getattr(stage, f"build_{module}_spec")(args), emit_line=lambda _: None
+            )
+            try:
+                assert asyncio.run(runner._run_async_detect_with_state(ctx.host, ctx.port, ctx.target, None)) is None
+                outcome = runner._run_detect_with_state(ctx.host, ctx.port, ctx.target, None)
+                record = outcome.record.to_dict()
+                assert sync_proof is not None
+                async_proof = {key: record.get(key) for key in sync_proof}
+            finally:
+                runner._close_all_lifecycle_states()
+        expected_product = {"mongo": "mongo_express", "redis": "redis_insight", "pgadmin": "pgadmin"}[product]
+        assert sync_proof is not None and async_proof is not None
+        for proof in (sync_proof, async_proof):
+            assert proof["ui_product"] == expected_product and proof["detection_status"] == "confirmed", proof
+        assert async_proof == sync_proof
+        (tmp_path / "fingerprint-parity.json").write_text(
+            json.dumps({"proof": async_proof, "sync_fallback_reason": fallback_reason}, ensure_ascii=False)
+        )
 
         def audit(name: str, *action: str) -> dict:
             output = tmp_path / (name + ".json")

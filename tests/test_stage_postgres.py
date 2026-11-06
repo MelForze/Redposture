@@ -758,7 +758,7 @@ def test_postgres_lifecycle_anonymous_open_checks_defcreds_and_runs_data_once(
     assert all(attempt["password_sent"] is False for attempt in attempted_credentials)
     attempt_lines = postgres._format_credential_attempts_records(records[0], "txt")
     assert len(attempt_lines) == 2
-    assert all(" [*] unverified " in line for line in attempt_lines)
+    assert all(" [*] " in line and " (unverified: " in line for line in attempt_lines)
     assert all(" [-] " not in line for line in attempt_lines)
 
 

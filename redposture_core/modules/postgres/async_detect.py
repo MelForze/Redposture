@@ -217,6 +217,7 @@ async def detect(ctx: Any, _http: Any) -> AuditRecord:
         raise AsyncHttpFallback("PostgreSQL host-stage override requires legacy verification")
     cfg = AuditConfig.from_namespace(ctx.args)
     database = str(getattr(ctx.args, "database", "") or "").strip() or "postgres"
+    tls_config = stage._postgres_tls_config_from_args(ctx.args)
     started = time.monotonic()
     base = {
         "host": ctx.host,
@@ -239,13 +240,9 @@ async def detect(ctx: Any, _http: Any) -> AuditRecord:
                 or bool(getattr(ctx.args, "defcreds", False))
             )
             if cache is not None and not requested_credentials and getattr(ctx, "reuse_http", False):
-                session = await _probe_retained(
-                    ctx.host, ctx.port, cfg.timeout, stage._postgres_tls_config_from_args(ctx.args), database, cache
-                )
+                session = await _probe_retained(ctx.host, ctx.port, cfg.timeout, tls_config, database, cache)
             else:
-                session = await _probe(
-                    ctx.host, ctx.port, cfg.timeout, stage._postgres_tls_config_from_args(ctx.args), database
-                )
+                session = await _probe(ctx.host, ctx.port, cfg.timeout, tls_config, database)
             payload = {
                 **base,
                 "is_postgres": True,
@@ -281,7 +278,9 @@ async def detect(ctx: Any, _http: Any) -> AuditRecord:
         except (OSError, ValueError, ConnectionError) as exc:
             last_error = str(exc)
             if attempt < max(1, cfg.retries + 1) - 1:
-                await asyncio.sleep(actions._retry_delay(attempt))
+                from ...detect_backoff import detect_backoff
+
+                await detect_backoff(actions._retry_delay(attempt))
     else:
         payload = {
             **base,

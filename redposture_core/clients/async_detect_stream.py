@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 from typing import Any
 
 from .async_http_detect import AsyncHttpFallback
+from .numeric_host import numeric_host_family
 
 
 def require_numeric_host(host: str) -> None:
     """Avoid asyncio.open_connection's uncancellable executor DNS resolver."""
     try:
-        ipaddress.ip_address(host)
+        numeric_host_family(host)
     except ValueError as exc:
         raise AsyncHttpFallback("hostname requires synchronous resolver") from exc
     if "%" in host:

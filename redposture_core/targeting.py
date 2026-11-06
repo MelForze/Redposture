@@ -180,6 +180,7 @@ class StreamingTargetPlan:
     schemes: tuple[str, ...] = ()
     include_matrix_ports_for_bare_explicit_targets: bool = False
     bare_ipv4_hosts: set[int] = field(default_factory=set, compare=False, repr=False)
+    _port_count_cache: dict[tuple[int, ...], int] = field(default_factory=dict, init=False, compare=False, repr=False)
 
     def __bool__(self) -> bool:
         return self.target_count > 0
@@ -373,6 +374,18 @@ class StreamingTargetPlan:
 
     def count_for_ports(self, default_ports: tuple[int, ...]) -> int:
         matrix_ports = tuple(dict.fromkeys(int(port) for port in default_ports))
+        cached = self._port_count_cache.get(matrix_ports)
+        if cached is None:
+            result = self._count_for_ports(matrix_ports)
+            # Plans are immutable; replacements own a fresh cache. Bound the
+            # number of port matrices retained by embedded callers as well.
+            if len(self._port_count_cache) >= 8:
+                self._port_count_cache.clear()
+            self._port_count_cache[matrix_ports] = result
+            return result
+        return cached
+
+    def _count_for_ports(self, matrix_ports: tuple[int, ...]) -> int:
         total = self.no_port_count * len(matrix_ports)
         for count in self.explicit_port_counts.values():
             total += count

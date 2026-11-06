@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any, cast
 from urllib.parse import urlsplit
 
+from ..detect_backoff import retain_detect_slot
 from .async_http_detect import AsyncDetectionHttp
 from .async_retained_socket import RetainedSocketIO
 from .http_session import HttpSessionPool
@@ -172,6 +173,7 @@ class RetainedDetectionHttp(AsyncDetectionHttp):
             release()
             raise
         writer.io.sockets.pop(writer.sock, None)
+        retain_detect_slot()
         self._connection = None
         return True
 

@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable, Iterable, Iterator
 from contextvars import copy_context
 from typing import Any, Generic, TypeVar, cast
 
+from .detect_backoff import DetectLease, DetectSlots, current_detect_lease
 from .scheduler import _DaemonWorkerPool, _Outcome, _Task
 
 T = TypeVar("T")
@@ -54,8 +55,8 @@ def automatic_detect_concurrency(
     Platforms without resource keep the bounded size profile.
     """
     count = max(1, int(target_count))
-    requested = 64
-    for threshold, limit in ((1000, 128), (10000, 256), (50000, 512), (100000, 1024)):
+    requested = 256
+    for threshold, limit in ((1000, 512), (10000, 1024)):
         if count >= threshold:
             requested = limit
     requested = min(count, requested)
@@ -91,6 +92,7 @@ class AsyncDetectScheduler(Generic[T, D, R]):
         children: Callable[[T, R], Iterable[T]] | None = None,
         inline_finish: Callable[[T, D], bool] | None = None,
         cancel_event: threading.Event | None = None,
+        detect_children: Callable[[T, D], Iterable[T]] | None = None,
     ) -> Iterator[tuple[T, R]]:
         source = iter(items)
 
@@ -107,8 +109,7 @@ class AsyncDetectScheduler(Generic[T, D, R]):
                 released_credits = 0
                 wake_source = False
                 notice_queued = False
-            for _ in range(count):
-                credits.release()
+            credits.release_many(count)
             changed.set()
             if notify_source:
                 work_available.set()
@@ -142,7 +143,7 @@ class AsyncDetectScheduler(Generic[T, D, R]):
         cancelled = threading.Event()
         done = threading.Event()
         errors: list[BaseException] = []
-        credits: asyncio.Semaphore
+        credits: DetectSlots
         changed: asyncio.Event
         work_available: asyncio.Event
         ready: deque[_Task[tuple[T, D]]] = deque()
@@ -159,7 +160,7 @@ class AsyncDetectScheduler(Generic[T, D, R]):
 
         async def run() -> None:
             nonlocal credits, changed, work_available
-            credits = asyncio.Semaphore(self.max_inflight)
+            credits = DetectSlots(self.max_inflight)
             changed = asyncio.Event()
             work_available = asyncio.Event()
             from .clients.async_resolver import install_numeric_resolver
@@ -170,8 +171,29 @@ class AsyncDetectScheduler(Generic[T, D, R]):
             assert task is not None
             task_ref.append(task)
             loop_ready.set()
+            slots = DetectSlots(self.detect_workers)
+            live_workers = 0
+
+            def replace_waiter() -> None:
+                nonlocal live_workers
+                # Sleeping retries retain their original target/credit. Only
+                # the spare bounded inflight window can admit more work.
+                if not cancelled.is_set() and live_workers < self.max_inflight and (not roots_done or pending):
+                    live_workers += 1
+                    group.create_task(worker())
 
             async def worker() -> None:
+                nonlocal live_workers
+                lease = DetectLease(slots, replace_waiter)
+                lease_token = current_detect_lease.set(lease)
+                try:
+                    await consume(lease)
+                finally:
+                    current_detect_lease.reset(lease_token)
+                    lease.release()
+                    live_workers -= 1
+
+            async def consume(lease: DetectLease) -> None:
                 nonlocal counter, roots_done, outstanding, followups_outstanding
                 while not cancelled.is_set():
                     await credits.acquire()
@@ -215,7 +237,18 @@ class AsyncDetectScheduler(Generic[T, D, R]):
                     if followup:
                         with source_lock:
                             followup_indices.add(index)
-                    result = await detect(item)
+                    lease.retained_socket = False
+                    await lease.acquire()
+                    try:
+                        result = await detect(item)
+                    finally:
+                        lease.release()
+                    if detect_children is not None:
+                        new_items = list(detect_children(item, result))
+                        with source_lock:
+                            pending.extend(new_items)
+                        if new_items:
+                            work_available.set()
                     if inline_finish is not None and inline_finish(item, result):
                         try:
                             value = finish(item, result)
@@ -258,6 +291,7 @@ class AsyncDetectScheduler(Generic[T, D, R]):
                 async with asyncio.TaskGroup() as group:
                     group.create_task(dispatch())
                     for _ in range(min(self.detect_workers, self.max_inflight)):
+                        live_workers += 1
                         group.create_task(worker())
             finally:
                 if watcher is not None:

@@ -1261,6 +1261,44 @@ def _kafka_lifecycle_detection_record_detect_steps(ctx: Any, state: KafkaLifecyc
                         else "service is not kafka"
                     )
                     return _record(detected=False, status="fail", auth_required=None, error=error)
+                # ApiVersions advertises handshake support on both plaintext
+                # and SASL listeners; it does not by itself prove auth. Ask
+                # for mechanisms before Metadata can close a SASL connection.
+                if 17 in api_probe.versions and hasattr(session, "probe_sasl"):
+                    state.protocol_requests += 1
+                    try:
+                        sasl_required = yield _DetectCall(session.probe_sasl, (), {})
+                    except (TimeoutError, ConnectionError, OSError, ValueError):
+                        # A compatible gateway may advertise the API but close
+                        # on handshake. Restore the original Metadata path on
+                        # a fresh session; never discard the ApiVersions proof.
+                        session.close()
+                        try:
+                            session = yield _DetectCall(
+                                KafkaSession.open,
+                                (host, port, timeout),
+                                {"use_tls": state.transport_mode == "tls", "tls_config": state.tls_config},
+                            )
+                        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+                            state.is_kafka = True
+                            state.auth_required = None
+                            return _record(
+                                detected=True,
+                                status="unknown_auth",
+                                auth_required=None,
+                                error=_friendly_error_from_exception(exc),
+                            )
+                        state.connections_opened += 1
+                        session.api_versions = dict(api_probe.versions)
+                        sasl_required = None
+                    if sasl_required is True:
+                        state.is_kafka = True
+                        state.auth_required = True
+                        state.sasl_first = True
+                        session.close()
+                        record = _record(detected=True, status="auth_required", auth_required=True, error=None)
+                        record["auth_flow"] = "sasl_handshake"
+                        return record
                 state.protocol_requests += 1
                 metadata, metadata_error = yield _DetectCall(session.fetch_metadata, (), {"topics": None})
                 state.is_kafka = True

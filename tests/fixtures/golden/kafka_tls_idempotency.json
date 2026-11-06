@@ -146,7 +146,7 @@
         "username": "user"
       }
     ],
-    "auth_flow": "sasl_fallback",
+    "auth_flow": "sasl_handshake",
     "auth_required": true,
     "cluster_permissions": {
       "create": true,

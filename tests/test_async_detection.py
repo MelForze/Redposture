@@ -14,13 +14,16 @@ import pytest
     [
         (1, 1),
         (32, 32),
-        (999, 64),
-        (1000, 128),
-        (9999, 128),
-        (10000, 256),
-        (49999, 256),
-        (50000, 512),
-        (99999, 512),
+        (255, 255),
+        (256, 256),
+        (257, 256),
+        (999, 256),
+        (1000, 512),
+        (9999, 512),
+        (10000, 1024),
+        (49999, 1024),
+        (50000, 1024),
+        (99999, 1024),
         (100000, 1024),
         (874666, 1024),
         (1000000, 1024),
@@ -33,6 +36,17 @@ def test_automatic_detect_scales_input_without_scaling_sync_workers(monkeypatch,
 
     monkeypatch.setattr(resource, "getrlimit", lambda _: (100000, 100000))
     assert automatic_detect_concurrency(targets, deep_workers=16) == want
+
+
+@pytest.mark.parametrize("targets,profile", [(999, 256), (1000, 512), (10000, 1024), (1000000, 1024)])
+@pytest.mark.parametrize("inflight", [1, 128, 768, 2048])
+def test_fixed_profile_respects_explicit_inflight_at_every_tier(monkeypatch, targets, profile, inflight):
+    from redposture_core import async_detection
+
+    monkeypatch.setattr(async_detection, "fd_detect_budget", lambda *_: None)
+    assert async_detection.automatic_detect_concurrency(targets, deep_workers=7, max_inflight=inflight) == min(
+        targets, profile, inflight
+    )
 
 
 def test_automatic_detect_reserves_descriptors_for_sync_work_and_output(monkeypatch):
@@ -301,9 +315,9 @@ def test_cancel_after_source_exhaustion_interrupts_blocked_finish(monkeypatch):
 @pytest.mark.parametrize(
     "module,cidr,expected_count,want",
     [
-        ("postgres", "198.18.0.0/19", (8192 - 2) * 9, 512),
+        ("postgres", "198.18.0.0/19", (8192 - 2) * 9, 1024),
         ("postgres", "198.18.0.0/18", (16384 - 2) * 9, 1024),
-        ("kafka", "198.18.0.0/20", (4096 - 2) * 14, 512),
+        ("kafka", "198.18.0.0/20", (4096 - 2) * 14, 1024),
         ("kafka", "198.18.0.0/19", (8192 - 2) * 14, 1024),
     ],
 )

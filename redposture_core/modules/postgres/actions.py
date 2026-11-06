@@ -337,6 +337,8 @@ class _PgStartupEvidence:
                 )
             elif code in {11, 12}:
                 valid = len(payload) > 4 and b"\x00" not in payload[4:]
+            if code in {8, 11, 12} and not self.detected:
+                valid = False  # Continuations cannot initiate authentication.
             if not valid:
                 label = "invalid MD5 authentication payload" if code == 5 else "invalid authentication payload"
                 raise self.error(label, error_kind="protocol_error")
@@ -361,14 +363,15 @@ class _PgStartupEvidence:
             parts = payload.split(b"\x00")
             if len(parts) != 3 or not parts[0] or parts[-1]:
                 raise self.error("invalid parameter status payload", error_kind="protocol_error")
-            self.detected = True
+            # ParameterStatus is metadata, not an initial startup decision.
+            # Some compatible proxies send it before AuthenticationOk; keep
+            # the observation without promoting an unrelated listener.
             if parts[0] == b"server_version":
                 self.server_version = parts[1].decode("utf-8", errors="replace") or None
             return
         if kind == b"K":
             if len(payload) != 8:
                 raise self.error("invalid backend key payload", error_kind="protocol_error")
-            self.detected = True
             return
         if kind in {b"E", b"N"}:
             try:
@@ -376,8 +379,8 @@ class _PgStartupEvidence:
             except _PgAuditError as exc:
                 self.enrich(exc)
                 raise
-            self.detected = True
             if kind == b"E":
+                self.detected = True
                 error_kind = _pg_startup_error_kind(sqlstate, message)
                 if error_kind == "authentication_failed":
                     self.auth_required = True
@@ -3626,20 +3629,24 @@ def _pg_unverified_credential_line(record: dict[str, Any], attempt: dict[str, An
     password = attempt.get("password")
     password_text = "<no-password>" if password is None else "<empty>" if password == "" else _pg_startup_text(password)
     verification = str(attempt.get("credential_verification") or "unavailable")
-    label = "credential error" if verification == "error" else "unverified"
-    reason = _pg_startup_text(attempt.get("error_kind") or verification)
-    details = f" (reason:{reason})"
-    for key, label_text in (
-        ("sqlstate", "sqlstate"),
-        ("startup_username", "startup user"),
-        ("startup_database", "database"),
-    ):
-        if attempt.get(key) is not None:
-            details += f" ({label_text}:{_pg_startup_text(attempt[key])})"
-    error = _pg_startup_text(attempt.get("error") or "")
-    if error:
-        details += f" err={error}"
-    return f"{_nxc_prefix(record)} [*] {label} {username}:{password_text}{details}"
+    reason = {
+        "unknown_user": "unknown user",
+        "database_unavailable": "database unavailable",
+        "auth_configuration_error": "authentication unavailable",
+        "auth_policy_denied": "login restricted",
+        "startup_rejected": "startup rejected",
+        "transport_error": "connection error",
+        "connection_error": "connection error",
+    }.get(str(attempt.get("error_kind") or ""))
+    if reason is None:
+        reason = (
+            "anonymous access"
+            if attempt.get("auth_required") is False
+            else "connection error"
+            if verification == "error"
+            else "verification unavailable"
+        )
+    return f"{_nxc_prefix(record)} [*] {username}:{password_text} (unverified: {reason})"
 
 
 def _pg_failed_startup_suffix(attempt: dict[str, Any]) -> str:
@@ -3704,6 +3711,9 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
 
 
 def _postgres_extra_color_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
+    unverified = payload.find(" (unverified:")
+    if unverified >= 0:
+        return [(unverified, len(payload), "orange")]
     if payload.startswith(("unverified ", "credential error ", "startup rejected", "authentication unavailable")):
         return [(0, len(payload), "orange")]
     if payload.startswith(("CRITICAL - ", "HIGH - ", "MEDIUM - ")):

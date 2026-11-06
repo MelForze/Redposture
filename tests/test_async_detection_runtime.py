@@ -172,7 +172,10 @@ def test_async_fallback_preserves_discovery_deadline_from_first_probe():
     assert len(expired) == 40 and all(expired)
 
 
-def test_automatic_detect_has_more_inflight_than_sync_data_workers():
+def test_automatic_detect_has_more_inflight_than_sync_data_workers(monkeypatch):
+    from redposture_core import async_detection
+
+    monkeypatch.setattr(async_detection, "fd_detect_budget", lambda *_: None)
     active = peak = 0
     data_active = data_peak = 0
     lock = threading.Lock()
@@ -218,7 +221,9 @@ def test_automatic_detect_has_more_inflight_than_sync_data_workers():
         )
     )
     assert result.detected_count == result.record_count == 100
-    assert 2 < peak <= 64
+    selected_limit = async_detection.automatic_detect_concurrency(100, deep_workers=2)
+    assert selected_limit == 100  # 256 profile, capped by the target count.
+    assert 2 < peak <= selected_limit
     assert data_peak == 2
 
 

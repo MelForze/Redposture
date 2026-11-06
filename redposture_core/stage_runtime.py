@@ -1002,6 +1002,7 @@ class _AuditDetectOutcome:
     lifecycle_state: Any = None
     runtime_stage_telemetry: bool = False
     started_at: float | None = None
+    additional_surface_scheduled: bool = False
 
 
 @dataclass(frozen=True)
@@ -2934,10 +2935,22 @@ class AuditCommandRunner:
             async def _detect_item(item: tuple[int, str, int, ScanTargetSpec | None]) -> _AuditDetectOutcome | None:
                 started_at = time.monotonic()
                 outcome = await self._run_async_detect_with_state(item[1], item[2], item[3], debug_emit)
+                if outcome is not None and self._is_detected(outcome.record):
+                    other_target = self._additional_surface_target(outcome.record, item[3], item[2])
+                    if other_target is not None:
+                        outcome = replace(outcome, additional_surface_scheduled=True)
                 if outcome is None:
                     with fallback_start_lock:
                         fallback_detect_started_at[item[0]] = started_at
                 return outcome
+
+            def _detect_children(
+                item: tuple[int, str, int, ScanTargetSpec | None], prepared: _AuditDetectOutcome | None
+            ) -> Iterable[tuple[int, str, int, ScanTargetSpec | None]]:
+                if prepared is not None and prepared.additional_surface_scheduled:
+                    target = self._additional_surface_target(prepared.record, item[3], item[2])
+                    if target is not None:
+                        yield (-item[0] - 1, item[1], item[2], target)
 
             outcomes = AsyncDetectScheduler[
                 tuple[int, str, int, ScanTargetSpec | None], _AuditDetectOutcome | None, _AuditPipelineOutcome
@@ -2951,6 +2964,7 @@ class AuditCommandRunner:
                 inline_finish=lambda _item, prepared: (
                     prepared is not None and prepared.lifecycle_state is None and not self._is_detected(prepared.record)
                 ),
+                detect_children=_detect_children,
             )
             if debug_emit is not None:
                 debug_emit(
@@ -2961,6 +2975,12 @@ class AuditCommandRunner:
             outcomes = scheduler.iter_completed(plan.iter_target_specs(), _run_target)
         try:
             for (_idx, _host, _port, _target), outcome in outcomes:
+                if _idx < 0:
+                    # Secondary surfaces are independent records, not extra
+                    # logical input targets in progress/run-level counts.
+                    if outcome.detected and not outcome.duplicate_target:
+                        _finalize_record(outcome.record)
+                    continue
                 if outcome.duplicate_target:
                     progress.advance(1)
                     continue
@@ -3870,30 +3890,17 @@ class AuditCommandRunner:
                 )
             )
         additional_records: tuple[AuditRecord, ...] = ()
-        if (
-            self.spec.module in web_panels.MODULE_PRODUCTS
-            and self.spec.module != "portainer"
-            and target is not None
-            and target.surface_hint is None
-            and (target.scheme in {"http", "https"} or target.explicit_port is not None)
-        ):
-            other_surface = "backend" if detect_record.extra.get("surface") == "ui" else "ui"
-            # An explicit HTTP URL and a known UI port probe the panel first.
-            # A backend result here already implies that UI detection failed;
-            # probing it again repeats safe requests on the same origin.
-            ui_already_checked = other_surface == "ui" and (
-                target.scheme in {"http", "https"} or int(port) in web_panels.UI_PORTS[self.spec.module]
+        other_target = self._additional_surface_target(detect_record, target, port)
+        if other_target is not None and not (prepared_detect and prepared_detect.additional_surface_scheduled):
+            other = self._run_target_pipeline(
+                host,
+                port,
+                other_target,
+                credential_runs,
+                debug_emit,
             )
-            if not ui_already_checked:
-                other = self._run_target_pipeline(
-                    host,
-                    port,
-                    replace(target, surface_hint=other_surface),
-                    credential_runs,
-                    debug_emit,
-                )
-                if other.detected:
-                    additional_records = (other.record,)
+            if other.detected:
+                additional_records = (other.record,)
         return _AuditPipelineOutcome(
             record=final_record,
             detected=True,
@@ -3901,6 +3908,26 @@ class AuditCommandRunner:
             deep_processed=deep_processed,
             additional_records=additional_records,
         )
+
+    def _additional_surface_target(
+        self, record: AuditRecord, target: ScanTargetSpec | None, port: int
+    ) -> ScanTargetSpec | None:
+        if (
+            self.spec.module not in web_panels.MODULE_PRODUCTS
+            or self.spec.module == "portainer"
+            or target is None
+            or target.surface_hint is not None
+            or (target.scheme not in {"http", "https"} and target.explicit_port is None)
+        ):
+            return None
+        surface = "backend" if record.extra.get("surface") == "ui" else "ui"
+        # A backend result on a UI-first endpoint already includes a failed
+        # panel probe. Keep that proof instead of probing the same UI again.
+        if surface == "ui" and (
+            target.scheme in {"http", "https"} or int(port) in web_panels.UI_PORTS[self.spec.module]
+        ):
+            return None
+        return replace(target, surface_hint=surface)
 
     def _run_deep_and_close_state(
         self,

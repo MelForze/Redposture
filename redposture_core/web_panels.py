@@ -16,6 +16,7 @@ import threading
 import time
 from collections.abc import Mapping
 from contextlib import contextmanager
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
@@ -204,6 +205,45 @@ def _response_contains(response: HttpResponse, *markers: str) -> bool:
     return all(marker.lower() in text for marker in markers)
 
 
+class _PanelMarkup(HTMLParser):
+    """Read actual title/elements, excluding examples in comments or scripts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.title: list[str] = []
+        self.in_title = False
+        self.elements: set[str] = set()
+        self.identifiers: set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.elements.add(tag)
+        self.identifiers.update(value for name, value in attrs if name == "id" and value is not None)
+        if tag == "title":
+            self.in_title = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self.in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self.in_title:
+            self.title.append(data)
+
+
+def _product_page(
+    response: HttpResponse, title_pattern: str, *, element: str | None = None, identifier: str | None = None
+) -> bool:
+    if response.status != 200 or response.error or response.truncated:
+        return False
+    page = _PanelMarkup()
+    page.feed(response.text[:32768])
+    page.close()
+    title = " ".join("".join(page.title).split())
+    return (bool(re.fullmatch(title_pattern, title, re.I)) or identifier in page.identifiers) and (
+        element is None or element in page.elements
+    )
+
+
 def _version(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -239,30 +279,34 @@ def fingerprint_requests(module: str, base: str, observations: list[bool] | None
             and not home.error
             and not home.truncated
             and home.status == 200
-            and re.search(r"<title[^>]*>\s*Portainer(?:\s*[-|:][^<]*)?\s*</title>", home.text[:32768], re.I)
+            and _product_page(home, r"Portainer(?:\s*[-|:].*)?")
         ):
             return "portainer", _version(info["Version"]), ["portainer_system_status", "portainer_page"]
     elif module == "mongodb":
         home = yield (base, "/")
         logo = yield (base, "/public/img/mongo-express-logo.png")
         if (
-            _response_contains(home, "<title", "mongo express")
+            _product_page(home, r".*\bmongo\s+express\b.*")
             and "/public/img/mongo-express-logo.png" in home.text
             and logo.status == 200
+            and not logo.error
+            and not logo.truncated
             and _header(logo, "content-type").lower().startswith("image/png")
         ):
             return "mongo_express", None, ["mongo_express_page", "mongo_express_logo"]
     elif module == "elastic":
         status = yield (base, "/api/status")
         info = _json(status)
-        if status.status == 401 and _header(status, "osd-name"):
+        if status.status == 401 and not status.error and not status.truncated and _header(status, "osd-name"):
             login = yield (base, "/app/login")
-            if _header(login, "osd-name") and _response_contains(login, "<title>opensearch dashboards</title>"):
+            if _header(login, "osd-name") and _product_page(login, r"OpenSearch Dashboards"):
                 version = _version(_header(status, "osd-version")) or _version(_header(login, "osd-version"))
                 return "opensearch_dashboards", version, ["opensearch_auth_challenge", "opensearch_login_page"]
-        if status.status == 401 and _header(status, "kbn-name"):
+        if status.status == 401 and not status.error and not status.truncated and _header(status, "kbn-name"):
             login = yield (base, "/login")
-            if _header(login, "kbn-name") and _response_contains(login, "kibana"):
+            if _header(login, "kbn-name") and _product_page(
+                login, r".*\bkibana\b.*", identifier="kbn-injected-metadata"
+            ):
                 version = _version(_header(status, "kbn-version")) or _version(_header(login, "kbn-version"))
                 return "kibana", version, ["kibana_auth_challenge", "kibana_login_page"]
         if (
@@ -293,7 +337,7 @@ def fingerprint_requests(module: str, base: str, observations: list[bool] | None
         home = yield (base, "/")
         info = _json((yield (base, "/api/info")))
         if (
-            _response_contains(home, "<title>redis insight</title>")
+            _product_page(home, r"Redis Insight")
             and isinstance(info, dict)
             and info.get("appType") == "DOCKER"
             and info.get("buildType") == "DOCKER_ON_PREMISE"
@@ -302,7 +346,13 @@ def fingerprint_requests(module: str, base: str, observations: list[bool] | None
     elif module == "postgres":
         login = yield (base, "/login")
         ping = yield (base, "/misc/ping")
-        if _response_contains(login, "pgadmin") and ping.status == 200 and ping.text.strip().upper() == "PING":
+        if (
+            _product_page(login, r".*\bpgAdmin(?:\s+4)?\b.*")
+            and ping.status == 200
+            and not ping.error
+            and not ping.truncated
+            and ping.text.strip().upper() == "PING"
+        ):
             return "pgadmin", None, ["pgadmin_login", "pgadmin_ping"]
         root = yield (base, "/", {"headers": {"Accept": "application/openapi+json"}})
         spec = _json(root)
@@ -316,19 +366,19 @@ def fingerprint_requests(module: str, base: str, observations: list[bool] | None
             return "postgrest", _version(_header(root, "server")), ["postgrest_server", "postgrest_openapi"]
     elif module == "kubeapi":
         home = yield (base, "/")
-        if _response_contains(home, "<title>kubernetes dashboard</title>", "<kd-root"):
+        if _product_page(home, r"Kubernetes Dashboard", element="kd-root"):
             return "kubernetes_dashboard", None, ["dashboard_title", "dashboard_angular_root"]
     elif module == "minio":
         home = yield (base, "/")
         session = yield (base, "/api/v1/session")
         session_info = None
-        if session.status == 403:
+        if session.status == 403 and not session.error and not session.truncated:
             try:
                 session_info = session.json()
             except (ValueError, UnicodeError):
                 pass
         if (
-            _response_contains(home, "<title", "minio console")
+            _product_page(home, r".*\bminio console\b.*")
             and _header(session, "server").lower() == "minio console"
             and isinstance(session_info, dict)
             and session_info.get("message") == "invalid session"

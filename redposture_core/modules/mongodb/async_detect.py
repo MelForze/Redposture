@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any, cast
 
@@ -282,7 +281,12 @@ async def detect(ctx: Any, _http: Any) -> AuditRecord:
                     return _finish(ctx, payload, cfg, stage_started)
             last_error = client_helpers.normalize_mongodb_error(exc)
             if attempt < max(1, cfg.retries + 1) - 1:
-                await asyncio.sleep(actions._retry_delay(attempt))
+                from ...detect_backoff import detect_backoff
+
+                if client is not None:
+                    await client.close()
+                    client = None
+                await detect_backoff(actions._retry_delay(attempt))
         finally:
             if client is not None:
                 await client.close()

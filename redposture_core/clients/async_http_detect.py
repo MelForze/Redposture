@@ -9,17 +9,24 @@ from __future__ import annotations
 import asyncio
 import http.client
 import io
-import ipaddress
 import ssl
+from functools import lru_cache
 from typing import Any, cast
 from urllib.parse import urlsplit
 
+from ..detect_backoff import detect_backoff
 from ..http_headers import merge_custom_http_headers
 from . import transport
 from .http_api import HttpResponse, decode_http_content, normalize_http_error
+from .numeric_host import numeric_host_family
 from .tls_cache import shared_client_ssl_context
 
 _HEADER_CAP = 64 * 1024
+
+
+@lru_cache(maxsize=4096)
+def _request_url(url: str) -> Any:
+    return urlsplit(url)
 
 
 class AsyncHttpFallback(Exception):
@@ -125,7 +132,7 @@ class AsyncDetectionHttp:
                 )
                 if attempt < retries and retryable:
                     self._stats["retries"] += 1
-                    await asyncio.sleep(min(1.5, 0.2 * (2**attempt)))
+                    await detect_backoff(min(1.5, 0.2 * (2**attempt)))
                     continue
                 return HttpResponse(
                     status=0, body=b"", headers={}, error=error or type(exc).__name__, request_url=url, final_url=url
@@ -166,13 +173,13 @@ class AsyncDetectionHttp:
     async def _once(
         self, url: str, timeout: float, headers: dict[str, str], *, method: str = "GET", body: bytes | None = None
     ) -> HttpResponse:
-        parsed = urlsplit(url)
+        parsed = _request_url(url)
         scheme = parsed.scheme.lower()
         host = parsed.hostname
         if scheme not in {"http", "https"} or not host or parsed.username is not None:
             raise AsyncHttpFallback("unsupported request URL")
         try:
-            ipaddress.ip_address(host)
+            numeric_host_family(host)
         except ValueError as exc:
             # asyncio's default resolver owns non-daemon executor threads;
             # blocked DNS survives cancellation. Keep DNS on the daemon sync

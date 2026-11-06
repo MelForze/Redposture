@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any
 
@@ -388,7 +387,9 @@ async def detect(ctx: Any, _http: Any) -> AuditRecord:
             reraise_fallback(exc)
             last_error = client_helpers.normalize_oracle_error(exc)
             if attempt < max(1, cfg.retries + 1) - 1:
-                await asyncio.sleep(actions._retry_delay(attempt))
+                from ...detect_backoff import detect_backoff
+
+                await detect_backoff(actions._retry_delay(attempt))
     record.update(
         timestamp=actions.utc_now_iso(), status="fail", is_oracle=False, error=last_error or "connection failed"
     )

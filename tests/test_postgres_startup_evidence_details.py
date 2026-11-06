@@ -134,10 +134,9 @@ def test_every_uncertain_credential_is_visible_with_reason_and_protocol_diagnost
     }
     lines = actions._format_credential_attempts_records(record, "txt")
     assert len(lines) == 2
-    assert "unverified alice:candidate" in lines[0]
-    assert "reason:unknown_user" in lines[0] and "sqlstate:28000" in lines[0]
-    assert "startup user:alice" in lines[0] and "database:app" in lines[0]
-    assert "credential error bob:candidate" in lines[1]
+    assert lines[0].endswith("[*] alice:candidate (unverified: unknown user)")
+    assert all(field not in lines[0] for field in ("reason:", "sqlstate:", "startup user:", "database:", "err="))
+    assert lines[1].endswith("[*] bob:candidate (unverified: connection error)")
     assert all("[-]" not in line and "\x1b" not in line for line in lines)
     assert "\x1b" not in actions._format_record(record, "json")
     assert (

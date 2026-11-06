@@ -135,8 +135,8 @@ def test_postgres_scram_handshake_validates_server_signature(monkeypatch: pytest
     [
         (5, b"x", "invalid MD5 authentication payload", None, False),
         (10, b"SCRAM-SHA-256\0\0", "SCRAM authentication required", "scram-sha-256", True),
-        (11, b"unexpected challenge", "unexpected SCRAM continue", "scram-sha-256", True),
-        (12, b"v=signature", "unexpected SCRAM final", "scram-sha-256", True),
+        (11, b"unexpected challenge", "invalid authentication payload", None, False),
+        (12, b"v=signature", "invalid authentication payload", None, False),
         (99, b"", "invalid authentication payload", None, False),
     ],
 )
@@ -155,6 +155,9 @@ def test_postgres_auth_challenges_do_not_turn_malformed_sequences_into_success(
     assert caught.value.detected is detected
     assert caught.value.auth_required is (True if detected else None)
     assert caught.value.auth_method == method
+    assert caught.value.password_sent is False
+    assert caught.value.credential_verified is None
+    assert caught.value.error_kind == ("authentication_unavailable" if detected else "protocol_error")
 
 
 @pytest.mark.parametrize(

@@ -623,6 +623,22 @@ def _postgres_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRe
             result = _postgres_auth_probe_record(ctx, record)
         else:
             result = _postgres_probe_credential(ctx)
+        debug_emit = getattr(ctx, "debug_emit", None)
+        if callable(debug_emit) and result.extra.get("credential_verification") in {
+            "unavailable",
+            "unverified",
+            "error",
+        }:
+            details = result.extra
+            text = actions._pg_startup_text
+            debug_emit(
+                f"postgres credential verification host={text(ctx.host)} port={ctx.port} "
+                f"username={text(ctx.credential.username)} "
+                f"verification={text(details.get('credential_verification'))} "
+                f"reason={text(details.get('error_kind'))} sqlstate={text(details.get('sqlstate'))} "
+                f"startup user={text(details.get('startup_username'))} "
+                f"database={text(details.get('startup_database'))} error={text(details.get('error') or '')}"
+            )
         return result
 
     coordinator = getattr(ctx.args, "_postgres_credential_coordinator", None)

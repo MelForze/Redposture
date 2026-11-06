@@ -181,7 +181,7 @@ def test_postgres_unavailable_attempt_is_not_rendered_as_rejected() -> None:
         "txt",
     )
     assert len(lines) == 2
-    assert "[*] unverified postgres:postgres" in lines[0]
+    assert "[*] postgres:postgres (unverified: verification unavailable)" in lines[0]
     assert "[-]" not in lines[0]
     assert lines[1].endswith("[-] admin:admin")
 

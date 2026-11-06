@@ -8,7 +8,6 @@ bytes, and TLS state remains in the very SSLSocket adopted by sync auth/data.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import socket
 import ssl
 import time
@@ -16,10 +15,15 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Any
+from weakref import WeakKeyDictionary
 
+from ..detect_backoff import detect_backoff, retain_detect_slot
 from ..detection_io import DetectCall, DetectDelay, HttpRead, read_http
 from . import transport
 from .async_http_detect import AsyncHttpFallback
+from .numeric_host import numeric_host_family
+
+_READY_LOOPS: WeakKeyDictionary[Any, tuple[int, ...]] = WeakKeyDictionary()
 
 
 @asynccontextmanager
@@ -39,12 +43,19 @@ class RetainedSocketIO:
 
     def check_supported(self) -> None:
         """Decline loops without readiness support before connecting a target."""
+        methods = tuple(
+            id(getattr(method, "__func__", method))
+            for method in (getattr(self.loop, "add_reader", None), getattr(self.loop, "add_writer", None))
+        )
+        if _READY_LOOPS.get(self.loop) == methods:
+            return
         left, right = socket.socketpair()
         try:
             self.loop.add_reader(left.fileno(), lambda: None)
             self.loop.remove_reader(left.fileno())
             self.loop.add_writer(left.fileno(), lambda: None)
             self.loop.remove_writer(left.fileno())
+            _READY_LOOPS[self.loop] = methods
         except (AttributeError, NotImplementedError) as exc:
             raise AsyncHttpFallback("event loop has no raw socket readiness support") from exc
         finally:
@@ -88,12 +99,11 @@ class RetainedSocketIO:
         try:
             if "%" in str(host):
                 raise ValueError("scoped IPv6 requires the legacy resolver")
-            numeric = ipaddress.ip_address(str(host))
+            family = numeric_host_family(str(host))
         except ValueError as exc:
             # The scheduler owns DNS. Never silently dispatch getaddrinfo to a
             # worker from this native detector when called outside that setup.
             raise AsyncHttpFallback("raw native detector requires a numeric target") from exc
-        family = socket.AF_INET6 if numeric.version == 6 else socket.AF_INET
         sock = socket.socket(family, socket.SOCK_STREAM)
         sock.setblocking(False)
         self.sockets[sock] = timeout
@@ -151,6 +161,7 @@ class RetainedSocketIO:
         """Transfer only fully framed sockets, after every readiness wait ends."""
         for sock, timeout in self.sockets.items():
             if sock.fileno() >= 0:
+                retain_detect_slot()
                 sock.settimeout(timeout)
         self.sockets.clear()
 
@@ -191,7 +202,7 @@ async def run_native(steps: Any, http: Any, registry: dict[Any, Any], io: Retain
 
     async def execute(step: Any) -> Any:
         if isinstance(step, DetectDelay):
-            return await asyncio.sleep(step.seconds)
+            return await detect_backoff(step.seconds, socket_free=not any(sock.fileno() >= 0 for sock in io.sockets))
         if isinstance(step, HttpRead):
             return await read_http(step, http)
         if isinstance(step, FingerprintRead):
@@ -218,7 +229,7 @@ async def run_native(steps: Any, http: Any, registry: dict[Any, Any], io: Retain
         if function is _CREATE_CONNECTION:
             return await io.open(*args, **kwargs)
         if function is _SLEEP:
-            return await asyncio.sleep(*args, **kwargs)
+            return await detect_backoff(*args, socket_free=not any(sock.fileno() >= 0 for sock in io.sockets), **kwargs)
         if isinstance(owner, socket.socket) and owner in io.sockets:
             name = getattr(function, "__name__", "")
             if name == "recv":

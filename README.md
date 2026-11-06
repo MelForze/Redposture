@@ -32,13 +32,15 @@ All 32 modules, their UI probes, `spray` discovery and exporters `collect/trigge
 
 | Endpoints after port expansion | Async detection limit |
 | --- | ---: |
-| 32–999 | 64 |
-| 1,000–9,999 | 128 |
-| 10,000–49,999 | 256 |
-| 50,000–99,999 | 512 |
-| 100,000+ | 1,024 |
+| 32–999 | 256 |
+| 1,000–9,999 | 512 |
+| 10,000+ | 1,024 |
 
 The limit is selected once at startup, respecting the target count, available file descriptors and any explicit inflight cap. It does not change in response to CPU load, memory growth or event-loop delays. `--workers` controls synchronous work; smaller lists, hostnames, active proxies and unsupported responses use the original client. The higher limits are scheduling limits, not a claim that a million hosts have been tested.
+
+For supported endpoints exposing both a backend and a UI, the second surface is an independent asynchronous task within the same bounded detection budget. A slow UI does not delay authentication or data reads for an already confirmed backend. Unsupported native checks retain their synchronous fallback. Retry pauses after sockets close can yield their detection slot to another target; waiting retries stay inside the bounded inflight window and keep their attempt counts and minimum intervals. Open or retained sockets continue to occupy a detection slot.
+
+Detection distinguishes protocol compatibility from an identified product. `PostgreSQL-compatible endpoint` confirms PostgreSQL wire evidence, not an HTTP UI or a specific PostgreSQL/PgBouncer implementation. A startup rejection before an authentication challenge can leave `auth required:unknown`; it does not reject an untested password. UI fingerprints require product-specific evidence from complete responses. Kafka brokers advertising SASL handshake support are checked with read-only mechanism negotiation before Metadata, avoiding an unauthenticated Metadata request on SASL listeners; legacy fallbacks remain available.
 
 Supported HTTP modules and UIs can pass an anonymous keep-alive connection from async detection to synchronous authentication or data reads. At most 64 connections wait for this handoff per command, also bounded by the synchronous worker count and available file descriptors. Connections carrying credentials or cookies are excluded. If a transferred connection closes, only its first GET/HEAD may reconnect once; POST and execution requests are never replayed by this mechanism. PostgreSQL can keep a completed session for subsequent reads under the same user, database and TLS policy; each credential candidate still authenticates independently. MongoDB reuses the verified synchronous client. Spray shares the handoff budget across queued targets, and exporters reuse prefetch connections without adding callback retries.
 

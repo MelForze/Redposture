@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from ...audit_models import AuditRecord
 from ...clients.async_clickhouse_detect import NativeClickHouseIO
 from ...clients.async_http_detect import AsyncHttpFallback
+from ...detect_backoff import detect_backoff
 from ...detection_io import DetectCall, DetectDelay
 from . import actions
 
@@ -37,7 +37,9 @@ async def detect(ctx: Any, _http: Any, options: Any) -> AuditRecord:
         while True:
             try:
                 if isinstance(step, DetectDelay):
-                    await asyncio.sleep(step.seconds)
+                    await detect_backoff(
+                        step.seconds, socket_free=not any(sock.fileno() >= 0 for sock in transport.io.sockets)
+                    )
                     value = None
                 elif isinstance(step, DetectCall) and step.function is _CONNECT:
                     value = await transport.connect_and_probe(*step.args, **step.kwargs)

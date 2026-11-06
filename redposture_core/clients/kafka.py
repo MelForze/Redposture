@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip as gzip
 import importlib
 import inspect
+import re
 import secrets
 import socket
 import ssl
@@ -205,6 +206,54 @@ class KafkaSession:
         self.api_versions = versions
         self.correlation_id = correlation
         return ok, error
+
+    def probe_sasl(self) -> bool | None:
+        return _run_detect_sync(self._probe_sasl_detect_steps())
+
+    def _probe_sasl_detect_steps(self):
+        """Read-only mechanism negotiation, never a credential attempt.
+
+        A successful or unsupported-mechanism response with a complete list
+        proves SASL. Non-SASL brokers answer ILLEGAL_SASL_STATE. Unknown/legacy
+        cases retain the original Metadata/fallback path.
+        """
+        minimum, maximum = (self.api_versions or {}).get(KAFKA_SASL_HANDSHAKE, (1, -1))
+        version = min(1, maximum)
+        if version < minimum or version < 0:
+            return None
+        correlation = self.correlation_id
+        self.correlation_id += 1
+        payload = yield _DetectCall(
+            _send_kafka_request,
+            (self.sock,),
+            {
+                "api_key": KAFKA_SASL_HANDSHAKE,
+                "api_version": version,
+                "correlation_id": correlation,
+                "client_id": KAFKA_CLIENT_ID,
+                "body": _encode_kafka_string("PLAIN"),
+            },
+        )
+        try:
+            reader = _KafkaReader(payload)
+            if reader.read_i32() != correlation:
+                return None
+            code = reader.read_i16()
+            count = reader.read_i32()
+            if count < 0 or count > reader.remaining() // 2:
+                return None
+            for _ in range(count):
+                if not re.fullmatch(r"[A-Za-z0-9_-]+", reader.read_string() or ""):
+                    return None
+            if reader.remaining():
+                return None
+            if code in {0, 33} and count:
+                return True
+            if code == 34 and not count:
+                return False
+        except (ValueError, struct.error):
+            pass
+        return None
 
     def fetch_metadata(self, *, topics: list[str] | None = None) -> tuple[dict[str, Any] | None, str | None]:
         return _run_detect_sync(self._fetch_metadata_detect_steps(topics=topics))
@@ -3126,6 +3175,7 @@ _ASYNC_RETAINED_STEPS = {
     cast(Any, KafkaSession.open).__func__: cast(Any, KafkaSession._open_detect_steps).__func__,
     KafkaSession.detect: KafkaSession._detect_detect_steps,
     KafkaSession.fetch_metadata: KafkaSession._fetch_metadata_detect_steps,
+    KafkaSession.probe_sasl: KafkaSession._probe_sasl_detect_steps,
     open_kafka_socket: _open_kafka_socket_detect_steps,
     _open_kafka_socket_configured: _open_kafka_socket_configured_detect_steps,
     _recv_kafka_frame: _recv_kafka_frame_detect_steps,
