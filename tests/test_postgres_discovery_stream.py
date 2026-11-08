@@ -42,6 +42,29 @@ def row(value: bytes):
     return b"D" + struct.pack(">i", len(payload) + 4) + payload
 
 
+@pytest.mark.parametrize("denied", [False, True])
+def test_table_source_manifest_confirms_even_empty_success_and_denied_sqlstate(denied):
+    ready = b"Z\0\0\0\5I"
+    error = b"SERROR\0C42501\0Mpermission denied for table settings\0\0"
+    wire = Wire((b"E" + struct.pack(">i", len(error) + 4) + error if denied else b"") + ready)
+    c = DiscoveryCollector(
+        "postgres",
+        SimpleNamespace(host="qa", port=5432, args=SimpleNamespace(discover_time=30)),
+        {"status": "open_no_auth"},
+    )
+    _, values, problem = pg._pg_query_table_rows(
+        wire, "public.settings", discovery_collector=c, database_name="qa", retain_rows=False
+    )
+    report = c.result()
+    rows = {r["id"]: r for r in report["sources"]}
+    table = rows["postgres.table_rows"]
+    assert table["read"] == int(not denied) and table["denied"] == int(denied)
+    assert table["complete"] == (not denied)
+    assert rows["postgres.table_catalog"]["requested"] == 0
+    assert bool(problem) == denied
+    assert report["status"] == ("unavailable" if denied else "complete")
+
+
 def test_discovery_reads_large_datarow_field_on_disk_and_keeps_next_frame(monkeypatch):
     monkeypatch.setattr(pg, "_PG_MAX_MESSAGE_SIZE", 1024)
     value = b"qa-long-" + b"Ab0" * 400000
@@ -77,6 +100,26 @@ def test_postgres_table_discover_scans_long_json_value_without_materializing(mon
     assert len(report["findings"]) == 1
     assert report["findings"][0]["value"].digest == hashlib.sha256(value.encode()).hexdigest()
     assert report["findings"][0]["object_path"] == "$.table.app.public.settings.password"
+
+
+def test_postgres_streaming_rows_keep_distinct_honest_source_locators():
+    from redposture_core.discovery_values import iter_json_chunks
+
+    password = "inactive-repeated-row-password"
+    wire = Wire(row(('{"id":7,"password":"' + password + '"}').encode()) * 2 + b"Z\0\0\0\5I")
+    ctx = SimpleNamespace(args=SimpleNamespace(discover_time=30), host="qa", port=5432)
+    collector = DiscoveryCollector("postgres", ctx, {"status": "open_no_auth"})
+    _, _, error = pg._pg_query_table_rows(
+        wire, "public.settings", database_name="app", discovery_collector=collector, retain_rows=False
+    )
+    assert error is None
+    import json
+
+    finding = json.loads("".join(iter_json_chunks(collector.result())))["findings"][0]
+    assert finding["occurrence_count"] == 2
+    assert [item["row_ordinal"] for item in finding["locations"]] == [0, 1]
+    assert all(item["database"] == "app" and item["table"] == "public.settings" for item in finding["locations"])
+    assert all(item["locator_kind"] == "read_order" and "primary_key" not in item for item in finding["locations"])
 
 
 def test_streaming_query_keeps_completed_row_when_later_frame_breaks():

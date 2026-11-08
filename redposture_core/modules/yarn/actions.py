@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from contextlib import nullcontext
 from typing import Any
 
 from ...clients.http_api import http_response_requires_https
@@ -179,73 +180,91 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             continue
         if getattr(ctx.args, "show_" + name, False):
             requested.append(name)
-        state, error, partial = "unknown", None, False
-        streamed_apps = False
-        if not budget.allowed():
-            error, partial = "discovery budget reached", True
-        else:
-            response = _get(ctx, base, path, budget=budget)
-            pool = getattr(getattr(ctx, "lifecycle_state", None), "http", None)
-            if (
-                name == "apps"
-                and collector is not None
-                and response.status == 200
-                and response.truncated
-                and not response.error
-                and callable(getattr(pool, "request_stream", None))
-            ):
-                streamed_apps = True
-                complete_stream = collector.stream_json_scalars(
-                    pool,
-                    base + path,
-                    "app_specs",
-                    headers={"Accept": "application/json"},
-                    timeout=budget.timeout(),
-                    root_kind="object",
-                    exclude=lambda item: item[:2] != ("apps", "app"),
-                    required_containers={("apps",): "object", ("apps", "app"): "array"},
-                    row_validators={
-                        ("apps", "app"): (
-                            frozenset({"id"}),
-                            lambda row: isinstance(row.get("id"), str) and bool(_APP_ID.fullmatch(row["id"])),
-                        )
-                    },
-                )
-                state = "allowed" if complete_stream else "unknown"
-                error, partial = (
-                    "streamed response; inventory snapshot unavailable" if complete_stream else "incomplete stream",
-                    True,
-                )
-            elif not budget.consume(response):
-                error, partial = "response or byte limit", True
+        with (
+            collector.source_attempt("yarn.application_collection", scope="validated_app_collection_responses")
+            if collector is not None and name == "apps"
+            else nullcontext() as evidence
+        ):
+            state, error, partial = "unknown", None, False
+            streamed_apps = False
+            if not budget.allowed():
+                error, partial = "discovery budget reached", True
             else:
-                data = json_value(response)
-                if name == "metrics":
-                    model = data.get("clusterMetrics") if isinstance(data, dict) else None
-                    valid = isinstance(model, dict) and all(
-                        type(model.get(k)) is int and model[k] >= 0 for k in ("totalMB", "allocatedMB", "totalNodes")
+                response = _get(ctx, base, path, budget=budget)
+                if evidence is not None:
+                    evidence.status = response.status
+                    evidence.unsupported = response.status in {404, 405, 501}
+                pool = getattr(getattr(ctx, "lifecycle_state", None), "http", None)
+                if (
+                    name == "apps"
+                    and collector is not None
+                    and response.status == 200
+                    and response.truncated
+                    and not response.error
+                    and callable(getattr(pool, "request_stream", None))
+                ):
+                    streamed_apps = True
+                    complete_stream = collector.stream_json_scalars(
+                        pool,
+                        base + path,
+                        "app_specs",
+                        headers={"Accept": "application/json"},
+                        timeout=budget.timeout(),
+                        root_kind="object",
+                        on_status=lambda status: setattr(evidence, "status", status),
+                        exclude=lambda item: item[:2] != ("apps", "app"),
+                        required_containers={("apps",): "object", ("apps", "app"): "array"},
+                        row_validators={
+                            ("apps", "app"): (
+                                frozenset({"id"}),
+                                lambda row: isinstance(row.get("id"), str) and bool(_APP_ID.fullmatch(row["id"])),
+                            )
+                        },
                     )
-                    state = access(response, valid)
-                    if state == "allowed":
-                        result[name] = model
+                    assert evidence is not None
+                    if complete_stream:
+                        evidence.accept()
+                    state = "allowed" if complete_stream else "unknown"
+                    error, partial = (
+                        "streamed response; inventory snapshot unavailable" if complete_stream else "incomplete stream",
+                        True,
+                    )
+                elif not budget.consume(response):
+                    error, partial = "response or byte limit", True
                 else:
-                    rows = _rows(data, name)
-                    state = access(response, rows is not None)
-                    if state == "allowed" and rows is not None:
-                        unique = {row["id"]: row for row in rows}
-                        result[name] = list(unique.values())[:_LIMIT]
-                        if len(unique) != len(rows):
-                            error, partial = "duplicate resource IDs", True
-                        if len(rows) >= _LIMIT and (not discover or len(unique) > _LIMIT):
-                            error, partial = "bounded snapshot item limit; collection coverage unverified", True
-                        if name == "apps" and collector is not None:
-                            collector.mark_accessible_source()
-                            for row in unique.values():
-                                if not collector.add("app_specs." + row["id"], row):
-                                    collector.partial("yarn/apps", "discover_time")
-                                    break
-                if state != "allowed":
-                    error, partial = "invalid collection" if response.status == 200 else f"HTTP {response.status}", True
+                    data = json_value(response)
+                    if name == "metrics":
+                        model = data.get("clusterMetrics") if isinstance(data, dict) else None
+                        valid = isinstance(model, dict) and all(
+                            type(model.get(k)) is int and model[k] >= 0
+                            for k in ("totalMB", "allocatedMB", "totalNodes")
+                        )
+                        state = access(response, valid)
+                        if state == "allowed":
+                            result[name] = model
+                    else:
+                        rows = _rows(data, name)
+                        state = access(response, rows is not None)
+                        if state == "allowed" and rows is not None:
+                            unique = {row["id"]: row for row in rows}
+                            result[name] = list(unique.values())[:_LIMIT]
+                            if len(unique) != len(rows):
+                                error, partial = "duplicate resource IDs", True
+                            if len(rows) >= _LIMIT and (not discover or len(unique) > _LIMIT):
+                                error, partial = "bounded snapshot item limit; collection coverage unverified", True
+                            if name == "apps" and collector is not None:
+                                collector.mark_accessible_source()
+                                for row in unique.values():
+                                    if not collector.add("app_specs." + row["id"], row):
+                                        collector.partial("yarn/apps", "discover_time")
+                                        break
+                    if name == "apps" and evidence is not None and state == "allowed":
+                        evidence.accept()
+                    if state != "allowed":
+                        error, partial = (
+                            "invalid collection" if response.status == 200 else f"HTTP {response.status}",
+                            True,
+                        )
         result[name + "_access"] = state
         result[name + "_partial"] = partial
         if error:

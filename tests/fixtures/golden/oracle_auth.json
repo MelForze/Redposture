@@ -15,121 +15,296 @@
     "connect_service": "FREEPDB1",
     "connect_sid": null,
     "content_discovery": {
-      "bytes_inspected": 1039122,
-      "bytes_read": 1039122,
+      "bytes_inspected": 1026106,
+      "bytes_read": 1026106,
       "emitted_fingerprints": [],
       "findings": [
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
-          "source": "authenticated",
-          "type": "api_key",
-          "value": "ora-api-key-prod-2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
-          "source": "authenticated",
-          "type": "api_key",
-          "value": "ora-billing-key-2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
-          "source": "authenticated",
-          "type": "api_key",
-          "value": "ora-read-key-2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.REDPOSTURE.ACCOUNTS",
+              "object_path": "$.table.REDPOSTURE.ACCOUNTS.password",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
           "object_path": "$.table.REDPOSTURE.ACCOUNTS.password",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "password",
           "value": "BillingOracle!2026"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.REDPOSTURE.ACCOUNTS",
+              "object_path": "$.table.REDPOSTURE.ACCOUNTS.password",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
           "object_path": "$.table.REDPOSTURE.ACCOUNTS.password",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "password",
           "value": "OracleAdmin!2026"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.REDPOSTURE.ACCOUNTS",
+              "object_path": "$.table.REDPOSTURE.ACCOUNTS.password",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
           "object_path": "$.table.REDPOSTURE.ACCOUNTS.password",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "password",
           "value": "ReadOnlyOracle!2026"
         },
         {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
-          "source": "authenticated",
-          "type": "generic_secret",
-          "value": "RemoteLink!2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
-          "source": "authenticated",
-          "type": "generic_secret",
-          "value": "WalletPass!2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
-          "source": "authenticated",
-          "type": "generic_secret",
-          "value": "oracle-jwt-secret-lab-2026"
-        },
-        {
           "confidence": "low",
+          "detectors": [
+            "entropy_candidate"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.XDB.XDB$H_INDEX",
+              "object_path": "$.table.XDB.XDB$H_INDEX.children",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
           "object_path": "$.table.XDB.XDB$H_INDEX.children",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "high_entropy",
           "value": "OLAP_XS_ADMIN562039e330f7516e06317bf6b642ea1_acl"
         },
         {
           "confidence": "low",
+          "detectors": [
+            "entropy_candidate"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.XDB.XDB$H_INDEX",
+              "object_path": "$.table.XDB.XDB$H_INDEX.children",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
           "object_path": "$.table.XDB.XDB$H_INDEX.children",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "high_entropy",
           "value": "OLAP_XS_ADMIN562039e330fd516e06317bf6b642ea1_acl"
         },
         {
           "confidence": "low",
+          "detectors": [
+            "entropy_candidate"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.XDB.XDB$H_INDEX",
+              "object_path": "$.table.XDB.XDB$H_INDEX.children",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
           "object_path": "$.table.XDB.XDB$H_INDEX.children",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "high_entropy",
           "value": "OLAP_XS_ADMIN562039e3311516e06317bf6b642ea1_acl"
         },
         {
           "confidence": "low",
+          "detectors": [
+            "entropy_candidate"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.XDB.XDB$H_INDEX",
+              "object_path": "$.table.XDB.XDB$H_INDEX.children",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
           "object_path": "$.table.XDB.XDB$H_INDEX.children",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "high_entropy",
           "value": "OLAP_XS_ADMIN562039e3315516e06317bf6b642ea1_acl"
         },
         {
           "confidence": "low",
+          "detectors": [
+            "entropy_candidate"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.XDB.XDB$H_INDEX",
+              "object_path": "$.table.XDB.XDB$H_INDEX.children",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
           "object_path": "$.table.XDB.XDB$H_INDEX.children",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "high_entropy",
           "value": "OLAP_XS_ADMIN562039e3319516e06317bf6b642ea1_acl"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.REDPOSTURE.ACCOUNTS",
+              "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "api_key",
+          "value": "ora-api-key-prod-2026"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.REDPOSTURE.ACCOUNTS",
+              "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "api_key",
+          "value": "ora-billing-key-2026"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.REDPOSTURE.SERVICE_TOKENS",
+              "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "RemoteLink!2026"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.REDPOSTURE.SERVICE_TOKENS",
+              "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "oracle-jwt-secret-lab-2026"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.REDPOSTURE.ACCOUNTS",
+              "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.table.REDPOSTURE.ACCOUNTS.api_key",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "api_key",
+          "value": "ora-read-key-2026"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "table.REDPOSTURE.SERVICE_TOKENS",
+              "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
+              "source": "authenticated",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.table.REDPOSTURE.SERVICE_TOKENS.token_value",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "WalletPass!2026"
         }
       ],
       "live_emitted": false,
@@ -140,6 +315,37 @@
         "oracle: XDB.XDB$COLUMN_INFO: read failed"
       ],
       "source": "authenticated",
+      "sources": [
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "oracle.table_catalog",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "visible_tables_in_selected_schema",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 0,
+          "id": "oracle.table_rows",
+          "implemented": true,
+          "read": 180,
+          "requested": 184,
+          "scope": "complete_selected_table_row_streams",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 0,
+          "id": "oracle.query_rows",
+          "implemented": true,
+          "read": 0,
+          "requested": 0,
+          "unsupported": false
+        }
+      ],
       "status": "partial"
     },
     "credential_attempts": [

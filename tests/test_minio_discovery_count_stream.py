@@ -8,6 +8,7 @@ import tracemalloc
 import pytest
 
 from redposture_core.clients.minio_api import MinioResponse
+from redposture_core.discovery_occurrences import OccurrenceRegistry
 from redposture_core.discovery_spool import SpoolingRecords
 from redposture_core.modules.minio import discover
 from redposture_core.modules.minio.discover import Budget, discover_secrets
@@ -17,17 +18,13 @@ from scripts.qa_memory_workload import run_memory_workload
 
 
 def test_minio_sqlite_full_keeps_earlier_findings_and_reads_next_object(monkeypatch: pytest.MonkeyPatch) -> None:
-    class LimitedRecords(SpoolingRecords):
-        created = 0
+    class LimitedRegistry(OccurrenceRegistry):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            pages = self._db.execute("PRAGMA page_count").fetchone()[0]
+            self._db.execute(f"PRAGMA max_page_count={pages}")
 
-        def __init__(self):
-            super().__init__()
-            if type(self).created == 0:
-                pages = self._db.execute("PRAGMA page_count").fetchone()[0]
-                self._db.execute(f"PRAGMA max_page_count={pages}")
-            type(self).created += 1
-
-    monkeypatch.setattr(discover, "SpoolingRecords", LimitedRecords)
+    monkeypatch.setattr(discover, "OccurrenceRegistry", LimitedRegistry)
     bodies = {
         "first.env": b'password="first-secret"\n',
         "full.env": b'password="' + b"Ab0" * 15_000 + b'"\n',
@@ -51,7 +48,7 @@ def test_minio_candidate_spool_failure_reports_partial_and_retains_previous_resu
 
         def __init__(self):
             super().__init__()
-            if type(self).created == 1:
+            if type(self).created == 0:
                 pages = self._db.execute("PRAGMA page_count").fetchone()[0]
                 self._db.execute(f"PRAGMA max_page_count={pages}")
             type(self).created += 1

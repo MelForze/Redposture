@@ -83,9 +83,9 @@ def test_discovery_deduplicates_json_text_and_token_detector_for_one_value() -> 
 @pytest.mark.parametrize(
     "payload,reason",
     [
-        (lambda secret: f"api_token={secret}", "text_api_token"),
-        (lambda secret: f"<api_token>{secret}</api_token>", "xml_api_token"),
-        (lambda secret: f"postgresql://reporter:{secret}@db.internal:5432/app", "uri_with_auth"),
+        (lambda secret: f"api_token={secret}", "generic_secret"),
+        (lambda secret: f"<api_token>{secret}</api_token>", "generic_secret"),
+        (lambda secret: f"postgresql://reporter:{secret}@db.internal:5432/app", "connection_string"),
     ],
 )
 def test_discovery_text_findings_keep_full_long_value(payload, reason: str) -> None:
@@ -95,10 +95,7 @@ def test_discovery_text_findings_keep_full_long_value(payload, reason: str) -> N
     selected = [item for item in findings if item["reason"] == reason]
     assert selected, findings
     assert secret in selected[0]["sample"]
-    if reason == "uri_with_auth":
-        assert selected[0]["sample"] == payload(secret)
-    else:
-        assert selected[0]["sample"].endswith("-Tail")
+    assert selected[0]["sample"] == (payload(secret) if reason == "connection_string" else secret)
 
 
 @pytest.mark.parametrize("kind", ["qemu", "lxc"])
@@ -116,7 +113,7 @@ def test_discovery_ignores_pve_config_digest_without_losing_secrets(kind: str) -
     assert not any(digest in item["sample"] for item in findings)
     assert any(item["path"] == "$.description" for item in findings)
     assert any(item["path"] == "$.password" for item in findings)
-    assert any(token in item["sample"] for item in findings)
+    assert any(token.split("=", 1)[-1] == item["sample"] for item in findings)
     assert any("RealSecret12345" in item["sample"] for item in findings)
 
 
@@ -128,7 +125,7 @@ def test_discovery_does_not_globally_suppress_opaque_config_values() -> None:
     proxmox_actions._scan_endpoint_payload("/nodes/pve/qemu/101/config", payload, findings, set())
 
     assert findings
-    assert any(token in item["sample"] for item in findings)
+    assert any(token.split("=", 1)[-1] == item["sample"] for item in findings)
 
 
 def test_streamed_proxmox_findings_are_not_repeated_at_final_render() -> None:
@@ -1903,9 +1900,11 @@ def test_audit_proxmox_detects_uri_jwt_and_base64_cloud_init(monkeypatch) -> Non
     )
 
     reasons = {str(item.get("reason") or "") for item in (record.get("findings") or []) if isinstance(item, dict)}
-    assert "uri_with_auth" in reasons
-    assert "jwt_token" in reasons
-    assert "cloud_init_blob" in reasons
+    assert {"password", "jwt"} <= reasons
+    values = {item["sample"] for item in record["findings"]}
+    assert "postgresql://app:AppSecret2026@db.internal:5432/app" in values
+    assert "SuperSecret2026!" in values
+    assert cloud_init not in values
 
 
 def test_format_record_token_ok_caps_order_and_no_endpoints_findings() -> None:
@@ -2767,6 +2766,6 @@ def test_discover_text_xml_secret_requires_sensitive_tag() -> None:
         path="$.description",
         limit=20,
     )
-    assert any(item["reason"] == "xml_password" for item in findings)
+    assert any(item["reason"] == "password" for item in findings)
     assert any("SecretXmlValue12345" in item["sample"] for item in findings)
     assert not any(item["reason"] == "xml_description" for item in findings)

@@ -15,23 +15,59 @@
     "can_delete_znode": null,
     "connect_error": null,
     "content_discovery": {
-      "bytes_inspected": 432,
+      "bytes_inspected": 275,
       "bytes_read": 254,
       "emitted_fingerprints": [],
       "findings": [
         {
-          "confidence": "high",
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./redposture/app/api_key.api_key",
+          "locations": [
+            {
+              "object": "znode./redposture/app/api_key",
+              "object_path": "$.znode./redposture/app/api_key",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.znode./redposture/app/api_key",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "api_key",
           "value": "rp-keeper-key-2026"
         }
       ],
       "live_emitted": false,
-      "partial_reasons": [],
+      "partial_reasons": [
+        "znode./keeper/feature_flags: binary_or_unsupported_encoding"
+      ],
       "source": "anonymous",
-      "status": "complete"
+      "sources": [
+        {
+          "complete": false,
+          "denied": 0,
+          "id": "keeper.znode_data",
+          "implemented": true,
+          "read": 14,
+          "requested": 14,
+          "scope": "selected_or_reachable_znodes",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "keeper.znode_children",
+          "implemented": true,
+          "read": 14,
+          "requested": 14,
+          "scope": "reachable_parent_children_responses",
+          "unsupported": false
+        }
+      ],
+      "status": "partial"
     },
     "credential_auth_probe_results": {},
     "credential_verdict": null,
@@ -114,13 +150,13 @@
     "znode_capability_scope": null,
     "znode_count": 13,
     "znode_count_attempt_timeouts": [],
-    "znode_count_partial": false,
-    "znode_count_unknown": false,
+    "znode_count_partial": true,
+    "znode_count_unknown": true,
     "znode_details": null,
-    "znode_truncated_reason": null,
+    "znode_truncated_reason": "znode./keeper/feature_flags: binary_or_unsupported_encoding",
     "znode_values": null,
     "znodes": null,
-    "znodes_truncated": false
+    "znodes_truncated": true
   },
   {
     "_zookeeper_discovery_streamed": true,
@@ -138,23 +174,59 @@
     "can_delete_znode": null,
     "connect_error": null,
     "content_discovery": {
-      "bytes_inspected": 432,
+      "bytes_inspected": 275,
       "bytes_read": 254,
       "emitted_fingerprints": [],
       "findings": [
         {
-          "confidence": "high",
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./redposture/app/api_key.api_key",
+          "locations": [
+            {
+              "object": "znode./redposture/app/api_key",
+              "object_path": "$.znode./redposture/app/api_key",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.znode./redposture/app/api_key",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "api_key",
           "value": "rp-keeper-key-2026"
         }
       ],
       "live_emitted": false,
-      "partial_reasons": [],
+      "partial_reasons": [
+        "znode./keeper/feature_flags: binary_or_unsupported_encoding"
+      ],
       "source": "anonymous",
-      "status": "complete"
+      "sources": [
+        {
+          "complete": false,
+          "denied": 0,
+          "id": "keeper.znode_data",
+          "implemented": true,
+          "read": 14,
+          "requested": 14,
+          "scope": "selected_or_reachable_znodes",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "keeper.znode_children",
+          "implemented": true,
+          "read": 14,
+          "requested": 14,
+          "scope": "reachable_parent_children_responses",
+          "unsupported": false
+        }
+      ],
+      "status": "partial"
     },
     "credential_auth_probe_results": {},
     "credential_verdict": null,
@@ -237,13 +309,13 @@
     "znode_capability_scope": null,
     "znode_count": 13,
     "znode_count_attempt_timeouts": [],
-    "znode_count_partial": false,
-    "znode_count_unknown": false,
+    "znode_count_partial": true,
+    "znode_count_unknown": true,
     "znode_details": null,
-    "znode_truncated_reason": null,
+    "znode_truncated_reason": "znode./keeper/feature_flags: binary_or_unsupported_encoding",
     "znode_values": null,
     "znodes": null,
-    "znodes_truncated": false
+    "znodes_truncated": true
   },
   {
     "host": "127.0.0.1",
@@ -253,19 +325,19 @@
     "znode_count": 13,
     "znode_values": [
       "/:<empty>",
-      "/clickhouse:cluster=keeper-lab",
-      "/keeper:<empty>",
-      "/redposture:env=keeper-lab,owner=platform",
+      "/clickhouse/tables/01/redposture.events/metadata:CREATE TABLE redposture.events (id UInt64, event String) ENGINE=ReplicatedMergeTree",
+      "/clickhouse/tables/01/redposture.events/replicas/replica-1:host=keeper-lab-1",
+      "/clickhouse/tables/01/redposture.events/replicas:replica_count=1",
+      "/clickhouse/tables/01/redposture.events:database=redposture,table=events",
+      "/clickhouse/tables/01:shard=01",
       "/clickhouse/tables:replicas=3",
+      "/clickhouse:cluster=keeper-lab",
       "/keeper/api_version:2",
       "/keeper/feature_flags:<base64:wA==>",
-      "/redposture/app:service=redposture-api",
-      "/clickhouse/tables/01:shard=01",
+      "/keeper:<empty>",
       "/redposture/app/api_key:rp-keeper-key-2026",
-      "/clickhouse/tables/01/redposture.events:database=redposture,table=events",
-      "/clickhouse/tables/01/redposture.events/replicas:replica_count=1",
-      "/clickhouse/tables/01/redposture.events/metadata:CREATE TABLE redposture.events (id UInt64, event String) ENGINE=ReplicatedMergeTree",
-      "/clickhouse/tables/01/redposture.events/replicas/replica-1:host=keeper-lab-1"
+      "/redposture/app:service=redposture-api",
+      "/redposture:env=keeper-lab,owner=platform"
     ]
   },
   {
@@ -276,18 +348,18 @@
     "znode_count": 13,
     "znodes": [
       "/clickhouse",
-      "/keeper",
-      "/redposture",
       "/clickhouse/tables",
+      "/clickhouse/tables/01",
+      "/clickhouse/tables/01/redposture.events",
+      "/clickhouse/tables/01/redposture.events/metadata",
+      "/clickhouse/tables/01/redposture.events/replicas",
+      "/clickhouse/tables/01/redposture.events/replicas/replica-1",
+      "/keeper",
       "/keeper/api_version",
       "/keeper/feature_flags",
+      "/redposture",
       "/redposture/app",
-      "/clickhouse/tables/01",
-      "/redposture/app/api_key",
-      "/clickhouse/tables/01/redposture.events",
-      "/clickhouse/tables/01/redposture.events/replicas",
-      "/clickhouse/tables/01/redposture.events/metadata",
-      "/clickhouse/tables/01/redposture.events/replicas/replica-1"
+      "/redposture/app/api_key"
     ]
   },
   {
@@ -298,19 +370,19 @@
     "znode_count": 13,
     "znode_values": [
       "/:<empty>",
-      "/clickhouse:cluster=keeper-lab",
-      "/keeper:<empty>",
-      "/redposture:env=keeper-lab,owner=platform",
-      "/clickhouse/tables:replicas=3",
-      "/keeper/feature_flags:<base64:wA==>",
-      "/keeper/api_version:2",
-      "/redposture/app:service=redposture-api",
-      "/clickhouse/tables/01:shard=01",
-      "/redposture/app/api_key:rp-keeper-key-2026",
-      "/clickhouse/tables/01/redposture.events:database=redposture,table=events",
-      "/clickhouse/tables/01/redposture.events/replicas:replica_count=1",
       "/clickhouse/tables/01/redposture.events/metadata:CREATE TABLE redposture.events (id UInt64, event String) ENGINE=ReplicatedMergeTree",
-      "/clickhouse/tables/01/redposture.events/replicas/replica-1:host=keeper-lab-1"
+      "/clickhouse/tables/01/redposture.events/replicas/replica-1:host=keeper-lab-1",
+      "/clickhouse/tables/01/redposture.events/replicas:replica_count=1",
+      "/clickhouse/tables/01/redposture.events:database=redposture,table=events",
+      "/clickhouse/tables/01:shard=01",
+      "/clickhouse/tables:replicas=3",
+      "/clickhouse:cluster=keeper-lab",
+      "/keeper/api_version:2",
+      "/keeper/feature_flags:<base64:wA==>",
+      "/keeper:<empty>",
+      "/redposture/app/api_key:rp-keeper-key-2026",
+      "/redposture/app:service=redposture-api",
+      "/redposture:env=keeper-lab,owner=platform"
     ]
   },
   {
@@ -321,18 +393,18 @@
     "znode_count": 13,
     "znodes": [
       "/clickhouse",
-      "/keeper",
-      "/redposture",
       "/clickhouse/tables",
-      "/keeper/feature_flags",
-      "/keeper/api_version",
-      "/redposture/app",
       "/clickhouse/tables/01",
-      "/redposture/app/api_key",
       "/clickhouse/tables/01/redposture.events",
-      "/clickhouse/tables/01/redposture.events/replicas",
       "/clickhouse/tables/01/redposture.events/metadata",
-      "/clickhouse/tables/01/redposture.events/replicas/replica-1"
+      "/clickhouse/tables/01/redposture.events/replicas",
+      "/clickhouse/tables/01/redposture.events/replicas/replica-1",
+      "/keeper",
+      "/keeper/api_version",
+      "/keeper/feature_flags",
+      "/redposture",
+      "/redposture/app",
+      "/redposture/app/api_key"
     ]
   }
 ]

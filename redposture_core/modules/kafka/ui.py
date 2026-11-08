@@ -9,7 +9,8 @@ import re
 import sqlite3
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any
@@ -23,6 +24,7 @@ from ...detection_io import run_sync as _run_detect_sync
 from ...discovery_frontier import DiscoveryFrontier
 from ...discovery_json import DiskJSONDocument
 from ...discovery_options import DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
+from ...discovery_sources import SourceManifest, SourceRead
 from ...discovery_spool import SpoolingRecords, SpoolingStrings, SpoolingValues
 from ...discovery_values import iter_json_chunks
 from ...html_fingerprint import markup_evidence
@@ -804,6 +806,28 @@ def _collect_cluster_inventory(
             page += 1
 
 
+@contextmanager
+def _source_attempt(options: dict[str, Any], kind: str) -> Iterator[SourceRead]:
+    manifest = options.get("_source_manifest")
+    source = "kafka." + kind
+    evidence, finished = SourceRead(), False
+    if manifest is not None:
+        manifest.request(source, scope="selected_ui_collections_and_topic_walks")
+    try:
+        with manifest.guard(source) if manifest is not None else nullcontext():
+            yield evidence
+            finished = True
+    finally:
+        if manifest is not None:
+            manifest.read(source, evidence.count)
+            manifest.finish(source, complete=finished and evidence.complete, denied=evidence.status in {401, 403})
+
+
+def _message_error_status(error: str | None) -> int | None:
+    match = re.search(r"\bHTTP (401|403)\b", error or "")
+    return int(match[1]) if match else None
+
+
 def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, Any]) -> dict[str, Any]:
     """Checkpoint every completed message page, keeping messages off the result object."""
     payload = dict(record)
@@ -812,6 +836,8 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
         return payload
     args = getattr(ctx, "args", None)
     collector = DiscoveryCollector("kafka", ctx, payload) if getattr(args, "discover", False) else None
+    if collector is not None and options.get("_source_manifest") is not None:
+        collector.source_manifest = options["_source_manifest"]
     budget = _UiDiscoveryBudget(2**63 - 1, collector.deadline) if collector is not None else None
     discovery_kwargs: dict[str, Any] = {"budget": budget} if budget is not None else {}
     temporary = (
@@ -865,28 +891,31 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
             },
         ) as writer:
             try:
-                check_deadline()
-                cluster_response, cluster_data = _full_json(
-                    pool, base, "/api/clusters", cookie=cookie, **discovery_kwargs
-                )
-                clusters = _clusters(cluster_data, limit=None)
-                cluster_problem = response_problem(cluster_response)
-                if clusters is None:
-                    payload["ui_clusters_partial"] = True
-                    payload["ui_topics_partial"] = True
-                    payload["cluster_count"] = None
-                    raise _FullIncomplete(f"Kafka UI clusters unavailable: {cluster_problem or 'invalid JSON'}")
-                if collector is not None:
-                    collector.mark_accessible_source()
-                payload["ui_clusters"] = clusters
-                payload["cluster_count"] = len(clusters)
-                if cluster_problem:
-                    payload["ui_clusters_partial"] = True
-                    payload["ui_topics_partial"] = True
-                    payload["cluster_count"] = None
+                with _source_attempt(options, "ui_cluster_catalog") as evidence:
+                    check_deadline()
+                    cluster_response, cluster_data = _full_json(
+                        pool, base, "/api/clusters", cookie=cookie, **discovery_kwargs
+                    )
+                    evidence.status = cluster_response.status
+                    clusters = _clusters(cluster_data, limit=None)
+                    cluster_problem = response_problem(cluster_response)
+                    if clusters is None:
+                        payload["ui_clusters_partial"] = True
+                        payload["ui_topics_partial"] = True
+                        payload["cluster_count"] = None
+                        raise _FullIncomplete(f"Kafka UI clusters unavailable: {cluster_problem or 'invalid JSON'}")
                     if collector is not None:
-                        collector.add("ui.clusters", clusters, charge=False)
-                    raise _FullIncomplete(f"Kafka UI clusters: {cluster_problem}")
+                        collector.mark_accessible_source()
+                    payload["ui_clusters"] = clusters
+                    payload["cluster_count"] = len(clusters)
+                    if cluster_problem:
+                        payload["ui_clusters_partial"] = True
+                        payload["ui_topics_partial"] = True
+                        payload["cluster_count"] = None
+                        if collector is not None:
+                            collector.add("ui.clusters", clusters, charge=False)
+                        raise _FullIncomplete(f"Kafka UI clusters: {cluster_problem}")
+                    evidence.accept()
                 for cluster in clusters:
                     check_deadline()
                     cluster_name = str(cluster["name"])
@@ -895,49 +924,53 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
                     topics: list[str] = SpoolingStrings() if collector is not None else []
                     topic_problem: str | None = None
                     if not topic_filter or options.get("show_topics"):
-                        page_number = 1
-                        seen_pages: set[tuple[str, ...]] = set()
-                        while True:
-                            check_deadline()
-                            page_response, value = _full_json(
-                                pool,
-                                base,
-                                cluster_path + f"/topics?page={page_number}&perPage=200",
-                                cookie=cookie,
-                                **discovery_kwargs,
-                            )
-                            items = value.get("topics") if isinstance(value, Mapping) else value
-                            page_problem = response_problem(page_response)
-                            if not isinstance(items, list):
-                                payload["ui_topics_partial"] = True
-                                raise _FullIncomplete(
-                                    f"Kafka UI {cluster_name} topics unavailable: {page_problem or 'invalid JSON'}"
+                        with _source_attempt(options, "ui_topic_catalog") as evidence:
+                            page_number = 1
+                            seen_pages: set[tuple[str, ...]] = set()
+                            while True:
+                                check_deadline()
+                                page_response, value = _full_json(
+                                    pool,
+                                    base,
+                                    cluster_path + f"/topics?page={page_number}&perPage=200",
+                                    cookie=cookie,
+                                    **discovery_kwargs,
                                 )
-                            names = tuple(
-                                item["name"]
-                                for item in items
-                                if isinstance(item, Mapping) and isinstance(item.get("name"), str)
-                            )
-                            digest = hashlib.sha256(json.dumps(names).encode()).hexdigest()
-                            if frontier is not None:
-                                fresh_page = frontier.claim(f"page:{cluster_name}:{digest}")
-                            else:
-                                fresh_page = names not in seen_pages
-                                seen_pages.add(names)
-                            if not fresh_page:
-                                raise _FullIncomplete(f"Kafka UI {cluster_name}: repeated topic page")
-                            for name in names:
-                                if frontier is None or frontier.claim(f"topic:{cluster_name}:{name}"):
-                                    topics.append(name)
-                            if page_problem:
-                                payload["ui_topics_partial"] = True
-                                if collector is not None:
-                                    collector.add(f"ui.cluster.{cluster_name}.topics", items, charge=False)
-                                topic_problem = page_problem
-                                break
-                            if len(items) < 200:
-                                break
-                            page_number += 1
+                                evidence.status = page_response.status
+                                items = value.get("topics") if isinstance(value, Mapping) else value
+                                page_problem = response_problem(page_response)
+                                if not isinstance(items, list):
+                                    payload["ui_topics_partial"] = True
+                                    raise _FullIncomplete(
+                                        f"Kafka UI {cluster_name} topics unavailable: {page_problem or 'invalid JSON'}"
+                                    )
+                                names = tuple(
+                                    item["name"]
+                                    for item in items
+                                    if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+                                )
+                                digest = hashlib.sha256(json.dumps(names).encode()).hexdigest()
+                                if frontier is not None:
+                                    fresh_page = frontier.claim(f"page:{cluster_name}:{digest}")
+                                else:
+                                    fresh_page = names not in seen_pages
+                                    seen_pages.add(names)
+                                if not fresh_page:
+                                    raise _FullIncomplete(f"Kafka UI {cluster_name}: repeated topic page")
+                                for name in names:
+                                    if frontier is None or frontier.claim(f"topic:{cluster_name}:{name}"):
+                                        topics.append(name)
+                                if page_problem:
+                                    payload["ui_topics_partial"] = True
+                                    if collector is not None:
+                                        collector.add(f"ui.cluster.{cluster_name}.topics", items, charge=False)
+                                    topic_problem = page_problem
+                                    break
+                                evidence.count += 1
+                                if len(items) < 200:
+                                    evidence.complete = True
+                                    break
+                                page_number += 1
                     if options.get("show_topics"):
                         if collector is not None:
                             if not isinstance(payload["ui_topics"], SpoolingRecords):
@@ -954,71 +987,19 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
                     if topic_problem:
                         raise _FullIncomplete(f"Kafka UI {cluster_name} topics: {topic_problem}")
                     for topic in [topic_filter] if topic_filter else topics:
-                        checkpoint_key = f"topic:{cluster_name}:{topic}"
-                        checkpoint = writer.get_meta(checkpoint_key) or {}
-                        if checkpoint.get("complete"):
-                            continue
-                        cursor = checkpoint.get("cursor")
-                        legacy = checkpoint.get("legacy")
-                        offsets: dict[int, int] | None = None
-                        end: dict[int, int] | None = None
-                        if isinstance(legacy, dict):
-                            offsets = {int(k): int(v) for k, v in legacy.get("offsets", {}).items()}
-                            end = {int(k): int(v) for k, v in legacy.get("end", {}).items()}
-                        elif state.ui_vendor == "provectus":
-                            snapshot = _legacy_topic_offsets(
-                                pool, base, cluster_name, topic, cookie=cookie, **discovery_kwargs
-                            )
-                            if snapshot is None:
-                                raise _FullIncomplete(
-                                    f"legacy Kafka UI {cluster_name}/{topic}: end offsets unavailable"
-                                )
-                            offsets, end = snapshot
-                            writer.set_meta(checkpoint_key, {"legacy": {"offsets": offsets, "end": end}})
-                        seen_cursors: set[str] = set()
-                        while True:
-                            check_deadline()
-                            scanned: set[tuple[int, int]] = set()
-
-                            def scan_message(
-                                message: dict[str, Any],
-                                *,
-                                scanned: set[tuple[int, int]] = scanned,
-                                offsets: dict[int, int] | None = offsets,
-                                end: dict[int, int] | None = end,
-                                cluster_name: str = cluster_name,
-                                topic: str = topic,
-                            ) -> None:
-                                position_key = (message["partition"], message["offset"])
-                                if collector is None or position_key in scanned:
-                                    return
-                                if offsets is not None:
-                                    assert end is not None
-                                    part, position = position_key
-                                    if part not in offsets or not offsets[part] <= position < end[part]:
-                                        return
-                                scanned.add(position_key)
-                                source = f"ui.cluster.{cluster_name}.topic.{topic}.partition.{position_key[0]}.offset.{position_key[1]}"
-                                collector.scan_json_chunks(
-                                    source, (chunk.encode("utf-8") for chunk in iter_json_chunks(message))
-                                )
-
-                            message_kwargs = (
-                                {**discovery_kwargs, "on_message": scan_message} if collector is not None else {}
-                            )
-                            page, done, error, next_cursor, cursor_supported = _read_ui_messages(
-                                pool,
-                                base,
-                                cluster_name,
-                                topic,
-                                vendor=state.ui_vendor,
-                                cookie=cookie,
-                                limit=500,
-                                cursor=cursor,
-                                offsets=offsets,
-                                **message_kwargs,
-                            )
-                            if done and not error and not cursor_supported and offsets is None:
+                        with _source_attempt(options, "ui_message_walks") as evidence:
+                            checkpoint_key = f"topic:{cluster_name}:{topic}"
+                            checkpoint = writer.get_meta(checkpoint_key) or {}
+                            if checkpoint.get("complete"):
+                                continue
+                            cursor = checkpoint.get("cursor")
+                            legacy = checkpoint.get("legacy")
+                            offsets: dict[int, int] | None = None
+                            end: dict[int, int] | None = None
+                            if isinstance(legacy, dict):
+                                offsets = {int(k): int(v) for k, v in legacy.get("offsets", {}).items()}
+                                end = {int(k): int(v) for k, v in legacy.get("end", {}).items()}
+                            elif state.ui_vendor == "provectus":
                                 snapshot = _legacy_topic_offsets(
                                     pool, base, cluster_name, topic, cookie=cookie, **discovery_kwargs
                                 )
@@ -1027,58 +1008,119 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
                                         f"legacy Kafka UI {cluster_name}/{topic}: end offsets unavailable"
                                     )
                                 offsets, end = snapshot
-                            advanced = 0
-                            next_offsets = dict(offsets) if offsets is not None else None
-                            for message in page:
-                                part, position = message["partition"], message["offset"]
-                                if offsets is not None:
-                                    assert end is not None
-                                    if part not in offsets or not offsets[part] <= position < end[part]:
-                                        continue
-                                    assert next_offsets is not None
-                                    next_offsets[part] = max(next_offsets[part], position + 1)
-                                    advanced += 1
-                                key = f"message:{cluster_name}:{topic}:{part}:{position}"
-                                if writer.add(key, "messages", {"cluster": cluster_name, "topic": topic, **message}):
-                                    if collector is not None:
-                                        scan_message(message)
-                                    emit = getattr(ctx, "live_emit", None)
-                                    if collector is None and callable(emit) and writer.new_count % 100 == 0:
-                                        emit(
-                                            [f"KAFKA\t{ctx.host}\t{ctx.port}\t [*] UI Export (messages:{writer.count})"]
+                                writer.set_meta(checkpoint_key, {"legacy": {"offsets": offsets, "end": end}})
+                            seen_cursors: set[str] = set()
+                            while True:
+                                check_deadline()
+                                scanned: set[tuple[int, int]] = set()
+
+                                def scan_message(
+                                    message: dict[str, Any],
+                                    *,
+                                    scanned: set[tuple[int, int]] = scanned,
+                                    offsets: dict[int, int] | None = offsets,
+                                    end: dict[int, int] | None = end,
+                                    cluster_name: str = cluster_name,
+                                    topic: str = topic,
+                                ) -> None:
+                                    position_key = (message["partition"], message["offset"])
+                                    if collector is None or position_key in scanned:
+                                        return
+                                    if offsets is not None:
+                                        assert end is not None
+                                        part, position = position_key
+                                        if part not in offsets or not offsets[part] <= position < end[part]:
+                                            return
+                                    scanned.add(position_key)
+                                    source = f"ui.cluster.{cluster_name}.topic.{topic}.partition.{position_key[0]}.offset.{position_key[1]}"
+                                    collector.scan_json_chunks(
+                                        source, (chunk.encode("utf-8") for chunk in iter_json_chunks(message))
+                                    )
+
+                                message_kwargs = (
+                                    {**discovery_kwargs, "on_message": scan_message} if collector is not None else {}
+                                )
+                                page, done, error, next_cursor, cursor_supported = _read_ui_messages(
+                                    pool,
+                                    base,
+                                    cluster_name,
+                                    topic,
+                                    vendor=state.ui_vendor,
+                                    cookie=cookie,
+                                    limit=500,
+                                    cursor=cursor,
+                                    offsets=offsets,
+                                    **message_kwargs,
+                                )
+                                evidence.status = _message_error_status(error)
+                                if done and not error and not cursor_supported and offsets is None:
+                                    snapshot = _legacy_topic_offsets(
+                                        pool, base, cluster_name, topic, cookie=cookie, **discovery_kwargs
+                                    )
+                                    if snapshot is None:
+                                        raise _FullIncomplete(
+                                            f"legacy Kafka UI {cluster_name}/{topic}: end offsets unavailable"
                                         )
-                            if not done or error:
-                                raise _FullIncomplete(
-                                    f"Kafka UI {cluster_name}/{topic}: {error or 'incomplete message page'}"
-                                )
-                            if next_offsets is not None:
-                                offsets = next_offsets
-                                assert end is not None
-                                complete = all(offsets[part] >= high for part, high in end.items())
-                                writer.set_meta(
-                                    checkpoint_key,
-                                    {"legacy": {"offsets": offsets, "end": end}, "complete": complete},
-                                )
-                                if complete:
-                                    break
-                                if not advanced:
-                                    raise _FullIncomplete(f"legacy Kafka UI {cluster_name}/{topic}: no offset progress")
-                                continue
-                            if next_cursor:
-                                fresh_cursor = (
-                                    frontier.claim(f"cursor:{cluster_name}:{topic}:{next_cursor}")
-                                    if frontier is not None
-                                    else next_cursor not in seen_cursors
-                                )
-                                if not fresh_cursor or next_cursor == cursor:
-                                    raise _FullIncomplete(f"Kafka UI {cluster_name}/{topic}: repeated cursor")
-                                if frontier is None:
-                                    seen_cursors.add(next_cursor)
-                                cursor = next_cursor
-                                writer.set_meta(checkpoint_key, {"cursor": cursor})
-                                continue
-                            writer.set_meta(checkpoint_key, {"complete": True})
-                            break
+                                    offsets, end = snapshot
+                                advanced = 0
+                                next_offsets = dict(offsets) if offsets is not None else None
+                                for message in page:
+                                    part, position = message["partition"], message["offset"]
+                                    if offsets is not None:
+                                        assert end is not None
+                                        if part not in offsets or not offsets[part] <= position < end[part]:
+                                            continue
+                                        assert next_offsets is not None
+                                        next_offsets[part] = max(next_offsets[part], position + 1)
+                                        advanced += 1
+                                    key = f"message:{cluster_name}:{topic}:{part}:{position}"
+                                    if writer.add(
+                                        key, "messages", {"cluster": cluster_name, "topic": topic, **message}
+                                    ):
+                                        if collector is not None:
+                                            scan_message(message)
+                                        emit = getattr(ctx, "live_emit", None)
+                                        if collector is None and callable(emit) and writer.new_count % 100 == 0:
+                                            emit(
+                                                [
+                                                    f"KAFKA\t{ctx.host}\t{ctx.port}\t [*] UI Export (messages:{writer.count})"
+                                                ]
+                                            )
+                                if not done or error:
+                                    raise _FullIncomplete(
+                                        f"Kafka UI {cluster_name}/{topic}: {error or 'incomplete message page'}"
+                                    )
+                                if next_offsets is not None:
+                                    offsets = next_offsets
+                                    assert end is not None
+                                    complete = all(offsets[part] >= high for part, high in end.items())
+                                    writer.set_meta(
+                                        checkpoint_key,
+                                        {"legacy": {"offsets": offsets, "end": end}, "complete": complete},
+                                    )
+                                    if complete:
+                                        break
+                                    if not advanced:
+                                        raise _FullIncomplete(
+                                            f"legacy Kafka UI {cluster_name}/{topic}: no offset progress"
+                                        )
+                                    continue
+                                if next_cursor:
+                                    fresh_cursor = (
+                                        frontier.claim(f"cursor:{cluster_name}:{topic}:{next_cursor}")
+                                        if frontier is not None
+                                        else next_cursor not in seen_cursors
+                                    )
+                                    if not fresh_cursor or next_cursor == cursor:
+                                        raise _FullIncomplete(f"Kafka UI {cluster_name}/{topic}: repeated cursor")
+                                    if frontier is None:
+                                        seen_cursors.add(next_cursor)
+                                    cursor = next_cursor
+                                    writer.set_meta(checkpoint_key, {"cursor": cursor})
+                                    continue
+                                writer.set_meta(checkpoint_key, {"complete": True})
+                                break
+                            evidence.accept()
             except (KeyboardInterrupt, _FullIncomplete) as exc:
                 result = writer.finish(complete=False, reason=str(exc) or "interrupted")
             else:
@@ -1103,6 +1145,22 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
 
 
 def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, Any]) -> dict[str, Any]:
+    if not bool(getattr(getattr(ctx, "args", None), "discover", False)):
+        return _collect_ui(ctx, record, state, options)
+    manifest = SourceManifest()
+    if record.get("kafka_interface") == "http_surface":
+        source = "kafka.http_surface_messages"
+        manifest.request(source, implemented=False, scope=str(record.get("ui_vendor") or "http_surface"))
+        manifest.finish(source, complete=False, unsupported=True)
+    else:
+        for kind in ("ui_cluster_catalog", "ui_topic_catalog", "ui_message_walks"):
+            manifest.declare("kafka." + kind)
+    result = _collect_ui(ctx, record, state, {**options, "_source_manifest": manifest})
+    result["discover_sources"] = manifest.result()
+    return result
+
+
+def _collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, Any]) -> dict[str, Any]:
     if record.get("kafka_interface") == "http_surface":
         return http_surfaces.collect(record, options)
     if options.get("ui_dump_all"):
@@ -1123,15 +1181,24 @@ def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, 
     )
     cookie = state.ui_cookie if payload.get("status") in {"valid_credentials", "weak_default_creds"} else ""
     discovery_kwargs: dict[str, Any] = {"budget": discovery_budget} if discovery_budget is not None else {}
-    cluster_response = _get(
-        pool,
-        base,
-        "/api/clusters",
-        cookie=cookie,
-        **discovery_kwargs,
-    )
-    cluster_data = _json(cluster_response)
-    clusters = _clusters(cluster_data, limit=None) or []
+    with _source_attempt(options, "ui_cluster_catalog") as evidence:
+        cluster_response = _get(
+            pool,
+            base,
+            "/api/clusters",
+            cookie=cookie,
+            **discovery_kwargs,
+        )
+        cluster_data = _json(cluster_response)
+        clusters = _clusters(cluster_data, limit=None) or []
+        evidence.status = cluster_response.status
+        if (
+            cluster_response.status == 200
+            and not cluster_response.error
+            and not cluster_response.truncated
+            and _clusters(cluster_data, limit=None) is not None
+        ):
+            evidence.accept()
     payload["ui_clusters"] = [
         {
             "name": c["name"],
@@ -1193,43 +1260,48 @@ def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, 
         cluster_path = "/api/clusters/" + quote(name, safe="")
         cluster_topics: list[str] = []
         if options.get("show_topics") or (dump_enabled and not query_topic):
-            page = 1
-            seen_names: set[str] = set()
-            while True:
-                if dump_enabled and (topic_pages_remaining <= 0 or time.monotonic() >= dump_deadline):
-                    payload["ui_dump_partial"] = True
-                    break
-                response = _get(
-                    pool,
-                    base,
-                    cluster_path + f"/topics?page={page}&perPage=200",
-                    cookie=cookie,
-                    **discovery_kwargs,
-                )
-                if dump_enabled:
-                    topic_pages_remaining -= 1
-                value = _json(response)
-                items = value.get("topics") if isinstance(value, dict) else value
-                if not isinstance(items, list):
-                    payload["ui_dump_partial"] = dump_enabled
-                    payload["ui_topics_partial"] = bool(options.get("show_topics"))
-                    break
-                new_topics = 0
-                for item in items:
-                    topic = item.get("name") if isinstance(item, dict) else None
-                    if isinstance(topic, str) and topic not in seen_names:
-                        seen_names.add(topic)
-                        cluster_topics.append(topic)
-                        new_topics += 1
-                if len(items) < 200:
-                    break
-                if not new_topics:
-                    payload["ui_dump_partial"] = dump_enabled
-                    payload["ui_topics_partial"] = bool(options.get("show_topics"))
-                    break
-                if not dump_enabled and len(cluster_topics) >= max_topics:
-                    break
-                page += 1
+            with _source_attempt(options, "ui_topic_catalog") as evidence:
+                page = 1
+                seen_names: set[str] = set()
+                while True:
+                    if dump_enabled and (topic_pages_remaining <= 0 or time.monotonic() >= dump_deadline):
+                        payload["ui_dump_partial"] = True
+                        break
+                    response = _get(
+                        pool,
+                        base,
+                        cluster_path + f"/topics?page={page}&perPage=200",
+                        cookie=cookie,
+                        **discovery_kwargs,
+                    )
+                    if dump_enabled:
+                        topic_pages_remaining -= 1
+                    evidence.status = response.status
+                    value = _json(response)
+                    items = value.get("topics") if isinstance(value, dict) else value
+                    if not isinstance(items, list):
+                        payload["ui_dump_partial"] = dump_enabled
+                        payload["ui_topics_partial"] = bool(options.get("show_topics"))
+                        break
+                    new_topics = 0
+                    for item in items:
+                        topic = item.get("name") if isinstance(item, dict) else None
+                        if isinstance(topic, str) and topic not in seen_names:
+                            seen_names.add(topic)
+                            cluster_topics.append(topic)
+                            new_topics += 1
+                    if not response.error and not response.truncated and response.status == 200:
+                        evidence.count += 1
+                    if len(items) < 200:
+                        evidence.complete = not response.error and not response.truncated and response.status == 200
+                        break
+                    if not new_topics:
+                        payload["ui_dump_partial"] = dump_enabled
+                        payload["ui_topics_partial"] = bool(options.get("show_topics"))
+                        break
+                    if not dump_enabled and len(cluster_topics) >= max_topics:
+                        break
+                    page += 1
             cluster_topics.sort()
             if options.get("show_topics"):
                 payload["ui_topics"].extend(
@@ -1242,111 +1314,121 @@ def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, 
             payload["ui_dump_skipped_topics"] += max(0, len(dump_topics) - remaining)
             selected_topics = dump_topics[:remaining]
             for index, topic in enumerate(selected_topics):
-                if (discovery_budget is None and dump_bytes >= dump_byte_limit) or time.monotonic() >= dump_deadline:
-                    payload["ui_dump_partial"] = True
-                    payload["ui_dump_skipped_topics"] += len(selected_topics) - index
-                    break
-                messages: list[dict[str, Any]] = []
-                error: str | None = None
-                complete = False
-                cursor: str | None = None
-                seen_cursors: set[str] = set()
-                legacy_offsets: dict[int, int] | None = None
-                legacy_end: dict[int, int] | None = None
-                seen_positions: set[tuple[int, int]] = set()
-                while (
-                    len(messages) < dump_limit
-                    and (discovery_budget is not None or dump_bytes < dump_byte_limit)
-                    and time.monotonic() < dump_deadline
-                ):
-                    message_page, done, error, next_cursor, cursor_supported = _read_ui_messages(
-                        pool,
-                        base,
-                        name,
-                        topic,
-                        vendor=state.ui_vendor,
-                        cookie=cookie,
-                        limit=min(500, dump_limit - len(messages)),
-                        cursor=cursor,
-                        offsets=legacy_offsets,
-                        **({"budget": discovery_budget} if discovery_budget is not None else {}),
-                    )
-                    page_positions: set[tuple[int, int]] = set()
-                    unique_page = []
-                    for message in message_page:
-                        position = (message["partition"], message["offset"])
-                        if position not in seen_positions and position not in page_positions:
-                            unique_page.append(message)
-                            page_positions.add(position)
-                    duplicate_only = bool(message_page) and not unique_page
-                    message_page = unique_page
-                    message_bytes = len(json.dumps(message_page, ensure_ascii=False).encode())
-                    if next_cursor and next_cursor in seen_cursors:
-                        error = error or "Kafka UI repeated a message cursor"
-                    if duplicate_only and next_cursor:
-                        error = error or "Kafka UI made no unique message progress"
-                    if (discovery_budget is not None and message_bytes > dump_byte_limit) or (
-                        discovery_budget is None and dump_bytes + message_bytes > dump_byte_limit
+                with _source_attempt(options, "ui_message_walks") as evidence:
+                    if (
+                        discovery_budget is None and dump_bytes >= dump_byte_limit
+                    ) or time.monotonic() >= dump_deadline:
+                        payload["ui_dump_partial"] = True
+                        payload["ui_dump_skipped_topics"] += len(selected_topics) - index
+                        break
+                    messages: list[dict[str, Any]] = []
+                    error: str | None = None
+                    complete = False
+                    cursor: str | None = None
+                    seen_cursors: set[str] = set()
+                    legacy_offsets: dict[int, int] | None = None
+                    legacy_end: dict[int, int] | None = None
+                    seen_positions: set[tuple[int, int]] = set()
+                    while (
+                        len(messages) < dump_limit
+                        and (discovery_budget is not None or dump_bytes < dump_byte_limit)
+                        and time.monotonic() < dump_deadline
                     ):
-                        error = "Kafka UI dump byte budget reached"
-                        break
-                    if not done or error:
-                        dump_bytes += message_bytes
-                        messages.extend(message_page)
-                        break
-                    if not cursor_supported:
-                        if legacy_offsets is None:
-                            snapshot = _legacy_topic_offsets(
-                                pool,
-                                base,
-                                name,
-                                topic,
-                                cookie=cookie,
-                                **({"budget": discovery_budget} if discovery_budget is not None else {}),
-                            )
-                            if snapshot is None:
-                                error = "legacy Kafka UI topic end offsets unavailable"
-                                dump_bytes += message_bytes
-                                messages.extend(message_page)
-                                break
-                            legacy_offsets, legacy_end = snapshot
-                        assert legacy_end is not None
-                        new_positions = 0
+                        message_page, done, error, next_cursor, cursor_supported = _read_ui_messages(
+                            pool,
+                            base,
+                            name,
+                            topic,
+                            vendor=state.ui_vendor,
+                            cookie=cookie,
+                            limit=min(500, dump_limit - len(messages)),
+                            cursor=cursor,
+                            offsets=legacy_offsets,
+                            **({"budget": discovery_budget} if discovery_budget is not None else {}),
+                        )
+                        page_positions: set[tuple[int, int]] = set()
+                        unique_page = []
                         for message in message_page:
                             position = (message["partition"], message["offset"])
-                            if position[0] not in legacy_offsets or position in seen_positions:
-                                continue
-                            if not (legacy_offsets[position[0]] <= position[1] < legacy_end[position[0]]):
-                                continue
-                            seen_positions.add(position)
-                            legacy_offsets[position[0]] = position[1] + 1
-                            messages.append(message)
-                            new_positions += 1
+                            if position not in seen_positions and position not in page_positions:
+                                unique_page.append(message)
+                                page_positions.add(position)
+                        duplicate_only = bool(message_page) and not unique_page
+                        message_page = unique_page
+                        message_bytes = (
+                            sum(len(chunk.encode("utf-8")) for chunk in iter_json_chunks(message_page))
+                            if discovery_budget is not None
+                            else len(json.dumps(message_page, ensure_ascii=False).encode())
+                        )
+                        if next_cursor and next_cursor in seen_cursors:
+                            error = error or "Kafka UI repeated a message cursor"
+                        if duplicate_only and next_cursor:
+                            error = error or "Kafka UI made no unique message progress"
+                        if (discovery_budget is not None and message_bytes > dump_byte_limit) or (
+                            discovery_budget is None and dump_bytes + message_bytes > dump_byte_limit
+                        ):
+                            error = "Kafka UI dump byte budget reached"
+                            break
+                        if not done or error:
+                            dump_bytes += message_bytes
+                            messages.extend(message_page)
+                            break
+                        if not cursor_supported:
+                            if legacy_offsets is None:
+                                snapshot = _legacy_topic_offsets(
+                                    pool,
+                                    base,
+                                    name,
+                                    topic,
+                                    cookie=cookie,
+                                    **({"budget": discovery_budget} if discovery_budget is not None else {}),
+                                )
+                                if snapshot is None:
+                                    error = "legacy Kafka UI topic end offsets unavailable"
+                                    dump_bytes += message_bytes
+                                    messages.extend(message_page)
+                                    break
+                                legacy_offsets, legacy_end = snapshot
+                            assert legacy_end is not None
+                            new_positions = 0
+                            for message in message_page:
+                                position = (message["partition"], message["offset"])
+                                if position[0] not in legacy_offsets or position in seen_positions:
+                                    continue
+                                if not (legacy_offsets[position[0]] <= position[1] < legacy_end[position[0]]):
+                                    continue
+                                seen_positions.add(position)
+                                legacy_offsets[position[0]] = position[1] + 1
+                                messages.append(message)
+                                new_positions += 1
+                            dump_bytes += message_bytes
+                            if all(legacy_offsets[part] >= high for part, high in legacy_end.items()):
+                                complete = True
+                                break
+                            if not new_positions:
+                                error = "legacy Kafka UI made no offset progress before topic end"
+                                break
+                            continue
                         dump_bytes += message_bytes
-                        if all(legacy_offsets[part] >= high for part, high in legacy_end.items()):
-                            complete = True
-                            break
-                        if not new_positions:
-                            error = "legacy Kafka UI made no offset progress before topic end"
-                            break
-                        continue
-                    dump_bytes += message_bytes
-                    messages.extend(message_page)
-                    seen_positions.update(page_positions)
-                    if next_cursor:
-                        seen_cursors.add(next_cursor)
-                        cursor = next_cursor
-                        continue
-                    # The v2 cursor contract defines an absent next cursor as
-                    # the end of polling, regardless of the page size.
-                    complete = True
-                    break
-                if len(messages) >= dump_limit and not complete:
-                    error = error or "Kafka UI message limit reached"
-                payload["ui_dump_partial"] = payload["ui_dump_partial"] or not complete
-                payload["ui_dump_records"].append(
-                    {"cluster": name, "topic": topic, "messages": messages, "complete": complete, "error": error}
-                )
+                        messages.extend(message_page)
+                        seen_positions.update(page_positions)
+                        if next_cursor:
+                            seen_cursors.add(next_cursor)
+                            cursor = next_cursor
+                            continue
+                        # The v2 cursor contract defines an absent next cursor as
+                        # the end of polling, regardless of the page size.
+                        complete = True
+                        break
+                    if len(messages) >= dump_limit and not complete:
+                        error = error or "Kafka UI message limit reached"
+                    payload["ui_dump_partial"] = payload["ui_dump_partial"] or not complete
+                    payload["ui_dump_records"].append(
+                        {"cluster": name, "topic": topic, "messages": messages, "complete": complete, "error": error}
+                    )
+                    evidence.status = _message_error_status(error)
+                    if complete and not error:
+                        evidence.accept()
         _collect_cluster_inventory(payload, pool, base, cluster_path, name, cookie, options)
     payload["topic_count"] = len(payload["ui_topics"]) if options.get("show_topics") else None
     payload["ui_dump_partial"] = payload["ui_dump_partial"] or payload["ui_dump_skipped_topics"] > 0

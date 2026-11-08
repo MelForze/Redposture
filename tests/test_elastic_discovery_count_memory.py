@@ -185,8 +185,8 @@ def test_elastic_detection_sequence_keeps_membership_copy_and_reverse_after_spil
 
 @pytest.mark.parametrize("shape", ["tree", "disk"])
 def test_elastic_intermediate_storage_failure_returns_completed_prefix(monkeypatch, shape) -> None:
+    from redposture_core import discovery_sequences as value_stream
     from redposture_core.discovery_spool import SpoolingRecords
-    from redposture_core.modules.elastic import value_stream
 
     class LimitedRecords(SpoolingRecords):
         def append(self, value, **kwargs):

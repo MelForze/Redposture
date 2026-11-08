@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -303,105 +304,131 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         return result
     requested = [name for name in ("workers", "apps") if getattr(ctx.args, "show_" + name, False)]
     discover = bool(getattr(ctx.args, "discover", False))
+    collector = DiscoveryCollector("spark", ctx, prior) if discover else None
     result["inventory_requested"] = requested
     if requested or discover:
-        budget = ReadBudget(ctx.args, started_at=getattr(ctx, "discovery_started_at", None))
-        state = "unavailable"
-        data = None
-        streamed_discovery: dict[str, Any] | None = None
-        error = "Master UI metadata unavailable on submission REST endpoint"
-        if prior.get("surface") == "master_ui" and budget.allowed():
-            response = _get(ctx, prior["api_endpoint"], "/json/", budget=budget)
-            pool = getattr(ctx.lifecycle_state, "http", None)
-            if (
-                discover
-                and response.status == 200
-                and response.truncated
-                and not response.error
-                and callable(getattr(pool, "request_stream", None))
-            ):
-                collector = DiscoveryCollector("spark", ctx, prior)
-                collector.stream_json_scalars(
-                    pool,
-                    prior["api_endpoint"] + "/json/",
-                    "spark_metadata",
-                    headers={"Accept": "application/json"},
-                    timeout=budget.timeout(),
-                    root_kind="object",
-                    exclude=lambda path: not path or path[0] not in {"workers", "activeapps"},
-                    expected_string=(("url",), str(prior.get("master_url") or "")),
-                    required_containers={("workers",): "array", ("activeapps",): "array"},
-                    row_validators={
-                        ("workers",): (
-                            frozenset({"id", "host", "state", "port", "cores", "coresused", "memory", "memoryused"}),
-                            _worker,
-                        ),
-                        ("activeapps",): (frozenset({"id", "name", "user", "state", "cores"}), _app),
-                    },
-                    row_streamed_strings={("activeapps",): frozenset({"name"})},
+        with (
+            collector.source_attempt("spark.master_metadata", scope="master_UI_validated_metadata_response")
+            if collector is not None
+            else nullcontext() as evidence
+        ):
+            budget = ReadBudget(ctx.args, started_at=getattr(ctx, "discovery_started_at", None))
+            state = "unavailable"
+            data = None
+            streamed_discovery: dict[str, Any] | None = None
+            error = "Master UI metadata unavailable on submission REST endpoint"
+            if prior.get("surface") == "master_ui" and budget.allowed():
+                response = _get(ctx, prior["api_endpoint"], "/json/", budget=budget)
+                if evidence is not None:
+                    evidence.status = response.status
+                pool = getattr(ctx.lifecycle_state, "http", None)
+                if (
+                    discover
+                    and response.status == 200
+                    and response.truncated
+                    and not response.error
+                    and callable(getattr(pool, "request_stream", None))
+                ):
+                    assert collector is not None
+                    complete_stream = collector.stream_json_scalars(
+                        pool,
+                        prior["api_endpoint"] + "/json/",
+                        "spark_metadata",
+                        headers={"Accept": "application/json"},
+                        timeout=budget.timeout(),
+                        on_status=lambda status: setattr(evidence, "status", status),
+                        root_kind="object",
+                        exclude=lambda path: not path or path[0] not in {"workers", "activeapps"},
+                        expected_string=(("url",), str(prior.get("master_url") or "")),
+                        required_containers={("workers",): "array", ("activeapps",): "array"},
+                        row_validators={
+                            ("workers",): (
+                                frozenset(
+                                    {"id", "host", "state", "port", "cores", "coresused", "memory", "memoryused"}
+                                ),
+                                _worker,
+                            ),
+                            ("activeapps",): (frozenset({"id", "name", "user", "state", "cores"}), _app),
+                        },
+                        row_streamed_strings={("activeapps",): frozenset({"name"})},
+                    )
+                    assert evidence is not None
+                    if complete_stream:
+                        evidence.accept()
+                    streamed_discovery = collector.result()
+                consumed = budget.consume(response) if streamed_discovery is None else False
+                data = json_value(response) if consumed else None
+                state = access(response, _master(data))
+                if not consumed:
+                    state = "unknown"
+                error = (
+                    "response or byte limit"
+                    if not consumed
+                    else "invalid Master collection"
+                    if response.status == 200
+                    else f"HTTP {response.status}"
                 )
-                streamed_discovery = collector.result()
-            consumed = budget.consume(response) if streamed_discovery is None else False
-            data = json_value(response) if consumed else None
-            state = access(response, _master(data))
-            if not consumed:
-                state = "unknown"
-            error = (
-                "response or byte limit"
-                if not consumed
-                else "invalid Master collection"
-                if response.status == 200
-                else f"HTTP {response.status}"
-            )
-        valid = state == "allowed"
-        partial = not valid or budget.partial
-        discover_partial = partial
-        metadata: dict[str, Any] = {}
-        for name, key in (("workers", "workers"), ("apps", "activeapps")):
-            collection = data[key] if valid and isinstance(data, dict) else []
-            rows = collection[:_MAX_ITEMS] if valid else None
-            limited = valid and len(collection) > _MAX_ITEMS
-            partial |= limited
-            if rows is not None:
-                metadata[name] = rows
-            if name in requested:
-                result[name + "_access"] = state
-                result[name + "_partial"] = not valid or limited
+            valid = state == "allowed"
+            partial = not valid or budget.partial
+            discover_partial = partial
+            metadata: dict[str, Any] = {}
+            for name, key in (("workers", "workers"), ("apps", "activeapps")):
+                collection = data[key] if valid and isinstance(data, dict) else []
+                rows = collection[:_MAX_ITEMS] if valid else None
+                limited = valid and len(collection) > _MAX_ITEMS
+                partial |= limited
                 if rows is not None:
-                    result[name] = rows
-                if not valid or limited:
-                    result[name + "_error"] = "item limit" if limited else error
-        result["inventory_status"] = "partial" if valid and partial else "complete" if valid else "unavailable"
-        if discover:
-            if valid and isinstance(data, dict):
-                collector = DiscoveryCollector("spark", ctx, prior)
-                collector.mark_accessible_source()
-                for name, key in (("workers", "workers"), ("apps", "activeapps")):
-                    if not collector.add("spark_metadata." + name, data[key]):
-                        collector.partial("spark_metadata." + name, "discover_time")
-                        break
-                result["content_discovery"] = collector.result()
-                discover_partial |= result["content_discovery"]["status"] != "complete"
+                    metadata[name] = rows
+                if name in requested:
+                    result[name + "_access"] = state
+                    result[name + "_partial"] = not valid or limited
+                    if rows is not None:
+                        result[name] = rows
+                    if not valid or limited:
+                        result[name + "_error"] = "item limit" if limited else error
+            result["inventory_status"] = "partial" if valid and partial else "complete" if valid else "unavailable"
+            if discover:
+                if valid and isinstance(data, dict):
+                    assert collector is not None
+                    collector.mark_accessible_source()
+                    for name, key in (("workers", "workers"), ("apps", "activeapps")):
+                        if not collector.add("spark_metadata." + name, data[key]):
+                            collector.partial("spark_metadata." + name, "discover_time")
+                            break
+                    assert evidence is not None
+                    evidence.accept()
+                    result["content_discovery"] = collector.result()
+                    discover_partial |= result["content_discovery"]["status"] != "complete"
+                if streamed_discovery is not None:
+                    result["content_discovery"] = streamed_discovery
+                    discover_partial = streamed_discovery["status"] != "complete"
+                result["content_discovery_partial"] = discover_partial
+                if budget.reason is not None:
+                    result["discovery_budget_reason"] = budget.reason
+                if valid:
+                    result["spark_metadata"] = metadata
             if streamed_discovery is not None:
-                result["content_discovery"] = streamed_discovery
-                discover_partial = streamed_discovery["status"] != "complete"
-            result["content_discovery_partial"] = discover_partial
-            if budget.reason is not None:
-                result["discovery_budget_reason"] = budget.reason
-            if valid:
-                result["spark_metadata"] = metadata
-        if streamed_discovery is not None:
-            result["inventory_status"] = (
-                "partial"
-                if requested and streamed_discovery["status"] == "complete"
-                else "unavailable"
-                if requested
-                else "not_requested"
-            )
-            if requested and streamed_discovery["status"] == "complete":
-                for name in requested:
-                    result[name + "_access"] = "allowed"
-                    result[name + "_error"] = "streamed response; inventory snapshot unavailable"
+                result["inventory_status"] = (
+                    "partial"
+                    if requested and streamed_discovery["status"] == "complete"
+                    else "unavailable"
+                    if requested
+                    else "not_requested"
+                )
+                if requested and streamed_discovery["status"] == "complete":
+                    for name in requested:
+                        result[name + "_access"] = "allowed"
+                        result[name + "_error"] = "streamed response; inventory snapshot unavailable"
+            if collector is not None and evidence is not None and not valid and streamed_discovery is None:
+                if prior.get("surface") != "master_ui":
+                    evidence.unsupported = True
+                else:
+                    collector.partial(
+                        "spark/master_metadata", "access_denied" if evidence.status in {401, 403} else error
+                    )
+        if collector is not None:
+            result["content_discovery"] = collector.result()
+            result["content_discovery_partial"] |= result["content_discovery"]["status"] != "complete"
     if getattr(ctx.args, "probe_submit", False):
         probe = _probe_submit(ctx, prior)
         result["submit_probe"] = probe

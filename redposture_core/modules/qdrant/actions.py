@@ -32,6 +32,7 @@ from ...console import Console
 from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
 from ...discovery_frontier import DiscoveryFrontier
 from ...discovery_paths import Text, concat_discovery_text
+from ...discovery_sources import SourceRead
 from ...discovery_values import DiskBackedText
 from ...json_stream import JSONPath, JSONScalarStream
 from ...rendering import (
@@ -482,9 +483,26 @@ def _qdrant_scroll_payloads(
     collector: DiscoveryCollector | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     with DiscoveryFrontier() if collector is not None else nullcontext(None) as frontier:
-        return _qdrant_scroll_payloads_inner(
-            host, port, timeout, collection_name, headers=headers, collector=collector, frontier=frontier
-        )
+        if collector is None:
+            return _qdrant_scroll_payloads_inner(
+                host, port, timeout, collection_name, headers=headers, collector=None, frontier=frontier
+            )
+        with collector.source_attempt(
+            "qdrant.point_payloads", scope="complete_selected_collection_scrolls"
+        ) as evidence:
+            points, partial = _qdrant_scroll_payloads_inner(
+                host,
+                port,
+                timeout,
+                collection_name,
+                headers=headers,
+                collector=collector,
+                frontier=frontier,
+                source_evidence=evidence,
+            )
+            if not partial:
+                evidence.accept()
+            return points, partial
 
 
 class _QdrantSinglePointStream:
@@ -615,6 +633,8 @@ def _qdrant_stream_oversized_point(
     headers: dict[str, str] | None,
     collector: DiscoveryCollector,
     page_number: int,
+    *,
+    on_status: Callable[[int], None] | None = None,
 ) -> tuple[dict[str, Any] | None, str | int | None, str | None]:
     state = getattr(_THREAD_LOCAL_TRANSPORT, "state", None)
     if not isinstance(state, QdrantLifecycleState) or state.http is None:
@@ -629,10 +649,19 @@ def _qdrant_stream_oversized_point(
     )
     decoder = _QdrantSinglePointStream(collector, urllib.parse.unquote(encoded_collection), page_number)
 
+    received_status = 0
+
+    def on_response(status: int, _headers: Any) -> None:
+        nonlocal received_status
+        received_status = status
+        if on_status is not None:
+            on_status(status)
+
     def on_chunk(chunk: bytes) -> None:
         if not collector.charge(len(chunk)):
             raise TimeoutError("discover_time")
-        decoder.parser.feed(chunk)
+        if received_status == 200:
+            decoder.parser.feed(chunk)
 
     try:
         response = state.http.request_stream(
@@ -646,12 +675,15 @@ def _qdrant_stream_oversized_point(
             },
             body=json.dumps(request_body, ensure_ascii=False).encode(),
             on_chunk=on_chunk,
+            on_response=on_response,
             chunk_size=max(1, min(collector.remaining, 64 * 1024)),
             timeout=timeout,
             deadline=collector.deadline,
         )
         if response.error or response.truncated or response.status != 200:
             return None, None, str(response.error or f"status={response.status}")
+        if received_status != 200:
+            return None, None, "response_headers_unverified"
         decoder.parser.finish()
         if not decoder.points_seen or not decoder.offset_seen:
             return None, None, "invalid_scroll_response"
@@ -675,6 +707,7 @@ def _qdrant_scroll_payloads_inner(
     headers: dict[str, str] | None,
     collector: DiscoveryCollector | None,
     frontier: DiscoveryFrontier | None,
+    source_evidence: SourceRead | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Read payloads without mutation, streaming discovery within its budget."""
     encoded = urllib.parse.quote(collection_name, safe="")
@@ -711,12 +744,24 @@ def _qdrant_scroll_payloads_inner(
             payload=request_body,
             **request_options,
         )
+        if source_evidence is not None:
+            source_evidence.status = status
         if collector is not None and error == "byte_budget" and page_size > 1 and collector.allowed():
             page_size = max(1, page_size // 2)
             continue
         if collector is not None and error == "byte_budget" and page_size == 1 and collector.allowed():
             streamed_point, next_offset, stream_error = _qdrant_stream_oversized_point(
-                host, port, request_timeout, encoded, request_body, headers, collector, page_number + 1
+                host,
+                port,
+                request_timeout,
+                encoded,
+                request_body,
+                headers,
+                collector,
+                page_number + 1,
+                on_status=lambda status: (
+                    setattr(source_evidence, "status", status) if source_evidence is not None else None
+                ),
             )
             if stream_error:
                 collector.partial(f"collection.{collection_name}", stream_error)
@@ -2223,6 +2268,15 @@ def collect_qdrant_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
         DiscoveryCollector("qdrant", ctx, record) if bool(getattr(ctx.args, "discover", False)) else None
     )
 
+    if discovery_collector is not None:
+        discovery_collector.declare_sources("collection_catalog", "collection_info", "point_payloads")
+        if not collection_name:
+            with discovery_collector.source_attempt(
+                "qdrant.collection_catalog", scope="selected_identity_cached_validated_collection_names"
+            ) as evidence:
+                if isinstance(collections, list) and not record.get("collections_list_error"):
+                    evidence.accept()
+
     if bool(options["dump_requested"]):
         dump_targets = [collection_name] if collection_name else list(collections or [])
         if options["dump_limit"] is not None:
@@ -2246,18 +2300,28 @@ def collect_qdrant_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
                     "response_size_cap": response_cap,
                     "response_meter": discovery_collector.charge,
                 }
-            status, payload, error = _qdrant_get_collection_info(
-                host, port, info_timeout, str(name), headers=headers, **info_options
-            )
-            record["collection_dump_items"].append(
-                {
-                    "name": str(name),
-                    "ok": error is None and status == 200,
-                    "status": status,
-                    "error": error or (None if status == 200 else _qdrant_error_text(payload, fallback_status=status)),
-                    "info_raw": _json_compact(payload) if error is None and status == 200 else None,
-                }
-            )
+            with (
+                discovery_collector.source_attempt("qdrant.collection_info", scope="selected_collection_metadata")
+                if discovery_collector is not None
+                else nullcontext() as evidence
+            ):
+                status, payload, error = _qdrant_get_collection_info(
+                    host, port, info_timeout, str(name), headers=headers, **info_options
+                )
+                if evidence is not None:
+                    evidence.status = status
+                    if status == 200 and error is None:
+                        evidence.accept()
+                record["collection_dump_items"].append(
+                    {
+                        "name": str(name),
+                        "ok": error is None and status == 200,
+                        "status": status,
+                        "error": error
+                        or (None if status == 200 else _qdrant_error_text(payload, fallback_status=status)),
+                        "info_raw": _json_compact(payload) if error is None and status == 200 else None,
+                    }
+                )
             if bool(getattr(ctx.args, "discover", False)):
                 if error is not None or status != 200:
                     record["payload_discovery_partial"] = True

@@ -6,8 +6,29 @@ import json
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from redposture_core.discovery_values import DiskBackedText
 from redposture_core.modules.kafka.discovery import read_events
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429, 500])
+def test_denied_sse_body_cannot_publish_messages_or_early_findings(status: int) -> None:
+    observed: list[dict] = []
+    response, messages, complete, error, _cursor = read_events(
+        _stream(
+            {"type": "MESSAGE", "message": {"partition": 0, "offset": 0, "value": 'password="denied-body!42"'}},
+            {"type": "DONE"},
+            status=status,
+        ),
+        "http://ui/messages",
+        cookie="session=qa",
+        deadline=time.monotonic() + 30,
+        limit=2,
+        on_message=observed.append,
+    )
+    assert response.status == status and not complete and error
+    assert not observed and not messages
 
 
 def _stream(*events: dict, content_type: str = "text/event-stream", status: int = 200):

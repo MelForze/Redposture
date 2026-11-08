@@ -183,7 +183,7 @@ def test_discovery_does_not_call_long_benign_text_a_secret() -> None:
     assert report["findings"] == []
 
 
-def test_selected_binary_znode_is_dumped_as_base64_without_scanning_or_children() -> None:
+def test_selected_unknown_binary_znode_is_partial_and_dumped_without_children() -> None:
     class Client:
         def get_data_discovery(self, path: str, *, deadline: float | None = None) -> Any:
             assert path == "/binary"
@@ -207,7 +207,8 @@ def test_selected_binary_znode_is_dumped_as_base64_without_scanning_or_children(
         Client(),
         {"query_znode": "/binary", "dump": True, "show_znodes": True},
     )
-    assert result["content_discovery"]["status"] == "complete"
+    assert result["content_discovery"]["status"] == "partial"
+    assert any("binary_or_unsupported_encoding" in x for x in result["content_discovery"]["partial_reasons"])
     assert result["content_discovery"]["findings"] == []
     assert result["znode_count"] is None
     stream = Path(result["_stream_lines_file"])

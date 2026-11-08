@@ -123,8 +123,11 @@ def test_r10_entropy_does_not_rescan_all_explicit_findings(monkeypatch: pytest.M
     original = secret_detection.SecretMatch
 
     class CountedMatch:
-        def __init__(self, detector: str, confidence: str, object_path: str, value: str) -> None:
+        def __init__(
+            self, detector: str, confidence: str, object_path: str, value: str, rule_ids=(), detector_aliases=()
+        ) -> None:
             self.detector, self.confidence, self.object_path, self._value = detector, confidence, object_path, value
+            self.rule_ids, self.detector_aliases = rule_ids, detector_aliases
 
         @property
         def value(self) -> str:

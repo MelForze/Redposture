@@ -7,16 +7,19 @@ import base64
 import codecs
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlencode
 
 from ...clients.airflow_api import AirflowClient
 from ...data_discovery import _scan_portioned_value
+from ...discovery_occurrences import OccurrenceRegistry
 from ...discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
 from ...discovery_paths import concat_discovery_text
-from ...discovery_spool import FINDING_SPOOL_MAX_CHARS, SpoolingFindings, SpoolingStrings
+from ...discovery_sources import SourceManifest, SourceRead
+from ...discovery_spool import SpoolingStrings
 from ...discovery_text import DiscoveryTextStream
 from ...discovery_values import DiskBackedText, iter_json_chunks
 from ...json_stream import JSONPath, JSONScalarStream, SingleStringFieldStream
@@ -1011,17 +1014,47 @@ def discover_task_logs(
     reasons: list[str] = []
     errors: list[dict[str, str]] = []
     findings: list[dict[str, Any]] = []
-    retained_value_chars = 0
-    seen_findings: set[tuple[str, str]] = set()
-    emitted_findings: set[tuple[str, str]] = set()
+    registry: OccurrenceRegistry | None = None
     dags_scanned = runs_scanned = tasks_seen = logs_scanned = bytes_scanned = 0
     dag_sources_scanned = variables_scanned = connections_scanned = 0
     dag_source_bytes_scanned = variable_bytes_scanned = connection_bytes_scanned = log_bytes_scanned = 0
     variable_keys: list[str] = []
     variables_error: str | None = None
     network_budget = _NetworkBudget(config.max_bytes)
+    manifest = SourceManifest()
+    for kind in (
+        "variable_collection",
+        "connection_collection",
+        "dag_catalog",
+        "run_catalog",
+        "task_catalog",
+        "dag_sources",
+        "task_logs",
+    ):
+        manifest.declare("airflow." + kind)
+    partial_events = 0
+
+    @contextmanager
+    def source_attempt(kind: str, *, catalog: bool = False) -> Iterator[SourceRead]:
+        source = "airflow." + kind
+        manifest.request(source, scope="selected_collection_pages" if catalog else "selected_complete_content_reads")
+        evidence, finished = SourceRead(), False
+        before = partial_events
+        try:
+            with manifest.guard(source):
+                yield evidence
+                finished = True
+        finally:
+            manifest.read(source, evidence.count)
+            manifest.finish(
+                source,
+                complete=finished and evidence.complete and (catalog or before == partial_events),
+                denied=evidence.status in {401, 403},
+            )
 
     def partial(reason: str, path: str | None = None) -> None:
+        nonlocal partial_events
+        partial_events += 1
         if reason not in reasons:
             reasons.append(reason)
         if path is not None:
@@ -1029,7 +1062,7 @@ def discover_task_logs(
 
     def add_matches(value: Any, *, source_kind: str, place: str, context: dict[str, Any] | None = None) -> bool:
         """Append and stream stable, de-duplicated findings. Return False at the finding limit."""
-        nonlocal findings, retained_value_chars
+        nonlocal findings, registry
         matches, _scanned_bytes, covered = _scan_portioned_value(value, "$", config.max_bytes, _deadline=deadline)
         if not covered:
             partial(
@@ -1038,6 +1071,8 @@ def discover_task_logs(
                 else "unscannable_continuous_field"
             )
         for match in matches:
+            if cancelled is not None and cancelled():
+                raise NestedSchedulerCancelled("Airflow discovery cancelled")
             # A vendor-specific detector and the generic api-key detector can
             # identify the exact same value. Likewise, the entropy fallback can
             # encompass an already classified assignment. Keep the specific
@@ -1052,55 +1087,39 @@ def discover_task_logs(
             ):
                 continue
             location = concat_discovery_text(place, match.object_path)
-            key = (fingerprint(match.value), location.digest if isinstance(location, DiskBackedText) else location)
-            if not isinstance(findings, SpoolingFindings) and key in seen_findings:
-                continue
+            key = ("value", fingerprint(match.value))
             finding: dict[str, Any] = {
                 "type": match.detector,
                 "confidence": match.confidence,
                 "value": match.value,
-                "fingerprint": key[0],
+                "fingerprint": key[1],
+                "detectors": list(match.rule_ids),
                 "source_kind": source_kind,
                 "place": location,
                 "object_path": match.object_path,
             }
             if context:
                 finding.update(context)
-            if not isinstance(findings, SpoolingFindings) and (
-                isinstance(match.value, DiskBackedText)
-                or len(findings) >= AIRFLOW_FINDING_SPOOL_THRESHOLD
-                or retained_value_chars + len(match.value) > FINDING_SPOOL_MAX_CHARS
+            if registry is None:
+                registry = OccurrenceRegistry()
+                findings = registry
+            if not registry.add(
+                finding,
+                identity=key,
+                location={
+                    "source_kind": source_kind,
+                    "object": place,
+                    "place": location,
+                    "object_path": match.object_path,
+                    **(context or {}),
+                },
             ):
-                spool = SpoolingFindings()
-                for previous in findings:
-                    previous_place = previous["place"]
-                    previous_key = (
-                        str(previous["fingerprint"]),
-                        previous_place.digest if isinstance(previous_place, DiskBackedText) else previous_place,
-                    )
-                    spool.add(
-                        previous,
-                        identity=previous_key,
-                        emitted=previous_key in emitted_findings,
-                    )
-                findings = spool
-                seen_findings.clear()
-                emitted_findings.clear()
-            if isinstance(findings, SpoolingFindings):
-                if not findings.add(finding, identity=key):
-                    continue
-            else:
-                seen_findings.add(key)
-                findings.append(finding)
-                retained_value_chars += len(match.value)
+                continue
             if on_finding is not None:
-                emitted = on_finding(dict(finding))
+                emitted = on_finding(registry.lookup(key) or dict(finding))
                 was_emitted = emitted is True or (emitted is None and not isinstance(match.value, DiskBackedText))
                 if was_emitted:
-                    if isinstance(findings, SpoolingFindings):
-                        findings.mark_emitted(*key)
-                    else:
-                        emitted_findings.add(key)
+                    registry.mark_emitted(*key)
             if config.max_findings is not None and len(findings) >= config.max_findings:
                 partial("max_findings")
                 return False
@@ -1114,10 +1133,15 @@ def discover_task_logs(
         return value, used, True
 
     def stream_dag_source(path: str, dag_id: str) -> tuple[int, bool]:
+        with source_attempt("dag_sources") as evidence:
+            return read_dag_source(path, dag_id, evidence)
+
+    def read_dag_source(path: str, dag_id: str, evidence: SourceRead) -> tuple[int, bool]:
         """Scan plain text or the API JSON envelope as one bounded HTTP stream."""
         received = 0
         json_mode = False
         stop_reason: str | None = None
+        response_status: int | None = None
         decoder = codecs.getincrementaldecoder("utf-8")("strict")
         context = {"dag_id": dag_id}
 
@@ -1141,7 +1165,9 @@ def discover_task_logs(
                 scanner.finish()
 
         def on_response(_status: int, headers: Any) -> None:
-            nonlocal json_mode
+            nonlocal json_mode, response_status
+            response_status = _status
+            evidence.status = _status
             json_mode = "json" in next(
                 (str(value).lower() for key, value in headers.items() if str(key).lower() == "content-type"),
                 "",
@@ -1151,9 +1177,11 @@ def discover_task_logs(
 
         def on_chunk(chunk: bytes) -> None:
             nonlocal received, stop_reason
+            if response_status != 200:
+                return
             if cancelled is not None and cancelled():
-                stop_reason = "cancelled"
-                raise StopSourceStream
+                scanner.close()
+                raise NestedSchedulerCancelled("Airflow discovery cancelled")
             if deadline is not None and time.monotonic() >= deadline:
                 stop_reason = "discover_time"
                 raise StopSourceStream
@@ -1167,15 +1195,20 @@ def discover_task_logs(
                 stop_reason = "dag_sources:invalid_source"
                 raise StopSourceStream from None
 
-        response = client.get_stream(
-            path,
-            on_chunk=on_chunk,
-            on_response=on_response,
-            extra_headers={"Accept": "text/plain, application/json"},
-            chunk_size=max(1, min(config.max_bytes, 64 * 1024)),
-            timeout=_request_timeout(deadline),
-            deadline=deadline,
-        )
+        try:
+            response = client.get_stream(
+                path,
+                on_chunk=on_chunk,
+                on_response=on_response,
+                extra_headers={"Accept": "text/plain, application/json"},
+                chunk_size=max(1, min(config.max_bytes, 64 * 1024)),
+                timeout=_request_timeout(deadline),
+                deadline=deadline,
+            )
+        except (NestedSchedulerCancelled, KeyboardInterrupt):
+            scanner.close()
+            raise
+        evidence.status = response.http_status
         if stop_reason:
             scanner.close()
             partial(stop_reason, path)
@@ -1200,6 +1233,7 @@ def discover_task_logs(
         except StopSourceStream:
             partial("max_findings", path)
         scanner.close()
+        evidence.accept()
         return received, False
 
     stopped = False
@@ -1212,6 +1246,28 @@ def discover_task_logs(
         error_prefix: str,
         max_reason: str,
         order_by: str | None = None,
+    ):
+        kinds = {
+            "variables": "variable_collection",
+            "connections": "connection_collection",
+            "dags": "dag_catalog",
+            "dag_runs": "run_catalog",
+            "task_instances": "task_catalog",
+        }
+        with source_attempt(kinds[key], catalog=True) as evidence:
+            yield from read_collection(
+                path, key, limit, error_prefix=error_prefix, max_reason=max_reason, order_by=order_by, evidence=evidence
+            )
+
+    def read_collection(
+        path: str,
+        key: str,
+        limit: int | None,
+        *,
+        error_prefix: str,
+        max_reason: str,
+        order_by: str | None,
+        evidence: SourceRead,
     ):
         nonlocal stopped
         offset = 0
@@ -1240,7 +1296,14 @@ def discover_task_logs(
                     partial(f"{error_prefix}:pagination_stalled", path)
                     return
                 seen_pages.add(signature)
-            yield from page.items
+            if not page.error:
+                evidence.count += 1
+            elif page.error in {"http_401", "http_403"}:
+                evidence.status = int(page.error[5:])
+            for item in page.items:
+                if cancelled is not None and cancelled():
+                    raise NestedSchedulerCancelled("Airflow discovery cancelled")
+                yield item
             offset += len(page.items)
             if page.error:
                 partial(f"{error_prefix}:{page.error}", path)
@@ -1249,6 +1312,7 @@ def discover_task_logs(
                     stopped = True
                 return
             if page.complete:
+                evidence.complete = True
                 return
             if not page.items:
                 partial(f"{error_prefix}:pagination_stalled", path)
@@ -1368,56 +1432,64 @@ def discover_task_logs(
                     # Airflow 3.x may return the JSON ``{"content": ...}`` shape;
                     # accepting both representations keeps the read-only probe
                     # compatible with both API generations.
-                    source_cap = min(config.max_bytes, 2 * 1024 * 1024)
-                    source_request_kwargs: dict[str, Any] = {}
-                    if deadline is not None:
-                        source_request_kwargs["timeout"] = _request_timeout(deadline)
-                    source_response = client.get(
-                        source_path,
-                        extra_headers={"Accept": "text/plain, application/json"},
-                        response_size_cap=source_cap,
-                        **source_request_kwargs,
-                    )
-                    budget_limited = source_cap == network_budget.remaining
-                    if len(source_response.body) > source_cap or (source_response.truncated and budget_limited):
-                        partial("max_bytes" if budget_limited else "dag_sources:response_truncated", source_path)
-                        stopped = True
-                        break
-                    if (
-                        budget_limited
-                        and source_response.transport_error
-                        and "exceeds limit" in source_response.transport_error
-                    ):
-                        partial("max_bytes", source_path)
-                        stopped = True
-                        break
-                    if source_response.transport_error:
-                        partial("dag_sources:transport_error", source_path)
-                    elif source_response.http_status != 200:
-                        partial(f"dag_sources:http_{source_response.http_status}", source_path)
-                    else:
-                        payload = source_response.json()
-                        source_value: Any = (
-                            payload.get("content")
-                            if isinstance(payload, dict) and isinstance(payload.get("content"), str)
-                            else source_response.body.decode("utf-8", errors="replace")
+                    with source_attempt("dag_sources") as evidence:
+                        source_cap = min(config.max_bytes, 2 * 1024 * 1024)
+                        source_request_kwargs: dict[str, Any] = {}
+                        if deadline is not None:
+                            source_request_kwargs["timeout"] = _request_timeout(deadline)
+                        source_response = client.get(
+                            source_path,
+                            extra_headers={"Accept": "text/plain, application/json"},
+                            response_size_cap=source_cap,
+                            **source_request_kwargs,
                         )
-                        scanned, used, complete = consume_value(source_value)
-                        dag_sources_scanned += 1
-                        dag_source_bytes_scanned += used
-                        if source_response.truncated:
-                            partial("dag_sources:response_truncated", source_path)
-                        if not add_matches(
-                            scanned,
-                            source_kind="dag_source",
-                            place=f"dag_source:{dag_id}",
-                            context={"dag_id": dag_id},
+                        evidence.status = source_response.http_status
+                        budget_limited = source_cap == network_budget.remaining
+                        if len(source_response.body) > source_cap or (source_response.truncated and budget_limited):
+                            partial("max_bytes" if budget_limited else "dag_sources:response_truncated", source_path)
+                            stopped = True
+                            break
+                        if (
+                            budget_limited
+                            and source_response.transport_error
+                            and "exceeds limit" in source_response.transport_error
                         ):
+                            partial("max_bytes", source_path)
                             stopped = True
                             break
-                        if not complete:
-                            stopped = True
-                            break
+                        if source_response.transport_error:
+                            partial("dag_sources:transport_error", source_path)
+                        elif source_response.http_status != 200:
+                            partial(f"dag_sources:http_{source_response.http_status}", source_path)
+                        else:
+                            payload = source_response.json()
+                            source_value: Any = (
+                                payload.get("content")
+                                if isinstance(payload, dict) and isinstance(payload.get("content"), str)
+                                else source_response.body.decode("utf-8", errors="replace")
+                            )
+                            scanned, used, complete = consume_value(source_value)
+                            dag_sources_scanned += 1
+                            dag_source_bytes_scanned += used
+                            if source_response.truncated:
+                                partial("dag_sources:response_truncated", source_path)
+                            if not add_matches(
+                                scanned,
+                                source_kind="dag_source",
+                                place=f"dag_source:{dag_id}",
+                                context={"dag_id": dag_id},
+                            ):
+                                stopped = True
+                                break
+                            if not complete:
+                                stopped = True
+                                break
+                        if (
+                            source_response.http_status == 200
+                            and not source_response.truncated
+                            and not source_response.transport_error
+                        ):
+                            evidence.accept()
         runs_path = f"{prefix}/dags/{_component(dag_id)}/dagRuns"
         runs = iter_collection(
             runs_path,
@@ -1504,29 +1576,34 @@ def discover_task_logs(
                             return False
                         return True
 
-                    _text, used, error = _read_log(
-                        client,
-                        log_path,
-                        max_log_bytes=config.max_log_bytes,
-                        max_total_bytes=config.max_bytes,
-                        deadline=deadline,
-                        cancelled=cancelled,
-                        network_budget=network_budget,
-                        on_chunk=emit_log_chunk,
-                    )
-                    logs_scanned += 1
-                    bytes_scanned += used
-                    log_bytes_scanned += used
-                    if error:
-                        log_scanner.close()
-                        partial(f"logs:{error}", log_path)
-                    else:
-                        try:
-                            log_scanner.finish()
-                        except StopLogScan:
-                            stopped = True
-                        finally:
+                    with source_attempt("task_logs") as evidence:
+                        _text, used, error = _read_log(
+                            client,
+                            log_path,
+                            max_log_bytes=config.max_log_bytes,
+                            max_total_bytes=config.max_bytes,
+                            deadline=deadline,
+                            cancelled=cancelled,
+                            network_budget=network_budget,
+                            on_chunk=emit_log_chunk,
+                        )
+                        logs_scanned += 1
+                        bytes_scanned += used
+                        log_bytes_scanned += used
+                        if error:
                             log_scanner.close()
+                            partial(f"logs:{error}", log_path)
+                        else:
+                            try:
+                                log_scanner.finish()
+                            except StopLogScan:
+                                stopped = True
+                            finally:
+                                log_scanner.close()
+                        if error is None:
+                            evidence.accept()
+                        elif error in {"http_401", "http_403"}:
+                            evidence.status = int(error[5:])
                     if stopped:
                         break
                 if stopped:
@@ -1536,12 +1613,14 @@ def discover_task_logs(
         if stopped:
             break
 
-    if isinstance(findings, SpoolingFindings):
-        findings.finish()
+    if registry is not None:
+        registry.finish()
+        findings = registry.bounded_inline_view(max_findings=AIRFLOW_FINDING_SPOOL_THRESHOLD)
     if isinstance(variable_keys, SpoolingStrings):
         variable_keys.finish()
     return {
         "status": "partial" if reasons else "complete",
+        "sources": manifest.result(),
         "api_generation": generation,
         "dags_scanned": dags_scanned,
         "runs_scanned": runs_scanned,
@@ -1559,6 +1638,11 @@ def discover_task_logs(
         "variables_error": variables_error,
         "finding_count": len(findings),
         "findings": findings,
+        "emitted_fingerprints": (
+            registry.emitted_fingerprints() if findings is registry else list(registry.emitted_fingerprints())
+        )
+        if registry is not None
+        else [],
         "partial_reasons": reasons,
         "errors": errors,
         "elapsed_ms": int((time.monotonic() - started) * 1000),

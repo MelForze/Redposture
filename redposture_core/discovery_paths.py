@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from hashlib import sha256
@@ -11,6 +13,12 @@ from urllib.parse import quote
 from .discovery_values import DiskBackedText
 
 Text = str | DiskBackedText
+_AMBIGUOUS_KEY = re.compile(r"[.\[\]\"'\\*\x00-\x20]")
+
+
+def literal_field_component(key: str) -> str:
+    """Unambiguous component for an already materialized small-tree path."""
+    return "[" + json.dumps(key, ensure_ascii=False) + "]" if _AMBIGUOUS_KEY.search(key) else "." + key
 
 
 def _bytes(value: Text) -> int:
@@ -160,7 +168,22 @@ def json_discovery_path(parts: tuple[Any, ...], source: Text = "$", *, style: st
     output: list[Text] = [source]
     for part in parts:
         if style == "dot":
-            output.extend((f"[{part}]",) if isinstance(part, int) else (".", part))
+            if isinstance(part, int):
+                output.append(f"[{part}]")
+            elif isinstance(part, str):
+                output.append(literal_field_component(part))
+            elif any(_AMBIGUOUS_KEY.search(chunk) for chunk in part.iter_text_chunks()):
+                quoted = DiskBackedText()
+                try:
+                    for chunk in part.iter_json_chunks():
+                        quoted.append_text(chunk)
+                    quoted.finish()
+                except BaseException:
+                    quoted.close()
+                    raise
+                output.extend(("[", quoted, "]"))
+            else:
+                output.extend((".", part))
         else:
             output.extend(("/", escape_discovery_text(str(part) if isinstance(part, int) else part, style)))
     return concat_discovery_text(*output)

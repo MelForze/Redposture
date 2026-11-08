@@ -8,6 +8,7 @@ import secrets
 import socket
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -31,9 +32,11 @@ from ...clients.oracle import (
 )
 from ...console import Console
 from ...discovery_options import DEFAULT_DISCOVER_TIME
+from ...discovery_sources import SourceRead
 from ...discovery_spool import SpoolingRecords
 from ...discovery_values import iter_json_chunks
 from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...scheduler import NestedSchedulerCancelled
 from ...shell_capture import build_capture_command, is_binary, parse_capture_lines, result_text_lines
 from ...show_limits import (
     limit_metadata,
@@ -737,6 +740,9 @@ def _collect_oracle_data(
         else None
     )
 
+    if collector is not None:
+        collector.declare_sources("table_catalog", "table_rows", "query_rows")
+
     def _mark_discover_partial(reason: str) -> None:
         data["discover_partial"] = True
         if reason not in data["discover_reasons"]:
@@ -745,6 +751,8 @@ def _collect_oracle_data(
             collector.partial("oracle", reason)
 
     def _next_discovery_item(items: Any) -> Any:
+        if collector is not None and not collector.allowed():
+            raise OracleReadBudgetError("discover_time")
         connection = getattr(client, "connection", None)
         if (
             discover_deadline is None
@@ -764,6 +772,18 @@ def _collect_oracle_data(
                 connection.call_timeout = previous_timeout
 
     def _read_discovery_table(owner: str, name: str, limit: int) -> bool:
+        with (
+            collector.source_attempt("oracle.table_rows", scope="complete_selected_table_row_streams")
+            if collector is not None
+            else nullcontext() as evidence
+        ):
+            before = collector.partial_events if collector is not None else 0
+            stopped = _read_discovery_table_inner(owner, name, limit, evidence)
+            if evidence is not None and collector is not None and not stopped and collector.partial_events == before:
+                evidence.accept()
+            return stopped
+
+    def _read_discovery_table_inner(owner: str, name: str, limit: int, evidence: SourceRead | None) -> bool:
         stream = getattr(client, "iter_table_rows", None)
         streaming = callable(stream)
         try:
@@ -776,8 +796,13 @@ def _collect_oracle_data(
         except OracleReadBudgetError as exc:
             _mark_discover_partial(str(exc))
             return True
-        except Exception:
-            _mark_discover_partial(f"{owner}.{name}: read failed")
+        except NestedSchedulerCancelled:
+            raise
+        except Exception as exc:
+            denied = "ORA-01031" in str(exc)
+            if evidence is not None and denied:
+                evidence.status = 403
+            _mark_discover_partial(f"{owner}.{name}: " + ("access_denied" if denied else "read failed"))
             return False
         row_limit = None if discover_implicit_dump and streaming else limit
         count = 0
@@ -807,8 +832,13 @@ def _collect_oracle_data(
         except OracleReadBudgetError as exc:
             _mark_discover_partial(str(exc))
             return True
-        except Exception:
-            _mark_discover_partial(f"{owner}.{name}: read failed")
+        except NestedSchedulerCancelled:
+            raise
+        except Exception as exc:
+            denied = "ORA-01031" in str(exc)
+            if evidence is not None and denied:
+                evidence.status = 403
+            _mark_discover_partial(f"{owner}.{name}: " + ("access_denied" if denied else "read failed"))
             return False
         finally:
             close = getattr(rows, "close", None)
@@ -816,52 +846,65 @@ def _collect_oracle_data(
                 close()
 
     if show_tables or dump_rows:
-        if discover_deadline is not None and time.monotonic() >= discover_deadline:
-            _mark_discover_partial("discovery budget reached")
-        elif discover and callable(getattr(client, "iter_tables", None)):
-            tables = (
-                client.iter_tables(schema, deadline=discover_deadline)
-                if isinstance(client, OracleAuditClient)
-                else client.iter_tables(schema)
-            )
-            try:
-                while True:
-                    if discover_deadline is not None and time.monotonic() >= discover_deadline:
-                        _mark_discover_partial("discovery budget reached")
-                        break
-                    try:
-                        visible = _next_discovery_item(tables)
-                    except StopIteration:
-                        break
-                    if discover_deadline is not None and time.monotonic() >= discover_deadline:
-                        _mark_discover_partial("discovery budget reached")
-                        break
-                    data["tables"].append(visible)
-            except OracleReadBudgetError as exc:
-                _mark_discover_partial(str(exc))
-            except Exception:
-                _mark_discover_partial("table catalog read failed")
-            finally:
-                close = getattr(tables, "close", None)
-                if callable(close):
-                    close()
-        else:
-            data["tables"] = client.list_tables(schema)
-            if discover and len(data["tables"]) >= 1000:
-                _mark_discover_partial("table catalog limit reached")
-        own_schema = str(context.get("session_user") or "").upper()
-        selected_schema = str(schema or "").upper()
-        if (
-            discover
-            and dump_rows
-            and not table
-            and not data["tables"]
-            and not data["discover_partial"]
-            and (not selected_schema or selected_schema != own_schema)
+        with (
+            collector.source_attempt("oracle.table_catalog", scope="visible_tables_in_selected_schema", content=False)
+            if collector is not None
+            else nullcontext() as catalog_evidence
         ):
-            # An empty visible catalog does not prove that a selected schema
-            # contains no tables; the account may simply lack SELECT grants.
-            data["discover_unavailable"] = True
+            catalog_before = collector.partial_events if collector is not None else 0
+            if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                _mark_discover_partial("discovery budget reached")
+            elif discover and callable(getattr(client, "iter_tables", None)):
+                tables = (
+                    client.iter_tables(schema, deadline=discover_deadline)
+                    if isinstance(client, OracleAuditClient)
+                    else client.iter_tables(schema)
+                )
+                try:
+                    while True:
+                        if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                            _mark_discover_partial("discovery budget reached")
+                            break
+                        try:
+                            visible = _next_discovery_item(tables)
+                        except StopIteration:
+                            break
+                        if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                            _mark_discover_partial("discovery budget reached")
+                            break
+                        data["tables"].append(visible)
+                except OracleReadBudgetError as exc:
+                    _mark_discover_partial(str(exc))
+                except NestedSchedulerCancelled:
+                    raise
+                except Exception as exc:
+                    denied = "ORA-01031" in str(exc)
+                    if catalog_evidence is not None and denied:
+                        catalog_evidence.status = 403
+                    _mark_discover_partial("table catalog: access_denied" if denied else "table catalog read failed")
+                finally:
+                    close = getattr(tables, "close", None)
+                    if callable(close):
+                        close()
+            else:
+                data["tables"] = client.list_tables(schema)
+                if discover and len(data["tables"]) >= 1000:
+                    _mark_discover_partial("table catalog limit reached")
+            own_schema = str(context.get("session_user") or "").upper()
+            selected_schema = str(schema or "").upper()
+            if (
+                discover
+                and dump_rows
+                and not table
+                and not data["tables"]
+                and not data["discover_partial"]
+                and (not selected_schema or selected_schema != own_schema)
+            ):
+                # An empty visible catalog does not prove that a selected schema
+                # contains no tables; the account may simply lack SELECT grants.
+                data["discover_unavailable"] = True
+            if catalog_evidence is not None and collector is not None and collector.partial_events == catalog_before:
+                catalog_evidence.accept()
     if dump_rows:
         limit = dump_limit if dump_limit is not None else _ORACLE_DUMP_SAFETY_LIMIT
         target_schema = schema
@@ -918,45 +961,62 @@ def _collect_oracle_data(
                 )
     query_streamed = False
     if query:
-        query_stream = getattr(client, "iter_query_rows", None)
-        if discover and callable(query_stream):
-            query_streamed = True
-            data["query_rows"] = SpoolingRecords()
-            query_rows = None
-            index = 0
-            preview_limit = dump_limit or 200
-            try:
-                query_rows = iter(query_stream(query, deadline=discover_deadline))
-                while True:
-                    if discover_deadline is not None and time.monotonic() >= discover_deadline:
-                        raise OracleReadBudgetError("discover_time")
-                    try:
-                        row = _next_discovery_item(query_rows)
-                    except StopIteration:
-                        break
-                    if index < preview_limit:
-                        data["query_rows"].append(row)
-                    if collector is not None and not collector.add(f"query_rows[{index}]", row):
-                        _mark_discover_partial(
-                            "discover_time" if time.monotonic() >= collector.deadline else "source_scan_incomplete"
-                        )
-                        break
-                    index += 1
-            except OracleReadBudgetError as exc:
-                _mark_discover_partial(str(exc))
-            except Exception as exc:
-                _mark_discover_partial("query: read failed")
-                data["error"] = data.get("error") or normalize_oracle_error(exc)
-            finally:
-                close = getattr(query_rows, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception as exc:
-                        _mark_discover_partial("query: cleanup failed")
-                        data["error"] = data.get("error") or normalize_oracle_error(exc)
-        else:
-            data["query_rows"] = client.query(query, limit=dump_limit or 200)
+        with (
+            collector.source_attempt("oracle.query_rows", scope="explicit_query_result_stream")
+            if collector is not None
+            else nullcontext() as query_evidence
+        ):
+            query_stream = getattr(client, "iter_query_rows", None)
+            if discover and callable(query_stream):
+                query_streamed = True
+                data["query_rows"] = SpoolingRecords()
+                query_rows = None
+                index = 0
+                preview_limit = dump_limit or 200
+                try:
+                    query_rows = iter(query_stream(query, deadline=discover_deadline))
+                    while True:
+                        if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                            raise OracleReadBudgetError("discover_time")
+                        try:
+                            row = _next_discovery_item(query_rows)
+                        except StopIteration:
+                            if query_evidence is not None:
+                                query_evidence.accept()
+                            break
+                        if index < preview_limit:
+                            data["query_rows"].append(row)
+                        if collector is not None and not collector.add(f"query_rows[{index}]", row):
+                            _mark_discover_partial(
+                                "discover_time" if time.monotonic() >= collector.deadline else "source_scan_incomplete"
+                            )
+                            break
+                        index += 1
+                except OracleReadBudgetError as exc:
+                    _mark_discover_partial(str(exc))
+                except NestedSchedulerCancelled:
+                    raise
+                except Exception as exc:
+                    if query_evidence is not None and "ORA-01031" in str(exc):
+                        query_evidence.status = 403
+                    _mark_discover_partial(
+                        "query: access_denied"
+                        if query_evidence is not None and query_evidence.status == 403
+                        else "query: read failed"
+                    )
+                    data["error"] = data.get("error") or normalize_oracle_error(exc)
+                finally:
+                    close = getattr(query_rows, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception as exc:
+                            _mark_discover_partial("query: cleanup failed")
+                            data["error"] = data.get("error") or normalize_oracle_error(exc)
+            else:
+                data["query_rows"] = client.query(query, limit=dump_limit or 200)
+                if query_evidence is not None:
+                    query_evidence.accept()
     if privesc_check or privesc_chain:
         findings = client.check_privesc()
         data["privesc_findings"] = findings

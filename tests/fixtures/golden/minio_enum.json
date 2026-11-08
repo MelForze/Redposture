@@ -74,12 +74,44 @@
     "discover_candidates_count": 10,
     "discover_coverage": "partial",
     "discover_coverage_percent": 100.0,
-    "discover_findings_count": 10,
+    "discover_findings_count": 6,
     "discover_objects_scanned": 10,
     "discover_partial_reasons": [
       "binary_or_unsupported_encoding"
     ],
     "discover_requested": true,
+    "discover_sources": [
+      {
+        "complete": false,
+        "denied": 0,
+        "id": "minio.object_contents",
+        "implemented": true,
+        "read": 10,
+        "requested": 10,
+        "scope": "selected_objects_complete_body_reads",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "minio.object_catalog",
+        "implemented": true,
+        "read": 10,
+        "requested": 1,
+        "scope": "selected_object_metadata_iterator",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "minio.bucket_catalog",
+        "implemented": true,
+        "read": 1,
+        "requested": 1,
+        "scope": "existing_bucket_listing",
+        "unsupported": false
+      }
+    ],
     "host": "127.0.0.1",
     "identity_kind": "delegated_admin",
     "is_minio": true,
@@ -151,73 +183,143 @@
     "secret_findings": [
       {
         "bucket": "secrets-corpus",
+        "confidence": "high",
+        "detectors": [
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "fingerprint": "<DOCKER_ID>",
         "key": "app/.env",
+        "locations": [
+          {
+            "bucket": "secrets-corpus",
+            "key": "app/.env",
+            "object_path": "$",
+            "source_kind": "object"
+          },
+          {
+            "bucket": "secrets-corpus",
+            "key": "dup/copy.env",
+            "object_path": "$",
+            "source_kind": "object"
+          }
+        ],
         "object_path": "$",
-        "type": "aws_access_key",
-        "value": "AKIAIOSFODNN7EXAMPLE"
+        "occurrence_count": 2,
+        "type": "generic_secret",
+        "value": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
       },
       {
         "bucket": "secrets-corpus",
+        "confidence": "high",
+        "detectors": [
+          "credential_uri"
+        ],
+        "document_ordinal": 0,
+        "fingerprint": "<DOCKER_ID>",
         "key": "app/config.json",
+        "locations": [
+          {
+            "bucket": "secrets-corpus",
+            "document_ordinal": 0,
+            "key": "app/config.json",
+            "object_path": "$.db",
+            "source_kind": "object"
+          }
+        ],
         "object_path": "$.db",
+        "occurrence_count": 1,
         "type": "connection_string",
         "value": "postgresql://reporter:lab-password@db.internal:5432/warehouse"
       },
       {
         "bucket": "secrets-corpus",
-        "key": "app/config.json",
-        "object_path": "$.db",
-        "type": "url_credentials",
-        "value": "postgresql://reporter:lab-password@db.internal:5432/warehouse"
-      },
-      {
-        "bucket": "secrets-corpus",
+        "confidence": "high",
+        "detectors": [
+          "gitlab_token_format",
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "fingerprint": "<DOCKER_ID>",
         "key": "app/config.yaml",
+        "locations": [
+          {
+            "bucket": "secrets-corpus",
+            "key": "app/config.yaml",
+            "object_path": "$",
+            "source_kind": "object"
+          }
+        ],
         "object_path": "$",
-        "type": "password",
-        "value": "backup-lab-password"
-      },
-      {
-        "bucket": "secrets-corpus",
-        "key": "app/config.yaml",
-        "object_path": "$",
+        "occurrence_count": 1,
         "type": "gitlab_token",
         "value": "glpat-abcdefghijklmnopqrstuv"
       },
       {
         "bucket": "secrets-corpus",
+        "confidence": "high",
+        "detectors": [
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "fingerprint": "<DOCKER_ID>",
         "key": "app/config.yaml",
+        "locations": [
+          {
+            "bucket": "secrets-corpus",
+            "key": "app/config.yaml",
+            "object_path": "$",
+            "source_kind": "object"
+          }
+        ],
         "object_path": "$",
-        "type": "generic_secret",
-        "value": "glpat-abcdefghijklmnopqrstuv"
+        "occurrence_count": 1,
+        "type": "password",
+        "value": "backup-lab-password"
       },
       {
         "bucket": "secrets-corpus",
-        "key": "dup/copy.env",
-        "object_path": "$",
-        "type": "aws_access_key",
-        "value": "AKIAIOSFODNN7EXAMPLE"
-      },
-      {
-        "bucket": "secrets-corpus",
+        "confidence": "high",
+        "detectors": [
+          "sensitive_field"
+        ],
+        "document_ordinal": 0,
+        "fingerprint": "<DOCKER_ID>",
         "key": "infra/terraform.tfstate",
+        "locations": [
+          {
+            "bucket": "secrets-corpus",
+            "document_ordinal": 0,
+            "key": "infra/terraform.tfstate",
+            "object_path": "$.resources[0].instances[0].attributes.secret",
+            "source_kind": "object"
+          }
+        ],
         "object_path": "$.resources[0].instances[0].attributes.secret",
+        "occurrence_count": 1,
         "type": "generic_secret",
         "value": "tf-lab-secret-8f99"
       },
       {
         "bucket": "secrets-corpus",
+        "confidence": "high",
+        "detectors": [
+          "private_key_pem"
+        ],
+        "fingerprint": "<DOCKER_ID>",
         "key": "keys/id_rsa",
+        "locations": [
+          {
+            "bucket": "secrets-corpus",
+            "key": "keys/id_rsa",
+            "object_path": "$",
+            "source_kind": "object"
+          }
+        ],
         "object_path": "$",
+        "occurrence_count": 1,
         "type": "private_key",
         "value": "-----BEGIN PRIVATE KEY-----\nTEFCUFJJVkFURUtFWURBVEE=\n-----END PRIVATE KEY-----"
-      },
-      {
-        "bucket": "secrets-corpus",
-        "key": "misc/harmless-name-with-secret.log",
-        "object_path": "$",
-        "type": "aws_access_key",
-        "value": "AKIAIOSFODNN7EXAMPLE"
       }
     ],
     "service": "minio",

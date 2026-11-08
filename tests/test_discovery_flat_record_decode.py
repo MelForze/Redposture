@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from redposture_core import data_discovery
+from redposture_core import discovery_engine as data_discovery
 from redposture_core import discovery_spool as module
 
 
@@ -47,12 +47,8 @@ def test_small_mapping_pairs_do_not_measure_unused_child_size(monkeypatch):
 
     monkeypatch.setattr(data_discovery, "_bounded_json_size", measure)
     matches, size, complete = data_discovery._scan_portioned_value(source, "$.projects", 128)
-    expected = {
-        (kind, f"$.projects.{key}", value)
-        for key, value in source.items()
-        for kind in ("generic_secret", "gitlab_token")
-    }
-    assert complete and len(matches) == 40
+    expected = {(kind, f"$.projects.{key}", value) for key, value in source.items() for kind in ("gitlab_token",)}
+    assert complete and len(matches) == 20
     assert {(m.detector, m.object_path, m.value) for m in matches} == expected
     assert size == sum(len(json.dumps({k: v}, ensure_ascii=False).encode()) for k, v in source.items())
     assert child_measurements == 0, child_measurements

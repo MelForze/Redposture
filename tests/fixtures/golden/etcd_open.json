@@ -11,110 +11,239 @@
     "api_versions": "v2,v3",
     "auth_required": false,
     "content_discovery": {
-      "bytes_inspected": 713,
+      "bytes_inspected": 583,
       "bytes_read": 1373,
       "emitted_fingerprints": [],
       "findings": [
         {
           "confidence": "high",
+          "detectors": [
+            "credential_uri"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.key_value_entries./redposture/app/api_key.api_key",
-          "source": "anonymous",
-          "type": "api_key",
-          "value": "rp-demo-key-2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "key_value_entries./redposture/cache/redis_uri",
+              "object_path": "$.key_value_entries./redposture/cache/redis_uri.redis_uri",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
           "object_path": "$.key_value_entries./redposture/cache/redis_uri.redis_uri",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "connection_string",
           "value": "redis://default:redis@redis:6379/0"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "credential_uri"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.key_value_entries./redposture/cache/redis_uri.redis_uri",
+          "locations": [
+            {
+              "object": "key_value_entries./redposture/v3/datasource/postgres_dsn",
+              "object_path": "$.key_value_entries./redposture/v3/datasource/postgres_dsn",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.key_value_entries./redposture/v3/datasource/postgres_dsn",
+          "occurrence_count": 1,
           "source": "anonymous",
-          "type": "url_credentials",
-          "value": "redis://default:redis@redis:6379/0"
+          "type": "connection_string",
+          "value": "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "credential_uri"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.key_value_entries./redposture/db/password.password",
+          "locations": [
+            {
+              "object": "key_value_entries./redposture/v3/observability/remote_write",
+              "object_path": "$.key_value_entries./redposture/v3/observability/remote_write",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.key_value_entries./redposture/v3/observability/remote_write",
+          "occurrence_count": 1,
           "source": "anonymous",
-          "type": "password",
-          "value": "postgres"
+          "type": "connection_string",
+          "value": "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "provider_token_format",
+            "webhook_url"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.key_value_entries./redposture/db/readonly_password.readonly_password",
-          "source": "anonymous",
-          "type": "password",
-          "value": "readonly"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "key_value_entries./redposture/integrations/slack/webhook",
+              "object_path": "$.key_value_entries./redposture/integrations/slack/webhook.webhook",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
           "object_path": "$.key_value_entries./redposture/integrations/slack/webhook.webhook",
+          "occurrence_count": 1,
           "source": "anonymous",
-          "type": "webhook",
+          "type": "slack_webhook",
           "value": "https://hooks.slack.com/services/T000/B000/REDACTED"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.key_value_entries./redposture/v3/datasource/admin_password.admin_password",
-          "source": "anonymous",
-          "type": "password",
-          "value": "admin"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.key_value_entries./redposture/v3/datasource/postgres_dsn.postgres_dsn",
-          "source": "anonymous",
-          "type": "connection_string",
-          "value": "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.key_value_entries./redposture/v3/datasource/postgres_dsn.postgres_dsn",
-          "source": "anonymous",
-          "type": "url_credentials",
-          "value": "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.key_value_entries./redposture/v3/kafka/sasl_password.sasl_password",
+          "locations": [
+            {
+              "object": "key_value_entries./redposture/v3/kafka/sasl_password",
+              "object_path": "$.key_value_entries./redposture/v3/kafka/sasl_password",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.key_value_entries./redposture/v3/kafka/sasl_password",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "password",
           "value": "Kfka-M0nitor-2026"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.key_value_entries./redposture/v3/observability/remote_write.remote_write",
+          "locations": [
+            {
+              "object": "key_value_entries./redposture/db/password",
+              "object_path": "$.key_value_entries./redposture/db/password.password",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.key_value_entries./redposture/db/password.password",
+          "occurrence_count": 1,
           "source": "anonymous",
-          "type": "url_credentials",
-          "value": "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
+          "type": "password",
+          "value": "postgres"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.key_value_entries./redposture/v3/token.token",
+          "locations": [
+            {
+              "object": "key_value_entries./redposture/db/readonly_password",
+              "object_path": "$.key_value_entries./redposture/db/readonly_password.readonly_password",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.key_value_entries./redposture/db/readonly_password.readonly_password",
+          "occurrence_count": 1,
+          "source": "anonymous",
+          "type": "password",
+          "value": "readonly"
+        },
+        {
+          "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "key_value_entries./redposture/v3/datasource/admin_password",
+              "object_path": "$.key_value_entries./redposture/v3/datasource/admin_password",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.key_value_entries./redposture/v3/datasource/admin_password",
+          "occurrence_count": 1,
+          "source": "anonymous",
+          "type": "password",
+          "value": "admin"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "key_value_entries./redposture/v3/token",
+              "object_path": "$.key_value_entries./redposture/v3/token",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.key_value_entries./redposture/v3/token",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "generic_secret",
           "value": "rp-v3-token-2026"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "key_value_entries./redposture/app/api_key",
+              "object_path": "$.key_value_entries./redposture/app/api_key.api_key",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.key_value_entries./redposture/app/api_key.api_key",
+          "occurrence_count": 1,
+          "source": "anonymous",
+          "type": "api_key",
+          "value": "rp-demo-key-2026"
         }
       ],
       "live_emitted": false,
       "partial_reasons": [],
       "source": "anonymous",
+      "sources": [
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "etcd.v2_values",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "retained_authorized_v2_tree",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "etcd.v3_values",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "complete_selected_key_or_range_reads",
+          "unsupported": false
+        }
+      ],
       "status": "complete"
     },
     "defcreds_enabled": false,

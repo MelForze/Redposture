@@ -14,9 +14,13 @@ from typing import Any, Protocol
 
 from ...clients.minio_api import MinioResponse
 from ...data_discovery import _scan_portioned_value
+from ...discovery_context import JSONFieldContext
 from ...discovery_frontier import DiscoveryFrontier
+from ...discovery_occurrences import OccurrenceRegistry
 from ...discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME
 from ...discovery_paths import Text, json_discovery_path
+from ...discovery_payloads import needs_payload_reader, scan_payload_file
+from ...discovery_sources import SourceManifest, SourceRead
 from ...discovery_spool import SpoolingRecords
 from ...discovery_text import DiscoveryTextStream, _Value
 from ...discovery_values import DiskBackedText
@@ -24,7 +28,6 @@ from ...json_stream import JSONPath, JSONScalarStream
 from ...scheduler import NestedSchedulerCancelled
 from ...secret_detection import fingerprint, scan_value
 from .enumerate import ObjectInfo
-from .payloads import needs_payload_reader, scan_payload_file
 
 
 class ObjectReader(Protocol):
@@ -164,8 +167,15 @@ class DiscoverResult:
     bytes_read: int = 0
     partial_reasons: list[str] = field(default_factory=list)
     coverage_complete: bool = True
+    source_manifest: SourceManifest = field(default_factory=SourceManifest, repr=False)
+    _partial_events: int = field(default=0, repr=False)
+
+    def __post_init__(self) -> None:
+        self.source_manifest.declare("minio.object_contents")
+        self.source_manifest.declare("minio.object_catalog")
 
     def _partial(self, reason: str) -> None:
+        self._partial_events += 1
         self.coverage_complete = False
         if reason not in self.partial_reasons:
             self.partial_reasons.append(reason)
@@ -185,17 +195,20 @@ def _path_identity(path: Text) -> tuple[int, str]:
 
 
 def _canonical_dedup_key(key: tuple[Any, ...]) -> tuple[Any, ...]:
-    detector, identity, path, bucket, object_key = key
+    detector, identity, path, bucket, object_key, *context = key
     if isinstance(path, (str, DiskBackedText)):
         path = _path_identity(path)
-    return detector, identity, path, bucket, object_key
+    return (detector, identity, path, bucket, object_key, *(context or (0,)))
 
 
 class _JSONDocuments(JSONScalarStream):
     """Keep scalar streaming across consecutive JSON documents in an object."""
 
+    document_ordinal = 0
+
     def _character(self, char: str) -> None:
         if self.root_state == "done" and char not in " \t\r\n":
+            self.document_ordinal += 1
             self.root_state = "value"
             self.root_kind = None
         super()._character(char)
@@ -211,6 +224,49 @@ def _read_and_scan(
     cancelled: Callable[[], bool] | None = None,
     *,
     retain_findings: bool = True,
+) -> bool:
+    kind = "minio.object_contents"
+    result.source_manifest.request(kind, scope="selected_objects_complete_body_reads")
+    before = result._partial_events
+    evidence, finished = SourceRead(), False
+    try:
+        with result.source_manifest.guard(kind):
+            continued = _read_object_and_scan(
+                client,
+                obj,
+                budget,
+                result,
+                seen,
+                on_finding,
+                cancelled,
+                retain_findings=retain_findings,
+                evidence=evidence,
+            )
+            finished = True
+            return continued
+    except (NestedSchedulerCancelled, KeyboardInterrupt):
+        result._partial("cancelled")
+        raise
+    finally:
+        result.source_manifest.read(kind, evidence.count)
+        result.source_manifest.finish(
+            kind,
+            complete=finished and evidence.complete and result._partial_events == before,
+            denied=evidence.status in {401, 403},
+        )
+
+
+def _read_object_and_scan(
+    client: ObjectReader,
+    obj: ObjectInfo,
+    budget: Budget,
+    result: DiscoverResult,
+    seen: set[tuple[Any, ...]],
+    on_finding: Callable[[dict[str, Any]], None] | None,
+    cancelled: Callable[[], bool] | None = None,
+    *,
+    retain_findings: bool = True,
+    evidence: SourceRead,
 ) -> bool:
     """Read one object in ranged chunks and scan each. Large objects are read in
     `chunk_size` ranged reads up to `max_object_size` (never skipped). The text
@@ -228,6 +284,7 @@ def _read_and_scan(
     json_value: _Value | None = None
     replay = None
     json_parser: _JSONDocuments | None = None
+    json_context: JSONFieldContext | None = None
     payload_spool: Any = None
     format_probe = b""
     format_decided = False
@@ -254,11 +311,12 @@ def _read_and_scan(
 
     semantic_portion = max(64, min(budget.chunk_size, 65536))
 
-    def publish(value: Any, object_path: Text = "$") -> None:
+    def publish(value: Any, object_path: Text = "$", field_name: str | None = None) -> None:
         nonlocal seen_frontier, seen_bytes, seen_normalized
         deadline = budget._started + budget.time_budget if budget.time_budget is not None else None
         if (
             content_kind == "text"
+            and field_name is None
             and isinstance(value, str)
             and isinstance(object_path, str)
             and len(value) <= semantic_portion
@@ -272,12 +330,17 @@ def _read_and_scan(
             for reason in reasons:
                 result._partial(reason)
         else:
-            matches, _, covered = _scan_portioned_value(value, object_path, semantic_portion, _deadline=deadline)
+            matches, _, covered = _scan_portioned_value(
+                value, object_path, semantic_portion, _deadline=deadline, _field_name=field_name
+            )
         if not covered:
             result._partial("timeout" if budget.expired() else "unscannable_continuous_field")
         for match in matches:
             identity = fingerprint(match.value)
-            dedup_key = _canonical_dedup_key((match.detector, identity, match.object_path, obj.bucket, obj.key))
+            context = (json_parser.document_ordinal,) if content_kind == "json" and json_parser is not None else ()
+            dedup_key = _canonical_dedup_key(
+                (match.detector, identity, match.object_path, obj.bucket, obj.key, *context)
+            )
             if not seen_normalized:
                 normalized = {_canonical_dedup_key(previous) for previous in seen}
                 seen.clear()
@@ -297,13 +360,18 @@ def _read_and_scan(
                     continue
                 seen.add(dedup_key)
                 seen_bytes += key_bytes
-            finding = {
+            finding: dict[str, Any] = {
                 "type": match.detector,
+                "confidence": match.confidence,
+                "detectors": list(match.rule_ids),
+                "fingerprint": identity,
                 "bucket": obj.bucket,
                 "key": obj.key,
                 "value": match.value,
                 "object_path": match.object_path,
             }
+            if context:
+                finding["document_ordinal"] = context[0]
             if retain_findings:
                 result.findings.append(finding)
             if on_finding is not None:
@@ -329,6 +397,8 @@ def _read_and_scan(
         # storage, if later syntax establishes that plain-text scanning is needed.
         if invalid_json and (obj.key.lower().endswith(".json") or "json" in str(obj.content_type or "").lower()):
             result._partial("parse_failure")
+        if json_context is not None:
+            json_context.close()
         content_kind = "text"
         if json_parser is not None:
             json_parser.close()
@@ -341,13 +411,17 @@ def _read_and_scan(
             replay.close()
 
     def feed_json(chunk: bytes) -> bool:
-        nonlocal json_parser
+        nonlocal json_parser, json_context
         try:
             if json_parser is None:
 
-                def publish_json(path: JSONPath, value: Any) -> None:
+                def publish_json(path: JSONPath, value: Any, field_name: str | None = None) -> None:
                     named = bool(path) and isinstance(path[-1], (str, DiskBackedText))
-                    publish({path[-1]: value} if named else value, json_discovery_path(path[:-1] if named else path))
+                    publish(
+                        {path[-1]: value} if named and field_name is None else value,
+                        json_discovery_path(path[:-1] if named and field_name is None else path),
+                        field_name,
+                    )
 
                 def json_string(path: JSONPath, text: str, final: bool) -> None:
                     nonlocal json_value
@@ -357,12 +431,20 @@ def _read_and_scan(
                     if final:
                         value = json_value.finish()
                         json_value = None
-                        publish_json(path, value)
+                        assert json_context is not None
+                        json_context.value(path, value)
 
+                json_context = JSONFieldContext(
+                    publish_json,
+                    result._partial,
+                    deadline=budget._started + budget.time_budget if budget.time_budget is not None else None,
+                )
                 json_parser = _JSONDocuments(
                     json_string,
-                    on_primitive=lambda item: publish_json(*item),
+                    on_primitive=lambda item: json_context.value(*item),
                     deadline=budget._started + budget.time_budget if budget.time_budget is not None else None,
+                    on_container=json_context.container,
+                    on_container_end=json_context.end,
                 )
             json_parser.feed(chunk)
             return True
@@ -453,6 +535,10 @@ def _read_and_scan(
         if budget.expired():
             raise TimeoutError("discover_time")
 
+    def retain_closed_context() -> None:
+        if json_context is not None and not budget.expired() and not (cancelled is not None and cancelled()):
+            json_context.close()
+
     try:
         while budget.max_object_size is None or object_read < budget.max_object_size:
             if cancelled is not None and cancelled():
@@ -471,16 +557,23 @@ def _read_and_scan(
             try:
                 try:
                     response = client.get_object_range(obj.bucket, obj.key, start=offset, length=length, signed=True)
+                except NestedSchedulerCancelled:
+                    raise
                 except Exception:  # noqa: BLE001 - preserve completed findings after one failed object
                     result._partial("read_failure")
+                    retain_closed_context()
                     return True
+                evidence.status = response.http_status
                 if response.transport_error:
                     result._partial("read_failure")
+                    retain_closed_context()
                     return True
                 if response.http_status in {401, 403} or (
                     response.error is not None and response.error.code == "AccessDenied"
                 ):
+                    evidence.status = 403
                     result._partial("permission_denied")
+                    retain_closed_context()
                     return True
                 if response.http_status == 416 or (
                     response.error is not None and response.error.code == "InvalidRange"
@@ -489,9 +582,13 @@ def _read_and_scan(
                     break
                 if response.http_status not in {200, 206}:
                     result._partial("read_failure")
+                    retain_closed_context()
                     return True
                 body = (response.body or b"")[:length]
                 if not body:
+                    if response.truncated:
+                        result._partial("response_truncated")
+                        return True
                     complete = True
                     break
                 read_any = True
@@ -508,6 +605,10 @@ def _read_and_scan(
                     if cancelled is not None and cancelled():
                         raise NestedSchedulerCancelled("MinIO discovery cancelled")
                     feed(body[position : position + 65_536])
+                if response.truncated and len(body) < length:
+                    result._partial("response_truncated")
+                    retain_closed_context()
+                    return True
                 if len(body) < length:
                     complete = True
                     break
@@ -527,6 +628,7 @@ def _read_and_scan(
                 )
                 if read_any:
                     result.objects_scanned += 1
+                evidence.accept()
                 return True
             if content_kind == "json":
                 try:
@@ -544,6 +646,8 @@ def _read_and_scan(
             result._partial("object_truncated")
         if read_any:
             result.objects_scanned += 1
+        if complete:
+            evidence.accept()
         return True
     except ValueError:
         result._partial("parse_failure")
@@ -555,6 +659,8 @@ def _read_and_scan(
         result._partial("storage_failure")
         return True
     finally:
+        if json_context is not None:
+            json_context.close(flush=False)
         if payload_spool is not None:
             payload_spool.close()
         if replay is not None:
@@ -581,12 +687,23 @@ def discover_secrets(
     read in chunks rather than skipped. `on_finding`, if given, is called with each
     finding as it is discovered (used for real-time output)."""
     budget = budget or Budget()
-    result = DiscoverResult(findings=SpoolingRecords(), candidates=SpoolingRecords())
+    registry = OccurrenceRegistry(source_order=True)
+    result = DiscoverResult(findings=registry, candidates=SpoolingRecords())
+    result.source_manifest.declare("minio.object_catalog")
+    result.source_manifest.request("minio.object_catalog", scope="selected_object_metadata_iterator")
     findings_lock = threading.Lock()
     obj_iter: Iterator[ObjectInfo] = iter(objects)
     enumerated = 0
 
     def candidates() -> Iterator[tuple[int, ObjectInfo]]:
+        try:
+            yield from enumerate_candidates()
+        finally:
+            result.source_manifest.finish("minio.object_catalog", complete=catalog_exhausted[0])
+
+    catalog_exhausted = [False]
+
+    def enumerate_candidates() -> Iterator[tuple[int, ObjectInfo]]:
         nonlocal enumerated
         candidate_index = 0
         while True:
@@ -596,7 +713,9 @@ def discover_secrets(
             try:
                 obj = next(obj_iter)
             except StopIteration:
+                catalog_exhausted[0] = True
                 return
+            result.source_manifest.read("minio.object_catalog")
             if budget.expired():
                 result._partial("timeout")
                 return
@@ -630,10 +749,23 @@ def discover_secrets(
             # Store immediately; the SQL sort key preserves final input order
             # without retaining completed objects behind a slow earlier read.
             with findings_lock:
-                assert isinstance(result.findings, SpoolingRecords)
-                result.findings.append(finding, sort_key=f"{index:020d}")
-                if on_finding is not None:
-                    on_finding(finding)
+                identity = ("value", str(finding["fingerprint"]))
+                created = registry.add(
+                    finding,
+                    identity=identity,
+                    order_key=f"{index:020d}",
+                    location={
+                        "source_kind": "object",
+                        "bucket": finding["bucket"],
+                        "key": finding["key"],
+                        "object_path": finding["object_path"],
+                        **({"document_ordinal": finding["document_ordinal"]} if "document_ordinal" in finding else {}),
+                    },
+                )
+                if created and on_finding is not None:
+                    emitted = on_finding(finding)
+                    if emitted is not False:
+                        registry.mark_emitted(*identity)
 
         _read_and_scan(
             client,
@@ -648,6 +780,7 @@ def discover_secrets(
         return local
 
     def merge(local: DiscoverResult) -> None:
+        result.source_manifest.merge(local.source_manifest.result())
         result.objects_scanned += local.objects_scanned
         result.bytes_read += local.bytes_read
         for reason in local.partial_reasons:

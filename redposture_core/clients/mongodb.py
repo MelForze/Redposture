@@ -16,6 +16,7 @@ from urllib.parse import quote
 
 from ..discovery_spool import SpoolingRecords
 from ..discovery_values import DiskBackedText
+from ..scheduler import NestedSchedulerCancelled
 
 _DEFAULT_SERVER_SELECTION_MS = 1000
 _SYSTEM_DATABASES = {"admin", "config", "local"}
@@ -552,6 +553,8 @@ class MongoAuditClient:
                         raise MongoBudgetStop(documents, TimeoutError("discover budget reached"))
                     documents.append(document)
             return documents
+        except NestedSchedulerCancelled:
+            raise
         except MongoPartialReadError:
             raise
         except Exception as exc:

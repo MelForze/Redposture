@@ -34,6 +34,7 @@ from ...console import Console
 from ...detection_io import DetectCall, DetectDelay, Steps, run_sync
 from ...discovery_frontier import DiscoveryFrontier
 from ...discovery_options import DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
+from ...discovery_sources import SourceManifest
 from ...discovery_spool import SpoolingRecords
 from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...shell_capture import DEFAULT_CAPTURE_BYTES, hex_preview, is_binary
@@ -1734,7 +1735,7 @@ def _list_secrets(
             # Scan on arrival, before the next list page is requested. Use the
             # original UTF-8 data rather than its escaped inventory display.
             source: dict[str, Any] = dict(record)
-            source_data = dict(decoded_data)
+            source_data: dict[str, Any] = dict(decoded_data)
             encoded = item.get("binaryData") if resource == "configmaps" else data_map
             if isinstance(encoded, dict):
                 for key, value in encoded.items():
@@ -1744,10 +1745,9 @@ def _list_secrets(
                         source_data.pop(str(key), None)
                         source.setdefault("data_errors", []).append(f"{key}: invalid_base64")
                     else:
-                        try:
-                            source_data[str(key)] = raw.decode("utf-8")
-                        except UnicodeDecodeError:
-                            source_data[str(key)] = "base64:" + base64.b64encode(raw).decode("ascii")
+                        # Preserve the declared byte source for shared encoding
+                        # and archive dispatch. Inventory display stays above.
+                        source_data[str(key)] = raw
             source["data"] = source_data
             item_sink(source)
 
@@ -3602,6 +3602,7 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
     needs_http_data = bool(options["show_namespaces"] or options["show_pods"] or options["show_secrets"])
     discover_budget = None
     collector = None
+    source_manifest = SourceManifest()
     if bool(getattr(ctx.args, "discover", False)):
         started_at = getattr(ctx, "discovery_started_at", None) or state.started_at or time.monotonic()
         discover_budget = KubeDiscoveryReadBudget(
@@ -3611,11 +3612,13 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
         collector = DiscoveryCollector("kubeapi", ctx, record)
 
     scanned_sources = {"secrets": 0, "configmaps": 0}
+    source_decode_errors: set[str] = set()
 
     def scan_source(resource: str, item: dict[str, Any]) -> None:
         assert collector is not None
         scanned_sources[resource] += 1
         for error in item.get("data_errors", []):
+            source_decode_errors.add(resource)
             collector.partial(f"{resource}.{item.get('namespace')}.{item.get('name')}", error)
         data = item.get("data")
         if resource == "configmaps" and item.get("name") == "kube-root-ca.crt" and isinstance(data, dict):
@@ -3809,6 +3812,9 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
     )
     if collector is not None:
         for resource, result in (("secrets", secrets_result), ("configmaps", configmaps_result)):
+            source_manifest.request(
+                resource, scope="selected_namespaces" if options["namespace_filters"] else "all_accessible_namespaces"
+            )
             if result.access_confirmed:
                 collector.mark_accessible_source()
             # Compatibility with alternate readers which return records rather
@@ -3816,6 +3822,13 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
             if not scanned_sources[resource]:
                 for item in result.items or []:
                     scan_source(resource, item)
+            source_manifest.read(resource, scanned_sources[resource])
+            denied = not result.access_confirmed and any(
+                part in str(result.error or "").lower() for part in ("denied", "forbidden", "unauthorized")
+            )
+            source_manifest.finish(
+                resource, complete=result.complete and resource not in source_decode_errors, denied=denied
+            )
             if not result.complete:
                 error = str(result.error or "incomplete source")
                 if not result.access_confirmed and any(
@@ -3823,9 +3836,35 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
                 ):
                     error = "access_denied: " + error
                 collector.partial(resource, error)
+        from .discover import scan_workload_env
+
+        def read_workload(path: str, sink: Callable[[dict[str, Any]], None]) -> KubeListResult:
+            return _coerce_list_result(
+                _invoke_kube_list_items(
+                    request_host,
+                    request_port,
+                    path,
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    use_https=state.use_https,
+                    insecure=state.insecure,
+                    ca_file=state.ca_file,
+                    token=token,
+                    username=username,
+                    password=password,
+                    client=data_client,
+                    retries=int(getattr(ctx.args, "retries", 0) or 0),
+                    discovery_budget=discover_budget,
+                    item_sink=sink,
+                )
+            )
+
+        scan_workload_env(
+            collector, namespaces=list(options["namespace_filters"]), list_items=read_workload, manifest=source_manifest
+        )
         if discover_budget is not None:
             collector.bytes_read = discover_budget.bytes_read
         record["content_discovery"] = collector.result()
+        record["content_discovery"]["sources"] = source_manifest.result()
     state.deep_record = record
     return record
 

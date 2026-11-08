@@ -26,6 +26,7 @@ def test_discover_streams_one_oversized_qdrant_point_with_full_value(monkeypatch
 
     class StreamPool:
         def request_stream(self, _method: str, _url: str, *, on_chunk: Any, **_kwargs: Any) -> Any:
+            _kwargs["on_response"](200, {"content-type": "application/json"})
             for index in range(0, len(body), 257):
                 on_chunk(body[index : index + 257])
             return SimpleNamespace(status=200, error=None, truncated=False)
@@ -63,6 +64,7 @@ def test_discover_oversized_qdrant_point_midstream_error_is_partial(monkeypatch:
 
     class BrokenPool:
         def request_stream(self, _method: str, _url: str, *, on_chunk: Any, **_kwargs: Any) -> Any:
+            _kwargs["on_response"](200, {"content-type": "application/json"})
             on_chunk(body[: body.index(b"next_page_offset")])
             return SimpleNamespace(status=200, error="unexpected EOF", truncated=True)
 
@@ -104,6 +106,7 @@ def test_discover_oversized_qdrant_point_continues_with_next_offset(monkeypatch:
 
     class StreamPool:
         def request_stream(self, _method: str, _url: str, *, on_chunk: Any, **_kwargs: Any) -> Any:
+            _kwargs["on_response"](200, {"content-type": "application/json"})
             for position in range(0, len(first_body), 257):
                 on_chunk(first_body[position : position + 257])
             return SimpleNamespace(status=200, error=None, truncated=False)
@@ -168,6 +171,7 @@ def test_discover_oversized_qdrant_nested_json_string_is_not_false_token(monkeyp
 
     class StreamPool:
         def request_stream(self, _method: str, _url: str, *, on_chunk: Any, **_kwargs: Any) -> Any:
+            _kwargs["on_response"](200, {"content-type": "application/json"})
             for position in range(0, len(body), 257):
                 on_chunk(body[position : position + 257])
             return SimpleNamespace(status=200, error=None, truncated=False)

@@ -187,6 +187,108 @@
       "shard_failures": [],
       "source_disabled_indices": [],
       "source_filtered_indices": [],
+      "sources": [
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.index_inventory",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.mappings",
+          "implemented": true,
+          "read": 8,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.index_settings",
+          "implemented": true,
+          "read": 8,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.cluster_settings",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.node_settings",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 1,
+          "id": "elastic.index_templates",
+          "implemented": true,
+          "read": 0,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 1,
+          "id": "elastic.component_templates",
+          "implemented": true,
+          "read": 0,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 1,
+          "id": "elastic.legacy_templates",
+          "implemented": true,
+          "read": 0,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 1,
+          "id": "elastic.ingest_pipelines",
+          "implemented": true,
+          "read": 0,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 4,
+          "id": "elastic.document_streams",
+          "implemented": true,
+          "read": 4,
+          "requested": 8,
+          "scope": "selected_complete_index_walks",
+          "unsupported": false
+        }
+      ],
       "status": "partial",
       "surfaces": {
         "cluster_settings": {
@@ -443,8 +545,7 @@
         "confidence": "very_high",
         "detectors": [
           "aws_credential_pair",
-          "plausible_value",
-          "sensitive_field"
+          "aws_credentials"
         ],
         "fingerprint": "sha256:<DOCKER_ID>",
         "locations": [
@@ -457,8 +558,11 @@
         ],
         "occurrence_count": 1,
         "score": 99,
-        "secret_type": "aws_secret_access_key",
-        "value": "CorpusAwsSecretKey2026AbCdEfGhIjKlMnOpQr"
+        "secret_type": "aws_credentials",
+        "value": {
+          "awsAccessKeyId": "AKIACORPUS2026ABCDEF",
+          "awsSecretAccessKey": "CorpusAwsSecretKey2026AbCdEfGhIjKlMnOpQr"
+        }
       },
       {
         "confidence": "very_high",
@@ -502,26 +606,6 @@
       {
         "confidence": "very_high",
         "detectors": [
-          "base64_credential",
-          "credential_pair"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "nested-credentials",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/nested-credentials",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 1,
-        "score": 92,
-        "secret_type": "password",
-        "value": "CorpusDockerPassword!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
           "basic_auth",
           "credential_pair"
         ],
@@ -536,8 +620,8 @@
         ],
         "occurrence_count": 1,
         "score": 92,
-        "secret_type": "password",
-        "value": "CorpusBasicPassword!2026"
+        "secret_type": "basic_auth",
+        "value": "Basic Y29ycHVzOkNvcnB1c0Jhc2ljUGFzc3dvcmQhMjAyNg=="
       },
       {
         "confidence": "very_high",
@@ -562,6 +646,52 @@
         "confidence": "very_high",
         "detectors": [
           "credential_pair",
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          },
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusEmbeddedClientSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "credential_pair",
+          "registry_auth"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 92,
+        "secret_type": "encoded_credentials",
+        "value": "Y29ycHVzLWRvY2tlcjpDb3JwdXNEb2NrZXJQYXNzd29yZCEyMDI2"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
           "credential_uri"
         ],
         "fingerprint": "sha256:<DOCKER_ID>",
@@ -574,14 +704,13 @@
           }
         ],
         "occurrence_count": 1,
-        "score": 92,
-        "secret_type": "password",
-        "value": "CorpusDsnPassword!2026"
+        "score": 96,
+        "secret_type": "connection_string",
+        "value": "postgresql://corpus:CorpusDsnPassword%212026@db.corpus.invalid/app"
       },
       {
         "confidence": "very_high",
         "detectors": [
-          "credential_pair",
           "credential_uri"
         ],
         "fingerprint": "sha256:<DOCKER_ID>",
@@ -600,48 +729,9 @@
           }
         ],
         "occurrence_count": 2,
-        "score": 92,
-        "secret_type": "password",
-        "value": "PayDb!2026"
-      },
-      {
-        "confidence": "very_high",
-        "detectors": [
-          "credential_pair",
-          "plausible_value",
-          "sensitive_field"
-        ],
-        "fingerprint": "sha256:<DOCKER_ID>",
-        "locations": [
-          {
-            "id": "nested-credentials",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/nested-credentials",
-            "source_kind": "document"
-          },
-          {
-            "id": "nested-credentials",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/nested-credentials",
-            "source_kind": "document"
-          },
-          {
-            "id": "nested-credentials",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/nested-credentials",
-            "source_kind": "document"
-          },
-          {
-            "id": "nested-credentials",
-            "index": "redposture-discover-corpus-v2",
-            "object": "redposture-discover-corpus-v2/nested-credentials",
-            "source_kind": "document"
-          }
-        ],
-        "occurrence_count": 4,
-        "score": 90,
-        "secret_type": "secret",
-        "value": "CorpusEmbeddedClientSecret!2026"
+        "score": 96,
+        "secret_type": "connection_string",
+        "value": "postgresql://payments:PayDb!2026@postgres.internal:5432/payments?sslmode=require"
       },
       {
         "confidence": "very_high",

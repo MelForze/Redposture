@@ -13,9 +13,10 @@ import threading
 import time
 import urllib.error
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from ...clients import transport
 from ...clients.http_api import (
@@ -869,7 +870,65 @@ def _dump_v2_all_from_body(body: str) -> list[dict[str, str | None]] | None:
     return [_etcd_kv_entry(key, value) for key, value in pairs]
 
 
+_ETCD_SOURCE_VALUE = TypeVar("_ETCD_SOURCE_VALUE")
+
+
+def _observe_etcd_source(
+    collector: DiscoveryCollector | None, api: str, read: Callable[[], tuple[_ETCD_SOURCE_VALUE | None, str | None]]
+) -> tuple[_ETCD_SOURCE_VALUE | None, str | None]:
+    if collector is None:
+        return read()
+    collector.declare_sources("v2_values", "v3_values")
+    with collector.source_attempt("etcd." + api + "_values", scope="complete_selected_key_or_range_reads") as evidence:
+        result, error = read()
+        if error:
+            denied = any(
+                word in error.lower()
+                for word in (
+                    "access_denied",
+                    "authentication required",
+                    "unauthorized",
+                    "forbidden",
+                    "status 401",
+                    "status 403",
+                )
+            )
+            evidence.status = 403 if denied else None
+            collector.partial(api, "access_denied" if denied else error)
+        elif result is not None:
+            evidence.accept()
+        return result, error
+
+
 def _dump_v2_key(
+    host: str,
+    port: int,
+    key: str,
+    timeout: float,
+    *,
+    basic_auth: tuple[str, str] | None = None,
+    discovery_budget: _EtcdDiscoveryBudget | None = None,
+    retained_payload: Mapping[str, Any] | None = None,
+    retained_error: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    collector = discovery_budget.collector if discovery_budget is not None else None
+    return _observe_etcd_source(
+        collector,
+        "v2",
+        lambda: _read_dump_v2_key(
+            host,
+            port,
+            key,
+            timeout,
+            basic_auth=basic_auth,
+            discovery_budget=discovery_budget,
+            retained_payload=retained_payload,
+            retained_error=retained_error,
+        ),
+    )
+
+
+def _read_dump_v2_key(
     host: str,
     port: int,
     key: str,
@@ -988,6 +1047,34 @@ def _dump_v3_all(
 
 
 def _stream_dump_v3_all(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    batch: int,
+    delay_ms: int,
+    limit: int | None = None,
+    auth_token: str | None = None,
+    discovery_budget: _EtcdDiscoveryBudget | None = None,
+) -> tuple[list[dict[str, str | None]] | None, str | None]:
+    collector = discovery_budget.collector if discovery_budget is not None else None
+    return _observe_etcd_source(
+        collector,
+        "v3",
+        lambda: _read_stream_dump_v3_all(
+            host,
+            port,
+            timeout,
+            batch=batch,
+            delay_ms=delay_ms,
+            limit=limit,
+            auth_token=auth_token,
+            discovery_budget=discovery_budget,
+        ),
+    )
+
+
+def _read_stream_dump_v3_all(
     host: str,
     port: int,
     timeout: float,
@@ -1141,10 +1228,9 @@ def _stream_dump_v3_all(
                 return entries, "invalid_base64_value"
             if discovery_budget is not None and discovery_budget.collector is not None:
                 source = f"key_value_entries.{key}"
-                if isinstance(value, DiskBackedText):
-                    discovery_budget.collector.scan_disk_text(source, value, key=key.rsplit("/", 1)[-1])
-                else:
-                    discovery_budget.collector.add(source, {key.rsplit("/", 1)[-1]: value}, charge=False)
+                discovery_budget.collector.scan_base64_payload(
+                    source, item.get("value") or "", field_name=key.rsplit("/", 1)[-1]
+                )
             if discovery_budget is None:
                 value = _format_etcd_text(value)
             entry = _etcd_kv_entry(key, value)
@@ -1180,6 +1266,23 @@ def _stream_dump_v3_all(
 
 
 def _dump_v3_key(
+    host: str,
+    port: int,
+    key: str,
+    timeout: float,
+    *,
+    auth_token: str | None = None,
+    discovery_budget: _EtcdDiscoveryBudget | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    collector = discovery_budget.collector if discovery_budget is not None else None
+    return _observe_etcd_source(
+        collector,
+        "v3",
+        lambda: _read_dump_v3_key(host, port, key, timeout, auth_token=auth_token, discovery_budget=discovery_budget),
+    )
+
+
+def _read_dump_v3_key(
     host: str,
     port: int,
     key: str,
@@ -1249,10 +1352,9 @@ def _dump_v3_key(
         return None, "invalid_base64_value"
     if discovery_budget is not None and discovery_budget.collector is not None:
         source = f"key_value_entries.{key}"
-        if isinstance(value, DiskBackedText):
-            discovery_budget.collector.scan_disk_text(source, value, key=key.rsplit("/", 1)[-1])
-        else:
-            discovery_budget.collector.add(source, {key.rsplit("/", 1)[-1]: value}, charge=False)
+        discovery_budget.collector.scan_base64_payload(
+            source, first.get("value") or "", field_name=key.rsplit("/", 1)[-1]
+        )
     return _etcd_kv_entry(resolved_key, value), error
 
 
@@ -1713,6 +1815,18 @@ def _detect_audit_etcd_host_steps(
                 )
                 collector.bytes_read += pre_collector_streamed_bytes
                 discovery_budget.collector = collector
+                collector.declare_sources("v2_values", "v3_values")
+                assert collector.source_manifest is not None
+                for api, supported, accessible, required in (
+                    ("v2", v2_supported, v2_has_access, v2_auth_required),
+                    ("v3", v3_supported, v3_has_access, v3_auth_required),
+                ):
+                    if supported and not accessible:
+                        collector.source_manifest.request("etcd." + api + "_values", scope="discovery_access_gate")
+                        collector.source_manifest.finish(
+                            "etcd." + api + "_values", complete=False, denied=required is True
+                        )
+
                 if key_dump_error:
                     collector.partial("v2", key_dump_error)
                 if not has_access:
@@ -1739,30 +1853,37 @@ def _detect_audit_etcd_host_steps(
                 if show_keys or (dump_keys and not (discover and query_key)):
                     dump_errors: list[str] = [f"v2: {key_dump_error}"] if key_dump_error else []
                     if v2_has_access:
-                        v2_entries = (
-                            _dump_v2_payload(v2_streamed_payload, collector)
-                            if v2_streamed_payload is not None
-                            else None
-                            if v2_error in {"byte_budget", "time_budget"}
-                            else _dump_v2_all_from_body(v2_body)
-                        )
-                        key_value_entries_by_api["v2"] = v2_entries
-                        if collector is not None and v2_entries is not None:
-                            collector.mark_accessible_source()
-                            if v2_streamed_payload is None:
-                                for entry in v2_entries:
-                                    key = str(entry.get("key") or "")
-                                    collector.add(
-                                        f"key_value_entries.{key}",
-                                        {key.rsplit("/", 1)[-1]: entry.get("value")},
-                                        charge=False,
-                                    )
-                        if v2_entries is None:
-                            dump_errors.append(
-                                f"v2: {v2_error}"
+                        with (
+                            collector.source_attempt("etcd.v2_values", scope="retained_authorized_v2_tree")
+                            if collector is not None
+                            else nullcontext() as evidence
+                        ):
+                            v2_entries = (
+                                _dump_v2_payload(v2_streamed_payload, collector)
+                                if v2_streamed_payload is not None
+                                else None
                                 if v2_error in {"byte_budget", "time_budget"}
-                                else "v2: /v2/keys returned invalid JSON"
+                                else _dump_v2_all_from_body(v2_body)
                             )
+                            key_value_entries_by_api["v2"] = v2_entries
+                            if collector is not None and v2_entries is not None:
+                                collector.mark_accessible_source()
+                                if v2_streamed_payload is None:
+                                    for entry in v2_entries:
+                                        key = str(entry.get("key") or "")
+                                        collector.add(
+                                            f"key_value_entries.{key}",
+                                            {key.rsplit("/", 1)[-1]: entry.get("value")},
+                                            charge=False,
+                                        )
+                            if v2_entries is None:
+                                dump_errors.append(
+                                    f"v2: {v2_error}"
+                                    if v2_error in {"byte_budget", "time_budget"}
+                                    else "v2: /v2/keys returned invalid JSON"
+                                )
+                            if evidence is not None and v2_entries is not None and not key_dump_error:
+                                evidence.accept()
                     if v3_has_access:
                         if dump_keys:
                             v3_entries, v3_dump_error = _stream_dump_v3_all(

@@ -147,11 +147,14 @@ class StreamedSearchPage:
             raise SearchStreamError("invalid source container path")
 
     def compact_source(self) -> dict[Text, Any] | list[Any]:
+        from ...discovery_groups import credential_field
+
         root: dict[Text, Any] | list[Any] = {}
         active_path: Path | None = None
         parts: list[str] = []
         size = 0
         nodes = 0
+        credential_disk: DiskBackedText | None = None
 
         def on_container(path: Path, kind: str) -> None:
             nonlocal root, nodes
@@ -168,7 +171,7 @@ class StreamedSearchPage:
                 self._put(root, relative, value)
 
         def on_string(path: Path, fragment: str, final: bool) -> None:
-            nonlocal active_path, parts, size, nodes
+            nonlocal active_path, parts, size, nodes, credential_disk
             if path[: len(_SOURCE_PATH)] != _SOURCE_PATH:
                 return
             if active_path != path:
@@ -176,6 +179,26 @@ class StreamedSearchPage:
             encoded_size = len(fragment.encode("utf-8"))
             self.source_bytes += encoded_size
             size += encoded_size
+            # Retain known related members together even when one is larger
+            # than the inline window. Other large scalars keep the existing
+            # separate scan path. A disk value is attached only at its closing
+            # JSON quote, so an interrupted prefix never becomes a credential.
+            if credential_disk is None and size > self.inline_limit and credential_field(path[-1]) is not None:
+                credential_disk = DiskBackedText()
+                for part in parts:
+                    credential_disk.append_text(part)
+                parts.clear()
+            if credential_disk is not None:
+                credential_disk.append_text(fragment)
+                if final:
+                    nodes += 1
+                    if nodes > 100_000:
+                        raise SearchStreamError("source has too many fields")
+                    credential_disk.finish()
+                    self._put(root, path[len(_SOURCE_PATH) :], credential_disk)
+                    credential_disk = None
+                    active_path, parts, size = None, [], 0
+                return
             if path not in self.large_paths:
                 if size > self.inline_limit:
                     self.large_paths.add(path)
@@ -205,7 +228,11 @@ class StreamedSearchPage:
                 raise SearchStreamError("scalar root source is unsupported")
             self._put(root, relative, value)
 
-        self._walk(on_string, on_primitive=on_primitive, on_container=on_container)
+        try:
+            self._walk(on_string, on_primitive=on_primitive, on_container=on_container)
+        finally:
+            if credential_disk is not None:
+                credential_disk.close()
         return root
 
     def scan_large_fields(

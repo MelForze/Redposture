@@ -154,7 +154,7 @@ def _structured(value: DiskBackedText, deadline: float | None) -> bool:
             head = chunk.lstrip()
             if head:
                 first = False
-                if head.startswith(("{", "[", "<")):
+                if head.startswith(("{", "[", "<", "#cloud-config")):
                     return True
         text = tail + chunk
         if _ASSIGNMENT_RE.search(text) or _SQL_PASSWORD_RE.search(text):

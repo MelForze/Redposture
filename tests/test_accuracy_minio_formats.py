@@ -11,10 +11,10 @@ import zipfile
 import pytest
 
 from redposture_core.clients.minio_api import MinioResponse
+from redposture_core.discovery_payloads import scan_payload_file
 from redposture_core.discovery_values import DiskBackedText, iter_json_chunks
 from redposture_core.modules.minio.discover import Budget, discover_secrets
 from redposture_core.modules.minio.enumerate import ObjectInfo
-from redposture_core.modules.minio.payloads import scan_payload_file
 from redposture_core.scheduler import NestedSchedulerCancelled
 
 
@@ -101,7 +101,7 @@ def test_unparsed_or_corrupt_payload_is_partial_and_next_object_survives(key, bo
 
 @pytest.mark.parametrize("error", [TimeoutError, NestedSchedulerCancelled])
 def test_archive_cancellation_and_deadline_propagate_and_close_spools(monkeypatch, error):
-    from redposture_core.modules.minio import payloads
+    from redposture_core import discovery_payloads as payloads
 
     spools = []
     factory = payloads.tempfile.SpooledTemporaryFile
@@ -138,9 +138,11 @@ def test_identical_values_in_different_archive_members_keep_both_places():
             archive.writestr(name, 'password="repeated-value"\n')
     body = stream.getvalue()
     result = discover_secrets(Reader({"config.zip": body}), [ObjectInfo("qa", "config.zip", len(body))])
-    assert result.coverage_complete and len(result.findings) == 2
-    assert [item["value"] for item in result.findings] == ["repeated-value", "repeated-value"]
-    assert len({item["object_path"] for item in result.findings}) == 2
+    assert result.coverage_complete and len(result.findings) == 1
+    finding = result.findings[0]
+    assert finding["value"] == "repeated-value"
+    assert finding["occurrence_count"] == len(finding["locations"]) == 2
+    assert len({item["object_path"] for item in finding["locations"]}) == 2
 
 
 @pytest.mark.parametrize("key,encoding", [("plain.zip", "utf-8"), ("plain.gz", "utf-8"), ("ordinary.txt", "cp1251")])

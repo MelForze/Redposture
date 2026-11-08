@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import codecs
 import hashlib
+import io
 import math
 import sqlite3
 import tempfile
@@ -14,9 +15,11 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from ...discovery_frontier import DiscoveryFrontier
+from ...discovery_sources import SourceManifest
 from ...discovery_spool import SpoolingRecords, SpoolingStrings
 from ...discovery_values import DiskBackedText
 from ...rendering import sanitize_report_payload
+from ...scheduler import NestedSchedulerCancelled
 from ...show_limits import dump_flag_limit, show_flag_limit
 from ...storage_discovery import DiscoveryCollector
 
@@ -216,6 +219,11 @@ class _DiscoverySession:
     def __init__(self, ctx: Any, prior: dict[str, Any], sock: Any) -> None:
         self.ctx = ctx
         self.collector = DiscoveryCollector("redis", ctx, prior)
+        self.collector.source_manifest = SourceManifest()
+        for category in ("key_catalog", "key_values"):
+            self.collector.source_manifest.declare("redis." + category)
+        self.last_denied = False
+        self.last_unsupported = False
         self.reader = RESPStreamReader(sock, deadline=self.collector.deadline)
         self.sock = sock
         self.records = SpoolingRecords()
@@ -233,6 +241,7 @@ class _DiscoverySession:
 
     def deny(self, source: str, error: bytes) -> None:
         reason = "access_denied" if any(marker in error.upper() for marker in (b"NOPERM", b"NOAUTH")) else "read_error"
+        self.last_denied |= reason == "access_denied"
         self.collector.partial(source, f"{reason}:{_text(error)}")
 
     def command(self, *parts: bytes | RedisBulk) -> tuple[str, Any]:
@@ -253,16 +262,34 @@ class _DiscoverySession:
         return self.reader.read()
 
     def scalar(self, key: str, raw: bytes | RedisBulk | None, path: str) -> str | DiskBackedText:
-        value = _text(raw)
-        if isinstance(value, DiskBackedText):
-            self.collector.scan_disk_text(path, value, key=key)
-        else:
-            self.collector.add(path, {key: value}, charge=False)
-        if isinstance(raw, RedisBulk):
-            raw.close()
-        return value
+        try:
+            value = _text(raw)
+            if isinstance(raw, RedisBulk):
+                raw.file.seek(0)
+                self.collector._scan_retained_payload(path, raw.file, field_name=key)
+            else:
+                with io.BytesIO(raw or b"") as source:
+                    self.collector._scan_retained_payload(path, source, field_name=key)
+            return value
+        finally:
+            if isinstance(raw, RedisBulk):
+                raw.close()
 
     def read_key(self, raw_key: bytes | RedisBulk) -> None:
+        with self.collector.source_attempt(
+            "redis.key_values", scope="selected_or_enumerated_keys_all_supported_types"
+        ) as evidence:
+            self.last_denied = self.last_unsupported = False
+            before = self.count
+            try:
+                self._read_key(raw_key)
+                if self.count > before:
+                    evidence.accept(self.count - before)
+            finally:
+                evidence.status = 403 if self.last_denied else None
+                evidence.unsupported = self.last_unsupported
+
+    def _read_key(self, raw_key: bytes | RedisBulk) -> None:
         key = (
             f"key_sha256:{raw_key.digest}"
             if isinstance(raw_key, RedisBulk)
@@ -292,6 +319,7 @@ class _DiscoverySession:
             self.collector.partial(source, "key_disappeared_during_read")
             return
         if command is None:
+            self.last_unsupported = True
             self.collector.partial(source, "unsupported_key_type")
             return
         kind, response = self.command(*command)
@@ -441,33 +469,42 @@ class _DiscoverySession:
         queue = _KeyQueue()
         cursors = DiscoveryFrontier()
         cursor = b"0"
+        catalog_complete = False
         try:
             while self.collector.allowed():
                 if not cursors.claim(cursor.decode("ascii")):
                     self.collector.partial("keys", "repeated_scan_cursor")
+                    assert self.collector.source_manifest is not None
+                    self.collector.source_manifest.finish("redis.key_catalog", complete=False)
                     break
-                kind, root = self.command(b"SCAN", cursor, b"COUNT", b"500")
-                if kind == "error":
-                    self.deny("keys", root)
-                    break
-                if kind != "array" or not isinstance(root, RESPArray) or root.remaining != 2:
-                    raise ValueError("invalid Redis SCAN response")
-                parts = iter(root)
-                kind, next_cursor = next(parts)
-                if kind != "bulk" or not isinstance(next_cursor, bytes) or not next_cursor.isdigit():
-                    raise ValueError("invalid Redis SCAN cursor")
-                kind, keys = next(parts)
-                if kind != "array" or not isinstance(keys, RESPArray):
-                    raise ValueError("invalid Redis SCAN keys")
-                for kind, key in keys:
-                    if kind != "bulk" or not isinstance(key, (bytes, RedisBulk)):
-                        raise ValueError("invalid Redis key")
-                    self.saw_key = True
-                    try:
-                        queue.add(key)
-                    finally:
-                        if isinstance(key, RedisBulk):
-                            key.close()
+                with self.collector.source_attempt(
+                    "redis.key_catalog", scope="validated_SCAN_pages", content=False
+                ) as evidence:
+                    kind, root = self.command(b"SCAN", cursor, b"COUNT", b"500")
+                    if kind == "error":
+                        self.deny("keys", root)
+                        evidence.status = 403 if self.last_denied else None
+                        break
+                    if kind != "array" or not isinstance(root, RESPArray) or root.remaining != 2:
+                        raise ValueError("invalid Redis SCAN response")
+                    parts = iter(root)
+                    kind, next_cursor = next(parts)
+                    if kind != "bulk" or not isinstance(next_cursor, bytes) or not next_cursor.isdigit():
+                        raise ValueError("invalid Redis SCAN cursor")
+                    kind, keys = next(parts)
+                    if kind != "array" or not isinstance(keys, RESPArray):
+                        raise ValueError("invalid Redis SCAN keys")
+                    for kind, key in keys:
+                        if kind != "bulk" or not isinstance(key, (bytes, RedisBulk)):
+                            raise ValueError("invalid Redis key")
+                        self.saw_key = True
+                        try:
+                            queue.add(key)
+                        finally:
+                            if isinstance(key, RedisBulk):
+                                key.close()
+                    evidence.accept()
+                    catalog_complete = next_cursor == b"0"
                 while (raw_key := queue.pop()) is not None:
                     try:
                         self.read_key(raw_key)
@@ -480,6 +517,9 @@ class _DiscoverySession:
                 if cursor == b"0":
                     break
         finally:
+            if not catalog_complete:
+                assert self.collector.source_manifest is not None
+                self.collector.source_manifest.finish("redis.key_catalog", complete=False)
             queue.close()
             cursors.close()
 
@@ -488,6 +528,9 @@ def discover_redis(ctx: Any, prior: dict[str, Any], sock: Any) -> dict[str, Any]
     session = _DiscoverySession(ctx, prior, sock)
     try:
         session.scan()
+    except (NestedSchedulerCancelled, KeyboardInterrupt):
+        sock.close()  # Cancellation may interrupt a RESP header or bulk body.
+        raise
     except (OSError, ValueError, ConnectionError) as exc:
         session.error = str(exc) or type(exc).__name__
         session.collector.partial("redis", session.error)

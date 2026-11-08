@@ -56,64 +56,187 @@
       "findings": [
         {
           "confidence": "high",
+          "detectors": [
+            "credential_pair",
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "id": 4,
+              "locator_kind": "document_id",
+              "object": "database.redposture.collection.audit_events.document",
+              "object_path": "$.database.redposture.collection.audit_events.document.details",
+              "source": "anonymous",
+              "source_kind": "document"
+            },
+            {
+              "id": 1,
+              "locator_kind": "document_id",
+              "object": "database.redposture.collection.service_tokens.document",
+              "object_path": "$.database.redposture.collection.service_tokens.document.token",
+              "source": "anonymous",
+              "source_kind": "document"
+            }
+          ],
           "object_path": "$.database.redposture.collection.audit_events.document.details",
+          "occurrence_count": 2,
           "source": "anonymous",
           "type": "generic_secret",
           "value": "gfa_demo_token_123"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "id": 1,
+              "locator_kind": "document_id",
+              "object": "database.redposture.collection.demo_accounts.document",
+              "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+              "source": "anonymous",
+              "source_kind": "document"
+            }
+          ],
           "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "password",
           "value": "admin"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "id": 2,
+              "locator_kind": "document_id",
+              "object": "database.redposture.collection.demo_accounts.document",
+              "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+              "source": "anonymous",
+              "source_kind": "document"
+            }
+          ],
           "object_path": "$.database.redposture.collection.demo_accounts.document.password",
-          "source": "anonymous",
-          "type": "password",
-          "value": "auto-runner-2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "password",
           "value": "readonly"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "id": 3,
+              "locator_kind": "document_id",
+              "object": "database.redposture.collection.demo_accounts.document",
+              "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+              "source": "anonymous",
+              "source_kind": "document"
+            }
+          ],
           "object_path": "$.database.redposture.collection.demo_accounts.document.password",
-          "source": "anonymous",
-          "type": "password",
-          "value": "reporting2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "password",
           "value": "service123"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "id": 4,
+              "locator_kind": "document_id",
+              "object": "database.redposture.collection.demo_accounts.document",
+              "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+              "source": "anonymous",
+              "source_kind": "document"
+            }
+          ],
+          "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+          "occurrence_count": 1,
+          "source": "anonymous",
+          "type": "password",
+          "value": "reporting2026"
+        },
+        {
+          "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "id": 5,
+              "locator_kind": "document_id",
+              "object": "database.redposture.collection.demo_accounts.document",
+              "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+              "source": "anonymous",
+              "source_kind": "document"
+            }
+          ],
+          "object_path": "$.database.redposture.collection.demo_accounts.document.password",
+          "occurrence_count": 1,
+          "source": "anonymous",
+          "type": "password",
+          "value": "auto-runner-2026"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "id": 2,
+              "locator_kind": "document_id",
+              "object": "database.redposture.collection.service_tokens.document",
+              "object_path": "$.database.redposture.collection.service_tokens.document.token",
+              "source": "anonymous",
+              "source_kind": "document"
+            }
+          ],
           "object_path": "$.database.redposture.collection.service_tokens.document.token",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "generic_secret",
           "value": "ci_demo_token_456"
         },
         {
-          "confidence": "high",
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "id": 3,
+              "locator_kind": "document_id",
+              "object": "database.redposture.collection.service_tokens.document",
+              "object_path": "$.database.redposture.collection.service_tokens.document.token",
+              "source": "anonymous",
+              "source_kind": "document"
+            }
+          ],
           "object_path": "$.database.redposture.collection.service_tokens.document.token",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "generic_secret",
           "value": "prom_rw_token_789"
@@ -122,6 +245,38 @@
       "live_emitted": false,
       "partial_reasons": [],
       "source": "anonymous",
+      "sources": [
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "mongodb.database_catalog",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_identity_cached_database_names",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "mongodb.collection_catalog",
+          "implemented": true,
+          "read": 2,
+          "requested": 2,
+          "scope": "selected_database_collection_names",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "mongodb.document_streams",
+          "implemented": true,
+          "read": 4,
+          "requested": 4,
+          "scope": "complete_selected_collection_cursors",
+          "unsupported": false
+        }
+      ],
       "status": "complete"
     },
     "credential_capabilities": {},

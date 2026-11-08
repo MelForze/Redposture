@@ -20,7 +20,7 @@ from redposture_core.cli_args import parse_args
 from redposture_core.clients.http_api import HttpResponse
 from redposture_core.modules.jenkins import actions, render
 from redposture_core.modules.jenkins.stage import build_jenkins_plan, build_jenkins_spec
-from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun
+from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun, AuditHookContext
 
 
 def _credentials(*names: str) -> tuple[AuditCredentialRun, ...]:
@@ -244,9 +244,9 @@ def test_cancellation_accounts_for_unstarted_pairs_without_invalid_verdicts(
     runner = _runner(auth, emitted=emitted)
     original_ctx = runner._ctx
 
-    def context_with_cancellation(*args: Any, **kwargs: Any) -> SimpleNamespace:
+    def context_with_cancellation(*args: Any, **kwargs: Any) -> AuditHookContext:
         ctx = original_ctx(*args, **kwargs)
-        return SimpleNamespace(**{**vars(ctx), "cancelled": cancelled.is_set})
+        return replace(ctx, cancelled=cancelled.is_set)
 
     monkeypatch.setattr(runner, "_ctx", context_with_cancellation)
     output = tmp_path / "cancelled.txt"

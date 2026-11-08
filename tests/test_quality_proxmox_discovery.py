@@ -40,6 +40,9 @@ def test_proxmox_discovery_urls_include_each_finding_once_and_remain_read_only(n
 
 @given(st.text(alphabet="abc123_-", min_size=8, max_size=30), st.sampled_from(("password", "api_key", "token")))
 def test_proxmox_secret_scanner_marks_only_sensitive_json_values(value: str, key: str) -> None:
+    # Positive medium fields must carry plausible values; uniform low-entropy
+    # api_key strings are covered as negatives in the shared policy suite.
+    value = "qR7xN2/pV5tC8+fK3sM9=zD6aL4-" + value
     findings: list[dict[str, str]] = []
     actions._scan_endpoint_payload(
         "/nodes/pve/config", json.dumps({key: value, "version": value}).encode(), findings, set()

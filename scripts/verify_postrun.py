@@ -733,7 +733,7 @@ def _manifest_findings_for_vendor(manifest: dict[str, object], vendor: str) -> l
         secret_type = item.get("secret_type")
         value = item.get("value")
         locations = item.get("locations")
-        if not isinstance(secret_type, str) or not secret_type or not isinstance(value, str) or not value:
+        if not isinstance(secret_type, str) or not secret_type or not isinstance(value, (str, dict)) or not value:
             raise SystemExit("discover corpus manifest finding requires secret_type and value")
         if not isinstance(locations, list) or not locations or not all(isinstance(loc, dict) for loc in locations):
             raise SystemExit("discover corpus manifest finding requires non-empty locations")
@@ -785,6 +785,11 @@ def _finding_is_in_manifest_scope(
         if str(location.get("index") or "") in expected_indices:
             return True
     return False
+
+
+def _discover_value_key(value: object) -> str:
+    """Retain JSON type and every member while ignoring object key order."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _validate_discover_lab_contracts(
@@ -857,7 +862,7 @@ def _validate_discover_lab_contracts(
             ]
             if not expected_findings:
                 raise SystemExit(f"discover corpus manifest has no document findings for vendor={vendor}")
-        expected_pairs = {(str(item["secret_type"]), str(item["value"])) for item in expected_findings}
+        expected_pairs = {(str(item["secret_type"]), _discover_value_key(item["value"])) for item in expected_findings}
         expected_objects = {
             str(location.get("object") or "")
             for item in expected_findings
@@ -880,7 +885,9 @@ def _validate_discover_lab_contracts(
                 required_source_kind="document" if corpus_scope == "documents" else None,
             )
         ]
-        actual_pairs = {(str(item.get("secret_type") or ""), str(item.get("value") or "")) for item in scoped_findings}
+        actual_pairs = {
+            (str(item.get("secret_type") or ""), _discover_value_key(item.get("value"))) for item in scoped_findings
+        }
         missing = sorted(expected_pairs - actual_pairs)
         unexpected = sorted(actual_pairs - expected_pairs)
         if missing or unexpected:
@@ -909,16 +916,25 @@ def _validate_discover_lab_contracts(
             confidence = finding.get("confidence")
             if not isinstance(score, int) or not 55 <= score <= 100:
                 raise SystemExit(f"discover contract for '{label}' has invalid score {score!r}")
-            if confidence not in {"medium", "high", "very_high"}:
+            if confidence == "low":
+                if (
+                    finding.get("secret_type") != "high_entropy"
+                    or finding.get("detectors") != ["entropy_candidate"]
+                    or score != 55
+                ):
+                    raise SystemExit(f"discover contract for '{label}' has invalid low-confidence evidence")
+            elif confidence not in {"medium", "high", "very_high"}:
                 raise SystemExit(f"discover contract for '{label}' has invalid confidence {confidence!r}")
 
-        values = {str(item.get("value") or "") for item in findings}
-        leaked_negatives = sorted(value for value in forbidden_values if value in values)
+        values = {_discover_value_key(item.get("value")) for item in findings}
+        leaked_negatives = sorted(value for value in forbidden_values if _discover_value_key(value) in values)
         if leaked_negatives:
             raise SystemExit(f"discover contract for '{label}' emitted forbidden false positives: {leaked_negatives!r}")
-        by_pair = {(str(item.get("secret_type") or ""), str(item.get("value") or "")): item for item in findings}
+        by_pair = {
+            (str(item.get("secret_type") or ""), _discover_value_key(item.get("value"))): item for item in findings
+        }
         for expected in expected_findings:
-            pair = (str(expected["secret_type"]), str(expected["value"]))
+            pair = (str(expected["secret_type"]), _discover_value_key(expected["value"]))
             actual = by_pair[pair]
             occurrence_min_raw = expected.get("occurrence_count_min", 1)
             if not isinstance(occurrence_min_raw, (int, str)):
@@ -1277,6 +1293,34 @@ def _iter_json_objects(text: str):
                     yield item
 
 
+_RICH_JSON_TOKEN = re.compile(
+    r'"(?:[^"\\]|\\.)*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null|[\[\]{}:,]'
+)
+
+
+def _rich_literal_present(text: str, needle: str) -> bool:
+    """JSON fragments ignore layout, never whitespace inside quoted values.
+
+    Streaming records use compact separators. Rich seed/empty-data checks
+    must keep working for those records as well as ordinary pretty JSON.
+    """
+    if not needle.startswith('"'):
+        return needle in text
+    tokens = []
+    position = 0
+    for match in _RICH_JSON_TOKEN.finditer(needle):
+        if needle[position : match.start()].strip():
+            return needle in text
+        tokens.append(match.group())
+        position = match.end()
+    if not tokens or needle[position:].strip():
+        return needle in text
+    pattern = r"\s*".join(re.escape(token) for token in tokens)
+    if tokens[-1] not in {"{", "[", ":", ","}:
+        pattern += r"(?=\s*(?:[,}\]:]|$))"
+    return re.search(pattern, text) is not None
+
+
 def _validate_rich_lab_outputs(rows: list[dict[str, str]]) -> None:
     for row in rows:
         if row["exit_code"] != "0":
@@ -1284,10 +1328,10 @@ def _validate_rich_lab_outputs(rows: list[dict[str, str]]) -> None:
         label = row["label"]
         output_text = _combined_run_output(row)
         for needle in _RICH_OUTPUT_REQUIRED_SUBSTRINGS.get(label, ()):
-            if needle not in output_text:
+            if not _rich_literal_present(output_text, needle):
                 raise SystemExit(f"label '{label}' is missing expected seeded lab data: {needle}")
         for needle in _RICH_OUTPUT_FORBIDDEN_SUBSTRINGS.get(label, ()):
-            if needle in output_text:
+            if _rich_literal_present(output_text, needle):
                 raise SystemExit(f"label '{label}' contains empty/unseeded lab output: {needle}")
 
         if label == "redis_default":
@@ -2970,6 +3014,10 @@ _GOLDEN_LABEL_VOLATILE_FIELDS: dict[str, frozenset[str]] = {
 }
 # Volatile fields limited to a specific nested result collection.
 _GOLDEN_CONTEXT_VOLATILE_FIELDS: dict[tuple[str, str], frozenset[str]] = {
+    # Discovery reads raw K3s workload status as well as secrets. Generated
+    # system pods may still be Pending in one fresh stand and Running in the
+    # next, changing the number of bytes without changing coverage/findings.
+    ("kubeapi", "content_discovery"): frozenset({"bytes_read"}),
     # Like server_version above, the SQL-reported patch follows the lab image.
     # Product, scope and read-only evidence remain part of the snapshot.
     ("postgres", "server_implementation"): frozenset({"version"}),
@@ -3114,7 +3162,11 @@ def _normalize_for_golden(
                 label=label,
                 parent_key=key,
             )
-            if effective_module == "kafka" and key == "object_path" and isinstance(normalized_value, str):
+            if (
+                effective_module == "kafka"
+                and (key == "object_path" or (key == "object" and parent_key == "locations"))
+                and isinstance(normalized_value, str)
+            ):
                 normalized_value = _GOLDEN_KAFKA_OBJECT_LOCATION.sub(
                     ".partition.<PARTITION>.offset.<OFFSET>", normalized_value
                 )

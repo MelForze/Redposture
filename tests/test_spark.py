@@ -74,6 +74,32 @@ def context(routes=None, port=8080, **args):
     )
 
 
+@pytest.mark.parametrize("status", [200, 403, 500])
+def test_master_source_manifest_reports_actual_validated_read(status):
+    ctx = context({"/json/": (status, MASTER)}, discover=True)
+    prior = {
+        "is_spark": True,
+        "surface": "master_ui",
+        "api_endpoint": "http://qa",
+        "master_url": MASTER["url"],
+        "status": "open_no_auth",
+    }
+    result = actions().data_record(ctx, prior)["content_discovery"]
+    row = next(r for r in result["sources"] if r["id"] == "spark.master_metadata")
+    assert row["requested"] == 1 and row["read"] == int(status == 200)
+    assert row["denied"] == int(status == 403) and row["complete"] == (status == 200)
+
+
+def test_submission_surface_does_not_claim_master_source_was_read():
+    ctx = context({}, discover=True)
+    result = actions().data_record(ctx, {"is_spark": True, "surface": "submission_rest", "api_endpoint": "http://qa"})[
+        "content_discovery"
+    ]
+    row = next(r for r in result["sources"] if r["id"] == "spark.master_metadata")
+    assert row["unsupported"] and not row["read"] and not row["complete"]
+    assert not ctx.lifecycle_state.http.calls
+
+
 def actions():
     try:
         return importlib.import_module("redposture_core.modules.spark.actions")
@@ -101,11 +127,17 @@ def test_master_detects_realistic_long_app_name_without_rejecting_product():
     assert record["detection_status"] == "confirmed"
 
 
-def test_streamed_discovery_accepts_long_app_name_and_keeps_finding():
+@pytest.mark.parametrize(("position", "malformed"), [("beginning", False), ("end", False), ("end", True)])
+def test_streamed_discovery_accepts_long_app_name_and_keeps_finding(position, malformed):
     ctx = context({"/json/": (200, MASTER), "/": HTML}, discover=True)
     detected = actions().detect_record(ctx)
     ctx.lifecycle_state.http.routes["/json/"] = HttpResponse(200, b"{", {}, truncated=True)
-    master = {**MASTER, "activeapps": [{**APP, "name": "qa-API_TOKEN=glpat-" + "q" * 100_000}]}
+    token = "glpat-" + ("q" * 100_000 if malformed else "qaOnlyInactiveToken123456")
+    assignment = "API_TOKEN=" + token
+    name = assignment + " " + "q" * 100_000 if position == "beginning" else "q" * 100_000 + " " + assignment
+    if malformed:
+        name = "qa-" + assignment  # original oversized provider-looking negative
+    master = {**MASTER, "activeapps": [{**APP, "name": name}]}
     payload = json.dumps(master).encode()
 
     def stream(_method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any) -> HttpResponse:
@@ -117,15 +149,10 @@ def test_streamed_discovery_accepts_long_app_name_and_keeps_finding():
     ctx.lifecycle_state.http.request_stream = stream
     record = actions().data_record(ctx, detected)
     assert record["content_discovery"]["status"] == "complete"
-    assert any(
-        "glpat-"
-        in (
-            "".join(item["value"].iter_text_chunks())
-            if isinstance(item["value"], DiskBackedText)
-            else str(item["value"])
-        )
+    assert [
+        ("".join(item["value"].iter_text_chunks()) if isinstance(item["value"], DiskBackedText) else str(item["value"]))
         for item in record["content_discovery"]["findings"]
-    )
+    ] == ([] if malformed else [token])
 
 
 def test_master_detects_complete_large_json_by_streaming_after_buffered_cap():

@@ -1184,9 +1184,15 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         )
 
     listing_errors: list[str] = []
+    bucket_errors: list[str] = []
+
+    def bucket_error(error: str) -> None:
+        bucket_errors.append(error)
+        listing_errors.append(error)
+
     bucket_infos: list[Any] | None = None
     if want_buckets:
-        bucket_infos = list(_enum.iter_buckets(client, on_error=listing_errors.append))
+        bucket_infos = list(_enum.iter_buckets(client, on_error=bucket_error))
         merged["buckets"] = [asdict(b) for b in bucket_infos]
 
     target_buckets: list[str] = []
@@ -1197,7 +1203,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             target_buckets = [str(bucket)]
         else:
             if bucket_infos is None:
-                bucket_infos = list(_enum.iter_buckets(client, on_error=listing_errors.append))
+                bucket_infos = list(_enum.iter_buckets(client, on_error=bucket_error))
             target_buckets = [b.name for b in bucket_infos]
 
     if want_probe:
@@ -1274,6 +1280,11 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             if grouped:
                 merged["_inventory_grouped_stream"] = True
         if want_discover:
+            ready_inventory = getattr(ctx, "emit_ready_inventory", None)
+            if output_format == "txt" and callable(ready_inventory):
+                if listing_errors:
+                    merged["listing_errors"] = list(dict.fromkeys(listing_errors))
+                ready_inventory(merged)
             started_at = getattr(ctx, "discovery_started_at", None)
             budget = _discover.Budget(
                 time_budget=getattr(args, "discover_time", None) or DEFAULT_DISCOVER_TIME,
@@ -1349,6 +1360,23 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             merged["discover_coverage_percent"] = round(coverage_percent, 2) if coverage_percent is not None else None
             merged["discover_candidates_count"] = candidates_count
             merged["discover_findings_count"] = len(result.findings)
+            result.source_manifest.declare("minio.bucket_catalog")
+            if bucket_infos is not None:
+                result.source_manifest.request("minio.bucket_catalog", scope="existing_bucket_listing")
+                if not bucket_errors:
+                    result.source_manifest.read("minio.bucket_catalog")
+                result.source_manifest.finish(
+                    "minio.bucket_catalog",
+                    complete=not bucket_errors,
+                    denied=any("AccessDenied" in error for error in bucket_errors),
+                )
+            if listing_errors:
+                result.source_manifest.finish(
+                    "minio.object_catalog",
+                    complete=False,
+                    denied=any("AccessDenied" in error for error in listing_errors),
+                )
+            merged["discover_sources"] = result.source_manifest.result()
             merged["discover_objects_scanned"] = result.objects_scanned
             merged["discover_bytes_read"] = result.bytes_read
 

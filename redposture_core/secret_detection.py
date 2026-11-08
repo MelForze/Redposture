@@ -9,22 +9,61 @@ from __future__ import annotations
 
 import base64
 import binascii
-import html
 import json
-import math
 import re
 import zlib
-from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
-from functools import lru_cache
+from collections.abc import Callable, Collection, Iterable, Mapping
+from dataclasses import dataclass, field
 from hashlib import sha256
-from itertools import chain
 from typing import Any
 from urllib.parse import urlsplit
 
+from .discovery_entropy import _PEM_BLOCK_RE as _PEM_BLOCK_RE
+from .discovery_entropy import _WORD_RE as _WORD_RE
+from .discovery_entropy import _entropy as _entropy
+from .discovery_entropy import _looks_like_resource_route as _looks_like_resource_route
+from .discovery_paths import literal_field_component
 from .discovery_values import DiskBackedText
-from .secret_literals import AssignmentLiterals
+from .secret_fields import (
+    _NON_SECRET_FIELD_RE as _NON_SECRET_FIELD_RE,
+)
+from .secret_fields import (
+    _SECRET_KEY_RE as _SECRET_KEY_RE,
+)
+from .secret_fields import (
+    _SECRET_METADATA_SUFFIXES as _SECRET_METADATA_SUFFIXES,
+)
+from .secret_fields import (
+    _SECRET_SENTINEL_MASK_RE as _SECRET_SENTINEL_MASK_RE,
+)
+from .secret_fields import (
+    _SECRET_SENTINELS as _SECRET_SENTINELS,
+)
+from .secret_fields import (
+    _TEMPLATE_PLACEHOLDER_RE as _TEMPLATE_PLACEHOLDER_RE,
+)
+from .secret_fields import (
+    _cached_normalized_secret_key as _cached_normalized_secret_key,
+)
+from .secret_fields import (
+    _is_secret_sentinel as _is_secret_sentinel,
+)
+from .secret_fields import (
+    _key_detector as _key_detector,
+)
+from .secret_fields import (
+    _normalize_secret_key as _normalize_secret_key,
+)
+from .secret_fields import (
+    _uncached_normalized_secret_key as _uncached_normalized_secret_key,
+)
+from .secret_fields import (
+    is_secret_field_name as is_secret_field_name,
+)
+from .secret_fields import (
+    is_secret_metadata_field as is_secret_metadata_field,
+)
+from .secret_literals import has_toml_assignment
 
 
 @dataclass(frozen=True)
@@ -33,6 +72,12 @@ class SecretMatch:
     confidence: str
     object_path: str | DiskBackedText
     value: str | DiskBackedText
+    rule_ids: tuple[str, ...] = field(default=(), compare=False)
+    detector_aliases: tuple[str, ...] = field(default=(), compare=False)
+
+
+def detector_matches(match: SecretMatch, enabled: Collection[str]) -> bool:
+    return match.detector in enabled or any(alias in enabled for alias in match.detector_aliases)
 
 
 _PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
@@ -147,16 +192,6 @@ def _candidate_patterns(text: str) -> tuple[tuple[str, str, re.Pattern[str]], ..
     return tuple(_INDEXED_PATTERNS[i] for i in sorted(indices))
 
 
-_SECRET_KEY_RE = re.compile(
-    r"(?i)(?:^|[_\-.])(password|passwd|pwd|passphrase|pass|credential|credentials|cred|creds|secret|apisecret|token|api[_-]?key|access[_-]?key|client[_-]?secret|session|cookie|private[_-]?key)(?:$|[_\-.])"
-)
-_NON_SECRET_FIELD_RE = re.compile(
-    r"(?i)(?:(?:^|_)(?:public_key|api_key_id|access_key_id|secret_key_id|token_id|checksum|hash)(?:$|_)|"
-    r"(?:^|_)(?:token_name|nmspcuri)$)"
-)
-_SECRET_METADATA_SUFFIXES = frozenset(
-    {"count", "length", "enabled", "name", "type", "endpoint", "policy", "status", "description", "format", "required"}
-)
 _ASSIGNMENT_RE = re.compile(
     r"(?i)(?<![\w.])(?:--)?((?:[A-Za-z][A-Za-z0-9]{0,32}[._-])*"
     r"(?:password|passwd|pwd|passphrase|pass|credential|credentials|cred|creds|"
@@ -169,45 +204,26 @@ _XML_ELEMENT_RE = re.compile(r"(?is)<([A-Za-z][\w:.-]{0,79})\b[^>]{0,2048}>([^<>
 _XML_TAG_RE = re.compile(r"<([A-Za-z][\w:.-]{0,79})\b([^<>]{0,2048})>", re.IGNORECASE)
 _XML_ATTR_RE = re.compile(r"([A-Za-z][\w:.-]{0,79})\s*=\s*([\"'])(.*?)\2", re.DOTALL)
 _MAX_DECODED_BYTES = 64 * 1024
-_WORD_RE = re.compile(r"[A-Za-z0-9_+/=-]{20,256}")
-_PEM_BLOCK_RE = re.compile(r"-----BEGIN ([A-Z0-9 ]+)-----[\s\S]+?-----END \1-----")
-_SECRET_SENTINELS = frozenset(
-    {
-        "disabled",
-        "enabled",
-        "false",
-        "n/a",
-        "nil",
-        "none",
-        "null",
-        "placeholder",
-        "redacted",
-        "true",
-        "<redacted>",
-        "<value>",
-    }
-)
-_SECRET_SENTINEL_MASK_RE = re.compile(r"(?:\*{3,}|x{4,})", re.IGNORECASE)
-_TEMPLATE_PLACEHOLDER_RE = re.compile(r"(?:\$\{[^}]+\}|\{\{[^}]+\}\})")
 
 
 def detector_names() -> tuple[str, ...]:
-    return tuple(dict.fromkeys([item[0] for item in _PATTERNS] + ["url_credentials", "generic_secret", "high_entropy"]))
+    from .discovery_rules import SCALAR_DETECTOR_TYPES
+
+    return tuple(
+        dict.fromkeys(
+            [item[0] for item in _PATTERNS]
+            + ["url_credentials", "generic_secret", "high_entropy", *SCALAR_DETECTOR_TYPES]
+        )
+    )
 
 
 def fingerprint(value: str | DiskBackedText) -> str:
+    if identity := getattr(value, "secret_digest", None):
+        return identity
     if isinstance(value, DiskBackedText):
         value._readable()
         return value.digest
     return sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest()
-
-
-def _entropy(value: str) -> float:
-    if not value:
-        return 0.0
-    counts = Counter(value)
-    size = len(value)
-    return -sum((count / size) * math.log2(count / size) for count in counts.values())
 
 
 def _url_credential(text: str) -> Iterable[str]:
@@ -223,202 +239,62 @@ def _url_credential(text: str) -> Iterable[str]:
             yield candidate
 
 
-def _looks_like_resource_route(candidate: str) -> bool:
-    """Reject unlabelled URL/path fragments from the entropy fallback."""
-    if candidate.count("/") < 2:
-        return False
-    if "-" in candidate:
-        return True
-    return sum(bool(re.fullmatch(r"[A-Za-z]{3,}", part)) for part in candidate.split("/")) >= 2
+def _scan_text(text: str, path: str, enabled: set[str], *, field_name: str | None = None) -> list[SecretMatch]:
+    # Scalar confirmation belongs to the same rules used by every product.
+    # Keep legacy detector labels as API aliases, not a second validator.
+    from .discovery_rules import analyze_value, classify_field_name
 
-
-def _is_secret_sentinel(value: Any) -> bool:
-    """Return whether a value is an explicit non-secret marker."""
-
-    if isinstance(value, bool):
-        return True
-    text = str(value).strip().casefold()
-    return text in _SECRET_SENTINELS or bool(
-        _SECRET_SENTINEL_MASK_RE.fullmatch(text) or _TEMPLATE_PLACEHOLDER_RE.fullmatch(text)
-    )
-
-
-def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
     found: list[SecretMatch] = []
-    literals = AssignmentLiterals(text, is_secret_field_name)
-    for name, confidence, pattern in _candidate_patterns(text):
-        if name not in enabled:
-            continue
-        for match in pattern.finditer(text):
-            value = match.group(1) if match.lastindex else match.group(0)
-            overlap = literals.overlap(*match.span())
-            if overlap is not None and overlap.value != value:
-                continue
-            if value and not _is_secret_sentinel(value):
-                found.append(SecretMatch(name, confidence, path, value))
-    # Consumers collapse equal value/place findings in scan order. Preserve
-    # provider-specific classifications before the generic assignment label.
-    for literal in literals.items:
-        detector = _key_detector(literal.name)
-        if detector in enabled and literal.value and not _is_secret_sentinel(literal.value):
-            found.append(SecretMatch(detector, "high", path, literal.value))
-    for match in _ASSIGNMENT_RE.finditer(text):
-        if literals.overlap(*match.span()) is not None or not is_secret_field_name(match.group(1)):
-            continue
-        value = match.group(2) or match.group(3) or ""
-        detector = _key_detector(match.group(1))
-        if detector in enabled and len(value) >= 4 and not _is_secret_sentinel(value):
-            found.append(SecretMatch(detector, "high", path, value))
-    if "password" in enabled:
-        for match in _SQL_PASSWORD_RE.finditer(text):
-            if not _is_secret_sentinel(match.group(1)):
-                found.append(SecretMatch("password", "high", path, match.group(1)))
-    for match in _XML_ELEMENT_RE.finditer(text):
-        detector = _key_detector(match.group(1))
-        value = html.unescape(match.group(2).strip())
-        if is_secret_field_name(match.group(1)) and detector in enabled and not _is_secret_sentinel(value):
-            found.append(SecretMatch(detector, "high", path, value))
-    for tag in _XML_TAG_RE.finditer(text):
-        attrs = {name.lower(): html.unescape(raw) for name, _quote, raw in _XML_ATTR_RE.findall(tag.group(2))}
-        named = attrs.get("name", "") if tag.group(1).lower() == "input" else ""
-        if named and is_secret_field_name(named):
-            value = attrs.get("value", "")
-            detector = _key_detector(named)
-            if value and detector in enabled and not _is_secret_sentinel(value):
-                found.append(SecretMatch(detector, "high", path, value))
-        for name, value in attrs.items():
-            normalized = _normalize_secret_key(name.removeprefix("data-"))
-            detector = _key_detector(normalized)
-            if is_secret_field_name(normalized) and value and detector in enabled and not _is_secret_sentinel(value):
-                found.append(SecretMatch(detector, "high", path, value))
-    if "url_credentials" in enabled:
-        found.extend(SecretMatch("url_credentials", "high", path, value) for value in _url_credential(text))
-    path_field = _normalize_secret_key(path.rsplit(".", 1)[-1])
-    if (
-        "high_entropy" in enabled
-        and not _NON_SECRET_FIELD_RE.search(path_field)
-        and not is_secret_metadata_field(path_field)
-    ):
-        explicit_values = {match.value for match in found if isinstance(match.value, str)}
-        if "=" not in text and text in explicit_values and _WORD_RE.fullmatch(text):
-            # The entropy loop has exactly one unmodified candidate, already
-            # excluded by explicit_values. Keep assignment/structured cases
-            # on the original path, where a different substring may be found.
-            return found
-        words = _WORD_RE.finditer(text)
-        first_word = next(words, None)
-        if first_word is None:
-            return found
-        pem_spans = [match.span() for match in _PEM_BLOCK_RE.finditer(text)]
-        # Candidate length is bounded at256. Substring membership therefore
-        # depends on that bound, not on the number of earlier findings.
-        value_lengths = sorted({len(value) for value in explicit_values if len(value) <= 256})
-        for token_match in chain((first_word,), words):
-            if literals.overlap(*token_match.span()) is not None:
-                continue
-            candidate = token_match.group(0)
-            if "=" in candidate:
-                key, assigned = candidate.split("=", 1)
-                if assigned and assigned[0].isalnum() and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", key):
-                    # Entropy belongs to the assigned value, not to the
-                    # long environment variable name or its '=' separator.
-                    candidate = assigned
-            if len(candidate) < 20:
-                continue
-            if any(start <= token_match.start() and token_match.end() <= end for start, end in pem_spans):
-                # The PEM body is already classified as one explicit object;
-                # its encoded lines are not separate credentials.
-                continue
-            if candidate.startswith("/") and token_match.start() > 0 and text[token_match.start() - 1] == "<":
-                # XML closing tag names are structure, even when camel case
-                # makes them look like high-entropy tokens.
-                continue
-            if _looks_like_resource_route(candidate):
-                # Random project IDs can make ordinary API/UI paths look like
-                # tokens. Explicit token/assignment detectors already ran.
-                continue
-            if candidate in explicit_values:
-                continue
-            if "=" in candidate and any(
-                candidate[start : start + length] in explicit_values
-                for length in value_lengths
-                if length <= len(candidate)
-                for start in range(len(candidate) - length + 1)
-            ):
-                continue
-            classes = sum(
-                bool(re.search(pattern, candidate)) for pattern in (r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]")
-            )
-            if classes >= 3 and re.search(r"[a-z]", candidate) and _entropy(candidate) >= 4.2:
-                try:
-                    decoded_candidate = base64.b64decode(
-                        candidate + "=" * (-len(candidate) % 4), altchars=b"-_", validate=True
-                    ).decode("utf-8")
-                except (ValueError, UnicodeDecodeError, binascii.Error):
-                    decoded_candidate = ""
-                if decoded_candidate and all(
-                    character.isprintable() or character.isspace() for character in decoded_candidate
-                ):
-                    continue
-                found.append(SecretMatch("high_entropy", "low", path, candidate))
-    return found
-
-
-def _normalize_secret_key(key: str) -> str:
-    """Normalize schema names without retaining long paths or custom strings."""
-    if type(key) is str and len(key) <= 128:
-        return _cached_normalized_secret_key(key)
-    return _uncached_normalized_secret_key(key)
-
-
-@lru_cache(maxsize=4096)
-def _cached_normalized_secret_key(key: str) -> str:
-    return _uncached_normalized_secret_key(key)
-
-
-def _uncached_normalized_secret_key(key: str) -> str:
-    """Normalize delimited, camelCase and acronym-based field names."""
-    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
-    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
-    return re.sub(r"[\s.\-]+", "_", separated).lower()
-
-
-def is_secret_field_name(key: str) -> bool:
-    """Whether a mapping key can identify a secret without inspecting its value."""
-    normalized = _normalize_secret_key(key)
-    return (
-        bool(_SECRET_KEY_RE.search(normalized))
-        and not bool(_NON_SECRET_FIELD_RE.search(normalized))
-        and not is_secret_metadata_field(normalized)
+    detections = analyze_value(
+        text,
+        path=field_name or path,
+        field_classification=classify_field_name(field_name) if field_name is not None else None,
+        allow_base64=False,
     )
-
-
-def is_secret_metadata_field(key: str) -> bool:
-    """Recognize secret-related metadata, without excluding actual short secrets."""
-    normalized = _normalize_secret_key(key)
-    prefix, _, suffix = normalized.rpartition("_")
-    return suffix in _SECRET_METADATA_SUFFIXES and bool(_SECRET_KEY_RE.search(prefix))
-
-
-def _key_detector(key: str) -> str:
-    lowered = _normalize_secret_key(key)
-    if "client_secret" in lowered:
-        return "client_secret"
-    if (
-        "password" in lowered
-        or "passwd" in lowered
-        or "passphrase" in lowered
-        or lowered.endswith(("pwd", "_pass"))
-        or lowered == "pass"
-    ):
-        return "password"
-    if "session" in lowered or "cookie" in lowered or lowered == "sid":
-        return "session_cookie"
-    if "api_key" in lowered or "apikey" in lowered:
-        return "api_key"
-    if "access_token" in lowered or "refresh_token" in lowered:
-        return "access_token"
-    return "generic_secret"
+    for detection in detections:
+        if not detection.available:
+            continue
+        detector = detection.secret_type
+        if field_name is not None and detection.field_name == field_name and "sensitive_field" in detection.detectors:
+            detector = _key_detector(field_name)
+        if detector == "secret":
+            name = detection.field_name or path.rsplit(".", 1)[-1]
+            detector = _key_detector(name) if is_secret_field_name(name) else "generic_secret"
+        aliases = {detector, detection.secret_type}
+        if (
+            field_name is not None
+            and detection.value == text
+            and classify_field_name(field_name) in {"strong", "medium"}
+        ):
+            aliases.add(_key_detector(field_name))
+        if "credential_uri" in detection.detectors:
+            aliases.update(("connection_string", "url_credentials", "password"))
+        if "connection_dsn" in detection.detectors:
+            aliases.update(("connection_string", "password", "generic_secret"))
+        if "basic_auth" in detection.detectors:
+            aliases.update(("basic_auth", "password"))
+        if "bearer_auth" in detection.detectors:
+            aliases.add("bearer_token")
+        if aliases & enabled:
+            found.append(
+                SecretMatch(
+                    detector,
+                    "high" if detection.score >= 75 else "medium" if detection.score >= 60 else "low",
+                    path,
+                    detection.value,
+                    detection.detectors,
+                    tuple(sorted(aliases - {detector})),
+                )
+            )
+    if _PATTERNS is not _INDEXED_PATTERNS:
+        # Compatibility for explicitly supplied private extension patterns.
+        for name, confidence, pattern in _candidate_patterns(text):
+            if name in enabled and name not in {item[0] for item in _INDEXED_PATTERNS}:
+                for match in pattern.finditer(text):
+                    found.append(
+                        SecretMatch(name, confidence, path, match.group(1) if match.lastindex else match.group())
+                    )
+    return found
 
 
 def _decode_structured_blob(value: str) -> str | None:
@@ -454,6 +330,8 @@ def _decode_structured_blob(value: str) -> str | None:
         except UnicodeDecodeError:
             return None
         stripped = decoded.lstrip()
+        if stripped.startswith("#cloud-config"):
+            return decoded
         if stripped.startswith(("{", "[")):
             try:
                 if isinstance(json.loads(decoded), (dict, list)):
@@ -466,15 +344,53 @@ def _decode_structured_blob(value: str) -> str | None:
     return None
 
 
-def scan_disk_atomic_token(value: DiskBackedText, *, object_path: str) -> list[SecretMatch]:
+def scan_disk_atomic_token(
+    value: DiskBackedText, *, object_path: str, deadline: float | None = None
+) -> list[SecretMatch]:
     """Classify supported complete atomic tokens with bounded regex inputs.
 
     Validation covers every character, not just a recognizable prefix. Unknown
     grammars are left to the caller's other readers rather than guessed by size.
     """
     first = next(value.iter_text_chunks(max_chars=1024), "")
+    from .discovery_dsn import dsn_carrier
+
+    if dsn_carrier(value, deadline=deadline)[0]:
+        return [
+            SecretMatch(
+                "connection_string", "high", object_path, value, ("connection_dsn",), ("password", "generic_secret")
+            )
+        ]
+    from .discovery_credentials import valid_cookie_carrier
+
+    if valid_cookie_carrier(value, deadline=deadline):
+        return [SecretMatch("session_cookie", "high", object_path, value, ("cookie_carrier",))]
+    if first.lower().startswith("basic"):
+        from .discovery_credentials import valid_basic_carrier
+
+        if valid_basic_carrier(value, deadline=deadline):
+            return [
+                SecretMatch("basic_auth", "high", object_path, value, ("basic_auth", "credential_pair"), ("password",))
+            ]
+    if "://" in first:
+        from .discovery_uri import uri_carrier_kind
+
+        kind = uri_carrier_kind(value, deadline=deadline)
+        if kind is not None:
+            return [
+                SecretMatch(
+                    kind,
+                    "high",
+                    object_path,
+                    value,
+                    ("credential_uri" if kind == "connection_string" else "signed_url",),
+                    ("password", "url_credentials") if kind == "connection_string" else ("azure_sas_signature",),
+                )
+            ]
     pem = re.match(r"-----BEGIN ((?:[A-Z0-9 ]+ )?PRIVATE KEY|CERTIFICATE)-----", first)
     if pem is not None:
+        if pem.group(1) == "CERTIFICATE":
+            return []
         end = f"-----END {pem.group(1)}-----"
         tail = suffix = ""
         count = length = 0
@@ -487,24 +403,13 @@ def scan_disk_atomic_token(value: DiskBackedText, *, object_path: str) -> list[S
         # The shorter overlap cannot itself contain an entire END marker.
         if count == 1 and suffix == end and length > len(pem.group()) + len(end):
             kind = "certificate" if pem.group(1) == "CERTIFICATE" else "private_key"
-            return [SecretMatch(kind, "medium" if kind == "certificate" else "high", object_path, value)]
+            return [SecretMatch(kind, "high", object_path, value, ("private_key_pem",))]
         return []
-    if first.startswith("eyJ"):
-        lengths = [0]
-        last = ""
-        for chunk in value.iter_text_chunks():
-            if re.fullmatch(r"[A-Za-z0-9_.-]*", chunk) is None:
-                return []
-            parts = chunk.split(".")
-            lengths[-1] += len(parts[0])
-            lengths.extend(map(len, parts[1:]))
-            if len(lengths) > 3:
-                return []
-            if chunk:
-                last = chunk[-1]
-        if len(lengths) == 3 and lengths[0] >= 8 and min(lengths[1:]) >= 2 and last != "-":
-            return [SecretMatch("jwt", "high", object_path, value)]
-        return []
+    if first.startswith("eyJ") or "." in first:
+        from .discovery_validation import validated_disk_jose
+
+        if jose_kind := validated_disk_jose(value, deadline=deadline):
+            return [SecretMatch(jose_kind, "high", object_path, value, (f"{jose_kind}_structure",))]
     rules = (
         ("grafana_token", "glsa_", r"[A-Za-z0-9_-]+"),
         ("api_token", "sk-", r"[A-Za-z0-9_-]+"),
@@ -516,7 +421,9 @@ def scan_disk_atomic_token(value: DiskBackedText, *, object_path: str) -> list[S
     for detector, prefix, alphabet in rules:
         if not first.startswith(prefix):
             continue
-        pattern = next(pattern for name, _confidence, pattern in _PATTERNS if name == detector)
+        from .discovery_rules import _PROVIDER_TOKENS
+
+        pattern = next(pattern for pattern, name in _PROVIDER_TOKENS if name == detector)
         if pattern.fullmatch(first) is None:
             return []
         remaining_prefix = len(prefix)
@@ -526,7 +433,7 @@ def scan_disk_atomic_token(value: DiskBackedText, *, object_path: str) -> list[S
             body = chunk[offset:]
             if body and re.fullmatch(alphabet, body) is None:
                 return []
-        return [SecretMatch(detector, "high", object_path, value)]
+        return [SecretMatch(detector, "high", object_path, value, ("provider_token_format",))]
     return []
 
 
@@ -538,6 +445,7 @@ def scan_value(
     _depth: int = 0,
     _decode_depth: int = 0,
     _on_incomplete: Callable[[str], None] | None = None,
+    _field_name: str | None = None,
 ) -> list[SecretMatch]:
     """Inspect a scalar or nested value without dropping malformed JSON text."""
 
@@ -547,39 +455,42 @@ def scan_value(
         return []
     enabled_set = set(enabled or detector_names())
     if isinstance(value, Mapping):
+        from .discovery_context import field_binding
+        from .discovery_groups import credential_groups
+
+        binding = field_binding(value)
         matches: list[SecretMatch] = []
+        grouped_keys: set[str] = set()
+        for group in credential_groups(value):
+            try:
+                grouped_value = group.value()
+            except OSError:
+                if _on_incomplete is None:
+                    raise
+                # Keep the parent's completed matches. The scalar fallback
+                # can still expose readable fields, but the failed object
+                # assembly must remain explicitly incomplete.
+                _on_incomplete("storage_failure")
+                continue
+            grouped_keys.update(group.fields)
+            match = SecretMatch(group.kind, "high", object_path, grouped_value, group.rules, group.aliases)
+            if detector_matches(match, enabled_set):
+                matches.append(match)
         for raw_key, nested in value.items():
+            if raw_key in grouped_keys:
+                continue
             key = str(raw_key)
-            path = f"{object_path}.{key}"
-            normalized_key = _normalize_secret_key(key)
-            nested_json = False
-            if isinstance(nested, str) and len(nested) <= _MAX_DECODED_BYTES and nested.lstrip().startswith(("{", "[")):
-                try:
-                    nested_json = isinstance(json.loads(nested), (dict, list))
-                except ValueError:
-                    pass
-            if (
-                is_secret_field_name(normalized_key)
-                and nested is not None
-                and nested != ""
-                and not nested_json
-                and not (isinstance(nested, str) and _decode_structured_blob(nested) is not None)
-                and not isinstance(nested, (Mapping, list, tuple, set))
-                and not _is_secret_sentinel(nested)
-            ):
-                detector = _key_detector(normalized_key)
-                if detector in enabled_set:
-                    matches.append(SecretMatch(detector, "high", path, str(nested)))
-            matches.extend(
-                scan_value(
-                    nested,
-                    object_path=path,
-                    enabled=enabled_set,
-                    _depth=_depth + 1,
-                    _decode_depth=_decode_depth,
-                    _on_incomplete=_on_incomplete,
-                )
+            path = object_path + literal_field_component(key)
+            child_matches = scan_value(
+                nested,
+                object_path=path,
+                enabled=enabled_set,
+                _depth=_depth + 1,
+                _decode_depth=_decode_depth,
+                _on_incomplete=_on_incomplete,
+                _field_name=binding.field_name if binding is not None and raw_key == binding.key else key,
             )
+            matches.extend(child_matches)
         return matches
     if isinstance(value, (list, tuple, set)):
         matches = []
@@ -599,10 +510,32 @@ def scan_value(
         text = value.decode("utf-8", errors="replace")
     elif isinstance(value, str):
         text = value
+    elif (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and is_secret_field_name(_field_name or object_path.rsplit(".", 1)[-1])
+    ):
+        text = str(value)
     else:
         return []
 
     stripped = text.strip()
+    from .discovery_dsn import dsn_carrier
+
+    if not dsn_carrier(stripped)[1]:
+        if _on_incomplete is not None:
+            _on_incomplete("unterminated_connection_dsn")
+        return []
+    if ('"""' in text or "'''" in text) and has_toml_assignment(text, is_secret_field_name):
+        # Triple-quoted assignments require one incremental literal grammar;
+        # the small-string shortcut must not treat the first two quotes as an
+        # empty single-quoted value and discard the rest of the literal.
+        from .discovery_engine import _scan_text_chunks
+
+        matches, complete = _scan_text_chunks((text,), object_path, 65_536, _decode_depth)
+        if not complete and _on_incomplete is not None:
+            _on_incomplete(getattr(matches, "incomplete_reason", None) or "invalid_literal")
+        return [match for match in matches if detector_matches(match, enabled_set)]
     if stripped.startswith(("{", "[")):
         try:
             parsed = json.loads(stripped)
@@ -617,7 +550,33 @@ def scan_value(
                 _decode_depth=_decode_depth,
                 _on_incomplete=_on_incomplete,
             )
-    matches = _scan_text(text, object_path, enabled_set)
+    if "," in text and "\n" in text:
+        from .discovery_csv import CSVCell, CSVSecretStream
+
+        csv_matches: list[SecretMatch] = []
+
+        def csv_cell(cell: CSVCell) -> None:
+            csv_matches.extend(
+                scan_value(
+                    cell.value,
+                    object_path=f"{object_path}.csv[{cell.row}].{cell.name}",
+                    enabled=enabled_set,
+                    _depth=_depth + 1,
+                    _decode_depth=_decode_depth,
+                    _on_incomplete=_on_incomplete,
+                    _field_name=str(cell.name),
+                )
+            )
+
+        csv_reader = CSVSecretStream(csv_cell, _on_incomplete or (lambda _reason: None), portion=max(64, len(text)))
+        try:
+            csv_reader.feed(text)
+            csv_reader.finish()
+            if csv_reader.active:
+                return csv_matches
+        finally:
+            csv_reader.close()
+    matches = _scan_text(text, object_path, enabled_set, field_name=_field_name)
     if _decode_depth < 2:
         decoded = _decode_structured_blob(stripped)
         if decoded is not None:
@@ -647,6 +606,7 @@ __all__ = [
     "SecretMatch",
     "decode_basic_identity",
     "detector_names",
+    "detector_matches",
     "fingerprint",
     "is_secret_field_name",
     "scan_value",

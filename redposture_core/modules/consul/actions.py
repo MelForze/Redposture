@@ -24,6 +24,7 @@ from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
 from ...discovery_frontier import DiscoveryFrontier
+from ...discovery_sources import SourceRead
 from ...json_stream import JSONPath, JSONScalarStream
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...storage_discovery import DiscoveryCollector
@@ -1310,6 +1311,28 @@ def _stream_consul_kv_keys(
     scheme: str,
     headers: dict[str, str] | None,
 ) -> str | None:
+    collector.declare_sources("kv_catalog", "kv_values")
+    with collector.source_attempt("consul.kv_catalog", scope="complete_key_catalog_response") as evidence:
+        error = _read_consul_kv_keys(
+            state, frontier, collector, host, port, timeout, scheme=scheme, headers=headers, evidence=evidence
+        )
+        if error is None:
+            evidence.accept()
+        return error
+
+
+def _read_consul_kv_keys(
+    state: ConsulLifecycleState,
+    frontier: DiscoveryFrontier,
+    collector: DiscoveryCollector,
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    scheme: str,
+    headers: dict[str, str] | None,
+    evidence: SourceRead,
+) -> str | None:
     """Read the unpaginated Consul key array without buffering the response."""
     if state.http is None:
         return "HTTP session unavailable"
@@ -1360,12 +1383,17 @@ def _stream_consul_kv_keys(
     def receive(chunk: bytes) -> None:
         if not collector.charge(len(chunk)):
             raise TimeoutError("discover_time")
-        parser.feed(chunk)
+        if evidence.status == 200:
+            parser.feed(chunk)
+
+    def on_response(status: int, _headers: Any) -> None:
+        evidence.status = status
 
     response = state.http.request_stream(
         "GET",
         url,
         on_chunk=receive,
+        on_response=on_response,
         headers={"User-Agent": "RedPosture/1.0", "Accept": "application/json", **(headers or {})},
         chunk_size=64 * 1024,
         timeout=max(0.001, min(timeout, collector.deadline - time.monotonic())),
@@ -1373,6 +1401,7 @@ def _stream_consul_kv_keys(
         allow_cross_origin_redirects=False,
         preserve_authorization_on_cross_origin=False,
     )
+    evidence.status = response.status
     if response.status == 404:
         collector.mark_accessible_source()
         return None
@@ -1404,6 +1433,34 @@ def _consul_kv_dump(
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
     replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
     collector = replay.discovery_collector if isinstance(replay, ConsulLifecycleState) else None
+    if collector is None or key_name is None:
+        return _read_consul_kv_dump(
+            host, port, timeout, scheme=scheme, insecure=insecure, headers=headers, key_name=key_name
+        )
+    collector.declare_sources("kv_catalog", "kv_values")
+    with collector.source_attempt("consul.kv_values", scope="complete_selected_KV_value_responses") as evidence:
+        result = _read_consul_kv_dump(
+            host, port, timeout, scheme=scheme, insecure=insecure, headers=headers, key_name=key_name
+        )
+        if result[1] is None:
+            evidence.accept()
+        else:
+            evidence.status = 403 if result[1] in {"Unauthorized", "Forbidden"} else None
+        return result
+
+
+def _read_consul_kv_dump(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    scheme: str,
+    insecure: bool,
+    headers: dict[str, str] | None = None,
+    key_name: str | None = None,
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
+    collector = replay.discovery_collector if isinstance(replay, ConsulLifecycleState) else None
     if key_name is None and collector is not None and isinstance(replay, ConsulLifecycleState):
         with DiscoveryFrontier() as frontier:
             if replay.http is not None:
@@ -1411,13 +1468,18 @@ def _consul_kv_dump(
                     replay, frontier, collector, host, port, timeout, scheme=scheme, headers=headers
                 )
             else:
-                keys, list_error = _consul_kv_keys_list(
-                    host, port, timeout, scheme=scheme, insecure=insecure, headers=headers
-                )
-                for key in keys or ():
-                    frontier.enqueue(key)
-                if keys is not None:
-                    collector.mark_accessible_source()
+                with collector.source_attempt("consul.kv_catalog", scope="complete_key_catalog_response") as evidence:
+                    keys, list_error = _consul_kv_keys_list(
+                        host, port, timeout, scheme=scheme, insecure=insecure, headers=headers
+                    )
+                    for key in keys or ():
+                        frontier.enqueue(key)
+                    if keys is not None:
+                        collector.mark_accessible_source()
+                    if keys is not None and list_error is None:
+                        evidence.accept()
+                    elif list_error in {"Unauthorized", "Forbidden"}:
+                        evidence.status = 403
             if list_error:
                 reason = "access_denied" if list_error in {"Unauthorized", "Forbidden"} else str(list_error)
                 collector.partial("kv", reason)
@@ -1500,12 +1562,12 @@ def _consul_kv_dump(
             "flags": entry.get("Flags"),
             "modify_index": entry.get("ModifyIndex"),
         }
-        if (
-            collector is not None
-            and key_name
-            and not collector.add(f"kv_dump_items.{key}", {key.rsplit("/", 1)[-1]: item["value"]}, charge=False)
-        ):
-            return decoded_items, "time_budget"
+        if collector is not None and key_name:
+            collector.scan_base64_payload(
+                f"kv_dump_items.{key}", entry.get("Value") or "", field_name=key.rsplit("/", 1)[-1]
+            )
+            if not collector.allowed():
+                return decoded_items, "time_budget"
         decoded_items.append(item)
     decoded_items.sort(key=lambda item: str(item.get("key") or "").lower())
     if invalid_entries and collector is not None:
@@ -4476,6 +4538,7 @@ def collect_consul_data(ctx: Any, _record: Any, options: dict[str, Any]) -> dict
         if bool(getattr(ctx.args, "discover", False)) and bool(options.get("dump_requested")):
             source = _record.to_dict() if hasattr(_record, "to_dict") else dict(_record or {})
             state.discovery_collector = DiscoveryCollector("consul", ctx, source)
+            state.discovery_collector.declare_sources("kv_catalog", "kv_values")
         state.deep_record = _consul_lifecycle_call(ctx, options, run_deep_checks=True)
         if state.discovery_collector is not None:
             state.deep_record["content_discovery"] = state.discovery_collector.result()

@@ -8,6 +8,7 @@ import inspect
 import itertools
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -30,6 +31,8 @@ from .discovery_options import DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
 from .discovery_rendering import (
     discovery_color_spans,
     format_discovery_finding_line,
+    iter_discovery_location_lines,
+    iter_discovery_source_lines,
     iter_disk_discovery_finding_line_chunks,
 )
 from .discovery_spool import SpoolingFindings, SpoolingStrings, contains_spooled
@@ -83,6 +86,7 @@ _TARGET_LIVE_EMIT: ContextVar[Callable[[Iterable[str]], None] | None] = ContextV
     "audit_target_live_emit", default=None
 )
 _TARGET_DISK_EMIT: ContextVar[Callable[..., None] | None] = ContextVar("audit_target_disk_emit", default=None)
+_TARGET_STREAM_EMIT: ContextVar[Callable[[str], int] | None] = ContextVar("audit_target_stream_emit", default=None)
 _TARGET_DISCOVERY_STARTED_AT: ContextVar[float | None] = ContextVar("audit_target_discovery_started_at", default=None)
 _CREDENTIAL_PHASE_EMIT_ACTIVE: ContextVar[bool] = ContextVar("audit_credential_phase_emit_active", default=False)
 _CREDENTIAL_JOB_ID: ContextVar[int | None] = ContextVar("audit_credential_job_id", default=None)
@@ -653,6 +657,12 @@ def _build_colored_emit(console: Any, colorize: Callable[[Any, str], bool] | Non
 
 AuditPhase = Literal["detect", "auth", "capabilities", "data"]
 
+_DISCOVERY_SUMMARY_LINE = re.compile(r"^\S+\s+\S+\s+\S+\s+\[\*\] Discover (?:Complete|Secrets) \(status:")
+
+
+def _is_discovery_summary_line(line: str) -> bool:
+    return _DISCOVERY_SUMMARY_LINE.match(line) is not None
+
 
 @dataclass(frozen=True)
 class AuditHookContext:
@@ -677,6 +687,9 @@ class AuditHookContext:
     cancelled: Callable[[], bool] | None = None
     reuse_http: bool = False
     session_budget: Any = None
+    # Publish a completed inventory through phase deduplication before content
+    # scanning. A transferred _stream_lines_file is emitted boundedly and removed.
+    emit_ready_inventory: Callable[[dict[str, Any]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -2328,7 +2341,11 @@ class AuditCommandRunner:
         self, record: AuditRecord, render_plan: RenderPlan | None, output_format: str, debug: bool
     ) -> list[str]:
         if record.extra.get("surface") == "ui" and self.spec.module != "portainer":
-            lines = web_panels.render_panel(record.to_dict(), self.spec.label) if output_format == "txt" else []
+            lines = (
+                web_panels.render_panel(record.to_dict(), self.spec.label, include_discovery_findings=False)
+                if output_format == "txt"
+                else []
+            )
         elif self.spec.render is not None:
             lines = [line for line in self.spec.render(record) if line]
         elif render_plan is not None:
@@ -2603,6 +2620,11 @@ class AuditCommandRunner:
             if not cancelled.is_set() or _CREDENTIAL_PHASE_EMIT_ACTIVE.get():
                 sink.emit_discovery_value(*args, **kwargs)
 
+        def _emit_target_stream(path: str) -> int:
+            if not cancelled.is_set() or _CREDENTIAL_PHASE_EMIT_ACTIVE.get():
+                return sink.emit_stream_file(path)
+            return 0
+
         def _run_target(
             item: tuple[int, str, int, ScanTargetSpec | None], prepared: _AuditDetectOutcome | None = None
         ) -> _AuditPipelineOutcome:
@@ -2616,6 +2638,7 @@ class AuditCommandRunner:
             )
             token = _TARGET_LIVE_EMIT.set(_emit_target_live if plan.output_format == "txt" else None)
             disk_token = _TARGET_DISK_EMIT.set(_emit_target_disk if plan.output_format == "txt" else None)
+            stream_token = _TARGET_STREAM_EMIT.set(_emit_target_stream if plan.output_format == "txt" else None)
             with fallback_start_lock:
                 fallback_started_at = fallback_detect_started_at.pop(item[0], None)
             discovery_token = _TARGET_DISCOVERY_STARTED_AT.set(
@@ -2675,6 +2698,7 @@ class AuditCommandRunner:
                         self._credential_phase_counts.pop(_credential_job_key(), None)
                 _TARGET_DISCOVERY_STARTED_AT.reset(discovery_token)
                 _TARGET_DISK_EMIT.reset(disk_token)
+                _TARGET_STREAM_EMIT.reset(stream_token)
                 _TARGET_LIVE_EMIT.reset(token)
                 _CREDENTIAL_JOB_ID.reset(job_token)
 
@@ -2691,7 +2715,7 @@ class AuditCommandRunner:
             nested_workers = self._nested_scheduler.max_workers if self._nested_scheduler is not None else 0
             debug_emit(f"worker profile: targets={target_count} workers={worker_count} nested_workers={nested_workers}")
 
-        def _emit_record(record: AuditRecord) -> None:
+        def _emit_record(record: AuditRecord, deferred_summaries: Iterable[str] = ()) -> None:
             nonlocal emitted_lines, suppressed_records
             # A record may buffer a large, pre-formatted section (e.g. a streamed
             # minio object listing) into a temp file; emit it after the static
@@ -2706,6 +2730,25 @@ class AuditCommandRunner:
             )
             elastic_spooled = isinstance(record.extra.get("discover_findings"), SpoolingFindings)
             source_spooled = contains_spooled(record.extra)
+            completion_lines = list(deferred_summaries)
+
+            def emit_discovery_footer() -> None:
+                nonlocal emitted_lines
+                if record.extra.get("surface") == "ui" and self.spec.module != "portainer":
+                    for chunks in web_panels.iter_panel_discovery_chunks(record.to_dict(), self.spec.label):
+                        sink.emit_text_chunks(chunks)
+                        emitted_lines += 1
+                if debug:
+                    for line in iter_discovery_source_lines(self.spec.module, record.host, record.port, record.extra):
+                        sink.emit_many([line])
+                        emitted_lines += 1
+                    for chunks in iter_discovery_location_lines(
+                        self.spec.module, record.host, record.port, record.extra
+                    ):
+                        sink.emit_text_chunks(chunks)
+                        emitted_lines += 1
+                sink.emit_many(completion_lines)
+                emitted_lines += len(completion_lines)
 
             def emit_pending_clickhouse_disk_findings() -> int:
                 if self.spec.module != "clickhouse" or record.extra.get("_clickhouse_disk_live_emitted"):
@@ -2890,6 +2933,7 @@ class AuditCommandRunner:
                     emitted_lines += emit_pending_clickhouse_disk_findings()
                     if stream_file:
                         emitted_lines += sink.emit_stream_file(stream_file)
+                    emit_discovery_footer()
                     return
                 if self.spec.render is None and self.spec.render_module is None:
                     return
@@ -2897,6 +2941,8 @@ class AuditCommandRunner:
                     suppressed_records += 1
                     return
                 lines = self._render_record(record, render_plan, plan.output_format, debug)
+                completion_lines.extend(line for line in lines if _is_discovery_summary_line(line))
+                lines = [line for line in lines if not _is_discovery_summary_line(line)]
                 emitted_lines += len(lines)
                 if self.spec.module == "clickhouse":
                     summary_index = next(
@@ -2935,6 +2981,7 @@ class AuditCommandRunner:
                     sink.emit_many(lines)
                 if stream_file:
                     emitted_lines += sink.emit_stream_file(stream_file)
+                emit_discovery_footer()
             finally:
                 if stream_file:
                     try:
@@ -2944,6 +2991,7 @@ class AuditCommandRunner:
 
         def _finalize_record(record: AuditRecord) -> None:
             nonlocal operational_failure_count, record_count, conclusive_negative_count
+            deferred_summaries = record.extra.pop("_discovery_summary_lines", ())
             ledger_record_id = id(record)
             record_detected = self._is_detected(record)
             record = _with_http_detection_diagnostics(record, confirmed=record_detected)
@@ -2991,7 +3039,7 @@ class AuditCommandRunner:
                 payload = record.to_dict()
                 for record_callback in record_callbacks:
                     record_callback(dict(payload))
-            _emit_record(record)
+            _emit_record(record, deferred_summaries)
             if self.spec.record_skipped_credential_attempts:
                 with self._credential_ledger_lock:
                     self._completed_credential_ledgers.pop(ledger_record_id, None)
@@ -3116,6 +3164,10 @@ class AuditCommandRunner:
                             counts[key] += 1
                             if counts[key] > prior_counts[key]:
                                 pending.append(line)
+                        summaries = [line for line in pending if _is_discovery_summary_line(line)]
+                        pending = [line for line in pending if not _is_discovery_summary_line(line)]
+                        if summaries:
+                            record.extra["_discovery_summary_lines"] = summaries
                         sink.emit_many(pending)
                         record = replace(
                             record, extra={**record.extra, "_self_emitted": True, "_self_emitted_lines": len(pending)}
@@ -3717,6 +3769,7 @@ class AuditCommandRunner:
                 final: bool = False,
                 detect_only: bool = False,
                 before_data: bool = False,
+                stream_file: str | None = None,
             ) -> None:
                 nonlocal phase_emitted_lines
                 if self.spec.defer_phase_output_until_final and not (final or detect_only or before_data):
@@ -3731,6 +3784,13 @@ class AuditCommandRunner:
                 rendered = self._render_record(phase_record, render_plan, "txt", debug)
                 if detect_only:
                     rendered = rendered[:1]
+                if final:
+                    summaries = [line for line in rendered if _is_discovery_summary_line(line)]
+                    if summaries:
+                        record.extra["_discovery_summary_lines"] = summaries
+                # Locations are emitted by the coordinator with bounded text
+                # chunks. Keep completion there too, after the debug footer.
+                rendered = [line for line in rendered if not _is_discovery_summary_line(line)]
                 elastic_findings = phase_record.extra.get("discover_findings")
                 elastic_spooled = isinstance(elastic_findings, SpoolingFindings)
                 elastic_findings_iter: SpoolingFindings | tuple[()] = (
@@ -3898,6 +3958,10 @@ class AuditCommandRunner:
                 elif new_lines:
                     live_emit(new_lines)
                     phase_emitted_lines += len(new_lines)
+                if stream_file is not None:
+                    stream_emit = _TARGET_STREAM_EMIT.get()
+                    if stream_emit is not None:
+                        phase_emitted_lines += stream_emit(stream_file)
 
             if self.spec.record_skipped_credential_attempts:
 
@@ -4572,6 +4636,25 @@ class AuditCommandRunner:
             credential_runs=(selected_credential,),
             lifecycle_state=lifecycle_state,
         )
+        if phase_emit is not None and callable(data_ctx.live_emit):
+            ready_phase_emit = phase_emit
+
+            def emit_ready_inventory(payload: dict[str, Any]) -> None:
+                stream_path = payload.get("_stream_lines_file")
+                if stream_path and _TARGET_STREAM_EMIT.get() is None:
+                    return
+                stream_path = payload.pop("_stream_lines_file", None)
+                try:
+                    ready = AuditRecord.from_mapping(payload, module=self.spec.module, service=record.service)
+                    ready_phase_emit(ready, True, before_data=True, stream_file=stream_path)
+                finally:
+                    if stream_path:
+                        try:
+                            os.remove(stream_path)
+                        except OSError:
+                            pass
+
+            data_ctx = replace(data_ctx, emit_ready_inventory=emit_ready_inventory)
         data_started_at = time.monotonic()
         prior_data_record = record
         try:

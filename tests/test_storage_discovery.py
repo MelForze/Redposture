@@ -644,6 +644,9 @@ def test_gitlab_discover_reads_repository_history_variables_and_job_logs(monkeyp
         ],
         "/api/v4/groups/4": {"id": 4, "parent_id": None},
         "/api/v4/projects/7/jobs?per_page=100&page=1": [{"id": 9, "artifacts_file": {"filename": ""}}],
+        "/api/v4/projects/7/wikis?with_content=1&per_page=100&page=1": [],
+        "/api/v4/projects/7/snippets?per_page=100&page=1": [],
+        "/api/v4/projects/7/packages?per_page=100&page=1": [],
     }
 
     def fake_request(_host, _port, _method, path, _timeout, **_kwargs):
@@ -874,7 +877,8 @@ def test_gitlab_stream_emits_complete_line_before_body_ends(monkeypatch) -> None
         return 200, json.dumps(value).encode(), {}, None
 
     class Pool:
-        def request_stream(self, _method, _url, *, on_chunk, **_kwargs):
+        def request_stream(self, _method, _url, *, on_chunk, on_response, **_kwargs):
+            on_response(200, {})
             on_chunk(b"API_TOKEN=glpat-abcdefghijklmnopqrst\n")
             assert emitted, "first complete line must appear while response is still open"
             on_chunk(b"ordinary tail\n")
@@ -921,7 +925,8 @@ def test_gitlab_stream_interruption_keeps_complete_line_only(monkeypatch) -> Non
         return 200, json.dumps(value).encode(), {}, None
 
     class Pool:
-        def request_stream(self, _method, _url, *, on_chunk, **_kwargs):
+        def request_stream(self, _method, _url, *, on_chunk, on_response, **_kwargs):
+            on_response(200, {})
             on_chunk(b"API_TOKEN=glpat-abcdefghijklmnopqrst\n")
             on_chunk(b"API_TOKEN=glpat-abcdef")
             return HttpResponse(200, b"", {}, error="connection lost", truncated=True)
@@ -999,6 +1004,9 @@ def test_gitlab_discover_lists_projects_with_its_own_network_budget(monkeypatch)
         "/api/v4/projects/7/repository/commits?all=true&per_page=100&page=1": [],
         "/api/v4/projects/7/variables?per_page=100&page=1": [],
         "/api/v4/projects/7/jobs?per_page=100&page=1": [],
+        "/api/v4/projects/7/wikis?with_content=1&per_page=100&page=1": [],
+        "/api/v4/projects/7/snippets?per_page=100&page=1": [],
+        "/api/v4/projects/7/packages?per_page=100&page=1": [],
     }
 
     def fake(_host, _port, _method, path, _timeout, **kwargs):
@@ -1977,14 +1985,15 @@ def test_portainer_discover_streams_oversized_swarm_config_catalog(monkeypatch, 
     assert calls.count(catalog_path + "/cfg-late") == 1
 
 
-def test_portainer_discover_streams_oversized_swarm_config_detail(monkeypatch) -> None:
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
+def test_portainer_discover_streams_oversized_swarm_config_detail(monkeypatch, encoding: str) -> None:
     from redposture_core import storage_discovery, web_panels
     from redposture_core.clients import http_session
     from redposture_core.clients.http_api import HttpResponse
 
     detail_path = "/api/endpoints/2/docker/configs/cfg-large"
     token = "glpat-abcdefghijklmnopqrst"
-    raw_value = ("ordinary-data\n" * 10000 + f"API_TOKEN={token}\n").encode()
+    raw_value = ("ordinary-data\n" * 10000 + f"API_TOKEN={token}\n").encode(encoding)
     detail = json.dumps({"ID": "cfg-large", "Spec": {"Data": base64.b64encode(raw_value).decode()}}).encode()
     streamed: list[str] = []
 

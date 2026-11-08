@@ -106,7 +106,7 @@ def test_minio_live_callback_streams_full_disk_place_and_json_without_ansi(monke
     )
     result = actions.data_record(context, {"status": "open_no_auth"})
     assert result["discover_coverage"] == "complete", result["discover_partial_reasons"]
-    expected_path = "$." + key + ".password"
+    expected_path = "$[" + json.dumps(key, ensure_ascii=False) + "].password"
     assert len(emitted) == 1
     assert emitted[0].endswith(" Place=" + json.dumps("bucket/config.json" + expected_path, ensure_ascii=False))
     assert "\x1b" not in emitted[0]

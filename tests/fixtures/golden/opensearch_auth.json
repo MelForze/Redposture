@@ -18,7 +18,7 @@
         "credential_nodes_access": "allowed",
         "credential_nodes_count": 1,
         "credential_probe_cleanup": "complete",
-        "credential_probe_index": "redposture-access-probe-9e8ae17a824848c78a74192e578d0c09",
+        "credential_probe_index": "redposture-access-probe-<RUN_ID>",
         "credential_resource_access_checked": true,
         "credential_users_access": "allowed",
         "credential_users_count": 8,
@@ -260,7 +260,7 @@
     "credential_nodes_access": "allowed",
     "credential_nodes_count": 1,
     "credential_probe_cleanup": "complete",
-    "credential_probe_index": "redposture-access-probe-9e8ae17a824848c78a74192e578d0c09",
+    "credential_probe_index": "redposture-access-probe-<RUN_ID>",
     "credential_resource_access_checked": true,
     "credential_users_access": "allowed",
     "credential_users_count": 8,
@@ -338,6 +338,108 @@
       "shard_failures": [],
       "source_disabled_indices": [],
       "source_filtered_indices": [],
+      "sources": [
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.index_inventory",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.mappings",
+          "implemented": true,
+          "read": 8,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.index_settings",
+          "implemented": true,
+          "read": 8,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.cluster_settings",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.node_settings",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.index_templates",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.component_templates",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.legacy_templates",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.ingest_pipelines",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_surface_objects",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "elastic.document_streams",
+          "implemented": true,
+          "read": 8,
+          "requested": 8,
+          "scope": "selected_complete_index_walks",
+          "unsupported": false
+        }
+      ],
       "status": "complete",
       "surfaces": {
         "cluster_settings": {

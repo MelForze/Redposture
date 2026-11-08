@@ -126,15 +126,15 @@ def test_storage_collector_spool_full_keeps_completed_findings_and_partial(monke
     from types import SimpleNamespace
 
     from redposture_core import storage_discovery as storage
-    from redposture_core.discovery_spool import SpoolingFindings
+    from redposture_core.discovery_occurrences import OccurrenceRegistry
 
-    class LimitedFindings(SpoolingFindings):
+    class LimitedFindings(OccurrenceRegistry):
         def add(self, finding, **kwargs):
             if finding["value"] == "second-secret":
                 raise OSError("database full")
             return super().add(finding, **kwargs)
 
-    monkeypatch.setattr(storage, "SpoolingFindings", LimitedFindings)
+    monkeypatch.setattr(storage, "OccurrenceRegistry", LimitedFindings)
     monkeypatch.setattr(storage, "FINDING_SPOOL_THRESHOLD", 0)
     context = SimpleNamespace(args=SimpleNamespace(discover_time=30), host="qa", port=80)
     collector = storage.DiscoveryCollector("gitlab", context, {"status": "open_no_auth"})

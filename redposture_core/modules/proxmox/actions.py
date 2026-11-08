@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import html
 import inspect
 import json
 import re
@@ -1030,186 +1029,71 @@ def _add_finding(
     )
 
 
+def _collect_shared_findings(
+    value: Any,
+    endpoint: str,
+    findings: list[dict[str, Any]],
+    seen: Any,
+    *,
+    path: Any,
+    field_name: str | None = None,
+    deadline: float | None = None,
+) -> bool:
+    """Adapt PVE source context to the common detector/value policy."""
+    from ...discovery_engine import _scan_portioned_value
+    from ...secret_detection import fingerprint
+
+    matches, _size, complete = _scan_portioned_value(value, path, 65536, _field_name=field_name, _deadline=deadline)
+    for match in matches:
+        # Keep the shared low-confidence candidate policy. Confidence travels
+        # with the finding; an adapter must not silently discard or promote it.
+        identity = (endpoint, match.object_path, fingerprint(match.value))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        findings.append(
+            {
+                "endpoint": endpoint,
+                "reason": match.detector,
+                "path": match.object_path,
+                "sample": match.value,
+                "type": match.detector,
+                **({"confidence": "low"} if match.confidence == "low" else {}),
+                "rule_ids": list(match.rule_ids),
+            }
+        )
+    return complete
+
+
 def _collect_text_findings(
     text: str,
     endpoint: str,
-    findings: list[dict[str, str]],
-    seen: set[tuple[str, str, str]],
+    findings: list[dict[str, Any]],
+    seen: Any,
     *,
     path: str,
     limit: int | None,
     depth: int = 0,
 ) -> None:
-    added = 0
-    for match in _TEXT_SECRET_RE.finditer(text):
-        if limit is not None and added >= limit:
-            break
-        key = str(match.group(1) or "")
-        value_raw = match.group(2) or match.group(3) or match.group(4) or ""
-        value = _clean_value_text(value_raw)
-        if not _key_looks_sensitive(key) or not _value_looks_secret(value):
-            continue
-        _add_finding(
-            findings,
-            seen,
-            endpoint=endpoint,
-            reason=f"text_{key.lower()}",
-            path=path,
-            sample=f"{key}={value}",
-        )
-        added += 1
-
-    for match in _XML_SECRET_RE.finditer(text):
-        if limit is not None and added >= limit:
-            break
-        key = str(match.group(1) or "")
-        value = html.unescape(str(match.group(2) or "").strip())
-        if not _key_looks_sensitive(key) or not _value_looks_secret(value):
-            continue
-        _add_finding(
-            findings,
-            seen,
-            endpoint=endpoint,
-            reason=f"xml_{key.lower()}",
-            path=path,
-            sample=f"{key}={value}",
-        )
-        added += 1
-
-    uri_auth_match = _URI_WITH_AUTH_RE.search(text)
-    if uri_auth_match:
-        _add_finding(
-            findings,
-            seen,
-            endpoint=endpoint,
-            reason="uri_with_auth",
-            path=path,
-            sample=str(uri_auth_match.group(0) or ""),
-        )
-    url_basic_match = _URL_BASIC_AUTH_RE.search(text)
-    if url_basic_match:
-        _add_finding(
-            findings,
-            seen,
-            endpoint=endpoint,
-            reason="url_basic_auth",
-            path=path,
-            sample=str(url_basic_match.group(0) or ""),
-        )
-    auth_basic_match = _AUTH_BASIC_RE.search(text)
-    if auth_basic_match:
-        _add_finding(
-            findings,
-            seen,
-            endpoint=endpoint,
-            reason="authorization_basic",
-            path=path,
-            sample=str(auth_basic_match.group(0) or ""),
-        )
-    auth_bearer_match = _AUTH_BEARER_RE.search(text)
-    if auth_bearer_match:
-        _add_finding(
-            findings,
-            seen,
-            endpoint=endpoint,
-            reason="authorization_bearer",
-            path=path,
-            sample=str(auth_bearer_match.group(0) or ""),
-        )
-    jwt_match = _JWT_RE.search(text)
-    if jwt_match:
-        _add_finding(
-            findings, seen, endpoint=endpoint, reason="jwt_token", path=path, sample=str(jwt_match.group(0) or "")
-        )
-    opaque_match = _OPAQUE_TOKEN_RE.search(text)
-    if opaque_match:
-        _add_finding(
-            findings,
-            seen,
-            endpoint=endpoint,
-            reason="opaque_token",
-            path=path,
-            sample=str(opaque_match.group(0) or ""),
-        )
-    if _looks_like_cloud_init_secret_blob(text):
-        _add_finding(findings, seen, endpoint=endpoint, reason="cloud_init_blob", path=path, sample=text)
-    pem_match = _PEM_PRIVATE_KEY_RE.search(text)
-    if pem_match:
-        _add_finding(
-            findings,
-            seen,
-            endpoint=endpoint,
-            reason="private_key_pem",
-            path=path,
-            sample=str(pem_match.group(0) or ""),
-        )
-
-    if depth >= 1:
-        return
-    for match in _BASE64_TEXT_RE.finditer(text):
-        candidate = str(match.group(0) or "")
-        decoded_text = _decode_base64_text(candidate)
-        if not decoded_text:
-            continue
-        _collect_text_findings(
-            decoded_text,
-            endpoint,
-            findings,
-            seen,
-            path=f"{path}.base64",
-            limit=max(4, limit // 2) if limit is not None else None,
-            depth=depth + 1,
-        )
+    # Compatibility entry point; shared readers own grammar/depth bounds.
+    _collect_shared_findings(text, endpoint, findings, seen, path=path)
 
 
 def _collect_json_findings(
     payload: Any,
     endpoint: str,
-    findings: list[dict[str, str]],
-    seen: set[tuple[str, str, str]],
+    findings: list[dict[str, Any]],
+    seen: Any,
     *,
     path: str = "$",
 ) -> None:
+    _collect_shared_findings(payload, endpoint, findings, seen, path=path)
 
-    if isinstance(payload, dict):
-        for key, value in payload.items():
-            key_text = str(key)
-            sub_path = f"{path}.{key_text}"
-            if _key_looks_sensitive(key_text) and _value_looks_secret(value):
-                _add_finding(
-                    findings,
-                    seen,
-                    endpoint=endpoint,
-                    reason=f"json_{key_text.lower()}",
-                    path=sub_path,
-                    sample=str(value),
-                )
 
-            if isinstance(value, str):
-                _collect_text_findings(
-                    value,
-                    endpoint,
-                    findings,
-                    seen,
-                    path=sub_path,
-                    limit=None,
-                )
-            _collect_json_findings(value, endpoint, findings, seen, path=sub_path)
-        return
-
-    if isinstance(payload, list):
-        for idx, value in enumerate(payload):
-            sub_path = f"{path}[{idx}]"
-            if isinstance(value, str):
-                _collect_text_findings(
-                    value,
-                    endpoint,
-                    findings,
-                    seen,
-                    path=sub_path,
-                    limit=None,
-                )
-            _collect_json_findings(value, endpoint, findings, seen, path=sub_path)
+def _pve_auth_metadata_field(endpoint: str, name: object) -> bool:
+    # This field belongs to the response's own authentication protocol, not
+    # stored VM/config content. Do not suppress it in unrelated source objects.
+    return endpoint in {"/access", "/access/ticket"} and name == "CSRFPreventionToken"
 
 
 def _scan_endpoint_payload(
@@ -1217,22 +1101,24 @@ def _scan_endpoint_payload(
     payload: bytes,
     findings: list[dict[str, str]],
     seen: set[tuple[str, str, str]],
-) -> None:
-    text = _decode_body_text(payload)
+) -> bool:
     parsed = _parse_json_payload(payload)
     data = _unwrap_api_data(parsed) if parsed is not None else None
+    if endpoint in {"/access", "/access/ticket"} and isinstance(data, dict):
+        data = {key: value for key, value in data.items() if not _pve_auth_metadata_field(endpoint, key)}
     if _PVE_VM_CONFIG_PATH_RE.fullmatch(endpoint) and isinstance(data, dict):
         digest = data.get("digest")
         if isinstance(digest, str) and _PVE_CONFIG_DIGEST_RE.fullmatch(digest):
             # pmxcfs inserts this SHA1 checksum into every VM/LXC config. Scan
             # the remaining JSON for both text and structured secrets.
             data = {key: value for key, value in data.items() if key != "digest"}
-    if parsed is None:
-        _collect_text_findings(text, endpoint, findings, seen, path="$text", limit=None)
-        return
-    if isinstance(data, str):
-        _collect_text_findings(data, endpoint, findings, seen, path="$", limit=None)
-    _collect_json_findings(data, endpoint, findings, seen)
+    return _collect_shared_findings(
+        payload if parsed is None else data,
+        endpoint,
+        findings,
+        seen,
+        path="$text" if parsed is None else "$",
+    )
 
 
 def _audit_proxmox_host(
@@ -1267,11 +1153,12 @@ def _audit_proxmox_host(
     _discover_max_bytes: int | None = None,
     _discovery_started_at: float | None = None,
 ) -> dict[str, Any]:
+    from ...discovery_sources import SourceManifest
     from ...discovery_spool import SpoolingRecords
-    from .discovery import FindingIndex
+    from .discovery import FindingIndex, ProxmoxFindings
 
     endpoint_results: list[dict[str, Any]] = SpoolingRecords() if discover_creds else []
-    findings: list[dict[str, Any]] = SpoolingRecords() if discover_creds else []
+    findings: list[dict[str, Any]] = ProxmoxFindings() if discover_creds else []
     findings_seen: Any = FindingIndex() if discover_creds else set()
     stream_started = False
     streamed_url_count = 0
@@ -1285,6 +1172,51 @@ def _audit_proxmox_host(
     discover_deadline = discover_started + _discover_time if _discover_time is not None else None
     discover_bytes_scanned = 0
     discover_limit_reason: str | None = None
+    discover_content_incomplete = False
+    source_manifest = SourceManifest()
+    source_kinds = (
+        "auth_metadata",
+        "node_catalog",
+        "qemu_catalog",
+        "lxc_catalog",
+        "qemu_configs",
+        "lxc_configs",
+        "storage_catalog",
+        "storage_content_catalog",
+        "storage_contents",
+        "syslog",
+        "reports",
+        "task_catalog",
+        "other_api",
+    )
+    if discover_creds:
+        for kind in source_kinds:
+            source_manifest.declare("proxmox." + kind)
+
+    def source_kind(path: str) -> str:
+        parts = path.split("?", 1)[0].strip("/").split("/")
+        if parts[0] == "access":
+            kind = "auth_metadata"
+        elif parts == ["nodes"]:
+            kind = "node_catalog"
+        elif len(parts) >= 3 and parts[0] == "nodes":
+            resource = parts[2]
+            if resource in {"qemu", "lxc"}:
+                kind = resource + ("_catalog" if len(parts) == 3 else "_configs")
+            elif resource == "storage":
+                kind = (
+                    "storage_catalog"
+                    if len(parts) == 3
+                    else "storage_content_catalog"
+                    if len(parts) == 5 and parts[4] == "content"
+                    else "storage_contents"
+                )
+            else:
+                kind = {"syslog": "syslog", "report": "reports", "tasks": "task_catalog"}.get(resource, "other_api")
+        else:
+            kind = "other_api"
+        return "proxmox." + kind
+
     if _resolved_auth is None:
         auth_headers, auth_method, auth_username, auth_password, auth_attempts = _resolve_proxmox_auth_headers(
             host,
@@ -1323,7 +1255,7 @@ def _audit_proxmox_host(
         if discover_creds and on_credential_finding is not None:
             new_findings = (
                 findings.iter_appended(streamed_finding_count)
-                if isinstance(findings, SpoolingRecords)
+                if isinstance(findings, (SpoolingRecords, ProxmoxFindings))
                 else iter(findings[streamed_finding_count:])
             )
             for finding in new_findings:
@@ -1331,7 +1263,37 @@ def _audit_proxmox_host(
                 if isinstance(finding, dict):
                     on_credential_finding(finding)
 
+    def accept_stream_finding(finding: dict[str, Any]) -> None:
+        nonlocal streamed_finding_count
+        with result_lock:
+            before = len(findings)
+            findings.append(finding)
+            if len(findings) > before and on_credential_finding is not None:
+                on_credential_finding(finding)
+            streamed_finding_count = len(findings)
+
     def perform_request(
+        path: str,
+        *,
+        method: str = "GET",
+        form: dict[str, Any] | None = None,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        observe = discover_creds and str(method or "GET").upper() == "GET"
+        source = source_kind(path)
+        if bool(getattr(_nested_scheduler, "cancelled", False)):
+            raise NestedSchedulerCancelled("Proxmox discovery cancelled")
+        if observe:
+            with result_lock:
+                source_manifest.request(source, scope="selected_api_responses")
+        try:
+            return read_request(path, method=method, form=form)
+        except BaseException:
+            if observe:
+                with result_lock:
+                    source_manifest.finish(source, complete=False)
+            raise
+
+    def read_request(
         path: str,
         *,
         method: str = "GET",
@@ -1404,7 +1366,8 @@ def _audit_proxmox_host(
                 headers={"User-Agent": "RedPosture/1.0", "Accept": "application/json,text/plain,*/*", **auth_headers},
                 timeout=request_timeout,
                 deadline=discover_deadline if discover_deadline is not None else discover_started + 900,
-                on_finding=on_credential_finding if stream_started else None,
+                on_finding=accept_stream_finding if stream_started else None,
+                cancelled=lambda: bool(getattr(_nested_scheduler, "cancelled", False)),
             )
         return status, payload, response_headers, error
 
@@ -1417,8 +1380,7 @@ def _audit_proxmox_host(
         response_headers: dict[str, str],
         error: str | None,
     ) -> None:
-        nonlocal discover_bytes_scanned, discover_limit_reason, streamed_finding_count
-        from ...secret_detection import fingerprint
+        nonlocal discover_bytes_scanned, discover_limit_reason, streamed_finding_count, discover_content_incomplete
         from .discovery import StreamedPayload
 
         request_method = str(method or "GET").upper()
@@ -1432,14 +1394,12 @@ def _audit_proxmox_host(
                     "truncated": response_headers.get("x-redposture-truncated") == "true",
                 }
             )
+            scan_complete = True
             if discover_creds and request_method == "GET" and status == 200 and payload:
                 if isinstance(payload, StreamedPayload):
                     discover_bytes_scanned += payload.bytes_read
                     for finding in payload.findings:
-                        identity = (path, finding["path"], fingerprint(finding["sample"]))
-                        if identity not in findings_seen:
-                            findings_seen.add(identity)
-                            findings.append(dict(finding))
+                        findings.append(dict(finding))
                     if stream_started and on_credential_finding is not None:
                         streamed_finding_count = len(findings)
                     if any("discover_time" in reason for reason in payload.partial_reasons):
@@ -1455,9 +1415,26 @@ def _audit_proxmox_host(
                 elif discover_limit_reason is None:
                     inspected = payload[:_discover_max_bytes] if _discover_max_bytes is not None else payload
                     discover_bytes_scanned += len(inspected)
-                    _scan_endpoint_payload(path, inspected, findings, findings_seen)
+                    if not _scan_endpoint_payload(path, inspected, findings, findings_seen):
+                        scan_complete = False
+                        discover_content_incomplete = True
                     if len(payload) > len(inspected):
                         discover_limit_reason = "discover_max_bytes"
+            if discover_creds and request_method == "GET":
+                source = source_kind(path)
+                complete = (
+                    status == 200
+                    and not error
+                    and not response_headers.get("x-redposture-discovery-error")
+                    and response_headers.get("x-redposture-truncated") != "true"
+                    and scan_complete
+                    and discover_limit_reason is None
+                )
+                if complete:
+                    source_manifest.read(source)
+                source_manifest.finish(
+                    source, complete=bool(complete), denied=status in {401, 403}, unsupported=status in {404, 405, 501}
+                )
             flush_stream_buffers()
 
     def fetch(
@@ -1554,20 +1531,26 @@ def _audit_proxmox_host(
             if discover_creds
             else 0
         )
+        if discover_creds:
+            result["discover_sources"] = source_manifest.result()
         result["responses_truncated"] = truncated_count
         result["discover_bytes_scanned"] = discover_bytes_scanned
-        result["partial"] = truncated_count > 0 or discover_limit_reason is not None or denied_count > 0
+        result["partial"] = (
+            truncated_count > 0 or discover_limit_reason is not None or denied_count > 0 or discover_content_incomplete
+        )
         if discover_limit_reason is not None:
             result["partial_error"] = discover_limit_reason
         elif truncated_count:
             result["partial_error"] = f"{truncated_count} endpoint response(s) exceeded the body limit"
         elif denied_count:
             result["partial_error"] = f"{denied_count} discovery endpoint(s) denied or unreadable"
+        elif discover_content_incomplete:
+            result["partial_error"] = "incomplete_payload"
         else:
             result["partial_error"] = None
         if isinstance(findings_seen, FindingIndex):
             findings_seen.close()
-        if isinstance(findings, SpoolingRecords):
+        if isinstance(findings, (SpoolingRecords, ProxmoxFindings)):
             findings.finish()
         return result
 
@@ -2165,26 +2148,17 @@ def _format_findings_detail_records(record: dict[str, Any], output_format: str) 
 
 def _format_single_finding_detail_line(record: dict[str, Any], finding: dict[str, Any]) -> str:
     reason = str(finding.get("reason") or "credential")
-    path = _clip(str(finding.get("path") or "-"), 100)
+    path = str(finding.get("path") or "-")
     sample = str(finding.get("sample") or "-")
-    endpoint = _clip(str(finding.get("endpoint") or "-"), 100)
-    normalized_reason = reason.lower()
-    if "password" in normalized_reason or "passwd" in normalized_reason:
-        finding_type = "password"
-    elif "token" in normalized_reason:
-        finding_type = "token"
-    elif "api" in normalized_reason and "key" in normalized_reason:
-        finding_type = "api_key"
-    elif "key" in normalized_reason:
-        finding_type = "private_key"
-    else:
-        finding_type = "credential_pair"
+    endpoint = str(finding.get("endpoint") or "-")
+    from .discovery import finding_type
+
     return format_discovery_finding_line(
         "PROXMOX",
         record.get("host"),
         record.get("port"),
         severity=finding.get("confidence") or "high",
-        finding_type=finding_type,
+        finding_type=finding_type(reason),
         value=sample,
         place=f"{endpoint}{path}",
     )
@@ -2201,6 +2175,10 @@ def _credential_finding_endpoints(record: dict[str, Any]) -> set[str]:
         endpoint = str(finding.get("endpoint") or "").strip()
         if endpoint.startswith("/"):
             endpoints.add(endpoint)
+        for location in finding.get("locations") or ():
+            endpoint = location.get("endpoint")
+            if isinstance(endpoint, str) and endpoint.startswith("/"):
+                endpoints.add(endpoint)
     return endpoints
 
 

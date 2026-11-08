@@ -18,18 +18,16 @@ from redposture_core import secret_detection as sd
 # --- value/format detectors ------------------------------------------------
 
 _FORMAT_SAMPLES = [
-    ("aws_access_key", "AKIAIOSFODNN7EXAMPLE"),
     ("jwt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcDEF123"),
     ("github_token", "ghp_1234567890abcdefABCDEF1234567890xyz"),
     ("gitlab_token", "glpat-ABCDEFghij1234567890"),
     ("slack_token", "xoxb-1234567890-ABCDEFghij"),
     ("stripe_key", "sk_live_0123456789ABCDEFghijklmn"),
     ("private_key", "-----BEGIN PRIVATE KEY-----\nMIIBabc\n-----END PRIVATE KEY-----"),
-    ("certificate", "-----BEGIN CERTIFICATE-----\nMIICabc\n-----END CERTIFICATE-----"),
     ("connection_string", "postgres://user:pass@host:5432/db"),
     ("bearer_token", "Authorization: Bearer abcdef012345.token_value"),
     ("password", "password = hunter2value"),
-    ("webhook", "https://hooks.slack.com/services/T000/B000/XXXXXXXX"),
+    ("slack_webhook", "https://hooks.slack.com/services/T000/B000/XXXXXXXX"),
     ("api_token", "sk-proj-AbCdEf0123456789AbCdEf0123456789"),
     ("grafana_token", "glsa_AbCdEf0123456789AbCdEf012345"),
     ("docker_token", "dckr_pat_AbCdEf0123456789AbCdEf01234"),
@@ -44,8 +42,16 @@ def test_known_secret_formats_are_detected(detector, sample):
 
 
 def test_url_credentials_detected():
-    detectors = {m.detector for m in sd.scan_value("amqp://guest:guest@broker:5672/")}
-    assert "url_credentials" in detectors
+    assert [(m.detector, m.value) for m in sd.scan_value("amqp://guest:guest@broker:5672/")] == [
+        ("connection_string", "amqp://guest:guest@broker:5672/")
+    ]
+
+
+@pytest.mark.parametrize(
+    "value", ["AKIAIOSFODNN7EXAMPLE", "-----BEGIN CERTIFICATE-----\nMIICabc\n-----END CERTIFICATE-----"]
+)
+def test_public_identifiers_and_certificates_are_not_secret_values(value):
+    assert sd.scan_value(value) == []
 
 
 def test_long_non_url_value_does_not_stall_discovery() -> None:
@@ -230,7 +236,7 @@ def test_certificate_body_is_not_reported_as_many_high_entropy_secrets() -> None
     body = "MIICjTCCAXWgAwIBAgIUc05OQ2FJbWFnZUJ5dGVzTm90QVNlY3JldDAKBggq" * 4
     certificate = f"-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----"
     matches = sd.scan_value(certificate)
-    assert [match.detector for match in matches] == ["certificate"]
+    assert matches == []
 
 
 def test_sensitive_key_with_embedded_json_reports_leaf_not_wrapper():
@@ -329,7 +335,9 @@ def test_oracle_xdb_namespace_uri_is_not_high_entropy_secret() -> None:
 
 def test_explicit_url_credentials_still_detected_in_namespace_uri_field() -> None:
     matches = sd.scan_value("postgres://user:pass@host:5432/db", object_path="$.table.XDB.XDB_NS.nmspcuri")
-    assert "url_credentials" in {match.detector for match in matches}
+    assert [(match.detector, match.value) for match in matches] == [
+        ("connection_string", "postgres://user:pass@host:5432/db")
+    ]
 
 
 def test_token_name_label_is_not_secret_but_explicit_token_still_is() -> None:

@@ -840,7 +840,7 @@
         "client_secret",
         "stripe_key"
       ],
-      "finding_count": 7,
+      "finding_count": 4,
       "findings": [
         {
           "column": "payload_a",
@@ -901,96 +901,6 @@
           "table": "secret_corpus",
           "type": "client_secret",
           "value": "client-secret-lab-8f99b731"
-        },
-        {
-          "column": "attributes",
-          "confidence": "high",
-          "database": "discovery",
-          "fingerprint": "<DOCKER_ID>",
-          "location_count": 1,
-          "locations": [
-            {
-              "column": "attributes",
-              "database": "discovery",
-              "object_path": "$.Authorization",
-              "partition": "202608",
-              "row_offset": 0,
-              "table": "secret_corpus"
-            }
-          ],
-          "object_path": "$.Authorization",
-          "occurrences": 1,
-          "partition": "202608",
-          "range": {
-            "limit": 2,
-            "offset": 0
-          },
-          "scanned_context": {
-            "chunk_id": "discovery.secret_corpus|202608|0|2"
-          },
-          "table": "secret_corpus",
-          "type": "jwt",
-          "value": "eyJhbGciOiJIUzI1NiJ9.lab.payloadsignature"
-        },
-        {
-          "column": "token",
-          "confidence": "high",
-          "database": "analytics",
-          "fingerprint": "<DOCKER_ID>",
-          "location_count": 1,
-          "locations": [
-            {
-              "column": "token",
-              "database": "analytics",
-              "object_path": "$",
-              "partition": "all",
-              "row_offset": 1,
-              "table": "sessions"
-            }
-          ],
-          "object_path": "$",
-          "occurrences": 1,
-          "partition": "all",
-          "range": {
-            "limit": 4,
-            "offset": 0
-          },
-          "scanned_context": {
-            "chunk_id": "analytics.sessions|all|0|4"
-          },
-          "table": "sessions",
-          "type": "jwt",
-          "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.bob.session"
-        },
-        {
-          "column": "token",
-          "confidence": "high",
-          "database": "analytics",
-          "fingerprint": "<DOCKER_ID>",
-          "location_count": 1,
-          "locations": [
-            {
-              "column": "token",
-              "database": "analytics",
-              "object_path": "$",
-              "partition": "all",
-              "row_offset": 0,
-              "table": "sessions"
-            }
-          ],
-          "object_path": "$",
-          "occurrences": 1,
-          "partition": "all",
-          "range": {
-            "limit": 4,
-            "offset": 0
-          },
-          "scanned_context": {
-            "chunk_id": "analytics.sessions|all|0|4"
-          },
-          "table": "sessions",
-          "type": "jwt",
-          "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.alice.session"
         },
         {
           "column": "payload_b",
@@ -27384,11 +27294,72 @@
         }
       ],
       "inventory_errors": [],
-      "occurrence_count": 9,
+      "occurrence_count": 6,
       "partial_reasons": [],
       "redacted": false,
       "resumed": true,
       "scan_errors": [],
+      "sources": [
+        {
+          "complete": false,
+          "denied": 0,
+          "id": "clickhouse.database_catalog",
+          "implemented": true,
+          "read": 0,
+          "requested": 0,
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "clickhouse.table_catalog",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "fresh_catalog_query_responses",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "clickhouse.column_catalog",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "fresh_catalog_query_responses",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "clickhouse.partition_catalog",
+          "implemented": true,
+          "read": 2,
+          "requested": 2,
+          "scope": "fresh_catalog_query_responses",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "clickhouse.table_chunks",
+          "implemented": true,
+          "read": 12,
+          "requested": 12,
+          "scope": "fresh_data_chunk_attempts_excluding_checkpoint_reuse",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 0,
+          "id": "clickhouse.unsupported_columns",
+          "implemented": false,
+          "read": 0,
+          "requested": 1,
+          "scope": "type_filter_metadata_only_no_value_reads",
+          "unsupported": true
+        }
+      ],
       "status": "complete",
       "tables_inventory_count": 136,
       "tables_scanned": 6

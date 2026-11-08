@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import closing
 from itertools import zip_longest
 from typing import Any, SupportsIndex, overload
@@ -33,6 +33,8 @@ class SpoolingSecretMatches(list[SecretMatch]):
             "confidence": match.confidence,
             "object_path": match.object_path,
             "value": match.value,
+            "rule_ids": list(match.rule_ids),
+            "detector_aliases": list(match.detector_aliases),
         }
 
     def append(self, match: SecretMatch) -> None:
@@ -62,7 +64,18 @@ class SpoolingSecretMatches(list[SecretMatch]):
             yield from self._memory
         else:
             for record in self._records:
-                yield SecretMatch(**record)
+                yield self._match(record)
+
+    @staticmethod
+    def _match(record: Mapping[str, Any]) -> SecretMatch:
+        return SecretMatch(
+            record["detector"],
+            record["confidence"],
+            record["object_path"],
+            record["value"],
+            tuple(record.get("rule_ids", ())),
+            tuple(record.get("detector_aliases", ())),
+        )
 
     def __len__(self) -> int:
         return self._count
@@ -78,7 +91,7 @@ class SpoolingSecretMatches(list[SecretMatch]):
             yield from reversed(self._memory)
         else:
             for record in self._records.iter_reversed():
-                yield SecretMatch(**record)
+                yield self._match(record)
 
     @overload
     def __getitem__(self, index: SupportsIndex, /) -> SecretMatch: ...
@@ -90,8 +103,8 @@ class SpoolingSecretMatches(list[SecretMatch]):
         if self._records is None:
             return self._memory[index]
         if isinstance(index, slice):
-            return [SecretMatch(**record) for record in self._records[index]]
-        return SecretMatch(**self._records[index])
+            return [self._match(record) for record in self._records[index]]
+        return self._match(self._records[index])
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, (list, tuple)):

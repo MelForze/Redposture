@@ -258,7 +258,11 @@ def test_portainer_stack_file_streams_past_one_portion() -> None:
 
 def test_portainer_large_container_inspect_streams_selected_fields() -> None:
     inspect = {
-        "Config": {"Env": ["ordinary text " * 100, "API_TOKEN=glpat-abcdefghijklmnopqrst"], "password": 123456},
+        "Config": {
+            "Env": ["ordinary text " * 100, "API_TOKEN=glpat-abcdefghijklmnopqrst"],
+            "password": 123456,
+            "Tty": True,
+        },
         "GraphDriver": {"Data": {"Ignored": "API_TOKEN=glpat-zyxwvutsrqponmlkjihg"}},
     }
 
@@ -270,6 +274,8 @@ def test_portainer_large_container_inspect_streams_selected_fields() -> None:
                 body = json.dumps(inspect).encode()
             elif self.path in {"/api/endpoints/2/docker/configs", "/api/endpoints/2/docker/secrets"}:
                 body = b"[]"
+            elif self.path.startswith("/api/endpoints/2/docker/containers/qa-container/logs?"):
+                body = b""
             else:
                 self.send_error(404)
                 return

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import inspect
+import io
 import json
 import re
 import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,6 +51,7 @@ from ...clients.kafka import (
 from ...console import Console
 from ...detection_io import DetectCall as _DetectCall
 from ...detection_io import run_sync as _run_detect_sync
+from ...discovery_bytes import SpoolBytes
 from ...discovery_options import DEFAULT_DISCOVER_TIME
 from ...discovery_values import DiskBackedText
 from ...rendering import (
@@ -1601,7 +1604,13 @@ def _spool_kafka_dump_details(record: Mapping[str, Any]) -> str:
 def _scan_broker_message(collector: DiscoveryCollector, topic: str, partition: int, offset: int, value: Any) -> None:
     """Scan the broker value without the human-readable pN@offset prefix."""
     source = f"topic.{topic}.partition.{partition}.offset.{offset}"
-    if isinstance(value, DiskBackedText):
+    if isinstance(value, SpoolBytes):
+        with value.reader() as stream:
+            collector._scan_retained_payload(source, stream)
+    elif isinstance(value, bytes):
+        with io.BytesIO(value) as memory_stream:
+            collector._scan_retained_payload(source, memory_stream)
+    elif isinstance(value, DiskBackedText):
         collector.scan_disk_text(source, value)
     elif isinstance(value, str):
         if value.lstrip().startswith(("{", "[")):
@@ -1638,6 +1647,14 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
     )
     max_messages = int(options["max_messages"]) if options["max_messages"] is not None else None
     collector = DiscoveryCollector("kafka", ctx, payload) if discover_deadline is not None and dump else None
+    if collector is not None:
+        collector.declare_sources("broker_topic_metadata", "broker_message_walks")
+        with collector.source_attempt(
+            "kafka.broker_topic_metadata", scope="selected_identity_cached_metadata", content=False
+        ) as evidence:
+            if metadata is not None:
+                evidence.accept()
+    manifest = collector.source_manifest if collector is not None else None
     show_topics_limit = options.get("show_topics_limit")
     probe_write = bool(options["probe_write"])
     write_payload = options.get("write_payload")
@@ -1686,23 +1703,32 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
                     discovery_kwargs["on_message"] = lambda topic, part, offset, value: _scan_broker_message(
                         collector, topic, part, offset, value
                     )
-            dump_results, dump_errors = _read_dump_topics(
-                host=str(ctx.host),
-                port=int(ctx.port),
-                timeout=float(getattr(ctx.args, "timeout", 5.0)),
-                topics=dump_topics,
-                max_messages=max_messages,
-                username=username,
-                password=password,
-                use_tls=(transport_mode == "tls") or None,
-                tls_config=state.tls_config,
-                known_kafka=True,
-                bootstrap_metadata=metadata,
-                sasl_first=state.sasl_first,
-                existing_session=selected_session,
-                leader_pool=state.leader_pool,
-                **discovery_kwargs,
-            )
+            if collector is not None:
+                assert manifest is not None
+                for _topic in dump_topics:
+                    manifest.request("kafka.broker_message_walks", scope="selected_topic_high_watermark_walks")
+            with (
+                collector.source_guard(manifest, "kafka.broker_message_walks")
+                if collector is not None and manifest is not None
+                else nullcontext()
+            ):
+                dump_results, dump_errors = _read_dump_topics(
+                    host=str(ctx.host),
+                    port=int(ctx.port),
+                    timeout=float(getattr(ctx.args, "timeout", 5.0)),
+                    topics=dump_topics,
+                    max_messages=max_messages,
+                    username=username,
+                    password=password,
+                    use_tls=(transport_mode == "tls") or None,
+                    tls_config=state.tls_config,
+                    known_kafka=True,
+                    bootstrap_metadata=metadata,
+                    sasl_first=state.sasl_first,
+                    existing_session=selected_session,
+                    leader_pool=state.leader_pool,
+                    **discovery_kwargs,
+                )
 
     topic_messages: list[str] | None = None
     topic_read_error: str | None = None
@@ -1710,9 +1736,21 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
         topic_messages = dump_results.get(query_topic_name)
         topic_read_error = dump_errors.get(query_topic_name) or dump_error
     if collector is not None:
+        assert manifest is not None
         for topic in dump_topics:
-            if topic not in dump_errors and topic in dump_results:
+            complete = topic not in dump_errors and topic in dump_results and dump_results[topic] is not None
+            if complete and max_messages is not None and len(dump_results[topic] or []) >= max_messages:
                 collector.mark_accessible_source()
+                collector.partial(f"topic.{topic}", "message_limit_reached")
+                complete = False
+            if complete:
+                collector.mark_accessible_source()
+                manifest.read("kafka.broker_message_walks")
+            manifest.finish(
+                "kafka.broker_message_walks",
+                complete=complete,
+                denied="AUTHORIZATION_FAILED" in str(dump_errors.get(topic, "")).upper(),
+            )
         for topic, read_error in dump_errors.items():
             reason = "access_denied" if "AUTHORIZATION_FAILED" in read_error.upper() else read_error
             collector.partial(f"topic.{topic}", reason)

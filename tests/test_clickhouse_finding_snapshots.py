@@ -18,7 +18,7 @@ def _record(value: Any, *, fingerprint: str, occurrences: int = 1) -> dict[str, 
         "fingerprint": fingerprint,
         "value": value,
         "occurrences": occurrences,
-        "locations": [{"row_offset": 7, "object_path": "$.пароль"}],
+        "locations": [{"row_offset": 7 + offset, "object_path": "$.пароль"} for offset in range(occurrences)],
     }
 
 
@@ -52,6 +52,16 @@ def test_finding_occurrence_summary_tracks_replacement_delete_and_failed_write(m
     assert store.occurrence_count() == 7
     del store["one"]
     assert store.occurrence_count() == 0
+
+
+def test_complete_replacement_clears_legacy_missing_location_state():
+    incomplete = _record("secret", fingerprint="a", occurrences=2)
+    incomplete["locations"] = incomplete["locations"][:1]
+    store = FindingStore({"one": incomplete})
+    assert store.has_incomplete_locations()
+    store["one"] = _record("new-secret", fingerprint="a", occurrences=3)
+    assert not store.has_incomplete_locations()
+    assert store.occurrence_count() == len(store["one"]["locations"]) == 3
 
 
 def test_finding_snapshots_own_full_disk_values_and_preserve_reserved_literal_keys() -> None:

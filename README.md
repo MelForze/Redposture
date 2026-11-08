@@ -177,6 +177,8 @@ Spray checkpoints preserve cooldowns and stopped origins on resume. Older checkp
 
 With no selector, these modules traverse accessible sources until the target deadline. `--discover-time` caps the whole target (default 900 seconds); the CLI has no byte limit. Findings include the full value in TXT and JSON. Network reads and archive expansion use bounded internal portions. A source that cannot be fully streamed, a denied source or a malformed response is reported as `partial` or `unavailable`, never as complete. Hidden values and Swarm secret metadata are not treated as recovered secrets. Panel access and registry access are checked separately.
 
+Recognized credential carriers retain their context: `Connection` contains the original URI or DSN, `SignedURL` contains the complete signed URL, and Basic/cookie findings retain the complete recognized carrier. Percent escapes in a URI remain unchanged: `postgres://qa:p%40ss@db.invalid/db` is reported as that full URI. Related AWS/OAuth fields within the same JSON object produce one `Credentials` finding with a JSON object in `Value`; unrelated neighboring secrets remain separate. Registry `auth` retains its original encoded pair, with the registry location in `Place`. Large values and grouped objects remain backed by temporary disk storage through output.
+
 ```bash
 redposture gitlab -t https://gitlab.example --token-file token.txt --project team/app --discover -o gitlab_discover_result.txt
 redposture nexus -t https://nexus.example -u auditor -p 'password' --repository releases --discover -o nexus_discover_result.txt

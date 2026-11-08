@@ -36,10 +36,14 @@ def test_jenkins_artifact_walk_rejects_unsafe_and_invalid_entries(monkeypatch: p
 
     class Client:
         def request(self, method: str, url: str, **kwargs: Any) -> HttpResponse:
+            if "api/json?tree=artifacts[" in url:
+                return reply({"artifacts": []})
             heads.append((method, url, kwargs))
             return HttpResponse(200, b"", {"content-length": "42"})
 
     def get(client: Any, base: str, path: str, basic: str | None) -> HttpResponse:
+        if "api/json?tree=artifacts[" in path:
+            return reply({"artifacts": []})
         paths.append(path)
         if path.startswith("/api/json"):
             return reply({"jobs": [{"name": "folder/job"}]})
@@ -73,6 +77,8 @@ def test_jenkins_artifact_walk_rejects_unsafe_and_invalid_entries(monkeypatch: p
 
 def test_jenkins_invalid_environment_map_is_partial_without_losing_config(monkeypatch: pytest.MonkeyPatch) -> None:
     def get(client: Any, base: str, path: str, basic: str | None) -> HttpResponse:
+        if "api/json?tree=artifacts[" in path:
+            return reply({"artifacts": []})
         if path.startswith("/api/json"):
             return reply({"jobs": [{"name": "job", "firstBuild": {"number": 7}, "lastBuild": {"number": 7}}]})
         return reply({"envMap": []}) if "injectedEnvVars" in path else HttpResponse(200, b"retained", {})
@@ -92,6 +98,8 @@ def test_jenkins_discover_reads_past_twenty_jobs_and_emits_before_next_get(monke
     jobs = [{"name": f"job-{number:02d}"} for number in range(21)]
 
     def get(_client: Any, _base: str, path: str, _basic: str | None = None) -> HttpResponse:
+        if "api/json?tree=artifacts[" in path:
+            return reply({"artifacts": []})
         if path.startswith("/api/json"):
             return reply({"jobs": jobs})
         if len(fetched) == 1:
@@ -121,6 +129,8 @@ def test_jenkins_discover_retries_oversized_jobs_list_with_real_tree_ranges(
     requested: list[str] = []
 
     def get(_client: Any, _base: str, path: str, _basic: str | None = None) -> HttpResponse:
+        if "api/json?tree=artifacts[" in path:
+            return reply({"artifacts": []})
         requested.append(path)
         if path.startswith("/api/json?tree="):
             match = re.search(r"\{(\d+),(\d+)\}$", path)
@@ -156,6 +166,8 @@ def test_jenkins_oversized_job_fallback_does_not_claim_complete_on_bad_pages(
     seen: list[str] = []
 
     def get(_client: Any, _base: str, path: str, _basic: str | None = None) -> HttpResponse:
+        if "api/json?tree=artifacts[" in path:
+            return reply({"artifacts": []})
         seen.append(path)
         if "{" not in path or failure == "oversized_single_job":
             return HttpResponse(200, b'{"jobs":[', {}, truncated=True)
@@ -208,6 +220,8 @@ def test_jenkins_discover_streams_large_log_past_one_portion(monkeypatch: pytest
 
     class FakePool:
         def request(self, _method: str, url: str, **kwargs: Any) -> HttpResponse:
+            if "api/json?tree=artifacts[" in url:
+                return reply({"artifacts": []})
             if "/api/json?tree=" in url and "/job/" not in url:
                 return reply({"jobs": [{"name": "app", "firstBuild": {"number": 1}, "lastBuild": {"number": 1}}]})
             if url.endswith("/injectedEnvVars/api/json"):
@@ -216,6 +230,7 @@ def test_jenkins_discover_streams_large_log_past_one_portion(monkeypatch: pytest
 
         def request_stream(self, _method: str, url: str, *, on_chunk, chunk_size: int, **_kwargs: Any) -> HttpResponse:
             streamed.append(url)
+            _kwargs["on_response"](200, {"Content-Type": "text/plain"})
             body = payload if url.endswith("/consoleText") else b"<project/>"
             for start in range(0, len(body), chunk_size):
                 on_chunk(body[start : start + chunk_size])
@@ -243,6 +258,8 @@ def test_jenkins_discover_streams_oversized_injected_environment(monkeypatch: py
 
     class FakePool:
         def request(self, _method: str, url: str, **kwargs: Any) -> HttpResponse:
+            if "api/json?tree=artifacts[" in url:
+                return reply({"artifacts": []})
             if "/api/json?tree=" in url and "/job/" not in url:
                 return reply({"jobs": [{"name": "app", "firstBuild": {"number": 1}, "lastBuild": {"number": 1}}]})
             if url.endswith("/injectedEnvVars/api/json"):
@@ -286,6 +303,8 @@ def test_jenkins_discover_streams_oversized_injected_environment(monkeypatch: py
 
 def test_jenkins_discover_optional_env_plugin_absent_is_not_partial(monkeypatch: pytest.MonkeyPatch) -> None:
     def get(_client: Any, _base: str, path: str, _basic: str | None = None) -> HttpResponse:
+        if "api/json?tree=artifacts[" in path:
+            return reply({"artifacts": []})
         if path.startswith("/api/json"):
             return reply({"jobs": [{"name": "job", "firstBuild": {"number": 1}, "lastBuild": {"number": 1}}]})
         if path.endswith("/config.xml"):
@@ -306,6 +325,8 @@ def test_jenkins_discover_walks_folder_and_older_build_logs(monkeypatch: pytest.
     fetched: list[str] = []
 
     def get(_client: Any, _base: str, path: str, _basic: str | None = None) -> HttpResponse:
+        if "api/json?tree=artifacts[" in path:
+            return reply({"artifacts": []})
         fetched.append(path)
         if path.startswith("/api/json"):
             return reply({"jobs": [{"name": "team", "_class": "com.cloudbees.hudson.plugins.folder.Folder"}]})

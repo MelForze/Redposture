@@ -3182,6 +3182,7 @@ def test_consul_discover_streams_kv_key_catalog_beyond_one_response_cap(monkeypa
     payload = b'["app/label",' + b" " * 200 + b'"app/api_token"]'
 
     def stream(_method: str, _url: str, *, on_chunk: Any, **_kwargs: Any) -> HttpResponse:
+        _kwargs["on_response"](200, {"Content-Type": "application/json"})
         for offset in range(0, len(payload), 5):
             on_chunk(payload[offset : offset + 5])
         return HttpResponse(200, b"", {"Content-Type": "application/json"})
@@ -3211,6 +3212,7 @@ def test_consul_discover_does_not_fetch_truncated_catalog_key(monkeypatch: pytes
     payload = json.dumps(["x" * 9000 + "/api_token"]).encode()
 
     def stream(_method: str, _url: str, *, on_chunk: Any, **_kwargs: Any) -> HttpResponse:
+        _kwargs["on_response"](200, {"Content-Type": "application/json"})
         for offset in range(0, len(payload), 32):
             on_chunk(payload[offset : offset + 32])
         return HttpResponse(200, b"", {})

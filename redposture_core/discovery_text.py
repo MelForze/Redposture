@@ -6,7 +6,10 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from .discovery_credentials import COOKIE_HEAD
+from .discovery_dsn import DSN_HEAD, DSNGrammar, dsn_carrier
 from .discovery_entities import EntityTextStream
+from .discovery_sql import SQL_IDENTIFIED_HEAD, SQL_PASSWORD_HEAD, SQL_START, SQLDialect, SQLLiteral
 from .discovery_values import DiskBackedText
 from .secret_detection import SecretMatch, _is_secret_sentinel, is_secret_field_name
 
@@ -15,9 +18,9 @@ _ATOMIC = re.compile(r"(?<![\w-])(?:eyJ|glsa_|sk-|dop_v1_|shpat_|dckr_pat_|pypi-
 _END = re.compile(r"""[\s,;"'&<>]""")
 _QUOTED = re.compile(r"""\\.|["']""", re.S)
 _AUTH = re.compile(r"(?i)\b(bearer|basic)\s+")
-_SQL_PASSWORD = re.compile(r"(?i)\b(?:WITH\s+)?PASSWORD\s+([\"'])")
+_URI = re.compile(r"(?<![A-Za-z0-9+.-])(?:jdbc:)?[A-Za-z][A-Za-z0-9+.-]*://")
+_URI_END = re.compile(r"[\s\"']")
 _BEARER_END = re.compile(r"[^A-Za-z0-9._~+/=-]")
-_BASIC_END = re.compile(r"[^A-Za-z0-9+/]")
 _XML_HEAD = re.compile(r"<([A-Za-z][\w:.-]{0,79})(?=[\s/>])")
 _XML_HEADER_CHAR = re.compile(r"[\"'>]")
 _PEM = re.compile(r"-----BEGIN ((?:[A-Z0-9 ]+ )?PRIVATE KEY|CERTIFICATE)-----")
@@ -86,9 +89,11 @@ class DiscoveryTextStream:
         partial: Callable[[str], Any],
         *,
         portion: int = 65_536,
+        sql_dialect: SQLDialect = "unknown",
         _attributes: bool | str = False,
     ) -> None:
         self.emit = emit
+        self.sql_dialect = sql_dialect
         self.attributes = _attributes
         self.xml_name = ""
         self.xml_quote = ""
@@ -107,8 +112,24 @@ class DiscoveryTextStream:
         self.detector: str | None = None
         self.minimum = 0
         self.auth_body_length = 0
-        self.padding = 0
         self.finished = False
+        self.dsn: DSNGrammar | None = None
+        from .discovery_toml import TOMLMultiline
+
+        self.toml: TOMLMultiline | None = None
+        self.sql: SQLLiteral | None = None
+        from .discovery_csv import CSVSecretStream
+
+        self.csv = None if _attributes else CSVSecretStream(emit, partial, portion=self.limit)
+        from .discovery_cloudinit import CloudInitPasswords
+
+        self.cloudinit = (
+            None
+            if _attributes
+            else CloudInitPasswords(
+                lambda value: emit(SecretMatch("password", "high", "", value, ("cloud_init_password",))), partial
+            )
+        )
 
     def _xml_attribute(self, item: Any) -> None:
         if self.xml_name.lower() == "input" and isinstance(item, dict):
@@ -148,7 +169,7 @@ class DiscoveryTextStream:
         key, self.key = self.key, None
         detector, self.detector = self.detector, None
         minimum, self.minimum = self.minimum, 0
-        self.auth_body_length = self.padding = 0
+        self.auth_body_length = 0
         self.mode = ""
         self.quote = ""
         self.escaped = False
@@ -162,6 +183,26 @@ class DiscoveryTextStream:
             self.emit(SecretMatch(detector, "high", "", value))
         else:
             self.emit({key: value} if key is not None else value)
+
+    def _drain_sql(self, *, final: bool = False) -> bool:
+        assert self.sql is not None
+        consumed = self.sql.feed(self.pending, final=final)
+        self.pending = self.pending[consumed:]
+        if not self.sql.complete:
+            return False
+        value = self.sql.take()
+        self.sql.close()
+        self.sql = None
+        self.mode = ""
+        if value is not None:
+            length = value.byte_length if isinstance(value, DiskBackedText) else len(value)
+            if length >= 4 and not (
+                value.obvious_placeholder if isinstance(value, DiskBackedText) else _is_secret_sentinel(value)
+            ):
+                self.emit(SecretMatch("password", "high", "", value, ("sql_password",)))
+            elif isinstance(value, DiskBackedText):
+                value.close()
+        return True
 
     def _begin_xml(self, match: re.Match[str]) -> None:
         if match.start():
@@ -177,8 +218,38 @@ class DiscoveryTextStream:
         self.mode = "xml_header"
         self.pending = self.pending[match.end() :]
 
+    def _drain_toml(self, *, final: bool = False) -> bool:
+        assert self.toml is not None
+        consumed = self.toml.feed(self.pending, final=final)
+        self.pending = self.pending[consumed:]
+        if not self.toml.done and not final:
+            return False
+        value = self.toml.take()
+        self.toml.close()
+        self.toml = None
+        if self.value is not None:
+            self.value.close()
+            self.value = None
+        key, self.key = self.key, None
+        self.mode = ""
+        if value is not None:
+            placeholder = value.obvious_placeholder if isinstance(value, DiskBackedText) else _is_secret_sentinel(value)
+            if value and not placeholder:
+                self.emit({key or "secret": value})
+            elif isinstance(value, DiskBackedText):
+                value.close()
+        return True
+
     def _drain(self) -> None:
         while self.pending:
+            if self.sql is not None:
+                if not self._drain_sql():
+                    return
+                continue
+            if self.toml is not None:
+                if not self._drain_toml():
+                    return
+                continue
             if (
                 not self.mode
                 and self.value is None
@@ -231,6 +302,30 @@ class DiscoveryTextStream:
                 self.xml_quote = self.xml_tail = ""
                 continue
             if self.value is not None:
+                if self.mode == "cookie":
+                    end = self.pending.find("\n")
+                    self.value.append(self.pending if end < 0 else self.pending[:end].rstrip("\r"))
+                    self.pending = "" if end < 0 else self.pending[end + 1 :]
+                    if end < 0:
+                        return
+                    self._complete()
+                    continue
+                if self.mode == "dsn":
+                    assert self.dsn is not None
+                    end = self.pending.find("\n")
+                    part = self.pending if end < 0 else self.pending[:end]
+                    self.value.append(part)
+                    self.dsn.feed(part)
+                    self.pending = "" if end < 0 else self.pending[end + 1 :]
+                    if end < 0:
+                        return
+                    if self.dsn.state in {"brace", "quoted"}:
+                        self.value.append("\n")
+                        self.dsn.feed("\n")
+                    else:
+                        self._complete()
+                        self.dsn = None
+                    continue
                 if self.mode == "xml_close":
                     self.pending = self.pending.lstrip()
                     if not self.pending:
@@ -284,20 +379,11 @@ class DiscoveryTextStream:
                         self.key = None
                         self.mode = ""
                     continue
-                if self.mode == "basic_padding":
-                    count = 0
-                    while count < len(self.pending) and self.pending[count] == "=" and count < 2 - self.padding:
-                        count += 1
-                    self.value.append(self.pending[:count])
-                    self.padding += count
-                    self.pending = self.pending[count:]
-                    if self.padding == 2 or self.pending:
-                        self._complete()
-                        continue
-                    return
                 if self.mode in {"bearer", "basic"}:
-                    end_pattern = _BEARER_END if self.mode == "bearer" else _BASIC_END
-                    boundary = end_pattern.search(self.pending)
+                    # Inspect the entire token68 before validating Basic.
+                    # Publishing at '=' or '.' could turn a malformed tail
+                    # into a false complete credential prefix.
+                    boundary = _BEARER_END.search(self.pending)
                     if boundary is None:
                         self.value.append(self.pending)
                         self.auth_body_length += len(self.pending)
@@ -306,10 +392,7 @@ class DiscoveryTextStream:
                     self.value.append(self.pending[: boundary.start()])
                     self.auth_body_length += boundary.start()
                     self.pending = self.pending[boundary.start() :]
-                    if self.mode == "basic" and self.pending.startswith("="):
-                        self.mode = "basic_padding"
-                    else:
-                        self._complete()
+                    self._complete()
                     continue
                 if self.mode == "pem":
                     end = self.pending.find(self.pem_end)
@@ -329,11 +412,20 @@ class DiscoveryTextStream:
                     if not self.pending:
                         return
                     if self.pending[0] in "\"'":
+                        if len(self.pending) < 3 and self.pending == self.pending[0] * len(self.pending):
+                            return
+                        if self.pending.startswith(self.pending[0] * 3):
+                            from .discovery_toml import TOMLMultiline
+
+                            self.toml = TOMLMultiline(self.pending[0], self.partial, portion=self.limit)
+                            self.mode = "toml"
+                            self.pending = self.pending[3:]
+                            continue
                         self.quote = self.pending[0]
                         self.pending = self.pending[1:]
                         self.mode = "quoted"
                     else:
-                        self.mode = "unquoted"
+                        self.mode = "uri" if _URI.match(self.pending) else "unquoted"
                     continue
                 if self.mode == "quoted":
                     start = int(self.escaped)
@@ -354,7 +446,7 @@ class DiscoveryTextStream:
                     self.pending = self.pending[end + 1 :]
                     self._complete()
                     continue
-                boundary = _END.search(self.pending)
+                boundary = (_URI_END if self.mode == "uri" else _END).search(self.pending)
                 if boundary is None:
                     self.value.append(self.pending)
                     self.pending = ""
@@ -382,6 +474,33 @@ class DiscoveryTextStream:
                 ),
                 None,
             )
+            dsn = None if self.attributes else DSN_HEAD.search(self.pending)
+            cookie = None if self.attributes else COOKIE_HEAD.search(self.pending)
+            if (
+                cookie is not None
+                and cookie.start() <= self.limit
+                and (assignment is None or cookie.start() <= assignment.start())
+            ):
+                if cookie.start():
+                    self.emit(self.pending[: cookie.start()])
+                self.value = _Value(self.limit)
+                self.key = None
+                self.mode = "cookie"
+                self.pending = self.pending[cookie.start() :]
+                continue
+            if (
+                dsn is not None
+                and dsn.start() <= self.limit
+                and (assignment is None or dsn.start() <= assignment.start())
+            ):
+                if dsn.start():
+                    self.emit(self.pending[: dsn.start()])
+                self.value = _Value(self.limit)
+                self.key = None
+                self.mode = "dsn"
+                self.dsn = DSNGrammar()
+                self.pending = self.pending[dsn.start() :]
+                continue
             pem = _PEM.search(self.pending)
             if (
                 xml is not None
@@ -392,7 +511,10 @@ class DiscoveryTextStream:
                 self._begin_xml(xml)
                 continue
             auth = _AUTH.search(self.pending)
-            sql_password = _SQL_PASSWORD.search(self.pending)
+            sql_password = SQL_PASSWORD_HEAD.search(self.pending)
+            identified = SQL_IDENTIFIED_HEAD.search(self.pending)
+            if identified is not None and (sql_password is None or identified.start() < sql_password.start()):
+                sql_password = identified
             contextual = auth
             if sql_password is not None and (contextual is None or sql_password.start() < contextual.start()):
                 contextual = sql_password
@@ -404,19 +526,19 @@ class DiscoveryTextStream:
             ):
                 if contextual.start():
                     self.emit(self.pending[: contextual.start()])
-                self.value = _Value(self.limit)
                 self.key = None
                 self.pending = self.pending[contextual.end() :]
                 if contextual is sql_password:
-                    self.detector = "password"
-                    self.minimum = 4
-                    self.mode = "quoted"
-                    self.quote = contextual.group(1)
+                    self.sql = SQLLiteral(contextual.group(1), portion=self.limit, dialect=self.sql_dialect)
+                    self.mode = "sql"
                 else:
+                    self.value = _Value(self.limit)
                     self.mode = contextual.group(1).lower()
+                    if self.mode == "basic":
+                        self.value.append(contextual.group())
                     self.detector = "bearer_token" if self.mode == "bearer" else "basic_auth"
                     self.minimum = 12 if self.mode == "bearer" else 8
-                    self.auth_body_length = self.padding = 0
+                    self.auth_body_length = 0
                 continue
             newline = self.pending.rfind("\n", 0, self.limit)
             if pem is not None and pem.start() <= self.limit and (newline < 0 or pem.start() <= newline):
@@ -429,13 +551,15 @@ class DiscoveryTextStream:
                 self.mode = "pem"
                 self.pending = self.pending[pem.end() :]
                 continue
-            multiline = False
+            multiline = assignment is not None and self.pending[assignment.end() :].lstrip().startswith(('"""', "'''"))
             if newline >= 0:
                 for candidate in _ASSIGNMENT.finditer(self.pending, 0, newline):
                     if not is_secret_field_name(candidate.group(1)):
                         continue
                     head = self.pending[candidate.end() : newline].lstrip()
-                    if head.startswith(('"', "'")) and not any(m.group() == head[0] for m in _QUOTED.finditer(head, 1)):
+                    if head.startswith(('"""', "'''")) or (
+                        head.startswith(('"', "'")) and not any(m.group() == head[0] for m in _QUOTED.finditer(head, 1))
+                    ):
                         assignment = candidate
                         multiline = True
                         break
@@ -446,6 +570,9 @@ class DiscoveryTextStream:
             if len(self.pending) <= self.limit and not multiline and not (self.attributes and assignment is not None):
                 return
             atomic = _ATOMIC.search(self.pending) if not multiline else None
+            uri = _URI.search(self.pending) if not multiline else None
+            if uri is not None and (atomic is None or uri.start() < atomic.start()):
+                atomic = uri
             match = assignment
             if atomic is not None and (match is None or atomic.start() < match.start()):
                 match = atomic
@@ -460,7 +587,7 @@ class DiscoveryTextStream:
                     self.pending = self.pending[match.end() :]
                 else:
                     self.key = None
-                    self.mode = "unquoted"
+                    self.mode = "uri" if match is uri else "unquoted"
                     self.pending = self.pending[match.start() :]
                 continue
             if 0 <= newline < self.limit:
@@ -469,6 +596,14 @@ class DiscoveryTextStream:
                 continue
             if len(self.pending) <= self.limit:
                 return
+            sql_start = SQL_START.search(self.pending)
+            if sql_start is not None and not re.search(r"[;\n]", self.pending[sql_start.end() :]):
+                if sql_start.start():
+                    self.emit(self.pending[: sql_start.start()])
+                    self.pending = self.pending[sql_start.start() :]
+                if len(self.pending) <= 4096:
+                    return
+                self.partial("unsupported_sql_header")
             cut = max(self.pending.rfind(char, 0, self.limit) for char in " \t\r\n,;\"'&<>")
             if cut >= 0:
                 part, self.pending = self.pending[: cut + 1], self.pending[cut + 1 :]
@@ -482,13 +617,43 @@ class DiscoveryTextStream:
         if self.finished:
             raise RuntimeError("text discovery stream is finished")
         for position in range(0, len(text), self.limit):
-            self.pending += text[position : position + self.limit]
+            part = text[position : position + self.limit]
+            if self.cloudinit is not None:
+                self.cloudinit.feed(part)
+            if self.csv is not None:
+                self.csv.feed(part)
+                if self.csv.active:
+                    if self.value is not None:
+                        self.value.close()
+                        self.value = None
+                    self.pending = ""
+                    continue
+            self.pending += part
             self._drain()
 
     def finish(self) -> None:
         if self.finished:
             raise RuntimeError("text discovery stream is finished")
+        if self.cloudinit is not None:
+            self.cloudinit.finish()
+        if self.csv is not None:
+            self.csv.finish()
+            if self.csv.active:
+                self.pending = ""
+                self.finished = True
+                return
         self._drain()
+        if self.sql is not None:
+            if self._drain_sql(final=True):
+                self._drain()
+            else:
+                self.partial("unterminated_sql_secret")
+                self.sql.close()
+                self.sql = None
+                self.pending = ""
+        if self.toml is not None:
+            self._drain_toml(final=True)
+            self._drain()
         self.finished = True
         if self.xml_attributes is not None:
             self.xml_attributes.close()
@@ -497,7 +662,17 @@ class DiscoveryTextStream:
             self.pending = ""
             self._close_xml_input()
         if self.value is not None:
-            if self.mode in {"quoted", "pem", "xml_body", "xml_close", "xml_cdata"}:
+            if self.mode == "dsn":
+                value = self.value.finish()
+                self.value = None
+                if not dsn_carrier(value)[1]:
+                    self.partial("unterminated_connection_dsn")
+                    if isinstance(value, DiskBackedText):
+                        value.close()
+                else:
+                    self.emit(value)
+                self.dsn = None
+            elif self.mode in {"quoted", "pem", "xml_body", "xml_close", "xml_cdata"}:
                 self.partial(
                     "unterminated_pem"
                     if self.mode == "pem"
@@ -518,6 +693,16 @@ class DiscoveryTextStream:
             self.pending = ""
 
     def close(self) -> None:
+        if self.cloudinit is not None:
+            self.cloudinit.close()
+        if self.sql is not None:
+            self.sql.close()
+            self.sql = None
+        if self.toml is not None:
+            self.toml.close()
+            self.toml = None
+        if self.csv is not None:
+            self.csv.close()
         self._close_xml_input()
         if self.xml_attributes is not None:
             self.xml_attributes.close()

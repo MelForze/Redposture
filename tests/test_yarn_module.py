@@ -57,6 +57,27 @@ def actions() -> Any:
     return importlib.import_module("redposture_core.modules.yarn.actions")
 
 
+@pytest.mark.parametrize("status", [200, 403, 500])
+def test_application_source_manifest_distinguishes_access_from_read(status):
+    ctx = context({"/ws/v1/cluster/apps": (status, {"apps": {"app": [APP]}})}, discover=True)
+    result = actions().data_record(ctx, {"is_yarn": True, "api_endpoint": "http://qa", "status": "open_no_auth"})[
+        "content_discovery"
+    ]
+    row = next(r for r in result["sources"] if r["id"] == "yarn.application_collection")
+    assert row["requested"] == 1 and row["read"] == int(status == 200)
+    assert row["complete"] == (status == 200) and row["denied"] == int(status == 403)
+
+
+def test_empty_application_collection_is_a_read_source_not_unavailable():
+    ctx = context({"/ws/v1/cluster/apps": (200, {"apps": None})}, discover=True)
+    result = actions().data_record(ctx, {"is_yarn": True, "api_endpoint": "http://qa", "status": "open_no_auth"})[
+        "content_discovery"
+    ]
+    assert result["status"] == "complete"
+    row = next(r for r in result["sources"] if r["id"] == "yarn.application_collection")
+    assert row["read"] == 1 and row["complete"]
+
+
 def test_cluster_schema_confirms_yarn_without_mutating_requests() -> None:
     ctx = context()
     record = actions().detect_record(ctx)

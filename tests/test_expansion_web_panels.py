@@ -468,7 +468,15 @@ def test_inventory_root_denials_propagate_to_each_requested_operation(
         SimpleNamespace(args=args), {"ui_product": product, "ui": {"endpoint": "http://panel"}}
     )["ui"]["inventory"]
     expected = {"status": "access_denied" if status == 403 else "unavailable"}
-    assert all(result[flag] == expected for flag in flags)
+    for flag in flags:
+        if flag == "discover":
+            assert set(result[flag]) == {"status", "sources"}
+            assert result[flag]["status"] == expected["status"]
+            source = result[flag]["sources"][0]
+            assert source["requested"] == 1 and source["read"] == 0
+            assert source["denied"] == int(status == 403) and not source["complete"]
+        else:
+            assert result[flag] == expected
     assert (
         paths
         == (

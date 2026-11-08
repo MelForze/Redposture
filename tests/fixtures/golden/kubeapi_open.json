@@ -14,17 +14,122 @@
     "configmaps_error": "configmaps is forbidden: User \"system:anonymous\" cannot list resource \"configmaps\" in API group \"\" at the cluster scope",
     "configmaps_partial": true,
     "content_discovery": {
-      "bytes_inspected": 0,
-      "bytes_read": 533,
+      "bytes_inspected": 38,
+      "bytes_read": 57250,
       "emitted_fingerprints": [],
       "findings": [],
       "live_emitted": false,
       "partial_reasons": [
         "secrets: access_denied: secrets is forbidden: User \"system:anonymous\" cannot list resource \"secrets\" in API group \"\" at the cluster scope",
-        "configmaps: access_denied: configmaps is forbidden: User \"system:anonymous\" cannot list resource \"configmaps\" in API group \"\" at the cluster scope"
+        "configmaps: access_denied: configmaps is forbidden: User \"system:anonymous\" cannot list resource \"configmaps\" in API group \"\" at the cluster scope",
+        "workload_env.replicationcontrollers: access_denied",
+        "workload_env.jobs: access_denied",
+        "workload_env.cronjobs: access_denied"
       ],
       "source": "anonymous",
-      "status": "unavailable"
+      "sources": [
+        {
+          "complete": false,
+          "denied": 1,
+          "id": "secrets",
+          "implemented": true,
+          "read": 0,
+          "requested": 1,
+          "scope": "all_accessible_namespaces",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 1,
+          "id": "configmaps",
+          "implemented": true,
+          "read": 0,
+          "requested": 1,
+          "scope": "all_accessible_namespaces",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "workload_env.pods",
+          "implemented": true,
+          "read": 5,
+          "requested": 1,
+          "scope": "all_accessible_namespaces",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 1,
+          "id": "workload_env.replicationcontrollers",
+          "implemented": true,
+          "read": 0,
+          "requested": 1,
+          "scope": "all_accessible_namespaces",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "workload_env.deployments",
+          "implemented": true,
+          "read": 2,
+          "requested": 1,
+          "scope": "all_accessible_namespaces",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "workload_env.replicasets",
+          "implemented": true,
+          "read": 2,
+          "requested": 1,
+          "scope": "all_accessible_namespaces",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "workload_env.statefulsets",
+          "implemented": true,
+          "read": 0,
+          "requested": 1,
+          "scope": "all_accessible_namespaces",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "workload_env.daemonsets",
+          "implemented": true,
+          "read": 0,
+          "requested": 1,
+          "scope": "all_accessible_namespaces",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 1,
+          "id": "workload_env.jobs",
+          "implemented": true,
+          "read": 0,
+          "requested": 1,
+          "scope": "all_accessible_namespaces",
+          "unsupported": false
+        },
+        {
+          "complete": false,
+          "denied": 1,
+          "id": "workload_env.cronjobs",
+          "implemented": true,
+          "read": 0,
+          "requested": 1,
+          "scope": "all_accessible_namespaces",
+          "unsupported": false
+        }
+      ],
+      "status": "partial"
     },
     "detection_signals": [
       "kubeapi.probe",

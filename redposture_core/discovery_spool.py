@@ -18,7 +18,15 @@ from typing import Any, SupportsIndex, overload
 
 from .discovery_containers import DiskContainer
 from .discovery_paths import DiskBackedPath
-from .discovery_values import ArenaDiskKeyText, DiskBackedText, DiskTextArena, InlineDiskText, _ArenaWrite
+from .discovery_values import (
+    ArenaDiskKeyText,
+    CredentialObject,
+    DiskBackedText,
+    DiskTextArena,
+    EncodedSecretText,
+    InlineDiskText,
+    _ArenaWrite,
+)
 
 _DISK_VALUE_REF = "\x00redposture_disk_value"
 _SPOOL_VALUE_REF = "\x00redposture_spool_value"
@@ -27,6 +35,8 @@ _MAPPING_VALUE_REF = "\x00redposture_mapping_value"
 _PATH_VALUE_REF = "\x00redposture_path_value"
 _INLINE_VALUE_REF = "\x00redposture_inline_value"
 _ARENA_VALUE_REF = "\x00redposture_arena_value"
+_ENCODED_VALUE_REF = "\x00redposture_encoded_value"
+_CREDENTIAL_OBJECT_REF = "\x00redposture_credential_object"
 _ARENA_OWNER_KEY = "text-arena"
 _OBJECT_OWNER_KEY = "object-store"
 _REFERENCE_MARKERS = (
@@ -37,6 +47,8 @@ _REFERENCE_MARKERS = (
     _PATH_VALUE_REF,
     _INLINE_VALUE_REF,
     _ARENA_VALUE_REF,
+    _ENCODED_VALUE_REF,
+    _CREDENTIAL_OBJECT_REF,
 )
 _INLINE_TEXT_MAX_BYTES = 1024
 _PLAIN_SCALAR_TYPES = (str, int, float, bool, type(None))
@@ -77,6 +89,10 @@ class _DiskValueReferences:
         return self._decode_disk_refs(value) if "\\u0000redposture_" in payload else value
 
     def _encode_disk_refs(self, value: Any, pending: dict[str, Any]) -> Any:
+        if isinstance(value, CredentialObject):
+            return {_CREDENTIAL_OBJECT_REF: self._encode_disk_refs(value.source, pending)}
+        if isinstance(value, EncodedSecretText):
+            return {_ENCODED_VALUE_REF: [value.secret_digest, self._encode_disk_refs(value.source, pending)]}
         if isinstance(value, DiskBackedPath):
             return {
                 _PATH_VALUE_REF: [
@@ -142,6 +158,11 @@ class _DiskValueReferences:
         if type(value) in _PLAIN_SCALAR_TYPES or _plain_scalar_record(value):
             return value
         if isinstance(value, dict):
+            if len(value) == 1 and _CREDENTIAL_OBJECT_REF in value:
+                return CredentialObject(self._decode_disk_refs(value[_CREDENTIAL_OBJECT_REF]))
+            if len(value) == 1 and _ENCODED_VALUE_REF in value:
+                digest, source = value[_ENCODED_VALUE_REF]
+                return EncodedSecretText(self._decode_disk_refs(source), digest)
             if len(value) == 1 and _MAPPING_VALUE_REF in value:
                 return {
                     self._decode_disk_refs(key): self._decode_disk_refs(item) for key, item in value[_MAPPING_VALUE_REF]

@@ -1,0 +1,380 @@
+{
+  "version": 1,
+  "provenance": "Separate authored holdout; input and exact labels frozen before first execution. Inactive values; no detector output used to create labels. No claim of external human review, statistical representativeness or production accuracy.",
+  "cases": [
+    {
+      "id": "holdout-payments",
+      "body": {
+        "service": "payments",
+        "settings": {
+          "password": "maple morning!81"
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "maple morning!81",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-billing",
+      "body": {
+        "service": "billing",
+        "settings": {
+          "password": "стена;ветер!27"
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "стена;ветер!27",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-warehouse",
+      "body": {
+        "service": "warehouse",
+        "settings": {
+          "password": "shell\"quoted\\r!91"
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "shell\"quoted\\r!91",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-gateway",
+      "body": {
+        "service": "gateway",
+        "settings": {
+          "password": "0"
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "0",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-reporting",
+      "body": {
+        "service": "reporting",
+        "settings": {
+          "password": "  space-boundary!92  "
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "  space-boundary!92  ",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-search",
+      "body": {
+        "service": "search",
+        "settings": {
+          "password": "amber-winter!71"
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "amber-winter!71",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-scheduler",
+      "body": {
+        "service": "scheduler",
+        "settings": {
+          "password": "river-evening!25"
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "river-evening!25",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-pipeline",
+      "body": {
+        "service": "pipeline",
+        "settings": {
+          "password": "snowfall-afternoon!24"
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "snowfall-afternoon!24",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-worker",
+      "body": {
+        "service": "worker",
+        "settings": {
+          "password": "cotton-forest!39"
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "cotton-forest!39",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-notebook",
+      "body": {
+        "service": "notebook",
+        "settings": {
+          "password": "autumn-ivy!63"
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "autumn-ivy!63",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-backup",
+      "body": {
+        "service": "backup",
+        "settings": {
+          "password": "summer-peak!54"
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "summer-peak!54",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-service",
+      "body": {
+        "service": "service",
+        "settings": {
+          "password": "paper-boat!12"
+        },
+        "health": {
+          "healthy": true,
+          "retries": 3
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "paper-boat!12",
+          "path": "$.settings.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-http-access-log",
+      "body": {
+        "message": "10.1.2.3 GET /health 200 17ms",
+        "request_id": "req-1234"
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-version-info",
+      "body": {
+        "version": "qR7xN2pV5tC8fK3sM9zD6aL4bE1",
+        "commit": "qR7xN2pV5tC8fK3sM9zD6aL4bE1"
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-public-endpoint",
+      "body": {
+        "database_url": "postgres://app@database.invalid:5432/qa"
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-secret-ref",
+      "body": {
+        "name": "DB_PASSWORD",
+        "valueFrom": {
+          "secretKeyRef": {
+            "name": "database",
+            "key": "password"
+          }
+        }
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-metrics",
+      "body": {
+        "password_length": 16,
+        "token_count": 12,
+        "credential_status": "valid",
+        "uptime": 420
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-config-template",
+      "body": {
+        "password": "${POSTGRES_PASSWORD}",
+        "replicas": 2
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-masked-config",
+      "body": {
+        "settings": {
+          "password": "<redacted>"
+        }
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-empty-secrets",
+      "body": {
+        "password": "",
+        "token": null,
+        "api_key": null
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-no-api-login",
+      "body": {
+        "message": "login not enabled",
+        "code": 404
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-readonly-role",
+      "body": {
+        "role": "reader",
+        "privileges": [
+          "read",
+          "list"
+        ],
+        "enabled": true
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-checksums",
+      "body": {
+        "checksum": "qR7xN2pV5tC8fK3sM9zD6aL4bE1",
+        "public_key": "ordinary-public-key"
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "holdout-empty-array",
+      "body": {
+        "jobs": [],
+        "metadata": {
+          "total": 0
+        }
+      },
+      "expected": [],
+      "status": "complete"
+    }
+  ]
+}

@@ -7,13 +7,8 @@ Elastic stage while making the discovery engine deterministic and testable.
 
 from __future__ import annotations
 
-import base64
-import binascii
-import csv
 import hashlib
-import html
 import json
-import math
 import operator
 import re
 import sqlite3
@@ -21,28 +16,177 @@ import tempfile
 import threading
 import time
 import urllib.parse
-import zlib
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from itertools import chain
 from pathlib import Path
 from typing import Any, Literal, SupportsIndex, TypeAlias, overload
 
-from ...data_discovery import _scan_portioned_value
+from ...discovery_confirmation import _analyze_disk_value as _analyze_disk_value
+from ...discovery_containers import DiskSequence
+from ...discovery_context import field_binding
 from ...discovery_encoded import compressed_text_prefix, mime_text_prefix
 from ...discovery_json import DiskJSONDocument
+from ...discovery_occurrences import OccurrenceLocations, OccurrenceRegistry
 from ...discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME
 from ...discovery_paths import Text, concat_discovery_text, json_discovery_path
+from ...discovery_rules import (
+    _ATTR_RE as _ATTR_RE,
+)
+from ...discovery_rules import (
+    _AUTH_HEADER_RE as _AUTH_HEADER_RE,
+)
+from ...discovery_rules import (
+    _AWS_ACCESS_RE as _AWS_ACCESS_RE,
+)
+from ...discovery_rules import (
+    _AWS_SECRET_RE as _AWS_SECRET_RE,
+)
+from ...discovery_rules import (
+    _AZURE_ACCOUNT_KEY_RE as _AZURE_ACCOUNT_KEY_RE,
+)
+from ...discovery_rules import (
+    _AZURE_SAS_RE as _AZURE_SAS_RE,
+)
+from ...discovery_rules import (
+    _CAMEL_BOUNDARY_RE as _CAMEL_BOUNDARY_RE,
+)
+from ...discovery_rules import (
+    _EXCLUDED_FIELDS as _EXCLUDED_FIELDS,
+)
+from ...discovery_rules import (
+    _GITHUB_RE as _GITHUB_RE,
+)
+from ...discovery_rules import (
+    _GITLAB_RE as _GITLAB_RE,
+)
+from ...discovery_rules import (
+    _GOOGLE_API_RE as _GOOGLE_API_RE,
+)
+from ...discovery_rules import (
+    _JWE_RE as _JWE_RE,
+)
+from ...discovery_rules import (
+    _JWT_RE as _JWT_RE,
+)
+from ...discovery_rules import (
+    _KEY_VALUE_RE as _KEY_VALUE_RE,
+)
+from ...discovery_rules import (
+    _MEDIUM_FIELDS as _MEDIUM_FIELDS,
+)
+from ...discovery_rules import (
+    _NPM_RE as _NPM_RE,
+)
+from ...discovery_rules import (
+    _PLACEHOLDER_RE as _PLACEHOLDER_RE,
+)
+from ...discovery_rules import (
+    _PRIVATE_KEY_RE as _PRIVATE_KEY_RE,
+)
+from ...discovery_rules import (
+    _PROVIDER_TOKENS as _PROVIDER_TOKENS,
+)
+from ...discovery_rules import (
+    _SECRET_KEY_SUFFIXES as _SECRET_KEY_SUFFIXES,
+)
+from ...discovery_rules import (
+    _SLACK_RE as _SLACK_RE,
+)
+from ...discovery_rules import (
+    _SQL_ACCOUNT_TOKEN as _SQL_ACCOUNT_TOKEN,
+)
+from ...discovery_rules import (
+    _SQL_IDENTIFIED_BY_RE as _SQL_IDENTIFIED_BY_RE,
+)
+from ...discovery_rules import (
+    _SQL_PASSWORD_RE as _SQL_PASSWORD_RE,
+)
+from ...discovery_rules import (
+    _STRIPE_RE as _STRIPE_RE,
+)
+from ...discovery_rules import (
+    _STRONG_FIELDS as _STRONG_FIELDS,
+)
+from ...discovery_rules import (
+    _TAG_RE as _TAG_RE,
+)
+from ...discovery_rules import (
+    _VAULT_RE as _VAULT_RE,
+)
+from ...discovery_rules import (
+    _XML_SECRET_RE as _XML_SECRET_RE,
+)
+from ...discovery_rules import (
+    DetectedSecret as DetectedSecret,
+)
+from ...discovery_rules import (
+    FieldClass as FieldClass,
+)
+from ...discovery_rules import (
+    _candidate as _candidate,
+)
+from ...discovery_rules import (
+    _confidence as _confidence,
+)
+from ...discovery_rules import (
+    _decode_base64url_json as _decode_base64url_json,
+)
+from ...discovery_rules import (
+    _decode_basic as _decode_basic,
+)
+from ...discovery_rules import (
+    _decode_credential_base64 as _decode_credential_base64,
+)
+from ...discovery_rules import (
+    _decode_structured_blob as _decode_structured_blob,
+)
+from ...discovery_rules import (
+    _disk_field_hint as _disk_field_hint,
+)
+from ...discovery_rules import (
+    _looks_placeholder as _looks_placeholder,
+)
+from ...discovery_rules import (
+    _plausible_opaque_secret as _plausible_opaque_secret,
+)
+from ...discovery_rules import (
+    _secret_key_kind as _secret_key_kind,
+)
+from ...discovery_rules import (
+    _shannon_entropy as _shannon_entropy,
+)
+from ...discovery_rules import (
+    _split_user_password as _split_user_password,
+)
+from ...discovery_rules import (
+    _structured_decoded_text as _structured_decoded_text,
+)
+from ...discovery_rules import (
+    _validated_jwe as _validated_jwe,
+)
+from ...discovery_rules import (
+    _validated_jwt as _validated_jwt,
+)
+from ...discovery_rules import (
+    analyze_value as analyze_value,
+)
+from ...discovery_rules import (
+    classify_field as classify_field,
+)
+from ...discovery_rules import (
+    normalize_field_name as normalize_field_name,
+)
+from ...discovery_sources import SourceManifest
 from ...discovery_spool import SpoolingFindings, _DiskValueReferences, _slice_values
 from ...discovery_values import DiskBackedText
 from ...json_stream import JSONPath
 from ...scheduler import NestedSchedulerCancelled
-from ...secret_detection import is_secret_metadata_field
 from ...secret_literals import AssignmentLiterals
-from .value_stream import SpoolingSequence, disk_basic_password, disk_entropy, stable_json_chunks, validated_disk_jose
+from .value_stream import SpoolingSequence, stable_json_chunks
 
 JsonObject: TypeAlias = dict[str, Any]
-FieldClass: TypeAlias = Literal["strong", "medium", "excluded", "neutral"]
 SurfaceStatus: TypeAlias = Literal["complete", "partial", "denied", "unsupported", "timeout", "error"]
 
 DEFAULT_PAGE_SIZE = 200
@@ -50,165 +194,13 @@ DEFAULT_MAX_DOCUMENTS = 50_000
 DEFAULT_MAX_SOURCE_BYTES = DEFAULT_DISCOVER_MAX_BYTES
 DEFAULT_MAX_SECONDS = DEFAULT_DISCOVER_TIME
 DEFAULT_MAX_FINDINGS = 10_000
-DEFAULT_MAX_LOCATIONS = 100
+DEFAULT_MAX_LOCATIONS = None
 MAX_QUERY_CLAUSES = 24
 MAPPING_BATCH_SIZE = 20
 MAX_PAGINATION_CONTEXT_RECOVERIES = 1
 MAX_LEGACY_SEARCH_ADJUSTMENTS = 5
 DISCOVER_WORKERS = 8
 
-_STRONG_FIELDS = {
-    "password",
-    "passwd",
-    "pwd",
-    "passphrase",
-    "credential",
-    "credentials",
-    "cred",
-    "creds",
-    "apisecret",
-    "client_secret",
-    "private_key",
-    "secret_access_key",
-    "aws_secret_access_key",
-    "azure_storage_key",
-    "storage_account_key",
-    "account_key",
-    "dockerconfigjson",
-    "client_key_data",
-    "authorization",
-    "api_token",
-    "refresh_token",
-    "connection_string",
-    "connection_uri",
-    "dsn",
-}
-_MEDIUM_FIELDS = {
-    "secret",
-    "token",
-    "access_token",
-    "api_key",
-    "apikey",
-    "auth",
-    "cookie",
-    "session",
-    "webhook",
-    "key",
-}
-_EXCLUDED_FIELDS = {
-    "public_key",
-    "certificate",
-    "cert",
-    "key_id",
-    "api_key_id",
-    "access_key_id",
-    "aws_access_key_id",
-    "token_id",
-    "username",
-    "user",
-    "email",
-    "checksum",
-    "hash",
-    "policy",
-    "count",
-    "token_count",
-    "source",
-    "script",
-    "type",
-    "provider",
-    "status",
-    "expires",
-    "expires_at",
-    "expiration",
-    "ttl",
-}
-_PLACEHOLDER_RE = re.compile(
-    r"^(?:"
-    r"\$\{[^}]+\}|\{\{[^}]+\}\}|<[^>]*(?:redact|secret|password|token)[^>]*>|"
-    r"redacted|masked|hidden|none|null|n/?a|x{4,}|\*{4,}|-{4,}"
-    r")$",
-    re.IGNORECASE,
-)
-_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-_JWT_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){0,2})(?![A-Za-z0-9_-])"
-)
-_JWE_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])"
-    r"([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
-    r"(?![A-Za-z0-9_-])"
-)
-_AWS_ACCESS_RE = re.compile(r"(?<![A-Z0-9])((?:AKIA|ASIA)[A-Z0-9]{16})(?![A-Z0-9])")
-_AWS_SECRET_RE = re.compile(r"[A-Za-z0-9/+=]{40}")
-_GOOGLE_API_RE = re.compile(r"(?<![A-Za-z0-9_-])(AIza[A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])")
-_GITHUB_RE = re.compile(
-    r"(?<![A-Za-z0-9_])((?:gh[pousr]_[A-Za-z0-9]{20,255}|github_pat_[A-Za-z0-9_]{22,255}))(?![A-Za-z0-9_])"
-)
-_GITLAB_RE = re.compile(r"(?<![A-Za-z0-9_-])(glpat-[A-Za-z0-9_-]{16,255})(?![A-Za-z0-9_-])")
-_SLACK_RE = re.compile(r"(?<![A-Za-z0-9-])(xox[baprs]-[A-Za-z0-9-]{10,255})(?![A-Za-z0-9-])")
-_STRIPE_RE = re.compile(r"(?<![A-Za-z0-9_])((?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,255})(?![A-Za-z0-9_])")
-_VAULT_RE = re.compile(r"(?<![A-Za-z0-9.])(hvs\.[A-Za-z0-9_-]{16,255})(?![A-Za-z0-9_-])")
-_NPM_RE = re.compile(r"(?<![A-Za-z0-9_])(npm_[A-Za-z0-9]{20,255})(?![A-Za-z0-9_])")
-_PROVIDER_TOKENS = (
-    (re.compile(r"(?<![\w-])(sk-(?:proj-|ant-[\w-]{4,})?[A-Za-z0-9_-]{20,})(?![\w-])"), "api_token"),
-    (re.compile(r"(?<!\w)(glsa_[A-Za-z0-9_-]{20,})(?!\w)"), "grafana_token"),
-    (re.compile(r"(?<!\w)(dop_v1_[A-Za-z0-9]{32,})(?!\w)"), "digitalocean_token"),
-    (re.compile(r"(?<!\w)(shpat_[A-Za-z0-9]{24,})(?!\w)"), "shopify_token"),
-    (re.compile(r"(?<!\w)(dckr_pat_[A-Za-z0-9_-]{20,})(?!\w)"), "docker_token"),
-    (re.compile(r"(?<!\w)(pypi-AgEI[A-Za-z0-9_-]{16,})(?!\w)"), "pypi_token"),
-    (re.compile(r"(?<!\w)(SG\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,})(?!\w)"), "sendgrid_token"),
-    (re.compile(r"(?<!\w)(SK[0-9a-fA-F]{32})(?!\w)"), "twilio_token"),
-    (re.compile(r"(?<!\w)(\d{6,12}:AA[A-Za-z0-9_-]{20,})(?!\w)"), "telegram_token"),
-    (re.compile(r"(https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+)"), "slack_webhook"),
-)
-_AUTH_HEADER_RE = re.compile(r"(?i)\b(Basic|Bearer)\s+([A-Za-z0-9._~+/=-]{8,})")
-_AZURE_SAS_RE = re.compile(r"(?i)(?:^|[?&])sig=([^&\s]{8,})")
-_AZURE_ACCOUNT_KEY_RE = re.compile(r"(?i)(?:^|[;\s])AccountKey=([^;\s]{16,})")
-_PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----[\s\S]+?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----"
-)
-_KEY_VALUE_RE = re.compile(
-    r"(?i)(?<![\w.])(?:--)?"
-    r"((?:[A-Za-z][A-Za-z0-9]{0,32}[._-])*"
-    r"(?:password|passwd|pwd|passphrase|credential|credentials|cred|creds|pass|"
-    r"client[_-]?secret|api[_-]?secret|apisecret|api[_-]?token|"
-    r"_?auth[_-]?token|refresh[_-]?token|secret[_-]?access[_-]?key|"
-    r"secret[_-]?key|apikey))"
-    r"[\"']?\s*(?:=>|[:=])\s*(?:[\"']([^\"'\s,;<>]+)[\"']|([^\s,;&<>]+))"
-)
-_SECRET_KEY_SUFFIXES = (
-    "password",
-    "passwd",
-    "pwd",
-    "passphrase",
-    "credential",
-    "credentials",
-    "cred",
-    "creds",
-    "client_secret",
-    "api_secret",
-    "apisecret",
-    "api_token",
-    "token",
-    "auth_token",
-    "refresh_token",
-    "secret_access_key",
-    "secret_key",
-    "apikey",
-)
-_SQL_PASSWORD_RE = re.compile(r"(?i)\b(?:WITH\s+)?PASSWORD\s+['\"]([^'\"\s;]{4,})['\"]")
-_SQL_ACCOUNT_TOKEN = r"(?:'(?:''|\\.|[^'\\])*'|\"(?:\"\"|\\.|[^\"\\])*\"|`(?:``|[^`])*`|[A-Za-z0-9_.$%+-]+)"
-_SQL_IDENTIFIED_BY_RE = re.compile(
-    r"(?i)(?<![\w.])(?:CREATE\s+USER\s+(?:IF\s+NOT\s+EXISTS\s+)?|ALTER\s+USER\s+(?:IF\s+EXISTS\s+)?)"
-    + _SQL_ACCOUNT_TOKEN
-    + r"(?:\s*@\s*"
-    + _SQL_ACCOUNT_TOKEN
-    + r")?\s+IDENTIFIED\s+BY\s+"
-    + r"('(?:''|\\.|[^'\\])*'|\"(?:\"\"|\\.|[^\"\\])*\")(?=$|[\s;,])"
-)
-_XML_SECRET_RE = re.compile(r"(?is)<([A-Za-z][\w:.-]{0,79})\b[^>]{0,2048}>([^<>]{4,4096})</\1\s*>")
-_TAG_RE = re.compile(r"<([A-Za-z][\w:.-]{0,79})\b([^<>]{0,2048})>", re.IGNORECASE)
-_ATTR_RE = re.compile(r"([A-Za-z][\w:.-]{0,79})\s*=\s*([\"'])(.*?)\2", re.DOTALL)
 _BLOB_TYPES = {"text", "keyword", "wildcard", "match_only_text", "flattened"}
 
 
@@ -255,7 +247,7 @@ class DiscoverOptions:
     max_source_bytes: int | None = None
     max_seconds: float = DEFAULT_MAX_SECONDS
     max_findings: int | None = None
-    max_locations: int = DEFAULT_MAX_LOCATIONS
+    max_locations: int | None = DEFAULT_MAX_LOCATIONS
     mapping_batch_size: int = MAPPING_BATCH_SIZE
     max_depth: int = 32
     max_array_items: int | None = None
@@ -297,13 +289,58 @@ class FindingLocation:
         }
 
 
-@dataclass(frozen=True)
-class DetectedSecret:
-    value: str | DiskBackedText
-    secret_type: str
-    score: int
-    detectors: tuple[str, ...]
-    available: bool = True
+class _FindingLocations(DiskSequence):
+    """Typed, lazy location projection retaining the common registry owner."""
+
+    def __init__(self, rows: OccurrenceLocations) -> None:
+        self.rows = rows
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __iter__(self) -> Iterator[FindingLocation]:
+        return (FindingLocation(**row) for row in self.rows)
+
+    def __getitem__(self, index: Any) -> Any:
+        rows = self.rows[index]
+        return [FindingLocation(**row) for row in rows] if isinstance(index, slice) else FindingLocation(**rows)
+
+    def __contains__(self, value: object) -> bool:
+        return any(row == value for row in self)
+
+    def __eq__(self, other: object) -> bool:
+        return self.rows == [row.to_dict() for row in other] if isinstance(other, (list, tuple)) else NotImplemented
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        return NotImplemented if result is NotImplemented else not result
+
+    def copy(self) -> list[FindingLocation]:
+        return list(self)
+
+    def __reversed__(self) -> Iterator[FindingLocation]:
+        return (FindingLocation(**row) for row in reversed(self.rows))
+
+    def __repr__(self) -> str:
+        return f"FindingLocations(count={len(self)})"
+
+    @property
+    def byte_length(self) -> int:
+        return self.rows.byte_length
+
+    @property
+    def reference_owner(self) -> Any:
+        return self.rows.reference_owner
+
+    @property
+    def reference_locator(self) -> Any:
+        return self.rows.reference_locator
+
+
+def _location_view(rows: Any) -> list[FindingLocation]:
+    return (
+        _FindingLocations(rows) if isinstance(rows, OccurrenceLocations) else [FindingLocation(**row) for row in rows]
+    )
 
 
 @dataclass
@@ -326,7 +363,9 @@ class Finding:
             "score": self.score,
             "detectors": list(self.detectors),
             "occurrence_count": self.occurrence_count,
-            "locations": [location.to_dict() for location in self.locations],
+            "locations": self.locations.rows
+            if isinstance(self.locations, _FindingLocations)
+            else [location.to_dict() for location in self.locations],
         }
 
 
@@ -411,6 +450,7 @@ class DiscoverCoverage:
     limits: JsonObject = field(default_factory=dict)
     scope: JsonObject = field(default_factory=dict)
     limitations: list[str] = field(default_factory=list)
+    sources: list[JsonObject] = field(default_factory=list)
 
     def mark_truncated(self, reason: str) -> None:
         self.truncated = True
@@ -467,192 +507,6 @@ class IndexInfo:
     status: str = "open"
     data_stream: str | None = None
     aliases: tuple[str, ...] = ()
-
-
-def _confidence(score: int) -> str:
-    if score >= 90:
-        return "very_high"
-    if score >= 75:
-        return "high"
-    return "medium"
-
-
-def normalize_field_name(value: str) -> str:
-    """Normalize dotted, snake, kebab and camel-case field names."""
-
-    text = re.sub(r"\[\d*]", "", str(value).strip())
-    text = _CAMEL_BOUNDARY_RE.sub("_", text)
-    text = re.sub(r"[^A-Za-z0-9]+", "_", text)
-    return re.sub(r"_+", "_", text).strip("_").lower()
-
-
-def classify_field(value: str) -> FieldClass:
-    """Classify a mapping/JSON path without treating generic IDs as secrets."""
-
-    segments = [segment for segment in re.split(r"[./]+", str(value)) if segment]
-    leaf = normalize_field_name(segments[-1] if segments else value)
-    parts = [part for part in leaf.split("_") if part]
-    if leaf in _EXCLUDED_FIELDS:
-        return "excluded"
-    if is_secret_metadata_field(leaf):
-        return "excluded"
-    if {"public", "key"}.issubset(parts) or {"api", "key", "id"}.issubset(parts):
-        return "excluded"
-    if leaf.endswith(("_id", "_count", "_hash", "_checksum", "_policy")):
-        return "excluded"
-    if leaf in _STRONG_FIELDS:
-        return "strong"
-    if leaf in _MEDIUM_FIELDS:
-        return "medium"
-    if {"client", "secret"}.issubset(parts) or {"private", "key"}.issubset(parts):
-        return "strong"
-    if any(
-        part in {"password", "passwd", "passphrase", "credential", "credentials", "cred", "creds"} for part in parts
-    ):
-        return "strong"
-    if "apisecret" in parts:
-        return "strong"
-    if any(part in {"secret", "token"} for part in parts):
-        return "medium"
-    if leaf in {"value", "data", "content", "material"}:
-        for ancestor in reversed(segments[:-1]):
-            ancestor_class = classify_field(ancestor)
-            if ancestor_class in {"strong", "medium"}:
-                return ancestor_class
-    return "neutral"
-
-
-def _disk_field_hint(value: DiskBackedText, deadline: float | None = None, *, normalized_name: bool = False) -> str:
-    """Retain Elastic's field policy using bounded token state for a long key."""
-    token = ""
-    tokens: list[str] = []
-    relevant: set[str] = set()
-    count = 0
-    last = ""
-    previous = ""
-    ancestor = ""
-    last_segment = ""
-    segment_present = False
-    full_tokens: list[str] = []
-    full_size = 0
-    wanted = {
-        "public",
-        "key",
-        "api",
-        "id",
-        "client",
-        "secret",
-        "private",
-        "password",
-        "passwd",
-        "passphrase",
-        "credential",
-        "credentials",
-        "cred",
-        "creds",
-        "apisecret",
-        "token",
-    }
-
-    def finish_token() -> None:
-        nonlocal token, count, last, full_size
-        if not token:
-            return
-        count += 1
-        last = token
-        if len(tokens) < 8:
-            tokens.append(token)
-        if token in wanted:
-            relevant.add(token)
-        if normalized_name and full_size <= 256:
-            full_size += len(token) + 1
-            if full_size <= 256:
-                full_tokens.append(token)
-            else:
-                full_tokens.clear()
-        token = ""
-
-    def finish_segment() -> str:
-        nonlocal count, last, segment_present
-        finish_token()
-        leaf = "_".join(tokens) if count <= 8 else ""
-        if not count and not segment_present:
-            result = ""
-        elif leaf in _EXCLUDED_FIELDS or {"public", "key"} <= relevant or {"api", "key", "id"} <= relevant:
-            result = "hash"
-        elif count > 1 and last in {"id", "count", "hash", "checksum", "policy"}:
-            result = "hash"
-        elif (
-            leaf in _STRONG_FIELDS
-            or {"client", "secret"} <= relevant
-            or {"private", "key"} <= relevant
-            or relevant
-            & {"password", "passwd", "passphrase", "credential", "credentials", "cred", "creds", "apisecret"}
-        ):
-            result = "password" if last in {"password", "passwd", "pwd", "passphrase", "pass"} else "client_secret"
-        elif leaf in _MEDIUM_FIELDS or relevant & {"secret", "token"}:
-            result = "secret"
-        elif leaf in {"value", "data", "content", "material"}:
-            result = leaf
-        else:
-            result = "neutral"
-        tokens.clear()
-        relevant.clear()
-        count, last = 0, ""
-        segment_present = False
-        return result
-
-    def characters() -> Iterator[str]:
-        # normalize_field_name removes numeric array suffixes before inserting
-        # camel boundaries. A long unclosed suffix needs only enough digits to
-        # establish that its token cannot equal any recognized policy word.
-        bracket = False
-        digits = ""
-        nonlocal segment_present
-        for chunk in value.iter_text_chunks():
-            if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError("max_seconds")
-            for char in chunk:
-                if char not in "./":
-                    segment_present = True
-                if bracket:
-                    if char.isdecimal():
-                        if len(digits) < 129:
-                            digits += char
-                        continue
-                    if char == "]":
-                        bracket, digits = False, ""
-                        continue
-                    yield "["
-                    yield from digits
-                    bracket, digits = False, ""
-                if char == "[":
-                    bracket = True
-                else:
-                    yield char
-        if bracket:
-            yield "["
-            yield from digits
-
-    for char in characters():
-        if char in "./":
-            hint = finish_segment()
-            if hint:
-                last_segment = hint
-            if classify_field(hint) in {"strong", "medium"}:
-                ancestor = hint
-        elif char.isascii() and char.isalnum():
-            if char.isupper() and ("a" <= previous <= "z" or "0" <= previous <= "9"):
-                finish_token()
-            if len(token) < 128:
-                token += char.lower()
-        else:
-            finish_token()
-        previous = char
-    hint = finish_segment() or last_segment or "neutral"
-    if normalized_name:
-        return "_".join(full_tokens)
-    return f"{ancestor}.{hint}" if ancestor and hint in {"value", "data", "content", "material"} else hint
 
 
 def extract_mapping_fields(payload: Mapping[str, Any], index_name: str | None = None) -> list[MappedField]:
@@ -821,7 +675,22 @@ def build_targeted_query(fields: Sequence[MappedField | str], *, size: int = DEF
     }
     selected_paths = list(dict.fromkeys(_field_path(item) for item in fields if _field_path(item)))
     if selected_paths:
-        body["_source"] = {"includes": selected_paths}
+        from ...discovery_groups import credential_field
+
+        # A filtered secret without its public identity cannot be grouped, and
+        # emitting it now cannot be undone after the full-index sweep. Request
+        # the containing object for known credential members, without changing
+        # the exists query, pagination, or the remaining source selectors.
+        source_paths = list(selected_paths)
+        for path in selected_paths:
+            parts = path.removesuffix(".keyword").rsplit(".", 1)
+            if credential_field(parts[-1]) is not None:
+                if len(parts) == 1:
+                    body["_source"] = True
+                    break
+                source_paths.append(parts[0])
+        else:
+            body["_source"] = {"includes": list(dict.fromkeys(source_paths))}
         doc_value_paths = [
             _field_path(item)
             for item in fields
@@ -833,6 +702,92 @@ def build_targeted_query(fields: Sequence[MappedField | str], *, size: int = DEF
         if stored_paths:
             body["stored_fields"] = list(dict.fromkeys(stored_paths))
     return body
+
+
+def _group_component_projection(source: Any, field: Any, projection: Any, *, deadline: float) -> bool:
+    """Recognize only exact projections of a member already in a source group.
+
+    Equal values in other objects, different values, absent source and ambiguous
+    multi-value projections remain independently scanned. No global suppression
+    by secret digest is safe here.
+    """
+    from ...discovery_groups import credential_groups
+    from ...secret_detection import fingerprint
+
+    if not isinstance(field, str) or len(field) > 4096 or field.count(".") > 64:
+        return False
+
+    def parents(value: Any, path: str) -> Iterator[tuple[Mapping[Any, Any], str]]:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("discover_time")
+        if isinstance(value, Mapping):
+            if path in value:
+                yield value, path
+            elif "." in path:
+                head, tail = path.split(".", 1)
+                yield from parents(value.get(head), tail)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                yield from parents(child, path)
+
+    def member_digests() -> Iterator[str]:
+        for path in dict.fromkeys((field, field.removesuffix(".keyword"))):
+            exists = False
+            for parent, key in parents(source, path):
+                exists = True
+                for group in credential_groups(parent, deadline=deadline):
+                    member = group.fields.get(key)
+                    if isinstance(member, (str, DiskBackedText)):
+                        yield fingerprint(member)
+            if exists:
+                return
+
+    values = projection if isinstance(projection, (list, tuple)) else (projection,)
+    if not values or any(not isinstance(value, (str, DiskBackedText)) for value in values):
+        return False
+    if len(values) == 1:
+        expected = fingerprint(values[0])
+        return any(digest == expected for digest in member_digests())
+    digests = member_digests()
+    first = next(digests, None)
+    if first is None:
+        return False
+    # A temporary disk index keeps both RAM and source visits bounded for a
+    # large object array. Per-value searches of that array would be quadratic.
+    db = sqlite3.connect("")
+    try:
+        db.execute("PRAGMA cache_size=-512")
+        db.execute("CREATE TABLE members(digest TEXT PRIMARY KEY) WITHOUT ROWID")
+        db.executemany("INSERT OR IGNORE INTO members VALUES (?)", ((value,) for value in chain((first,), digests)))
+        for value in values:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("discover_time")
+            if db.execute("SELECT 1 FROM members WHERE digest=?", (fingerprint(value),)).fetchone() is None:
+                return False
+        return True
+    finally:
+        db.close()
+
+
+class _CredentialProjectionView(Mapping[Any, Any]):
+    """Filter projected duplicates lazily, including disk-owned wide catalogs."""
+
+    def __init__(self, projection: Mapping[Any, Any], source: Any, deadline: float) -> None:
+        self.projection, self.source, self.deadline = projection, source, deadline
+
+    def __iter__(self) -> Iterator[Any]:
+        for key, value in self.projection.items():
+            if not _group_component_projection(self.source, key, value, deadline=self.deadline):
+                yield key
+
+    def __getitem__(self, key: Any) -> Any:
+        value = self.projection[key]
+        if _group_component_projection(self.source, key, value, deadline=self.deadline):
+            raise KeyError(key)
+        return value
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
 
 
 def _eligible_signature_fields(fields: Sequence[MappedField | str]) -> list[tuple[str, str | None]]:
@@ -949,190 +904,6 @@ def build_signature_query(fields: Sequence[MappedField | str], *, size: int = DE
     return build_signature_queries(fields, size=size)[0]
 
 
-def _looks_placeholder(value: str) -> bool:
-    text = value.strip()
-    return not text or _PLACEHOLDER_RE.fullmatch(text) is not None
-
-
-def _plausible_opaque_secret(value: str) -> bool:
-    text = value.strip()
-    if len(text) < 12 or len(text) > 256 * 1024:
-        return False
-    if text.lower() in {
-        "anonymous",
-        "disabled",
-        "enabled",
-        "expired",
-        "invalid",
-        "optional",
-        "public",
-        "required",
-        "supported",
-        "unsupported",
-    }:
-        return False
-    character_classes = sum(
-        bool(regex.search(text))
-        for regex in (
-            re.compile(r"[a-z]"),
-            re.compile(r"[A-Z]"),
-            re.compile(r"[0-9]"),
-            re.compile(r"[^A-Za-z0-9]"),
-        )
-    )
-    return _shannon_entropy(text) >= 3.0 and (character_classes >= 2 or len(text) >= 24)
-
-
-def _shannon_entropy(value: str) -> float:
-    if not value:
-        return 0.0
-    counts: dict[str, int] = {}
-    for character in value:
-        counts[character] = counts.get(character, 0) + 1
-    length = len(value)
-    return -sum((count / length) * math.log2(count / length) for count in counts.values())
-
-
-def _candidate(value: str | DiskBackedText, secret_type: str, score: int, *detectors: str) -> DetectedSecret:
-    return DetectedSecret(
-        value=value,
-        secret_type=secret_type,
-        score=min(100, max(0, score)),
-        detectors=tuple(dict.fromkeys(detectors)),
-    )
-
-
-def _secret_key_kind(value: str) -> str | None:
-    name = normalize_field_name(value)
-
-    def ends_with_segment(suffix: str) -> bool:
-        return name == suffix or name.endswith(f"_{suffix}")
-
-    if any(ends_with_segment(suffix) for suffix in ("password", "passwd", "pwd", "passphrase", "pass")):
-        return "password"
-    if any(ends_with_segment(suffix) for suffix in _SECRET_KEY_SUFFIXES):
-        return "secret"
-    return None
-
-
-def _split_user_password(value: str) -> tuple[str, str] | None:
-    """Parse one decoded credential pair without mistaking JSON/config blobs for it."""
-
-    if "\r" in value or "\n" in value or ":" not in value:
-        return None
-    username, password = value.split(":", 1)
-    if not password or re.fullmatch(r"[A-Za-z0-9_.@\\/+-]{1,256}", username) is None:
-        return None
-    return username, password
-
-
-def _decode_basic(value: str) -> str | None:
-    try:
-        decoded = base64.b64decode(value, validate=True).decode("utf-8")
-    except (ValueError, UnicodeDecodeError, binascii.Error):
-        return None
-    pair = _split_user_password(decoded)
-    return pair[1] if pair is not None else None
-
-
-def _decode_credential_base64(value: str) -> str | None:
-    compact = value.strip()
-    if not (8 <= len(compact) <= 8192) or len(compact) % 4:
-        return None
-    try:
-        decoded = base64.b64decode(compact, validate=True).decode("utf-8")
-    except (ValueError, UnicodeDecodeError, binascii.Error):
-        return None
-    if not decoded or any(ord(character) < 9 for character in decoded):
-        return None
-    return decoded
-
-
-def _structured_decoded_text(value: str) -> bool:
-    stripped = value.lstrip()
-    if stripped.startswith(("{", "[")):
-        try:
-            return isinstance(json.loads(value), (dict, list))
-        except ValueError:
-            return False
-    return bool(_KEY_VALUE_RE.search(value) or _XML_SECRET_RE.search(value) or _TAG_RE.search(value))
-
-
-def _decode_structured_blob(value: str, max_bytes: int) -> str | None:
-    """Unwrap at most two encodings, accepting only bounded structured text.
-
-    Plain base64 user:password pairs in neutral fields remain unreported: their
-    encoding alone is not evidence that a document contains a credential.
-    """
-
-    if max_bytes <= 0 or len(value) > min(max_bytes * 2, 131_072):
-        return None
-    current = value.strip()
-    for _ in range(2):
-        raw: bytes | None = None
-        if re.fullmatch(r"[0-9a-fA-F]{16,}", current) and len(current) % 2 == 0:
-            try:
-                raw = bytes.fromhex(current)
-            except ValueError:
-                pass
-        if raw is None and re.fullmatch(r"[A-Za-z0-9_+/=-]{16,}", current):
-            try:
-                raw = base64.b64decode(current + "=" * (-len(current) % 4), altchars=b"-_", validate=True)
-            except (ValueError, binascii.Error):
-                pass
-        if raw is None or len(raw) > max_bytes:
-            return None
-        if raw.startswith(b"\x1f\x8b"):
-            try:
-                decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
-                raw = decompressor.decompress(raw, max_bytes + 1)
-                if len(raw) > max_bytes or not decompressor.eof:
-                    return None
-            except zlib.error:
-                return None
-        try:
-            current = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-        if _structured_decoded_text(current):
-            return current
-    return None
-
-
-def _decode_base64url_json(value: str) -> Mapping[str, Any] | None:
-    try:
-        padding = "=" * ((4 - len(value) % 4) % 4)
-        decoded = base64.urlsafe_b64decode(value + padding)
-        parsed = json.loads(decoded.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError, binascii.Error):
-        return None
-    return parsed if isinstance(parsed, Mapping) else None
-
-
-def _validated_jwt(value: str) -> bool:
-    parts = value.split(".")
-    if len(parts) != 3:
-        return False
-    header = _decode_base64url_json(parts[0])
-    if header is None or not isinstance(header.get("alg"), str):
-        return False
-    payload = _decode_base64url_json(parts[1])
-    return payload is not None and bool(parts[2])
-
-
-def _validated_jwe(value: str) -> bool:
-    parts = value.split(".")
-    if len(parts) != 5:
-        return False
-    header = _decode_base64url_json(parts[0])
-    return (
-        header is not None
-        and isinstance(header.get("alg"), str)
-        and isinstance(header.get("enc"), str)
-        and all(bool(parts[offset]) for offset in (2, 3, 4))
-    )
-
-
 _DISK_BEARER_PREFIX_RE = re.compile(r"(?i)^\s*(?:Authorization:\s*)?Bearer\s+")
 _DISK_BEARER_PART_RE = re.compile(r"[A-Za-z0-9._~+/=-]*")
 
@@ -1171,332 +942,6 @@ def _disk_bearer_token(value: DiskBackedText) -> tuple[DiskBackedText | None, bo
     finally:
         if not retained:
             token.close()
-
-
-def analyze_value(
-    value: Any,
-    *,
-    path: str = "",
-    field_classification: FieldClass | None = None,
-    allow_base64: bool = True,
-) -> list[DetectedSecret]:
-    """Analyze one scalar and return confidence-scored secret candidates."""
-
-    if isinstance(value, bool) or value is None:
-        return []
-    text = str(value)
-    stripped = text.strip()
-    field_class = field_classification or classify_field(path)
-    markup = stripped.startswith("<") and ("=" in stripped or "</" in stripped)
-    if _looks_placeholder(stripped) and not markup:
-        return [
-            DetectedSecret(
-                value="",
-                secret_type="secret_indicator",
-                score=0,
-                detectors=("placeholder", "sensitive_field") if field_class != "neutral" else ("placeholder",),
-                available=False,
-            )
-        ]
-
-    detections: list[DetectedSecret] = []
-    literals = AssignmentLiterals(text, lambda name: _secret_key_kind(name) is not None)
-    for assignment_literal in literals.items:
-        kind = _secret_key_kind(assignment_literal.name)
-        if kind and assignment_literal.value and not _looks_placeholder(assignment_literal.value):
-            detections.append(_candidate(assignment_literal.value, kind, 85, "credential_pair", "sensitive_field"))
-    for match in _PRIVATE_KEY_RE.finditer(text):
-        detections.append(_candidate(match.group(0), "private_key", 100, "private_key_pem"))
-    for match in _JWE_RE.finditer(text):
-        token = match.group(1)
-        if _validated_jwe(token):
-            detections.append(_candidate(token, "jwe", 95, "jwe_structure"))
-    for match in _JWT_RE.finditer(text):
-        token = match.group(1)
-        if _validated_jwt(token):
-            detections.append(_candidate(token, "jwt", 95, "jwt_structure"))
-    for match in _AWS_ACCESS_RE.finditer(text):
-        detections.append(
-            DetectedSecret(
-                value=match.group(1),
-                secret_type="aws_access_key_id",
-                score=0,
-                detectors=("aws_access_key_format",),
-                available=False,
-            )
-        )
-    for regex, secret_type, detector, score in (
-        (_GOOGLE_API_RE, "google_api_key", "google_api_key_format", 98),
-        (_GITHUB_RE, "github_token", "github_token_format", 98),
-        (_GITLAB_RE, "gitlab_token", "gitlab_token_format", 98),
-        (_SLACK_RE, "slack_token", "slack_token_format", 98),
-        (_STRIPE_RE, "stripe_key", "stripe_key_format", 98),
-        (_VAULT_RE, "vault_token", "vault_token_format", 98),
-        (_NPM_RE, "npm_token", "npm_token_format", 98),
-    ):
-        for match in regex.finditer(text):
-            detections.append(_candidate(match.group(1), secret_type, score, detector))
-    for regex, secret_type in _PROVIDER_TOKENS:
-        for match in regex.finditer(text):
-            detections.append(_candidate(match.group(1), secret_type, 96, "provider_token_format"))
-    for match in _AUTH_HEADER_RE.finditer(text):
-        kind = match.group(1).lower()
-        token = match.group(2)
-        if kind == "basic":
-            password = _decode_basic(token)
-            if password:
-                detections.append(_candidate(password, "password", 92, "basic_auth", "credential_pair"))
-        elif _plausible_opaque_secret(token):
-            detections.append(_candidate(token, "bearer_token", 90, "bearer_auth"))
-    for match in _KEY_VALUE_RE.finditer(text):
-        if literals.overlap(*match.span()) is not None:
-            continue
-        raw_name = match.group(1)
-        kind = _secret_key_kind(raw_name)
-        if kind is None:
-            continue
-        secret = match.group(2) or match.group(3) or ""
-        if secret and not _looks_placeholder(secret):
-            detections.append(_candidate(secret, kind, 85, "credential_pair", "sensitive_field"))
-    for match in _SQL_PASSWORD_RE.finditer(text):
-        if not _looks_placeholder(match.group(1)):
-            detections.append(_candidate(match.group(1), "password", 85, "sql_password"))
-    for match in _SQL_IDENTIFIED_BY_RE.finditer(text):
-        literal = match.group(1)
-        quote = literal[0]
-        # Default MySQL string-literal escapes. SQL modes are not available
-        # when scanning stored text; NO_BACKSLASH_ESCAPES is not inferred.
-        escapes = {"0": "\0", "b": "\b", "n": "\n", "r": "\r", "t": "\t", "Z": "\x1a", "%": r"\%", "_": r"\_"}
-        secret = re.sub(
-            r"\\([\s\S])|" + re.escape(quote * 2),
-            lambda escaped, escapes=escapes, quote=quote: (
-                escapes.get(escaped.group(1), escaped.group(1)) if escaped.group(1) else quote
-            ),
-            literal[1:-1],
-        )
-        if len(secret) >= 4 and not _looks_placeholder(secret):
-            detections.append(_candidate(secret, "password", 85, "sql_password"))
-    if "\n" in text and "," in text and len(text) <= 64 * 1024:
-        try:
-            rows = csv.reader(text.splitlines()[:101])
-            headers = next(rows)
-            secret_columns = [(offset, _secret_key_kind(name)) for offset, name in enumerate(headers)]
-            for row in rows:
-                for offset, kind in secret_columns:
-                    if kind and offset < len(row) and not _looks_placeholder(row[offset]):
-                        detections.append(_candidate(row[offset], kind, 82, "csv_secret_column"))
-        except (csv.Error, StopIteration):
-            pass
-    for match in _XML_SECRET_RE.finditer(text):
-        kind = _secret_key_kind(match.group(1))
-        secret = html.unescape(match.group(2).strip())
-        if kind and not _looks_placeholder(secret):
-            detections.append(_candidate(secret, kind, 85, "xml_secret_element"))
-    for tag in _TAG_RE.finditer(text):
-        attributes = {name.lower(): html.unescape(raw) for name, _quote, raw in _ATTR_RE.findall(tag.group(2))}
-        input_kind = _secret_key_kind(attributes.get("name", ""))
-        if tag.group(1).lower() == "input" and input_kind:
-            secret = attributes.get("value", "")
-            if not _looks_placeholder(secret):
-                detections.append(_candidate(secret, input_kind, 85, "html_secret_input"))
-        for name, secret in attributes.items():
-            kind = _secret_key_kind(name.removeprefix("data-"))
-            if kind and not _looks_placeholder(secret):
-                detections.append(_candidate(secret, kind, 85, "xml_secret_attribute"))
-    lowered_text = text.lower()
-    if "sv=" in lowered_text and any(marker in lowered_text for marker in ("&se=", "&sp=", "&sr=")):
-        for match in _AZURE_SAS_RE.finditer(text):
-            signature = urllib.parse.unquote(match.group(1))
-            if len(signature) >= 16:
-                detections.append(_candidate(signature, "azure_sas_signature", 96, "azure_sas"))
-    for match in _AZURE_ACCOUNT_KEY_RE.finditer(text):
-        account_key = match.group(1)
-        if not _looks_placeholder(account_key):
-            detections.append(
-                _candidate(
-                    account_key,
-                    "azure_storage_key",
-                    98,
-                    "azure_storage_connection_string",
-                    "credential_pair",
-                )
-            )
-
-    parsed = urllib.parse.urlsplit(stripped)
-    if parsed.scheme and parsed.hostname and parsed.password is not None:
-        detections.append(
-            _candidate(
-                urllib.parse.unquote(parsed.password),
-                "password",
-                92,
-                "credential_uri",
-                "credential_pair",
-            )
-        )
-
-    if field_class in {"strong", "medium"} and len(stripped.encode("utf-8", errors="replace")) <= 256 * 1024:
-        normalized = normalize_field_name(path)
-        if any(name in normalized for name in ("password", "passwd", "pwd")):
-            secret_type = "password"
-        elif normalized.endswith(("aws_secret_access_key", "secret_access_key")):
-            secret_type = "aws_secret_access_key"
-        elif any(name in normalized for name in ("azure_storage_key", "storage_account_key", "account_key")):
-            secret_type = "azure_storage_key"
-        else:
-            secret_type = "secret"
-        decoded_value_added = False
-        base64_contexts = (
-            "password",
-            "passwd",
-            "pwd",
-            "client_secret",
-            "private_key",
-            "secret_access_key",
-            "authorization",
-            "api_token",
-            "refresh_token",
-            "credentials",
-            "connection_string",
-            "dsn",
-            "auth",
-            "dockerconfigjson",
-            "client_key_data",
-        )
-        if allow_base64 and normalized.endswith(base64_contexts):
-            decoded = _decode_credential_base64(stripped)
-            if decoded:
-                if decoded.lstrip().startswith(("{", "[")):
-                    detections.append(_candidate(decoded, "encoded_credentials", 78, "base64_credential"))
-                    decoded_value_added = True
-                elif _PRIVATE_KEY_RE.search(decoded):
-                    detections.append(_candidate(decoded, "private_key", 99, "base64_credential", "private_key_pem"))
-                    decoded_value_added = True
-                elif (pair := _split_user_password(decoded)) is not None:
-                    detections.append(_candidate(pair[1], "password", 92, "base64_credential", "credential_pair"))
-                    decoded_value_added = True
-                elif not _looks_placeholder(decoded):
-                    detections.append(_candidate(decoded, secret_type, 88, "base64_credential", "sensitive_field"))
-                    decoded_value_added = True
-        base_score = 85 if field_class == "strong" else 68
-        if field_class == "medium" and not _plausible_opaque_secret(stripped):
-            base_score = 0
-        if len(stripped) < 4:
-            base_score -= 20
-        if re.fullmatch(r"[0-9a-fA-F]{32,128}", stripped) and normalized.endswith(("hash", "checksum")):
-            base_score = 0
-        has_strong_format = any(detection.available and detection.score >= 90 for detection in detections)
-        if base_score >= 55 and not has_strong_format and not decoded_value_added:
-            detectors = ["sensitive_field"]
-            if _shannon_entropy(stripped) >= 3.5:
-                detectors.append("plausible_value")
-                base_score = min(94, base_score + 5)
-            detections.append(_candidate(stripped, secret_type, base_score, *detectors))
-
-    unique: dict[tuple[str, str | DiskBackedText], DetectedSecret] = {}
-    for detection in detections:
-        key = (detection.secret_type, detection.value)
-        previous = unique.get(key)
-        if previous is None or detection.score > previous.score:
-            unique[key] = detection
-    return list(unique.values())
-
-
-def _analyze_disk_value(
-    value: DiskBackedText, *, path: str, deadline: float | None = None
-) -> tuple[list[DetectedSecret], bool]:
-    """Use bounded readers while retaining Elastic's confirmation policy."""
-    if value.obvious_placeholder:
-        return [], True
-    jose = validated_disk_jose(value, deadline=deadline)
-    if jose is not None:
-        return [_candidate(value, jose, 95, f"{jose}_structure")], True
-    matches, _bytes, complete = _scan_portioned_value(value, "$", 65_536, _deadline=deadline)
-    detections = _detection_list()
-    confirmed_provider_types = {
-        "api_token",
-        "grafana_token",
-        "digitalocean_token",
-        "shopify_token",
-        "docker_token",
-        "pypi_token",
-    }
-    try:
-        for match in matches:
-            raw = match.value
-            if isinstance(raw, DiskBackedText):
-                if raw.obvious_placeholder:
-                    continue
-                if match.detector == "jwt":
-                    kind = validated_disk_jose(raw, deadline=deadline)
-                    if kind is not None:
-                        detections.append(_candidate(raw, kind, 95, f"{kind}_structure"))
-                elif match.detector in confirmed_provider_types:
-                    detections.append(_candidate(raw, match.detector, 96, "provider_token_format"))
-                elif match.detector in {
-                    "password",
-                    "client_secret",
-                    "access_token",
-                    "api_key",
-                    "generic_secret",
-                    "session_cookie",
-                }:
-                    key = (
-                        _disk_field_hint(match.object_path, deadline)
-                        if isinstance(match.object_path, DiskBackedText)
-                        else match.object_path.rsplit(".", 1)[-1]
-                    )
-                    field_class = classify_field(key)
-                    kind = "password" if match.detector == "password" else (_secret_key_kind(key) or "secret")
-                    if field_class == "strong" or match.detector == "password":
-                        detections.append(_candidate(raw, kind, 85, "credential_pair", "sensitive_field"))
-                    elif field_class == "medium":
-                        entropy, classes = disk_entropy(raw, deadline=deadline)
-                        if entropy >= 3.0 and (classes >= 2 or raw.byte_length >= 24):
-                            detections.append(_candidate(raw, kind, 73 if entropy >= 3.5 else 68, "sensitive_field"))
-                elif match.detector == "private_key":
-                    detections.append(_candidate(raw, "private_key", 100, "private_key_pem"))
-                elif match.detector == "bearer_token":
-                    detections.append(_candidate(raw, "bearer_token", 90, "bearer_auth"))
-                elif match.detector == "basic_auth":
-                    password = disk_basic_password(raw, deadline=deadline)
-                    if password is not None:
-                        detections.append(_candidate(password, "password", 92, "basic_auth", "credential_pair"))
-                elif match.detector != "certificate":
-                    complete = False
-                continue
-            # Confirm small common-reader candidates through Elastic's own rules;
-            # a common JWT or AWS-shaped ID alone is not sufficient evidence.
-            key = (
-                _disk_field_hint(match.object_path, deadline)
-                if isinstance(match.object_path, DiskBackedText)
-                else match.object_path.rsplit(".", 1)[-1]
-            )
-            hint = "password" if match.detector == "password" else key
-            scalar = (
-                f"Bearer {raw}"
-                if match.detector == "bearer_token"
-                else f"Basic {raw}"
-                if match.detector == "basic_auth"
-                else raw
-            )
-            detections.extend(analyze_value(scalar, path=hint, field_classification=classify_field(hint)))
-    except OSError:
-        detections.incomplete_reason = "storage_failure"
-        return detections, False
-    if not detections:
-        field_class = classify_field(path)
-        if field_class == "strong":
-            return [_candidate(value, _secret_key_kind(path) or "secret", 85, "sensitive_field")], True
-        if field_class == "medium":
-            entropy, classes = disk_entropy(value, deadline=deadline)
-            if entropy >= 3.0 and (classes >= 2 or value.byte_length >= 24):
-                return [
-                    _candidate(
-                        value, _secret_key_kind(path) or "secret", 73 if entropy >= 3.5 else 68, "sensitive_field"
-                    )
-                ], True
-            return [], True
-    return detections, complete
 
 
 def _needs_disk_scan(value: Any) -> bool:
@@ -1539,7 +984,7 @@ class _SpoolingElasticFindingList(list[Finding]):
                     score=item["score"],
                     detectors=item["detectors"],
                     occurrence_count=item["occurrence_count"],
-                    locations=[FindingLocation(**location) for location in item["locations"]],
+                    locations=_location_view(item["locations"]),
                 )
 
     @overload
@@ -1592,12 +1037,12 @@ class FindingAccumulator(_DiskValueReferences):
     def __init__(
         self,
         max_findings: int | None = None,
-        max_locations: int = DEFAULT_MAX_LOCATIONS,
+        max_locations: int | None = DEFAULT_MAX_LOCATIONS,
         on_finding: Callable[[Finding], None] | None = None,
         spill_threshold: int = 4096,
     ) -> None:
         self.max_findings = None if max_findings is None else max(0, int(max_findings))
-        self.max_locations = max(1, int(max_locations))
+        self.max_locations = None if max_locations is None else max(1, int(max_locations))
         self._items: dict[str, Finding] = {}
         self._retained_value_bytes = 0
         self._spill_threshold = max(1, int(spill_threshold))
@@ -1611,6 +1056,7 @@ class FindingAccumulator(_DiskValueReferences):
         self._disk_values: dict[str, DiskBackedText] = {}
         self._disk_refs = {}
         self._spool_refs = {}
+        self._location_records: OccurrenceRegistry | None = None
 
     def __del__(self) -> None:
         database = getattr(self, "_db", None)
@@ -1622,8 +1068,11 @@ class FindingAccumulator(_DiskValueReferences):
 
     @staticmethod
     def fingerprint(secret_type: str, value: str | DiskBackedText) -> str:
+        if identity := getattr(value, "secret_digest", None):
+            return f"sha256:{identity}"
         hasher = hashlib.sha256()
-        hasher.update(f"{secret_type}\0".encode())
+        # The same secret in password/token fields is one value with several
+        # locations. Keep the parameter for callers of the former API.
         if isinstance(value, DiskBackedText):
             for chunk in value.iter_text_chunks():
                 hasher.update(chunk.encode("utf-8"))
@@ -1687,7 +1136,7 @@ class FindingAccumulator(_DiskValueReferences):
             score=item["score"],
             detectors=item["detectors"],
             occurrence_count=item["occurrence_count"],
-            locations=[FindingLocation(**location) for location in item["locations"]],
+            locations=_location_view(item["locations"]),
         )
 
     def _save_finding(self, finding: Finding) -> None:
@@ -1705,6 +1154,29 @@ class FindingAccumulator(_DiskValueReferences):
 
         except sqlite3.Error as exc:
             raise OSError(f"Elastic finding storage failure: {exc}") from exc
+
+    def _add_location(self, finding: Finding, location: FindingLocation) -> None:
+        if isinstance(finding.locations, _FindingLocations) or (
+            self.max_locations is None and len(finding.locations) >= 64
+        ):
+            if self._location_records is None:
+                self._location_records = OccurrenceRegistry()
+            registry = self._location_records
+            record = {"type": "location", "fingerprint": finding.fingerprint}
+            if not isinstance(finding.locations, _FindingLocations):
+                for previous in finding.locations:
+                    registry.add(record, location=previous.to_dict())
+            registry.add(record, location=location.to_dict())
+            stored = registry.lookup(("location", finding.fingerprint))
+            assert stored is not None
+            finding.occurrence_count = stored["occurrence_count"]
+            finding.locations = _location_view(stored["locations"])
+        elif location not in finding.locations:
+            finding.occurrence_count += 1
+            if self.max_locations is None or len(finding.locations) < self.max_locations:
+                finding.locations.append(location)
+            else:
+                self.locations_dropped += 1
 
     def add(self, detection: DetectedSecret, location: FindingLocation) -> bool:
         if not detection.available or detection.score < 55:
@@ -1725,15 +1197,12 @@ class FindingAccumulator(_DiskValueReferences):
             if existing is not None:
                 if isinstance(detection.value, DiskBackedText) and detection.value is not existing.value:
                     detection.value.close()
+                if detection.score > existing.score:
+                    existing.secret_type = detection.secret_type
                 existing.score = max(existing.score, detection.score)
                 existing.confidence = _confidence(existing.score)
                 existing.detectors = sorted(set(existing.detectors) | set(detection.detectors))
-                if location not in existing.locations:
-                    existing.occurrence_count += 1
-                    if len(existing.locations) < self.max_locations:
-                        existing.locations.append(location)
-                    else:
-                        self.locations_dropped += 1
+                self._add_location(existing, location)
                 if self._db is not None:
                     self._save_finding(existing)
                 return True
@@ -1937,74 +1406,29 @@ def scan_value_tree(
             add_reason("max_depth")
             return
         if isinstance(current, Mapping):
+            from ...discovery_groups import credential_groups
+            from ...discovery_rules import _candidate
+
             processed_value_key: str | None = None
-            semantic_names = {
-                "aws_access_key_id",
-                "aws_secret_access_key",
-                "secret_access_key",
-                "field",
-                "target_field",
-                "name",
-                "key",
-                "kind",
-                "type",
-                "value",
-            }
-            normalized_items = {
-                normalized: (key, child)
-                for key, child in current.items()
-                if (
-                    normalized := (
-                        _disk_field_hint(key, deadline, normalized_name=True)
-                        if isinstance(key, DiskBackedText)
-                        else normalize_field_name(str(key))
+            grouped_keys: set[str] = set()
+            for group in credential_groups(current, deadline=deadline):
+                grouped_keys.update(group.fields)
+                result.detections.append(
+                    (
+                        _candidate(group.value(), group.kind, 99, *group.rules),
+                        FindingLocation(
+                            source_kind=source_kind,
+                            object=object_name,
+                            index=index,
+                            id=document_id,
+                            path=pointer,
+                        ),
                     )
                 )
-                in semantic_names
-            }
-            aws_access_item = normalized_items.get("aws_access_key_id")
-            aws_secret_item = normalized_items.get("aws_secret_access_key")
-            if aws_secret_item is None:
-                aws_secret_item = normalized_items.get("secret_access_key")
-            aws_access = aws_access_item[1] if aws_access_item else None
-            aws_secret = aws_secret_item[1] if aws_secret_item else None
-            if isinstance(aws_access, str) and isinstance(aws_secret, str) and _AWS_ACCESS_RE.fullmatch(aws_access):
-                if _AWS_SECRET_RE.fullmatch(aws_secret) and not _looks_placeholder(aws_secret):
-                    secret_key = aws_secret_item[0] if aws_secret_item else "aws_secret_access_key"
-                    result.detections.append(
-                        (
-                            _candidate(
-                                aws_secret,
-                                "aws_secret_access_key",
-                                99,
-                                "aws_credential_pair",
-                                "sensitive_field",
-                            ),
-                            FindingLocation(
-                                source_kind=source_kind,
-                                object=object_name,
-                                index=index,
-                                id=document_id,
-                                path=json_discovery_path((secret_key,), pointer, style="pointer"),
-                            ),
-                        )
-                    )
-            field_item = (
-                normalized_items.get("field")
-                or normalized_items.get("target_field")
-                or normalized_items.get("name")
-                or normalized_items.get("key")
-                or normalized_items.get("kind")
-                or normalized_items.get("type")
-            )
-            value_item = normalized_items.get("value")
-            if (
-                field_item is not None
-                and value_item is not None
-                and isinstance(field_item[1], str)
-                and not isinstance(value_item[1], (Mapping, list, tuple))
-            ):
-                semantic_path = field_item[1]
+            binding = field_binding(current, deadline=deadline)
+            if binding is not None:
+                semantic_path = binding.field_name
+                value_item = (binding.key, binding.value)
                 if _needs_disk_scan(value_item[1]):
                     walk(
                         value_item[1],
@@ -2036,6 +1460,8 @@ def scan_value_tree(
                     else:
                         result.suppressed_indicators += 1
             for raw_key, child in current.items():
+                if raw_key in grouped_keys:
+                    continue
                 key = _disk_field_hint(raw_key, deadline) if isinstance(raw_key, DiskBackedText) else str(raw_key)
                 if "max_seconds" in result.truncated_reasons:
                     break
@@ -2104,6 +1530,11 @@ def scan_value_tree(
             id=document_id,
             path=pointer or "/",
         )
+        from ...discovery_dsn import dsn_carrier
+
+        if not dsn_carrier(scalar_text.strip(), deadline=deadline)[1]:
+            add_reason("unterminated_connection_dsn")
+            return
         detections = analyze_value(
             scalar_text,
             path=classification_path,
@@ -2568,6 +1999,39 @@ class DiscoverEngine:
         )
         self._documents = _DocumentLedger()
         self._legacy_by_index: dict[str, JsonObject] = {}
+        self.source_manifest = SourceManifest()
+        for source in (
+            "index_inventory",
+            "mappings",
+            "index_settings",
+            "cluster_settings",
+            "node_settings",
+            "index_templates",
+            "component_templates",
+            "legacy_templates",
+            "ingest_pipelines",
+            "document_streams",
+        ):
+            self.source_manifest.declare("elastic." + source)
+
+    @contextmanager
+    def _source_scope(self, name: str) -> Iterator[None]:
+        source = "elastic." + name
+        self.source_manifest.request(source, scope="selected_surface_objects")
+        surface = self.coverage.surfaces.setdefault(name, SurfaceCoverage())
+        before, finished = surface.objects_scanned, False
+        try:
+            with self.source_manifest.guard(source):
+                yield
+                finished = True
+        finally:
+            self.source_manifest.read(source, max(0, surface.objects_scanned - before))
+            self.source_manifest.finish(
+                source,
+                complete=finished and surface.status == "complete" and not self.budget.stopped,
+                denied=surface.status == "denied",
+                unsupported=surface.status == "unsupported",
+            )
 
     @staticmethod
     def _merge_index_coverage(target: DiscoverCoverage, source: DiscoverCoverage) -> None:
@@ -2598,6 +2062,7 @@ class DiscoverEngine:
         if not attempted:
             return index, {}, child.coverage, False, False
         child._scan_index(index, fields)
+        child.coverage.sources = child.source_manifest.result()
         legacy = child._legacy_result(index)
         scanned = bool(child._documents) or int(legacy.get("total_hits") or 0) == 0
         return index, legacy, child.coverage, scanned, True
@@ -2611,7 +2076,7 @@ class DiscoverEngine:
         cleanup: bool = False,
         stream_search: bool = False,
     ) -> tuple[DiscoverResponse, Any]:
-        if bool(getattr(self.nested_scheduler, "cancelled", False)):
+        if not cleanup and bool(getattr(self.nested_scheduler, "cancelled", False)):
             raise NestedSchedulerCancelled("Elastic discovery cancelled")
         if not cleanup and not self.budget.check(findings=len(self.accumulator)):
             return (
@@ -2628,6 +2093,8 @@ class DiscoverEngine:
                 DiscoverRequest(method=method, path=path, headers=headers, body=encoded, stream_search=stream_search)
             )
             response = _normalize_request_result(raw_result)
+        except NestedSchedulerCancelled:
+            raise
         except Exception as exc:  # transport adapters are user/integration code
             response = DiscoverResponse(
                 status=0,
@@ -2797,6 +2264,16 @@ class DiscoverEngine:
             deadline=self.budget.started_at + self.options.max_seconds,
         )
         for detection, location in scan.detections:
+            # This reserved settings field is a generated index identifier,
+            # not an unlabelled document value. Exclude only the heuristic;
+            # explicit credential/provider evidence in the same field survives.
+            if (
+                source_kind == "index_settings"
+                and location.path == "/settings/index/uuid"
+                and detection.secret_type == "high_entropy"
+            ):
+                self.coverage.suppressed_indicators += 1
+                continue
             try:
                 self.accumulator.add(detection, location)
             except OSError:
@@ -2953,6 +2430,10 @@ class DiscoverEngine:
         )
 
     def _inventory(self) -> tuple[list[IndexInfo], str | None, JsonObject | None]:
+        with self._source_scope("index_inventory"):
+            return self._read_inventory()
+
+    def _read_inventory(self) -> tuple[list[IndexInfo], str | None, JsonObject | None]:
         surface = self.coverage.surfaces.setdefault("index_inventory", SurfaceCoverage())
         surface.objects_attempted += 1
         resolve_path = "/_resolve/index/*?expand_wildcards=all"
@@ -3009,6 +2490,19 @@ class DiscoverEngine:
         return [], str(detail.get("reason") or "failed to enumerate indices"), detail
 
     def _fetch_index_resource(
+        self,
+        indices: Sequence[str],
+        *,
+        suffix: str,
+        surface_name: str,
+        legacy_suffix: str | None = None,
+    ) -> JsonObject:
+        with self._source_scope(surface_name):
+            return self._read_index_resource(
+                indices, suffix=suffix, surface_name=surface_name, legacy_suffix=legacy_suffix
+            )
+
+    def _read_index_resource(
         self,
         indices: Sequence[str],
         *,
@@ -3086,6 +2580,10 @@ class DiscoverEngine:
         return merged
 
     def _scan_remote_surface(self, name: str, path: str) -> None:
+        with self._source_scope(name):
+            self._read_remote_surface(name, path)
+
+    def _read_remote_surface(self, name: str, path: str) -> None:
         surface = self.coverage.surfaces.setdefault(name, SurfaceCoverage())
         response, parsed = self._request("GET", path)
         if (
@@ -3228,6 +2726,10 @@ class DiscoverEngine:
         self.coverage.source_bytes_scanned = self.budget.source_bytes
         object_name = f"{document_index}/{document_id or key[1]}"
         for base_path, value in payloads:
+            if base_path and isinstance(value, Mapping):
+                # Source and docvalue/stored projections are representations of
+                # the same physical fields, not additional credential objects.
+                value = _CredentialProjectionView(value, source, self.budget.started_at + self.options.max_seconds)
             scan = scan_value_tree(
                 value,
                 source_kind="document",
@@ -3829,6 +3331,29 @@ class DiscoverEngine:
         )
 
     def _scan_index(self, index: str, fields: Sequence[MappedField]) -> None:
+        source = "elastic.document_streams"
+        self.source_manifest.request(source, scope="selected_complete_index_walks")
+        finished = False
+        try:
+            with self.source_manifest.guard(source):
+                self._read_index(index, fields)
+                finished = True
+        finally:
+            legacy = self._legacy_result(index)
+            detail = legacy.get("error_detail")
+            status = int(detail.get("status") or 0) if isinstance(detail, Mapping) else 0
+            complete = (
+                finished
+                and not legacy.get("error")
+                and not self.coverage.truncated
+                and not self.coverage.missing_source_documents
+                and not self.budget.stopped
+            )
+            if complete:
+                self.source_manifest.read(source)
+            self.source_manifest.finish(source, complete=bool(complete), denied=status in {401, 403})
+
+    def _read_index(self, index: str, fields: Sequence[MappedField]) -> None:
         legacy = self._legacy_result(index)
         sensitive = [item for item in fields if item.classification in {"strong", "medium"} and item.kind == "field"]
         for offset in range(0, len(sensitive), MAX_QUERY_CLAUSES):
@@ -3894,6 +3419,7 @@ class DiscoverEngine:
             self.coverage.mark_truncated("max_locations")
         self.coverage.documents_scanned = self.budget.documents
         self.coverage.source_bytes_scanned = self.budget.source_bytes
+        self.coverage.sources = self.source_manifest.result()
         self.coverage.elapsed_ms = max(0, int((self.monotonic() - self.budget.started_at) * 1000))
         return DiscoverReport(
             findings=self.accumulator.findings(),
@@ -3993,6 +3519,7 @@ class DiscoverEngine:
             legacy, index_coverage, scanned = outcome
             self._legacy_by_index[index] = legacy
             self._merge_index_coverage(self.coverage, index_coverage)
+            self.source_manifest.merge(index_coverage.sources)
             if legacy.get("error"):
                 detail = legacy.get("error_detail")
                 status = int(detail.get("status") or 0) if isinstance(detail, Mapping) else 0

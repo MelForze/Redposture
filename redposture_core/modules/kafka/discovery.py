@@ -10,6 +10,7 @@ from typing import Any
 from ...discovery_json import DiskJSONDocument
 from ...discovery_spool import SpoolingRecords
 from ...discovery_values import DiskBackedText
+from ...scheduler import NestedSchedulerCancelled
 
 
 def read_events(
@@ -27,9 +28,11 @@ def read_events(
     error: str | None = None
     line = tempfile.TemporaryFile()
     content_type = ""
+    response_status = 0
 
     def headers(status: int, values: Any) -> None:
-        nonlocal content_type
+        nonlocal content_type, response_status
+        response_status = status
         content_type = next((str(v).lower() for k, v in values.items() if k.lower() == "content-type"), "")
         if status == 200 and "text/event-stream" not in content_type:
             raise ValueError("Kafka UI message API did not return an event stream")
@@ -85,6 +88,8 @@ def read_events(
         line.truncate()
 
     def receive(chunk: bytes) -> None:
+        if response_status != 200:
+            return
         if time.monotonic() >= deadline:
             raise TimeoutError("discover_time")
         for part in chunk.splitlines(keepends=True):
@@ -114,6 +119,8 @@ def read_events(
             error = error or f"HTTP {response.status} from Kafka UI message API"
         if not error and not done:
             error = "Kafka UI message stream ended without completion"
+    except NestedSchedulerCancelled:
+        raise
     except (OSError, ValueError, RuntimeError) as exc:
         from ...clients.http_api import HttpResponse
 

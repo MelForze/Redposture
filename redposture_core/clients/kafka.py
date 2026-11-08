@@ -1398,6 +1398,7 @@ def _parse_record_entries(
     *,
     min_offset: int | None = None,
     max_offset: int | None = None,
+    on_raw_value: Callable[[int, Any], None] | None = None,
 ) -> list[tuple[int, str]]:
     items: list[tuple[int, str]] = SpoolingValues() if isinstance(reader._data, SpoolBytes) else []
     if record_count > KAFKA_MAX_PARSE_STEPS:
@@ -1422,6 +1423,8 @@ def _parse_record_entries(
             continue
         if value is None:
             continue
+        if on_raw_value is not None:
+            on_raw_value(offset, value)
         decoded = value.decode("utf-8", errors="replace")
         if decoded:
             items.append((offset, decoded))
@@ -1436,6 +1439,7 @@ def _parse_record_batch_entries(
     min_offset: int | None = None,
     max_offset: int | None = None,
     progress: dict[str, int] | None = None,
+    on_raw_value: Callable[[int, Any], None] | None = None,
 ) -> list[tuple[int, str]]:
     reader = _KafkaReader(batch)
     if reader.remaining() < 49:
@@ -1474,7 +1478,13 @@ def _parse_record_batch_entries(
             return []
         reader = _KafkaReader(decompressed)
     items = _parse_record_entries(
-        reader, base_offset, record_count, max_messages, min_offset=min_offset, max_offset=max_offset
+        reader,
+        base_offset,
+        record_count,
+        max_messages,
+        min_offset=min_offset,
+        max_offset=max_offset,
+        on_raw_value=on_raw_value,
     )
     if progress is not None:
         progress["next_offset"] = max(progress.get("next_offset", next_offset), next_offset)
@@ -1489,6 +1499,7 @@ def _parse_message_set_entries(
     min_offset: int | None = None,
     max_offset: int | None = None,
     progress: dict[str, int] | None = None,
+    on_raw_value: Callable[[int, Any], None] | None = None,
 ) -> list[tuple[int, str]]:
     if _depth > KAFKA_MAX_COMPRESSION_DEPTH:
         raise KafkaCompressionError("Kafka compression nesting exceeds 4 levels")
@@ -1516,6 +1527,7 @@ def _parse_message_set_entries(
                         min_offset=min_offset,
                         max_offset=max_offset,
                         progress=progress,
+                        on_raw_value=on_raw_value,
                     )
                 )
                 continue
@@ -1548,12 +1560,15 @@ def _parse_message_set_entries(
                         min_offset=min_offset,
                         max_offset=max_offset,
                         progress=progress,
+                        on_raw_value=on_raw_value,
                     )
                 )
                 continue
 
             if (min_offset is not None and offset < min_offset) or (max_offset is not None and offset >= max_offset):
                 continue
+            if on_raw_value is not None:
+                on_raw_value(int(offset), value)
             decoded = value.decode("utf-8", errors="replace")
             if decoded:
                 items.append((int(offset), decoded))
@@ -1575,6 +1590,7 @@ def _parse_fetch_response(
     progress: dict[str, int] | None = None,
     min_offset: int | None = None,
     max_offset: int | None = None,
+    on_raw_value: Callable[[int, Any], None] | None = None,
 ) -> tuple[list[tuple[int, str]] | None, str | None]:
     """Parse a Fetch v10 response.
 
@@ -1670,6 +1686,7 @@ def _parse_fetch_response(
                     min_offset=min_offset,
                     max_offset=min(high_watermark, max_offset) if max_offset is not None else high_watermark,
                     progress=parsed_progress,
+                    on_raw_value=on_raw_value,
                 )
                 if progress is not None:
                     progress.update(parsed_progress)
@@ -1822,6 +1839,14 @@ def _read_partition_messages_on_leader(
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             return items, correlation + 1, _friendly_error_from_exception(exc)
         progress: dict[str, int] = {}
+        raw_callback_used = False
+
+        def receive_raw(offset: int, value: Any) -> None:
+            nonlocal raw_callback_used
+            assert on_message is not None
+            raw_callback_used = True
+            on_message(offset, value)
+
         fetch_items, fetch_error = _parse_fetch_response(
             fetch_payload,
             correlation,
@@ -1831,6 +1856,7 @@ def _read_partition_messages_on_leader(
             progress=progress,
             min_offset=next_offset,
             max_offset=snapshot_end,
+            **({"on_raw_value": receive_raw} if budget is not None and on_message is not None else {}),
         )
         correlation += 1
         if fetch_error:
@@ -1842,7 +1868,7 @@ def _read_partition_messages_on_leader(
         for offset, value in fetch_items or []:
             if offset < next_offset or (snapshot_end is not None and offset >= snapshot_end):
                 continue
-            if on_message is not None:
+            if on_message is not None and not raw_callback_used:
                 on_message(offset, value)
             if isinstance(value, DiskBackedText):
                 combined = DiskBackedText()

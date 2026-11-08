@@ -344,8 +344,12 @@ def _walk_dict_values(value: Any) -> list[Any]:
         ("sk_live_" + "a" * 24, "stripe_key", "sk_live_" + "a" * 24),
         ("hvs." + "a" * 24, "vault_token", "hvs." + "a" * 24),
         ("npm_" + "a" * 32, "npm_token", "npm_" + "a" * 32),
-        ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "password", "password"),
-        ("postgresql://alice:p%40ssword@db.internal/app", "password", "p@ssword"),
+        ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "basic_auth", "Basic dXNlcjpwYXNzd29yZA=="),
+        (
+            "postgresql://alice:p%40ssword@db.internal/app",
+            "connection_string",
+            "postgresql://alice:p%40ssword@db.internal/app",
+        ),
         ("client_secret=opaque-secret-value", "secret", "opaque-secret-value"),
     ],
 )
@@ -396,8 +400,9 @@ def test_aws_access_key_is_only_reported_with_its_secret_pair() -> None:
 
     assert standalone and all(not item.available for item in standalone)
     assert any(
-        item.secret_type == "aws_secret_access_key"
-        and item.value == "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        item.secret_type == "aws_credentials"
+        and json.loads("".join(item.value.iter_json_chunks()))
+        == {"aws_access_key_id": access_key, "aws_secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}
         and item.score >= 90
         for item, _ in pair.detections
     )
@@ -516,10 +521,7 @@ def test_base64_is_decoded_only_in_a_credential_context() -> None:
         object_name="logs/blob",
     )
 
-    assert any(
-        item.value == "super-secret" and "base64_credential" in item.detectors
-        for item, _ in credential_context.detections
-    )
+    assert any(item.value == encoded and "registry_auth" in item.detectors for item, _ in credential_context.detections)
     assert all(item.value != "super-secret" for item, _ in neutral_context.detections)
 
 
@@ -580,7 +582,8 @@ def test_docker_auth_decodes_one_inner_basic_credential_without_json_wrapper_fin
     )
 
     assert any(
-        item.secret_type == "password" and item.value == "CorpusDockerPassword!2026"
+        item.secret_type == "encoded_credentials"
+        and item.value == "Y29ycHVzLWRvY2tlcjpDb3JwdXNEb2NrZXJQYXNzd29yZCEyMDI2"
         for item, _location in result.detections
     )
     assert all(not item.value.lstrip().startswith(("{", "[")) for item, _location in result.detections)
@@ -649,7 +652,7 @@ def test_finding_accumulator_deduplicates_by_secret_and_merges_locations() -> No
     )
 
     finding = accumulator.findings()[0]
-    expected_digest = sha256(b"password\0same-full-secret").hexdigest()
+    expected_digest = sha256(b"same-full-secret").hexdigest()
     assert finding.fingerprint == f"sha256:{expected_digest}"
     assert finding.value == "same-full-secret"
     assert finding.score == 95
@@ -717,15 +720,16 @@ def test_finding_accumulator_spills_many_unique_findings_and_keeps_duplicate_mer
     )
     findings = accumulator.findings()
     assert len(findings) == 3
-    assert [finding.value for finding in findings] == ["a", "b", "c"]
+    expected_order = ["a", *sorted(("b", "c"), key=lambda value: FindingAccumulator.fingerprint("password", value))]
+    assert [finding.value for finding in findings] == expected_order
     assert findings[0].score == 95
     assert findings[0].occurrence_count == 2
     assert findings[0].detectors == ["field", "strong"]
     report = DiscoverReport(findings=findings, coverage=DiscoverCoverage(), legacy_results=[])
     serialized = report.to_dict()
     assert len(serialized["discover_findings"]) == 3
-    assert [item["value"] for item in serialized["discover_findings"]] == ["a", "b", "c"]
-    assert [item["value"] for item in json.loads(json.dumps(serialized))["discover_findings"]] == ["a", "b", "c"]
+    assert [item["value"] for item in serialized["discover_findings"]] == expected_order
+    assert [item["value"] for item in json.loads(json.dumps(serialized))["discover_findings"]] == expected_order
 
 
 def test_default_elastic_discover_has_no_count_cap() -> None:

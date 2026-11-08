@@ -428,7 +428,8 @@ def test_etcd_v3_failed_page_ingests_closed_records_marks_partial_and_never_cont
     result = collector.result()
     assert result["status"] == "partial"
     assert [finding["value"] for finding in result["findings"]] == ["first-secret"]
-    assert [finding["object_path"] for finding in result["findings"]] == ["$.key_value_entries./password.password"]
+    # The source is the decoded KV value, not an extra synthetic JSON field.
+    assert [finding["object_path"] for finding in result["findings"]] == ["$.key_value_entries./password"]
     assert any("connection_reset" in reason for reason in result["partial_reasons"])
 
 

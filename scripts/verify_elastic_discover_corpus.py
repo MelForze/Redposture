@@ -45,7 +45,9 @@ def _matches_location(actual: Mapping[str, Any], expected: Mapping[str, Any]) ->
 
 
 def _finding_key(item: Mapping[str, Any]) -> tuple[str, str]:
-    return str(item.get("secret_type") or ""), str(item.get("value") or "")
+    return str(item.get("secret_type") or ""), json.dumps(
+        item.get("value"), sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
 
 
 def _is_corpus_scoped(item: Mapping[str, Any], corpus_index: str) -> bool:
@@ -134,7 +136,10 @@ def verify_records(
     for secret_type, value in unexpected:
         errors.append(f"unexpected corpus finding: {secret_type} value={value!r}")
 
-    forbidden = {str(value) for value in manifest.get("forbidden_values", [])}
+    forbidden = {
+        json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        for value in manifest.get("forbidden_values", [])
+    }
     for secret_type, value in actual_by_key:
         if value in forbidden:
             errors.append(f"forbidden negative control exported: {secret_type} value={value!r}")

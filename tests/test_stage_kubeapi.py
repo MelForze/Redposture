@@ -2373,6 +2373,8 @@ def test_kube_run_stage_and_audit_output_branches(monkeypatch: pytest.MonkeyPatc
 @pytest.mark.parametrize("raw", ["cWEtZnVsbC3OuwpsaW5lLXR3bw==", "%%%"])
 def test_kube_discovery_preserves_unicode_and_reports_invalid_base64(monkeypatch, raw) -> None:
     def get(_host, _port, path, _timeout, **kwargs):
+        if "/configmaps" not in path and "/secrets" not in path:
+            return 200, {"items": [], "metadata": {}}, {}, None
         if "/secrets" in path:
             return (
                 200,

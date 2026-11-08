@@ -14,7 +14,7 @@ import secrets
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,9 @@ from .clients.http_redirects import is_redirect_policy_error
 from .clients.http_session import HttpSessionPool
 from .detection_steps import run_requests
 from .discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME
+from .discovery_paths import concat_discovery_text
+from .discovery_rendering import iter_discovery_finding_line_chunks
+from .discovery_spool import SpoolingValues
 from .html_fingerprint import markup_evidence
 from .rendering import (
     BooleanColorRule,
@@ -1720,8 +1723,9 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                 results["discover"] = {
                     "count": len(findings),
                     "records": findings,
-                    "items": [str(row.get("value") or row.get("type") or "") for row in findings],
+                    "items": _panel_discovery_items(findings),
                     "coverage": coverage,
+                    "sources": coverage.get("sources", []),
                     "partial": not coverage.get("complete", False),
                     **payload,
                 }
@@ -2471,15 +2475,14 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                                 )
                                 if failed or len(selected) > walk_limit:
                                     scan._partial("listing_incomplete")
+                                    scan.source_manifest.finish("minio.object_catalog", complete=False)
                                 results["discover"] = {
                                     "count": len(scan.findings),
                                     "records": scan.findings,
-                                    "items": [
-                                        f"{entry['bucket']}/{entry['key']} {entry['type']} {entry['value']}"
-                                        for entry in scan.findings
-                                    ],
+                                    "items": _panel_discovery_items(scan.findings, objects=True),
                                     "bytes_read": scan.bytes_read,
                                     "objects_scanned": scan.objects_scanned,
+                                    "sources": scan.source_manifest.result(),
                                     "partial": not scan.coverage_complete,
                                     "partial_reasons": scan.partial_reasons,
                                 }
@@ -2488,6 +2491,22 @@ def enumerate_panel(ctx: Any, record: dict[str, Any]) -> dict[str, Any]:
                         results[flag] = _response_status(response)
         for flag in flags:
             results.setdefault(flag, {"status": "unsupported_by_ui"})
+    if "discover" in flags:
+        discovery = results.get("discover")
+        if isinstance(discovery, dict) and "sources" not in discovery:
+            from .discovery_sources import SourceManifest
+
+            manifest = SourceManifest()
+            unsupported = discovery.get("status") == "unsupported_by_ui"
+            source = product + ".ui_content_reader"
+            manifest.request(source, implemented=not unsupported, scope="this_ui_API_only")
+            manifest.finish(
+                source,
+                complete=False,
+                unsupported=unsupported,
+                denied=discovery.get("status") in {"access_denied", "auth_required"},
+            )
+            discovery["sources"] = manifest.result()
     ui["inventory"] = results
     payload = dict(record)
     payload["ui"] = ui
@@ -2622,7 +2641,49 @@ def _render_grouped_panel_inventory(prefix: str, product: str, inventory: dict[s
     return lines, consumed
 
 
-def render_panel(record: dict[str, Any], label: str) -> list[str]:
+def _panel_discovery_items(findings: list[Any], *, objects: bool = False) -> SpoolingValues:
+    """Keep the legacy JSON projection without a large Python string/list."""
+    items = SpoolingValues()
+    for finding in findings:
+        value = finding.get("value")
+        if value is None:
+            value = str(finding.get("type") or finding.get("secret_type") or "")
+        if objects:
+            value = concat_discovery_text(
+                f"{finding.get('bucket', '')}/{finding.get('key', '')} {finding.get('type', '')} ", value
+            )
+        items.append(value)
+    items.finish()
+    return items
+
+
+def iter_panel_discovery_chunks(record: Mapping[str, Any], label: str) -> Iterator[Iterator[str]]:
+    ui = record.get("ui")
+    inventory = ui.get("inventory") if isinstance(ui, Mapping) else None
+    discovery = inventory.get("discover") if isinstance(inventory, Mapping) else None
+    rows = discovery.get("records") if isinstance(discovery, Mapping) else None
+    if not isinstance(rows, list):
+        return
+    for finding in rows:
+        if not isinstance(finding, Mapping):
+            continue
+        locations = finding.get("locations")
+        place = (
+            locations[0]
+            if isinstance(locations, list) and locations
+            else {key: finding[key] for key in ("bucket", "key", "object_path", "path", "source") if key in finding}
+        )
+        yield iter_discovery_finding_line_chunks(
+            label,
+            record.get("host"),
+            record.get("port"),
+            finding_type=finding.get("secret_type") or finding.get("type"),
+            value=finding.get("value"),
+            place=place,
+        )
+
+
+def render_panel(record: dict[str, Any], label: str, *, include_discovery_findings: bool = True) -> list[str]:
     ui = record.get("ui") or {}
     product = str(record.get("ui_product") or "")
     name = UI_PRODUCTS.get(product, product)
@@ -2701,7 +2762,10 @@ def render_panel(record: dict[str, Any], label: str) -> list[str]:
                         for entry in records
                         if isinstance(entry, dict) and "table" in entry
                     ]
-            for item in items if key == "dump" else items[:200]:
+            rich_discovery = key == "discover" and isinstance(value.get("records"), list)
+            if rich_discovery and include_discovery_findings:
+                lines.extend("".join(chunks) for chunks in iter_panel_discovery_chunks(record, label))
+            for item in () if rich_discovery else items if key == "dump" else items[:200]:
                 clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(item)).replace("\r", "\\r").replace("\n", "\\n")
                 if key in {"dump", "discover"}:
                     lines.append(f"{prefix} [+] {clean if key == 'dump' else clean[:1024]}")

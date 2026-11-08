@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from typing import Any, cast
 
 from ...clients import transport
@@ -39,6 +40,7 @@ from ...rendering import (
     render_colored_marker_line,
     render_tagged_detail_line,
 )
+from ...scheduler import NestedSchedulerCancelled
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -543,6 +545,15 @@ def _collect_mongodb_data(
     nosql_command: dict[str, Any] | None = None,
     discovery_collector: DiscoveryCollector | None = None,
 ) -> dict[str, Any]:
+    if discovery_collector is not None:
+        discovery_collector.declare_sources("database_catalog", "collection_catalog", "document_streams")
+        if database_names is not None:
+            with discovery_collector.source_attempt(
+                "mongodb.database_catalog", scope="selected_identity_cached_database_names", content=False
+            ) as database_evidence:
+                if isinstance(database_names, list) and all(isinstance(name, str) for name in database_names):
+                    database_evidence.accept()
+
     query_requested = query_filter is not None
     command_database = selected_database or "admin"
     needs_collection_walk = bool(show_collections or show_indexes or index_filter or dump_documents or query_requested)
@@ -613,15 +624,37 @@ def _collect_mongodb_data(
         if discovery_collector is not None and not discovery_collector.allowed():
             break
         try:
-            collections = (
-                list(explicit_collections)
-                if explicit_collections is not None
-                else sorted(client.list_collection_names(db_name))
-            )
-            if explicit_collections is None:
-                note("can_list_collections", True, "list_collections", database=db_name)
+            with (
+                discovery_collector.source_attempt(
+                    "mongodb.collection_catalog", scope="selected_database_collection_names", content=False
+                )
+                if discovery_collector is not None and explicit_collections is None
+                else nullcontext() as evidence
+            ):
+                try:
+                    collections = (
+                        list(explicit_collections)
+                        if explicit_collections is not None
+                        else sorted(client.list_collection_names(db_name))
+                    )
+                    if evidence is not None:
+                        evidence.accept()
+                        if not collections and discovery_collector is not None:
+                            discovery_collector.mark_accessible_source()
+                    if explicit_collections is None:
+                        note("can_list_collections", True, "list_collections", database=db_name)
+                except Exception as exc:
+                    if evidence is not None:
+                        evidence.status = 403 if is_auth_error(exc) else None
+                    raise
+        except NestedSchedulerCancelled:
+            raise
         except Exception as exc:
             error = normalize_mongodb_error(exc)
+            if discovery_collector is not None:
+                discovery_collector.partial(
+                    "mongodb/collection_catalog", "access_denied" if is_auth_error(exc) else error
+                )
             note("can_list_collections", False, "list_collections", database=db_name, error=error)
             continue
 
@@ -687,43 +720,59 @@ def _collect_mongodb_data(
                     else _MONGODB_DUMP_SAFETY_LIMIT
                 )
                 try:
-                    discovery_kwargs: dict[str, Any] = {}
-                    if discovery_collector is not None and isinstance(client, MongoAuditClient):
-                        discovery_kwargs = {
-                            "on_document": lambda doc, db=db_name, coll=collection_name: discovery_collector.add(
-                                f"database.{db}.collection.{coll}.document", doc
-                            ),
-                            "deadline": discovery_collector.deadline,
-                            "batch_size": 1,
-                        }
-                    docs = client.find_documents(
-                        db_name,
-                        collection_name,
-                        query=query_filter or {},
-                        projection=projection,
-                        limit=limit,
-                        **discovery_kwargs,
-                    )
-                    if discovery_collector is not None:
-                        discovery_collector.mark_accessible_source()
-                        if limit is not None and len(docs) >= limit:
-                            discovery_collector.partial(f"{db_name}.{collection_name}", "document_limit")
-                        if not discovery_kwargs:
+                    with (
+                        discovery_collector.source_attempt(
+                            "mongodb.document_streams", scope="complete_selected_collection_cursors"
+                        )
+                        if discovery_collector is not None
+                        else nullcontext() as evidence
+                    ):
+                        try:
+                            discovery_kwargs: dict[str, Any] = {}
+                            if discovery_collector is not None and isinstance(client, MongoAuditClient):
+                                discovery_kwargs = {
+                                    "on_document": lambda doc, db=db_name, coll=collection_name: (
+                                        discovery_collector.add(f"database.{db}.collection.{coll}.document", doc)
+                                    ),
+                                    "deadline": discovery_collector.deadline,
+                                    "batch_size": 1,
+                                }
+                            docs = client.find_documents(
+                                db_name,
+                                collection_name,
+                                query=query_filter or {},
+                                projection=projection,
+                                limit=limit,
+                                **discovery_kwargs,
+                            )
+                            if discovery_collector is not None:
+                                discovery_collector.mark_accessible_source()
+                                if limit is not None and len(docs) >= limit:
+                                    discovery_collector.partial(f"{db_name}.{collection_name}", "document_limit")
+                                if not discovery_kwargs:
+                                    for doc in docs:
+                                        if not discovery_collector.add(
+                                            f"database.{db_name}.collection.{collection_name}.document", doc
+                                        ):
+                                            break
+                            note(
+                                "can_read_documents",
+                                True,
+                                "find_documents",
+                                database=db_name,
+                                collection=collection_name,
+                            )
+                            target = query_rows if query_requested else document_rows
                             for doc in docs:
-                                if not discovery_collector.add(
-                                    f"database.{db_name}.collection.{collection_name}.document", doc
-                                ):
-                                    break
-                    note(
-                        "can_read_documents",
-                        True,
-                        "find_documents",
-                        database=db_name,
-                        collection=collection_name,
-                    )
-                    target = query_rows if query_requested else document_rows
-                    for doc in docs:
-                        target.append({"database": db_name, "collection": collection_name, "document": doc})
+                                target.append({"database": db_name, "collection": collection_name, "document": doc})
+                            if evidence is not None:
+                                evidence.accept()
+                        except Exception as exc:
+                            if evidence is not None:
+                                evidence.status = 403 if is_auth_error(exc) else None
+                            raise
+                except NestedSchedulerCancelled:
+                    raise
                 except Exception as exc:
                     if discovery_collector is not None:
                         reason = "access_denied" if is_auth_error(exc) else normalize_mongodb_error(exc)

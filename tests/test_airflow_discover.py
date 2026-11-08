@@ -51,6 +51,29 @@ class _FakeClient:
         return self.responses.get(path, _response({"detail": "missing"}, 404))
 
 
+def test_airflow_equal_value_keeps_every_variable_place_and_emits_once():
+    value = "inactive-airflow-repeated-password"
+    items = [{"key": f"password_{n}", "value": value} for n in range(150)]
+    client = _FakeClient(
+        {
+            "/api/v1/variables?limit=100&offset=0": _response({"variables": items[:100], "total_entries": 150}),
+            "/api/v1/variables?limit=100&offset=100": _response({"variables": items[100:], "total_entries": 150}),
+            "/api/v1/dags?limit=100&offset=0": _response({"dags": [], "total_entries": 0}),
+        }
+    )
+    emitted = []
+    result = discover_task_logs(
+        client, "v1", DiscoverConfig(include_variables=True), on_finding=lambda row: emitted.append(row) or True
+    )
+    assert result["status"] == "complete", result["partial_reasons"]
+    assert result["variables_scanned"] == 150
+    assert len(result["findings"]) == len(emitted) == 1
+    finding = result["findings"][0]
+    assert finding["occurrence_count"] == len(finding["locations"]) == 150
+    assert {p["source_kind"] for p in finding["locations"]} == {"variable"}
+    assert len({p["place"] for p in finding["locations"]}) == 150
+
+
 def test_discover_airflow_collection_limits_inflight_request_to_remaining_time() -> None:
     path = "/api/v1/variables?limit=100&offset=0"
     client = _FakeClient({path: _response({"variables": [], "total_entries": 0})})
@@ -532,6 +555,7 @@ def test_v1_dag_source_streams_past_one_portion_and_emits_before_eof() -> None:
 
         def get_stream(self, path: str, *, on_chunk, **kwargs: object) -> AirflowResponse:
             self.stream_calls.append((path, kwargs))
+            kwargs["on_response"](200, {"Content-Type": "text/plain"})
             for offset in range(0, len(source), 9):
                 part = source[offset : offset + 9]
                 self.delivered += len(part)
@@ -568,6 +592,7 @@ def test_v1_dag_source_stream_interruption_preserves_only_complete_findings() ->
     class InterruptedClient(_FakeClient):
         def get_stream(self, path: str, *, on_chunk, **kwargs: object) -> AirflowResponse:
             assert path == source_path
+            kwargs["on_response"](200, {"Content-Type": "text/plain"})
             on_chunk(b"api_token=glpat-abcdefghijklmnopqrst\napi_token=glpat-incomplete")
             return AirflowResponse(200, {}, b"", transport_error="unexpected EOF", truncated=True)
 
@@ -656,6 +681,7 @@ def test_v1_dag_source_reads_uniform_line_and_keeps_later_finding() -> None:
 
     class StreamingClient(_FakeClient):
         def get_stream(self, _path: str, *, on_chunk, **_kwargs: object) -> AirflowResponse:
+            _kwargs["on_response"](200, {"Content-Type": "text/plain"})
             for offset in range(0, len(source), 9):
                 on_chunk(source[offset : offset + 9])
             return AirflowResponse(200, {"Content-Type": "text/plain"}, b"")
@@ -1687,10 +1713,15 @@ def test_airflow_spools_large_total_values_before_count_threshold() -> None:
 
 
 @pytest.mark.parametrize("source_kind", ["dag_source", "task_log"])
-def test_bare_jwt_in_large_airflow_source_keeps_full_value(source_kind) -> None:
+@pytest.mark.parametrize("token_valid", [False, True])
+def test_bare_jwt_in_large_airflow_source_keeps_full_value(source_kind, token_valid) -> None:
     from redposture_core.discovery_values import DiskBackedText
 
-    token = "eyJhbGciOiJIUzI1NiJ9." + "YWJj" * 80_000 + ".c2ln"
+    token = (
+        "eyJhbGciOiJIUzI1NiJ9.eyJkYXRhIjoi" + "YWJj" * 80_000 + "In0.c2lnbmF0dXJl"
+        if token_valid
+        else "eyJhbGciOiJIUzI1NiJ9." + "YWJj" * 80_000 + ".c2ln"
+    )
     dag_path, run_path, task_path = _paths("/api/v1")
     path = (
         "/api/v1/dagSources/source-token"
@@ -1743,8 +1774,11 @@ def test_bare_jwt_in_large_airflow_source_keeps_full_value(source_kind) -> None:
     )
     assert result["status"] == "complete", result["partial_reasons"]
     jwt = [finding["value"] for finding in result["findings"] if finding["type"] == "jwt"]
-    assert len(jwt) == 1 and isinstance(jwt[0], DiskBackedText)
-    assert "".join(jwt[0].iter_text_chunks()) == token
+    if token_valid:
+        assert len(jwt) == 1 and isinstance(jwt[0], DiskBackedText)
+        assert "".join(jwt[0].iter_text_chunks()) == token
+    else:
+        assert jwt == []
     assert any(finding["value"] == "qa-later-password" for finding in result["findings"])
 
 

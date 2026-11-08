@@ -124,8 +124,9 @@ def test_inspect_record_spools_many_distinct_findings(monkeypatch: pytest.Monkey
     result = inspect_record("redis", record)
     assert result["status"] == "complete"
     assert isinstance(result["findings"], SpoolingFindings)
-    assert len(result["findings"]) == 8
-    assert len(json.loads(json.dumps(result))["findings"]) == 8
+    # One provider-specific finding per value, without a generic duplicate.
+    assert len(result["findings"]) == 4
+    assert len(json.loads(json.dumps(result))["findings"]) == 4
 
 
 def test_discovery_flags_are_available_for_new_modules() -> None:

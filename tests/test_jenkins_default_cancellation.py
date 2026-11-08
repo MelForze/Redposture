@@ -6,7 +6,6 @@ import json
 import re
 import threading
 from dataclasses import replace
-from types import SimpleNamespace
 
 import pytest
 
@@ -46,7 +45,7 @@ def test_all_18_pairs_account_for_cancellation(tmp_path, monkeypatch, completed,
 
     def context(*args, **kwargs):
         ctx = original(*args, **kwargs)
-        return SimpleNamespace(**{**vars(ctx), "cancelled": cancelled.is_set})
+        return replace(ctx, cancelled=cancelled.is_set)
 
     monkeypatch.setattr(runner, "_ctx", context)
     output = tmp_path / f"result.{output_format}"

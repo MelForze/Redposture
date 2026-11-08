@@ -234,5 +234,5 @@ def test_vault_selected_missing_mount_is_explicit_partial(monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(vault, "_request", lambda *args, **kwargs: reply({"data": {"transit/": {"type": "transit"}}}))
     result = vault.data_record(context(discover=True, mount="missing/"), {"api_endpoint": "http://qa"})
-    assert result["kv_dump_items"] == [] and result["kv_discovery_reasons"] == ["selected KV mount unavailable"]
+    assert result["kv_dump_items"] == [] and result["kv_discovery_reasons"] == ["selected discovery mount unavailable"]
     assert result["inventory_status"] == "partial"

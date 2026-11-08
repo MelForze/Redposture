@@ -14,7 +14,7 @@ import ssl
 import time
 import unicodedata
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -2073,6 +2073,47 @@ def _pg_query_table_rows(
     database_name: str | None = None,
     retain_rows: bool = True,
 ) -> tuple[str, list[str] | None, str | None]:
+    if discovery_collector is not None:
+        discovery_collector.declare_sources(
+            "database_catalog", "accessible_database_catalog", "table_catalog", "table_rows"
+        )
+    with (
+        discovery_collector.source_attempt("postgres.table_rows", scope="complete_selected_table_row_streams")
+        if discovery_collector is not None
+        else nullcontext() as evidence
+    ):
+        before = discovery_collector.partial_events if discovery_collector is not None else 0
+        result = _pg_read_table_rows(
+            sock,
+            table_name,
+            columns=columns,
+            max_rows=max_rows,
+            discovery_collector=discovery_collector,
+            database_name=database_name,
+            retain_rows=retain_rows,
+        )
+        error = result[2]
+        if evidence is not None:
+            evidence.status = 403 if error and "permission denied" in error.lower() else None
+            if error is None:
+                evidence.accept()
+            elif discovery_collector is not None and discovery_collector.partial_events == before:
+                discovery_collector.partial(
+                    "postgres/table_rows", "access_denied: " + error if evidence.status == 403 else error
+                )
+        return result
+
+
+def _pg_read_table_rows(
+    sock: socket.socket,
+    table_name: str,
+    *,
+    columns: list[str] | None = None,
+    max_rows: int | None = None,
+    discovery_collector: DiscoveryCollector | None = None,
+    database_name: str | None = None,
+    retain_rows: bool = True,
+) -> tuple[str, list[str] | None, str | None]:
     sql_ident, display_name, normalize_error = _pg_normalize_table_name(table_name)
     if normalize_error or sql_ident is None or display_name is None:
         return (table_name or "").strip() or "<invalid>", None, normalize_error or "invalid table name"
@@ -2088,30 +2129,45 @@ def _pg_query_table_rows(
     if discovery_collector is not None:
         path = f"table.{database_name or '?'}.{display_name}"
         streamed_row = False
+        row_ordinal = 0
+
+        def row_location() -> dict[str, Any]:
+            return {
+                "source_kind": "table_row",
+                "object": display_name,
+                "database": database_name or "?",
+                "table": display_name,
+                "row_ordinal": row_ordinal,
+                "locator_kind": "read_order",
+            }
 
         def inspect_field(column: int, chunks: Iterator[bytes]) -> None:
             nonlocal streamed_row
             if column == 0:
                 streamed_row = True
-                discovery_collector.scan_json_chunks(path, chunks)
+                with discovery_collector.source_location(row_location()):
+                    discovery_collector.scan_json_chunks(path, chunks)
 
         def inspect_row(row: list[str | None]) -> bool | str:
-            nonlocal streamed_row
+            nonlocal streamed_row, row_ordinal
+            location = row_location()
+            row_ordinal += 1
             if streamed_row:
                 streamed_row = False
                 return True if discovery_collector.allowed() else "time_budget"
             if not row:
                 return True
             if isinstance(row[0], DiskBackedText):
-                if discovery_collector.scan_disk_text(path, row[0]):
-                    return True
+                with discovery_collector.source_location(location):
+                    if discovery_collector.scan_disk_text(path, row[0]):
+                        return True
                 return "time_budget" if time.monotonic() >= discovery_collector.deadline else True
             raw = _pg_text(row[0])
             try:
                 value = json.loads(raw)
             except ValueError:
                 value = raw
-            if discovery_collector.add(path, value):
+            if discovery_collector.add(path, value, location=location):
                 return True
             return "time_budget" if time.monotonic() >= discovery_collector.deadline else "byte_budget"
 
@@ -2246,13 +2302,24 @@ def _pg_collect_database_artifacts(
     table_names: list[str] | None = None
 
     if show_tables or (show_row_counts and not table_targets) or (dump_table_rows and not table_targets):
-        raw_table_names, table_error = _pg_query_readable_tables(sock)
-        query_error = _merge_query_error(query_error, table_error)
-        if discovery_collector is not None:
-            if isinstance(raw_table_names, list):
-                discovery_collector.mark_accessible_source()
-            elif table_error:
-                discovery_collector.partial(f"database.{database_name}", table_error)
+        with (
+            discovery_collector.source_attempt(
+                "postgres.table_catalog", scope="selected_database_readable_table_catalogs"
+            )
+            if discovery_collector is not None
+            else nullcontext() as evidence
+        ):
+            raw_table_names, table_error = _pg_query_readable_tables(sock)
+            if evidence is not None:
+                evidence.status = 403 if table_error and "permission denied" in table_error.lower() else None
+                if isinstance(raw_table_names, list) and not table_error:
+                    evidence.accept()
+            query_error = _merge_query_error(query_error, table_error)
+            if discovery_collector is not None:
+                if isinstance(raw_table_names, list):
+                    discovery_collector.mark_accessible_source()
+                elif table_error:
+                    discovery_collector.partial(f"database.{database_name}", table_error)
         if show_tables and isinstance(raw_table_names, list):
             if include_database_prefix:
                 table_names = [_pg_display_table_name(database_name, table_name) for table_name in raw_table_names]
@@ -2525,7 +2592,29 @@ def _audit_postgres_host(
                     if provided_credentials or defcreds
                     else {}
                 )
-                database_names_all, databases_error = _pg_query_databases(sock)
+                if discovery_collector is not None:
+                    discovery_collector.declare_sources(
+                        "database_catalog", "accessible_database_catalog", "table_catalog", "table_rows"
+                    )
+                with (
+                    discovery_collector.source_attempt(
+                        "postgres.database_catalog", scope="selected_identity_existing_session_catalog"
+                    )
+                    if discovery_collector is not None
+                    else nullcontext() as evidence
+                ):
+                    database_names_all, databases_error = _pg_query_databases(sock)
+                    if evidence is not None:
+                        evidence.status = (
+                            403 if databases_error and "permission denied" in databases_error.lower() else None
+                        )
+                        if isinstance(database_names_all, list) and not databases_error:
+                            evidence.accept()
+                        elif discovery_collector is not None:
+                            discovery_collector.partial(
+                                "postgres/database_catalog",
+                                "access_denied" if evidence.status == 403 else databases_error or "catalog_unavailable",
+                            )
                 accessible_database_names: list[str] | None = None
                 accessible_databases_error: str | None = None
                 database_count = len(database_names_all) if isinstance(database_names_all, list) else None
@@ -2537,7 +2626,30 @@ def _audit_postgres_host(
                     target_database is None and not table_targets and (effective_show_tables or dump_table_rows)
                 )
                 if inspect_all_databases:
-                    accessible_database_names, accessible_databases_error = _pg_query_accessible_databases(sock)
+                    with (
+                        discovery_collector.source_attempt(
+                            "postgres.accessible_database_catalog", scope="CONNECT_accessible_database_catalog"
+                        )
+                        if discovery_collector is not None
+                        else nullcontext() as evidence
+                    ):
+                        accessible_database_names, accessible_databases_error = _pg_query_accessible_databases(sock)
+                        if evidence is not None:
+                            evidence.status = (
+                                403
+                                if accessible_databases_error
+                                and "permission denied" in accessible_databases_error.lower()
+                                else None
+                            )
+                            if isinstance(accessible_database_names, list) and not accessible_databases_error:
+                                evidence.accept()
+                            elif discovery_collector is not None:
+                                discovery_collector.partial(
+                                    "postgres/accessible_database_catalog",
+                                    "access_denied"
+                                    if evidence.status == 403
+                                    else accessible_databases_error or "catalog_unavailable",
+                                )
                 prefixed_target_databases = [key for key in effective_table_targets_by_database if key]
                 if prefixed_target_databases:
                     inspection_databases = list(prefixed_target_databases)

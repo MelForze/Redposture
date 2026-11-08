@@ -38,7 +38,15 @@ class DiskBackedText:
     @property
     def obvious_placeholder(self) -> bool:
         self._readable()
-        return self.byte_length >= 4 and (self._all_x or self._all_star or self._all_dash or not self._has_nonspace)
+        if self.byte_length >= 4 and (self._all_x or self._all_star or self._all_dash or not self._has_nonspace):
+            return True
+        if self.byte_length <= 128:
+            # Exact short API sentinels have the same meaning on disk and in
+            # ordinary strings. Never search a prefix of a large real value.
+            from .secret_fields import _is_secret_sentinel
+
+            return _is_secret_sentinel("".join(self.iter_text_chunks(max_chars=128)))
+        return False
 
     @property
     def uniform(self) -> bool:
@@ -156,6 +164,109 @@ class InlineDiskText(DiskBackedText):
             self._materialized.close()
             self._materialized = None
         self._text = ""
+
+
+class EncodedSecretText(DiskBackedText):
+    """Lossless percent spelling for password bytes that cannot be UTF-8 text.
+
+    Storage digest describes the spelling; secret_digest describes decoded
+    bytes. Keeping these identities separate prevents arena corruption and
+    merging a binary password with a literal percent-prefixed password.
+    """
+
+    def __init__(self, source: str | DiskBackedText, secret_digest: str) -> None:
+        self.source = InlineDiskText(source) if isinstance(source, str) else source
+        self.secret_digest = secret_digest
+        self.byte_length = self.source.byte_length
+        self._finished, self._closed = True, False
+
+    @property
+    def digest(self) -> str:
+        return self.source.digest
+
+    @property
+    def obvious_placeholder(self) -> bool:
+        return self.source.obvious_placeholder
+
+    @property
+    def uniform(self) -> bool:
+        return self.source.uniform
+
+    @property
+    def path(self) -> Path:  # type: ignore[override]
+        self._readable()
+        return self.source.path
+
+    def iter_text_chunks(self, *, max_chars: int = 65_536) -> Iterator[str]:
+        self._readable()
+        yield from self.source.iter_text_chunks(max_chars=max_chars)
+
+    def iter_json_chunks(self, *, max_chars: int = 65_536) -> Iterator[str]:
+        self._readable()
+        yield '{"encoding":"percent","data":'
+        yield from self.source.iter_json_chunks(max_chars=max_chars)
+        yield "}"
+
+    def close(self) -> None:
+        # The original scalar can also be retained by its parser/spool owner.
+        # Release our reference normally rather than closing another owner.
+        self._closed = True
+
+
+class CredentialObject(DiskBackedText):
+    """An already validated credential object encoded on disk, never a JSON string.
+
+    The typed digest separates an object from a literal string with identical
+    JSON spelling. The spool retains this type when adopting the payload.
+    """
+
+    def __init__(self, source: DiskBackedText) -> None:
+        self.source = source
+        self.byte_length = source.byte_length
+        self._finished, self._closed = True, False
+
+    @classmethod
+    def from_fields(cls, fields: Mapping[str, object]) -> CredentialObject:
+        source = DiskBackedText()
+        try:
+            for chunk in iter_json_chunks(dict(sorted(fields.items()))):
+                source.append_text(chunk)
+            source.finish()
+            return cls(source)
+        except BaseException:
+            source.close()
+            raise
+
+    @property
+    def digest(self) -> str:
+        return self.source.digest
+
+    @property
+    def secret_digest(self) -> str:
+        return hashlib.sha256(("credential-object:" + self.digest).encode()).hexdigest()
+
+    @property
+    def obvious_placeholder(self) -> bool:
+        return False
+
+    @property
+    def uniform(self) -> bool:
+        return False
+
+    @property
+    def path(self) -> Path:  # type: ignore[override]
+        self._readable()
+        return self.source.path
+
+    def iter_text_chunks(self, *, max_chars: int = 65_536) -> Iterator[str]:
+        self._readable()
+        yield from self.source.iter_text_chunks(max_chars=max_chars)
+
+    def iter_json_chunks(self, *, max_chars: int = 65_536) -> Iterator[str]:
+        yield from self.iter_text_chunks(max_chars=max_chars)
+
+    def close(self) -> None:
+        self._closed = True
 
 
 class DiskTextArena:

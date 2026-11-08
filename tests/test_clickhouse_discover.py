@@ -98,14 +98,19 @@ def test_clickhouse_chunk_query_uses_remaining_target_deadline() -> None:
 
 
 def test_detector_engine_handles_nested_json_neutral_column_and_dedup_material() -> None:
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJxYSJ9.c2lnbmF0dXJl"
     value = json.dumps(
         {
             "neutral": {"client_secret": "super-secret-value-123"},
-            "headers": {"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature"},
+            "headers": {"Authorization": "Bearer " + token},
         }
     )
     matches = scan_value(value)
-    assert {match.detector for match in matches} >= {"client_secret", "bearer_token", "jwt"}
+    assert {match.detector for match in matches} >= {"client_secret", "jwt"}
+    jwt = next(match for match in matches if match.detector == "jwt")
+    assert jwt.value == token
+    assert {"jwt_structure", "bearer_auth"} <= set(jwt.rule_ids)
+    assert "bearer_token" in jwt.detector_aliases
     assert any(match.object_path == "$.neutral.client_secret" for match in matches)
     assert fingerprint("same") == fingerprint("same")
     assert any(match.value == "super-secret-value-123" for match in matches)

@@ -22,7 +22,7 @@ from redposture_core.modules.elastic.discover import (
     scan_value_tree,
 )
 
-DATASET = Path(__file__).resolve().parents[1] / "tests/fixtures/campaign22/discover-labelled.json"
+DATASET = Path(__file__).resolve().parents[1] / "tests/fixtures/campaign22/discover-labelled-carriers-v2.json"
 CORPUS = json.loads(DATASET.read_text(encoding="utf-8"))
 
 
@@ -193,9 +193,9 @@ def test_identified_by_sql_cleartext_secret_recall_limitation(statement: str, la
     "statement,value",
     [
         ("create user 'qa user'@'localhost' identified by 'C22-quote''value!'", "C22-quote'value!"),
-        (r"ALTER USER `qa` IDENTIFIED BY 'C22-quote\'value!'", "C22-quote'value!"),
+        (r"ALTER USER `qa` IDENTIFIED BY 'C22-quote\'value!'", r"C22-quote\'value!"),
         ('CREATE USER IF NOT EXISTS qa IDENTIFIED BY "C22-double""value!";', 'C22-double"value!'),
-        (r"ALTER USER IF EXISTS qa IDENTIFIED BY 'C22-back\\slash!';", "C22-back\\slash!"),
+        (r"ALTER USER IF EXISTS qa IDENTIFIED BY 'C22-back\\slash!';", r"C22-back\\slash!"),
         ("ALTER\nUSER qa\nIDENTIFIED BY 'C22-space value!';", "C22-space value!"),
     ],
 )

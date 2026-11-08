@@ -79,13 +79,27 @@
       "dag_source_bytes_scanned": 651,
       "dag_sources_scanned": 1,
       "dags_scanned": 1,
+      "emitted_fingerprints": [],
       "errors": [],
       "finding_count": 4,
       "findings": [
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "variable:warehouse_password",
+              "object_path": "$.warehouse_password",
+              "place": "variable:warehouse_password$.warehouse_password",
+              "source_kind": "variable"
+            }
+          ],
           "object_path": "$.warehouse_password",
+          "occurrence_count": 1,
           "place": "variable:warehouse_password$.warehouse_password",
           "source_kind": "variable",
           "type": "password",
@@ -94,8 +108,22 @@
         {
           "confidence": "high",
           "dag_id": "redposture_discovery",
+          "detectors": [
+            "credential_pair",
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "dag_id": "redposture_discovery",
+              "object": "dag_source:redposture_discovery",
+              "object_path": "$",
+              "place": "dag_source:redposture_discovery$",
+              "source_kind": "dag_source"
+            }
+          ],
           "object_path": "$",
+          "occurrence_count": 1,
           "place": "dag_source:redposture_discovery$",
           "source_kind": "dag_source",
           "type": "password",
@@ -104,8 +132,32 @@
         {
           "confidence": "high",
           "dag_id": "redposture_discovery",
+          "detectors": [
+            "stripe_key_format"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "dag_id": "redposture_discovery",
+              "object": "dag_source:redposture_discovery",
+              "object_path": "$",
+              "place": "dag_source:redposture_discovery$",
+              "source_kind": "dag_source"
+            },
+            {
+              "dag_id": "redposture_discovery",
+              "dag_run_id": "manual__<ISO>+00:00",
+              "map_index": -1,
+              "object": "log:redposture_discovery/manual__<ISO>+00:00/emit_test_secret/try:1/map:-1",
+              "object_path": "$",
+              "place": "log:redposture_discovery/manual__<ISO>+00:00/emit_test_secret/try:1/map:-1$",
+              "source_kind": "task_log",
+              "task_id": "emit_test_secret",
+              "try_number": 1
+            }
+          ],
           "object_path": "$",
+          "occurrence_count": 2,
           "place": "dag_source:redposture_discovery$",
           "source_kind": "dag_source",
           "type": "stripe_key",
@@ -114,22 +166,104 @@
         {
           "confidence": "high",
           "dag_id": "redposture_discovery",
-          "dag_run_id": "manual__<ISO>+00:00",
+          "detectors": [
+            "credential_pair",
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "map_index": -1,
+          "locations": [
+            {
+              "dag_id": "redposture_discovery",
+              "object": "dag_source:redposture_discovery",
+              "object_path": "$",
+              "place": "dag_source:redposture_discovery$",
+              "source_kind": "dag_source"
+            }
+          ],
           "object_path": "$",
-          "place": "log:redposture_discovery/manual__<ISO>+00:00/emit_test_secret/try:1/map:-1$",
-          "source_kind": "task_log",
-          "task_id": "emit_test_secret",
-          "try_number": 1,
-          "type": "stripe_key",
-          "value": "sk_live_RedpostureTaskLogD4w6kP8"
+          "occurrence_count": 1,
+          "place": "dag_source:redposture_discovery$",
+          "source_kind": "dag_source",
+          "type": "api_key",
+          "value": "sk_live_RedpostureTaskLogD4w6kP8\")"
         }
       ],
       "log_bytes_scanned": 75,
       "logs_scanned": 1,
       "partial_reasons": [],
       "runs_scanned": 1,
+      "sources": [
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "airflow.variable_collection",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_collection_pages",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "airflow.connection_collection",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_collection_pages",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "airflow.dag_catalog",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_collection_pages",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "airflow.run_catalog",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_collection_pages",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "airflow.task_catalog",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_collection_pages",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "airflow.dag_sources",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_complete_content_reads",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "airflow.task_logs",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_complete_content_reads",
+          "unsupported": false
+        }
+      ],
       "status": "complete",
       "task_instances_seen": 1,
       "variable_bytes_scanned": 80,

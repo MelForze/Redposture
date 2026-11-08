@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
+from contextlib import nullcontext
 from typing import Any
 from urllib.parse import quote
 
@@ -46,6 +48,7 @@ def _stream_directory(
     discovery: DiscoveryCollector,
     rows: list[dict[str, Any]],
     pending: deque[str],
+    on_status: Callable[[int], None] | None = None,
 ) -> tuple[bool, bool]:
     """Traverse a large Contents API listing without materializing the JSON body."""
     root: dict[str, str] = {}
@@ -135,6 +138,8 @@ def _stream_directory(
         headers["Authorization"] = "token " + token
 
     def on_response(status: int, response_headers: Any) -> None:
+        if on_status is not None:
+            on_status(status)
         media_type = next(
             (str(value).lower() for key, value in response_headers.items() if str(key).lower() == "content-type"), ""
         )
@@ -324,6 +329,8 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 budget.partial = True
     discover = bool(getattr(ctx.args, "discover", False))
     discovery = DiscoveryCollector("jupyter", ctx, prior) if discover else None
+    if discovery is not None:
+        discovery.declare_sources("contents_models", "notebook_contents")
     if getattr(ctx.args, "show_contents", False) or discover:
         if getattr(ctx.args, "show_contents", False):
             requested.append("contents")
@@ -340,101 +347,142 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             if len(seen) > 5000 and not discover:
                 content_partial = True
                 break
-            response = _get(
-                ctx,
-                base,
-                "/api/contents" + ("/" + quote(path, safe="/") if path else "") + "?content=1",
-                token,
-                budget=budget,
-            )
-            if discover and response.truncated and discovery is not None:
-                metadata_response = _get(
+            with (
+                discovery.source_attempt(
+                    "jupyter.contents_models", scope="selected_Contents_API_metadata_and_directory_models"
+                )
+                if discovery is not None
+                else nullcontext() as evidence
+            ):
+                response = _get(
                     ctx,
                     base,
-                    "/api/contents" + ("/" + quote(path, safe="/") if path else "") + "?content=0",
+                    "/api/contents" + ("/" + quote(path, safe="/") if path else "") + "?content=1",
                     token,
                     budget=budget,
                 )
-                if not budget.consume(metadata_response):
-                    content_partial = True
-                    continue
-                metadata = json_value(metadata_response)
-                state = access(metadata_response, _contents(metadata))
-                if len(seen) == 1:
-                    content_state = state
-                if state != "allowed" or metadata.get("path") != path:
-                    content_partial = True
-                    continue
-                if metadata.get("type") == "directory":
-                    complete, clipped_inventory = _stream_directory(
-                        ctx, base, path, token, budget, discovery, rows, pending
+                if evidence is not None:
+                    evidence.status = response.status
+                if discover and response.truncated and discovery is not None:
+                    metadata_response = _get(
+                        ctx,
+                        base,
+                        "/api/contents" + ("/" + quote(path, safe="/") if path else "") + "?content=0",
+                        token,
+                        budget=budget,
                     )
-                    inventory_truncated |= clipped_inventory
-                    if not complete:
-                        content_partial = True
-                    continue
-                if metadata.get("type") != "notebook":
-                    content_partial = True
-                    continue
-                if len(seen) == 1:
-                    rows.append({key: metadata.get(key) for key in ("name", "path", "type", "size", "writable")})
-                request_path = "/api/contents/" + quote(path, safe="/") + "?content=1"
-                headers = {"Accept": "application/json"}
-                if token:
-                    headers["Authorization"] = "token " + token
-                if not discovery.stream_json_scalars(
-                    ctx.lifecycle_state.http,
-                    base + request_path,
-                    "jupyter/notebook/" + path,
-                    headers=headers,
-                    timeout=budget.timeout(),
-                    root_kind="object",
-                ):
-                    content_partial = True
-                continue
-            if not budget.consume(response):
-                content_partial = True
-                break
-            data = json_value(response)
-            state = access(response, _contents(data))
-            if len(seen) == 1:
-                content_state = state
-            if state != "allowed":
-                content_partial = True
-                continue
-            if data["type"] == "directory":
-                children = data.get("content")
-                if not isinstance(children, list):
-                    content_partial = True
-                    continue
-                for item in children:
-                    if (
-                        not _contents(item)
-                        or not safe_path(item["path"])
-                        or not item["path"].startswith(path + "/" if path else "")
-                    ):
+                    assert evidence is not None
+                    evidence.status = metadata_response.status
+                    if not budget.consume(metadata_response):
                         content_partial = True
                         continue
+                    metadata = json_value(metadata_response)
+                    state = access(metadata_response, _contents(metadata))
+                    if len(seen) == 1:
+                        content_state = state
+                    if state != "allowed" or metadata.get("path") != path:
+                        content_partial = True
+                        continue
+                    if metadata.get("type") == "directory":
+                        complete, clipped_inventory = _stream_directory(
+                            ctx,
+                            base,
+                            path,
+                            token,
+                            budget,
+                            discovery,
+                            rows,
+                            pending,
+                            on_status=lambda status: setattr(evidence, "status", status),
+                        )
+                        if complete:
+                            evidence.accept()
+                        inventory_truncated |= clipped_inventory
+                        if not complete:
+                            content_partial = True
+                        continue
+                    if metadata.get("type") != "notebook":
+                        content_partial = True
+                        continue
+                    if len(seen) == 1:
+                        rows.append({key: metadata.get(key) for key in ("name", "path", "type", "size", "writable")})
+                    evidence.accept()
+                    request_path = "/api/contents/" + quote(path, safe="/") + "?content=1"
+                    headers = {"Accept": "application/json"}
+                    if token:
+                        headers["Authorization"] = "token " + token
+                    with discovery.source_attempt(
+                        "jupyter.notebook_contents", scope="selected_notebook_JSON_bodies"
+                    ) as notebook_evidence:
+                        if not discovery.stream_json_scalars(
+                            ctx.lifecycle_state.http,
+                            base + request_path,
+                            "jupyter/notebook/" + path,
+                            headers=headers,
+                            timeout=budget.timeout(),
+                            root_kind="object",
+                            on_status=lambda status: setattr(notebook_evidence, "status", status),
+                        ):
+                            content_partial = True
+                        else:
+                            notebook_evidence.accept()
+                    continue
+                if not budget.consume(response):
+                    content_partial = True
+                    break
+                data = json_value(response)
+                state = access(response, _contents(data))
+                if len(seen) == 1:
+                    content_state = state
+                if state != "allowed":
+                    content_partial = True
+                    continue
+                if evidence is not None:
+                    evidence.accept()
+                if data["type"] == "directory":
+                    children = data.get("content")
+                    if not isinstance(children, list):
+                        if evidence is not None:
+                            evidence.complete = False
+                        content_partial = True
+                        continue
+                    for item in children:
+                        if (
+                            not _contents(item)
+                            or not safe_path(item["path"])
+                            or not item["path"].startswith(path + "/" if path else "")
+                        ):
+                            if evidence is not None:
+                                evidence.complete = False
+                            content_partial = True
+                            continue
+                        if len(rows) < 5000:
+                            rows.append({key: item.get(key) for key in ("name", "path", "type", "size", "writable")})
+                        else:
+                            inventory_truncated = True
+                            if not discover:
+                                content_partial = True
+                                break
+                        if discover and item["type"] in {"notebook", "directory"}:
+                            pending.append(item["path"])
+                elif data["type"] == "notebook" and discover:
+                    if isinstance(data.get("content"), dict):
+                        if discovery is not None:
+                            with discovery.source_attempt(
+                                "jupyter.notebook_contents", scope="selected_notebook_JSON_bodies"
+                            ) as notebook_evidence:
+                                notebook_evidence.status = response.status
+                                discovery.add("jupyter/notebook/" + data["path"], data["content"], charge=False)
+                                notebook_evidence.accept()
+                    else:
+                        if evidence is not None:
+                            evidence.complete = False
+                        content_partial = True
+                else:
                     if len(rows) < 5000:
-                        rows.append({key: item.get(key) for key in ("name", "path", "type", "size", "writable")})
+                        rows.append({key: data.get(key) for key in ("name", "path", "type", "size", "writable")})
                     else:
                         inventory_truncated = True
-                        if not discover:
-                            content_partial = True
-                            break
-                    if discover and item["type"] in {"notebook", "directory"}:
-                        pending.append(item["path"])
-            elif data["type"] == "notebook" and discover:
-                if isinstance(data.get("content"), dict):
-                    if discovery is not None:
-                        discovery.add("jupyter/notebook/" + data["path"], data["content"], charge=False)
-                else:
-                    content_partial = True
-            else:
-                if len(rows) < 5000:
-                    rows.append({key: data.get(key) for key in ("name", "path", "type", "size", "writable")})
-                else:
-                    inventory_truncated = True
         states.append(content_state)
         result["contents_access"] = content_state
         if content_state == "allowed":

@@ -222,6 +222,7 @@ def test_elastic_long_key_keeps_its_field_classification(suffix, want):
     key.append_text("catalog_" + "q" * 100_000 + suffix)
     key.finish()
     assert classify_field(_disk_field_hint(key)) == want
+    assert classify_field("catalog_" + "q" * 100_000 + suffix) == want
 
 
 def test_elastic_long_key_pointer_survives_accumulator_disk_storage():

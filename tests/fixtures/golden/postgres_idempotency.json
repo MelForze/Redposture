@@ -14,168 +14,534 @@
       "findings": [
         {
           "confidence": "high",
+          "detectors": [
+            "credential_pair",
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.api_clients.client_secret",
-          "source": "authenticated",
-          "type": "client_secret",
-          "value": "billing-worker-secret-2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.api_clients.client_secret",
-          "source": "authenticated",
-          "type": "client_secret",
-          "value": "grafana-reader-secret-2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.api_clients.client_secret",
-          "source": "authenticated",
-          "type": "client_secret",
-          "value": "prom-rw-secret-2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.audit_events",
+              "object_path": "$.table.postgres.redposture.audit_events.details",
+              "row_ordinal": 3,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.audit_events"
+            },
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.service_tokens",
+              "object_path": "$.table.postgres.redposture.service_tokens.token",
+              "row_ordinal": 0,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.service_tokens"
+            }
+          ],
           "object_path": "$.table.postgres.redposture.audit_events.details",
+          "occurrence_count": 2,
           "source": "authenticated",
           "type": "generic_secret",
           "value": "gfa_demo_token_123"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "oauth_credentials",
+            "oauth_credential_pair"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.api_clients",
+              "object_path": "$.table.postgres.redposture.api_clients",
+              "row_ordinal": 0,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.api_clients"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.api_clients",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "oauth_credentials",
+          "value": {
+            "client_id": "grafana-reader",
+            "client_secret": "grafana-reader-secret-2026"
+          }
+        },
+        {
+          "confidence": "high",
+          "detectors": [
+            "oauth_credentials",
+            "oauth_credential_pair"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.api_clients",
+              "object_path": "$.table.postgres.redposture.api_clients",
+              "row_ordinal": 1,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.api_clients"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.api_clients",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "oauth_credentials",
+          "value": {
+            "client_id": "prometheus-remote-write",
+            "client_secret": "prom-rw-secret-2026"
+          }
+        },
+        {
+          "confidence": "high",
+          "detectors": [
+            "oauth_credentials",
+            "oauth_credential_pair"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.api_clients",
+              "object_path": "$.table.postgres.redposture.api_clients",
+              "row_ordinal": 2,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.api_clients"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.api_clients",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "oauth_credentials",
+          "value": {
+            "client_id": "billing-worker",
+            "client_secret": "billing-worker-secret-2026"
+          }
+        },
+        {
+          "confidence": "high",
+          "detectors": [
+            "provider_token_format",
+            "webhook_url"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.integration_secrets",
+              "object_path": "$.table.postgres.redposture.integration_secrets.endpoint",
+              "row_ordinal": 0,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.integration_secrets"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.integration_secrets.endpoint",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "slack_webhook",
+          "value": "https://hooks.slack.com/services/T000/B000/REDACTED"
+        },
+        {
+          "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.demo_accounts",
+              "object_path": "$.table.postgres.redposture.demo_accounts.password",
+              "row_ordinal": 0,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.demo_accounts"
+            }
+          ],
           "object_path": "$.table.postgres.redposture.demo_accounts.password",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "password",
           "value": "admin"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.demo_accounts",
+              "object_path": "$.table.postgres.redposture.demo_accounts.password",
+              "row_ordinal": 1,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.demo_accounts"
+            }
+          ],
           "object_path": "$.table.postgres.redposture.demo_accounts.password",
-          "source": "authenticated",
-          "type": "password",
-          "value": "auto-runner-2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.demo_accounts.password",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "password",
           "value": "readonly"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.demo_accounts",
+              "object_path": "$.table.postgres.redposture.demo_accounts.password",
+              "row_ordinal": 2,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.demo_accounts"
+            }
+          ],
           "object_path": "$.table.postgres.redposture.demo_accounts.password",
-          "source": "authenticated",
-          "type": "password",
-          "value": "reporting2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.demo_accounts.password",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "password",
           "value": "service123"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.integration_secrets.endpoint",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.demo_accounts",
+              "object_path": "$.table.postgres.redposture.demo_accounts.password",
+              "row_ordinal": 3,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.demo_accounts"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.demo_accounts.password",
+          "occurrence_count": 1,
           "source": "authenticated",
-          "type": "webhook",
-          "value": "https://hooks.slack.com/services/T000/B000/REDACTED"
+          "type": "password",
+          "value": "reporting2026"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.demo_accounts",
+              "object_path": "$.table.postgres.redposture.demo_accounts.password",
+              "row_ordinal": 4,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.demo_accounts"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.demo_accounts.password",
+          "occurrence_count": 1,
           "source": "authenticated",
-          "type": "generic_secret",
-          "value": "ghp_lab_demo_token_123456"
+          "type": "password",
+          "value": "auto-runner-2026"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
-          "source": "authenticated",
-          "type": "generic_secret",
-          "value": "pd_demo_routing_key_2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
-          "source": "authenticated",
-          "type": "generic_secret",
-          "value": "xoxb-demo-slack-token"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
-          "source": "authenticated",
-          "type": "slack_token",
-          "value": "xoxb-demo-slack-token"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.service_tokens.token",
-          "source": "authenticated",
-          "type": "generic_secret",
-          "value": "am_ops_token_101"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.service_tokens.token",
-          "source": "authenticated",
-          "type": "generic_secret",
-          "value": "ci_demo_token_456"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.service_tokens.token",
-          "source": "authenticated",
-          "type": "generic_secret",
-          "value": "prom_rw_token_789"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.web_sessions",
+              "object_path": "$.table.postgres.redposture.web_sessions.session_id",
+              "row_ordinal": 0,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.web_sessions"
+            }
+          ],
           "object_path": "$.table.postgres.redposture.web_sessions.session_id",
-          "source": "authenticated",
-          "type": "session_cookie",
-          "value": "sess-2ac81b90"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.table.postgres.redposture.web_sessions.session_id",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "session_cookie",
           "value": "sess-7f9c2b7a"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.web_sessions",
+              "object_path": "$.table.postgres.redposture.web_sessions.session_id",
+              "row_ordinal": 1,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.web_sessions"
+            }
+          ],
           "object_path": "$.table.postgres.redposture.web_sessions.session_id",
+          "occurrence_count": 1,
           "source": "authenticated",
           "type": "session_cookie",
           "value": "sess-d93f2e11"
+        },
+        {
+          "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.web_sessions",
+              "object_path": "$.table.postgres.redposture.web_sessions.session_id",
+              "row_ordinal": 2,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.web_sessions"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.web_sessions.session_id",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "session_cookie",
+          "value": "sess-2ac81b90"
+        },
+        {
+          "confidence": "high",
+          "detectors": [
+            "slack_token_format"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.integration_secrets",
+              "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
+              "row_ordinal": 0,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.integration_secrets"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "slack_token",
+          "value": "xoxb-demo-slack-token"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.integration_secrets",
+              "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
+              "row_ordinal": 1,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.integration_secrets"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "pd_demo_routing_key_2026"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.integration_secrets",
+              "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
+              "row_ordinal": 2,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.integration_secrets"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.integration_secrets.secret_value",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "ghp_lab_demo_token_123456"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.service_tokens",
+              "object_path": "$.table.postgres.redposture.service_tokens.token",
+              "row_ordinal": 1,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.service_tokens"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.service_tokens.token",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "ci_demo_token_456"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.service_tokens",
+              "object_path": "$.table.postgres.redposture.service_tokens.token",
+              "row_ordinal": 2,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.service_tokens"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.service_tokens.token",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "prom_rw_token_789"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "database": "postgres",
+              "locator_kind": "read_order",
+              "object": "redposture.service_tokens",
+              "object_path": "$.table.postgres.redposture.service_tokens.token",
+              "row_ordinal": 3,
+              "source": "authenticated",
+              "source_kind": "table_row",
+              "table": "redposture.service_tokens"
+            }
+          ],
+          "object_path": "$.table.postgres.redposture.service_tokens.token",
+          "occurrence_count": 1,
+          "source": "authenticated",
+          "type": "generic_secret",
+          "value": "am_ops_token_101"
         }
       ],
       "live_emitted": false,
       "partial_reasons": [],
       "source": "authenticated",
+      "sources": [
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "postgres.database_catalog",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_identity_existing_session_catalog",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "postgres.accessible_database_catalog",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "CONNECT_accessible_database_catalog",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "postgres.table_catalog",
+          "implemented": true,
+          "read": 1,
+          "requested": 1,
+          "scope": "selected_database_readable_table_catalogs",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "postgres.table_rows",
+          "implemented": true,
+          "read": 7,
+          "requested": 7,
+          "scope": "complete_selected_table_row_streams",
+          "unsupported": false
+        }
+      ],
       "status": "complete"
     },
     "credential_verification": "verified",

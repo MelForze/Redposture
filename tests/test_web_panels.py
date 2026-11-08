@@ -677,7 +677,7 @@ def test_minio_console_dump_walks_all_buckets_and_markers(monkeypatch: pytest.Mo
 
 
 def test_minio_console_discovery_listing_uses_shared_fifteen_minute_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    from redposture_core import data_discovery
+    from redposture_core import data_discovery, discovery_engine
     from redposture_core.modules.minio import discover
 
     clock = [1.0]
@@ -685,6 +685,7 @@ def test_minio_console_discovery_listing_uses_shared_fifteen_minute_budget(monke
     monkeypatch.setattr(web_panels, "time", fake_time)
     monkeypatch.setattr(discover, "time", fake_time)
     monkeypatch.setattr(data_discovery, "time", fake_time)
+    monkeypatch.setattr(discovery_engine, "time", fake_time)
     monkeypatch.setattr(web_panels, "HttpSessionPool", lambda **_kw: SimpleNamespace(close=lambda: None))
     paths = []
 

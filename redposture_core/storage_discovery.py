@@ -12,36 +12,43 @@ import tarfile
 import tempfile
 import time
 import zipfile
-from collections.abc import Callable, Iterable, Mapping
-from contextlib import closing
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import ExitStack, closing, contextmanager
+from contextvars import ContextVar
 from io import BytesIO
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
 from .data_discovery import _scan_portioned_value
+from .discovery_base64 import decoded_base64_file
 from .discovery_containers import DiskContainer, DiskMapping, DiskSequence
 from .discovery_encoded import compressed_text_prefix, decode_disk_structured_blob, encoded_text_prefix
+from .discovery_engine import _json_container_prefix
 from .discovery_frontier import DiscoveryFrontier
 from .discovery_json import DiskJSONDocument
 from .discovery_matches import prefer_specific_matches
+from .discovery_occurrences import OccurrenceRegistry
 from .discovery_options import DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
 from .discovery_paths import Text, concat_discovery_text, json_discovery_path
+from .discovery_payloads import is_tar_header, iter_payload_members, needs_payload_reader, scan_payload_file
 from .discovery_rendering import format_discovery_finding_line
+from .discovery_sources import SourceManifest, SourceRead
 from .discovery_spool import (
-    FINDING_SPOOL_MAX_CHARS,
     SpoolingFindings,
     SpoolingFingerprints,
     SpoolingRecords,
     SpoolingValues,
 )
-from .discovery_tar import open_tar_stream
 from .discovery_text import DiscoveryTextStream
 from .discovery_values import DiskBackedText, iter_json_chunks
-from .discovery_zip import BoundedZipFile
 from .json_stream import JSONPath, JSONScalarStream, SingleStringFieldStream
+from .scheduler import NestedSchedulerCancelled
 from .secret_detection import _scan_text, detector_names, fingerprint, is_secret_field_name
 
 FINDING_SPOOL_THRESHOLD = 4096
+_SOURCE_LOCATION: ContextVar[tuple[object, Mapping[str, Any]] | None] = ContextVar(
+    "discovery_source_location", default=None
+)
 
 
 class DiscoveryCollector:
@@ -63,13 +70,12 @@ class DiscoveryCollector:
         self.findings: list[dict[str, Any]] = []
         self.partial_reasons: list[str] = []
         self._additional_partial_reports = 0
+        self.partial_events = 0
         self._all_partial_access_denied = True
-        self._seen: set[tuple[str, str]] = set()
-        self._spool: SpoolingFindings | None = None
-        self._retained_value_chars = 0
+        self._spool: OccurrenceRegistry | None = None
         self._sources = 0
         self._live_emitted = False
-        self._emitted_fingerprints: set[str] = set()
+        self.source_manifest: SourceManifest | None = None
         self.source = (
             "anonymous"
             if record.get("status") == "open_no_auth" or record.get("anonymous_access") is True
@@ -79,7 +85,14 @@ class DiscoveryCollector:
             else "access_unverified"
         )
 
+    def _check_cancellation(self) -> None:
+        cancelled = getattr(self.ctx, "cancelled", None)
+        if callable(cancelled) and cancelled():
+            self.partial("discovery", "cancelled")
+            raise NestedSchedulerCancelled("discovery cancelled")
+
     def allowed(self) -> bool:
+        self._check_cancellation()
         if time.monotonic() >= self.deadline:
             self.partial("budget", "discover_time")
             return False
@@ -98,6 +111,7 @@ class DiscoveryCollector:
         return True
 
     def partial(self, source: Text, reason: str) -> None:
+        self.partial_events += 1
         if isinstance(source, DiskBackedText):
             try:
                 source = next(source.iter_text_chunks(max_chars=200), "")
@@ -119,9 +133,83 @@ class DiscoveryCollector:
         """An authorized empty source is complete even without scanned values."""
         self._sources += 1
 
-    def add(self, path: Text, value: Any, *, charge: bool = True, prefer_specific: bool = False) -> bool:
+    @contextmanager
+    def source_guard(self, manifest: SourceManifest, source: str) -> Iterator[None]:
+        """Keep cancellation observable even when transport raises it directly."""
+        try:
+            with manifest.guard(source):
+                yield
+        except (NestedSchedulerCancelled, KeyboardInterrupt):
+            self.partial(source, "cancelled")
+            raise
+
+    @contextmanager
+    def source_attempt(self, source: str, *, scope: str | None = None, content: bool = True) -> Iterator[SourceRead]:
+        """Count validated reads independently of findings, including empty sources."""
+        if self.source_manifest is None:
+            self.source_manifest = SourceManifest()
+        manifest = self.source_manifest
+        manifest.request(source, scope=scope)
+        evidence = SourceRead()
+        before = self.partial_events
+        finished = False
+        try:
+            with self.source_guard(manifest, source):
+                yield evidence
+                finished = True
+                if content and evidence.complete and self.partial_events == before:
+                    self.mark_accessible_source()
+        finally:
+            manifest.read(source, evidence.count)
+            manifest.finish(
+                source,
+                complete=finished and evidence.complete and self.partial_events == before,
+                denied=evidence.status in {401, 403},
+                unsupported=evidence.unsupported,
+            )
+
+    def declare_sources(self, *classes: str) -> None:
+        """Expose implemented but unrequested classes without inventing reads."""
+        if self.source_manifest is None:
+            self.source_manifest = SourceManifest()
+        for name in classes:
+            self.source_manifest.declare(self.module + "." + name)
+
+    @contextmanager
+    def source_location(self, location: Mapping[str, Any]) -> Iterator[None]:
+        """Pass a row/object locator through nested readers without shared mutable state."""
+        token = _SOURCE_LOCATION.set((self, dict(location)))
+        try:
+            yield
+        finally:
+            _SOURCE_LOCATION.reset(token)
+
+    def add(
+        self,
+        path: Text,
+        value: Any,
+        *,
+        charge: bool = True,
+        prefer_specific: bool = False,
+        location: Mapping[str, Any] | None = None,
+        field_name: str | None = None,
+    ) -> bool:
+        self._check_cancellation()
+        scoped = _SOURCE_LOCATION.get()
+        if location is None and scoped is not None and scoped[0] is self:
+            location = scoped[1]
+        place: dict[str, Any] = dict(location) if location is not None else {"source_kind": "content", "object": path}
+        if location is None and self.module == "mongodb" and isinstance(value, Mapping) and "_id" in value:
+            identifier = value["_id"]
+            place.update(
+                source_kind="document",
+                locator_kind="document_id",
+                id=identifier
+                if identifier is None or isinstance(identifier, (str, int, float, bool, list, Mapping, DiskBackedText))
+                else str(identifier),
+            )
         matches, inspected, covered = _scan_portioned_value(
-            value, concat_discovery_text("$.", path), self.remaining, _deadline=self.deadline
+            value, concat_discovery_text("$.", path), self.remaining, _deadline=self.deadline, _field_name=field_name
         )
         if prefer_specific:
             try:
@@ -146,37 +234,27 @@ class DiscoveryCollector:
         self.bytes_inspected += inspected
         try:
             for match in matches:
-                identity = (match.detector, fingerprint(match.value))
-                if self._spool is None and identity in self._seen:
-                    continue
+                self._check_cancellation()
+                identity = ("value", fingerprint(match.value))
                 finding = {
                     "type": match.detector,
                     "confidence": match.confidence,
+                    "detectors": list(match.rule_ids),
                     "value": match.value,
                     "fingerprint": identity[1],
                     "object_path": match.object_path,
                     "source": self.source,
                 }
                 emit = getattr(self.ctx, "live_emit", None)
-                if self._spool is None and (
-                    isinstance(match.value, DiskBackedText)
-                    or len(self.findings) >= FINDING_SPOOL_THRESHOLD
-                    or self._retained_value_chars + len(match.value) > FINDING_SPOOL_MAX_CHARS
+                if self._spool is None:
+                    self._spool = OccurrenceRegistry()
+                    self.findings = self._spool
+                if not self._spool.add(
+                    finding,
+                    location={**place, "object_path": match.object_path, "source": self.source},
+                    identity=identity,
                 ):
-                    spool = SpoolingFindings()
-                    for previous in self.findings:
-                        spool.add(previous, emitted=str(previous.get("fingerprint")) in self._emitted_fingerprints)
-                    self.findings = spool
-                    self._spool = spool
-                    self._seen.clear()
-                    self._emitted_fingerprints.clear()
-                if self._spool is not None:
-                    if not self._spool.add(finding):
-                        continue
-                else:
-                    self._seen.add(identity)
-                    self.findings.append(finding)
-                    self._retained_value_chars += len(match.value)
+                    continue
                 if isinstance(match.value, DiskBackedText):
                     disk_emit = getattr(self.ctx, "live_discovery_value", None)
                     if callable(disk_emit):
@@ -207,10 +285,7 @@ class DiscoveryCollector:
                         ]
                     )
                     self._live_emitted = True
-                    if self._spool is not None:
-                        self._spool.mark_emitted(*identity)
-                    else:
-                        self._emitted_fingerprints.add(identity[1])
+                    self._spool.mark_emitted(*identity)
         except OSError:
             self.partial(path, "storage_failure")
             return False
@@ -306,12 +381,33 @@ class DiscoveryCollector:
         self, source: Text, chunks: Iterable[bytes], *, _depth: int = 0, prefer_specific: bool = False
     ) -> bool:
         """Publish completed JSON fields while the enclosing source is still arriving."""
+        from .discovery_context import JSONFieldContext
+
         if _depth > 32:
             self.partial(source, "nested_json_depth")
             return False
         pending: list[str] = []
         pending_size = 0
         scalar: DiskBackedText | None = None
+
+        def publish(path: JSONPath, content: Any, field_name: str | None) -> None:
+            if field_name is not None:
+                self.add(location(path), content, charge=False, prefer_specific=prefer_specific, field_name=field_name)
+            elif isinstance(content, DiskBackedText):
+                name = path[-1] if path and isinstance(path[-1], (str, DiskBackedText)) else None
+                self.scan_disk_text(
+                    location(path[:-1] if name is not None else path),
+                    content,
+                    key=name,
+                    _depth=_depth + 1,
+                    prefer_specific=prefer_specific,
+                )
+            elif path and isinstance(path[-1], (str, DiskBackedText)):
+                self.add(location(path[:-1]), {path[-1]: content}, charge=False, prefer_specific=prefer_specific)
+            else:
+                self.add(location(path), content, charge=False, prefer_specific=prefer_specific)
+
+        contexts = JSONFieldContext(publish, lambda reason: self.partial(source, reason), deadline=self.deadline)
 
         def location(path: JSONPath) -> Text:
             return json_discovery_path(path, source)
@@ -330,31 +426,28 @@ class DiscoveryCollector:
                 scalar.append_text(text)
             if not final:
                 return
-            name = path[-1] if path and isinstance(path[-1], (str, DiskBackedText)) else None
-            parent = location(path[:-1]) if name is not None else location(path)
             if scalar is not None:
                 scalar.finish()
-                self.scan_disk_text(parent, scalar, key=name, _depth=_depth + 1, prefer_specific=prefer_specific)
+                contexts.value(path, scalar)
                 scalar = None
             else:
                 content = "".join(pending)
-                self.add(
-                    parent,
-                    {name: content} if name is not None else content,
-                    charge=False,
-                    prefer_specific=prefer_specific,
-                )
+                contexts.value(path, content)
             pending = []
             pending_size = 0
 
         def on_primitive(item: tuple[JSONPath, Any]) -> None:
             path, content = item
-            if path and isinstance(path[-1], (str, DiskBackedText)):
-                self.add(location(path[:-1]), {path[-1]: content}, charge=False, prefer_specific=prefer_specific)
-            else:
-                self.add(location(path), content, charge=False, prefer_specific=prefer_specific)
+            contexts.value(path, content)
 
-        decoder = JSONScalarStream(on_string, on_primitive=on_primitive, deadline=self.deadline)
+        decoder = JSONScalarStream(
+            on_string,
+            on_primitive=on_primitive,
+            deadline=self.deadline,
+            on_container=contexts.container,
+            on_container_end=contexts.end,
+        )
+        flush_context = True
         try:
             for chunk in chunks:
                 if not self.allowed():
@@ -363,19 +456,33 @@ class DiscoveryCollector:
             decoder.finish()
             self.mark_accessible_source()
             return True
+        except NestedSchedulerCancelled:
+            flush_context = False
+            raise
         except (ValueError, UnicodeError):
             self.partial(source, "invalid_json")
             return False
         except TimeoutError:
+            flush_context = False
             self.partial("budget", "discover_time")
             return False
         except OSError:
+            flush_context = False
             self.partial(source, "storage_failure")
+            try:
+                contexts.close()
+            except OSError:
+                # A failed result store must not mask the original failure;
+                # a source read failure can still publish its closed prefix.
+                pass
             return False
         finally:
-            decoder.close()
-            if scalar is not None:
-                scalar.close()
+            try:
+                contexts.close(flush=flush_context)
+            finally:
+                decoder.close()
+                if scalar is not None:
+                    scalar.close()
 
     def stream_http_content(
         self,
@@ -389,17 +496,25 @@ class DiscoveryCollector:
         prefer_specific: bool = False,
         allow_cross_origin_redirects: bool = False,
         preserve_authorization_on_cross_origin: bool = False,
+        on_status: Callable[[int], None] | None = None,
     ) -> bool:
         """Inspect one HTTP response in bounded chunks without retaining its body in RAM."""
         early_probe = bytearray()
         early_pending = bytearray()
         early_inspected = 0
         early_disabled = media_type == "zip" or "tar+" in media_type or media_type.endswith((".tar", ".tar.gz", ".tgz"))
+        response_status: int | None = None
         with tempfile.SpooledTemporaryFile(max_size=min(self.remaining, 1024 * 1024)) as spool:
+
+            def accept_response(status: int, _headers: Mapping[str, str]) -> None:
+                nonlocal response_status
+                response_status = status
+                if on_status is not None:
+                    on_status(status)
 
             def scan_early_lines(data: bytes) -> None:
                 nonlocal early_disabled, early_inspected
-                if early_disabled:
+                if early_disabled or response_status != 200:
                     return
                 if b"\x00" in data:
                     early_disabled = True
@@ -458,6 +573,7 @@ class DiscoveryCollector:
                 "GET",
                 url,
                 on_chunk=write_chunk,
+                on_response=accept_response,
                 chunk_size=max(1, min(self.remaining, 64 * 1024)),
                 headers={"User-Agent": "RedPosture/1.0", **headers},
                 timeout=timeout,
@@ -578,6 +694,8 @@ class DiscoveryCollector:
         row_validators: Mapping[JSONPath, tuple[frozenset[str], Callable[[Mapping[str, Any]], bool]]] | None = None,
         row_streamed_strings: Mapping[JSONPath, frozenset[str]] | None = None,
         on_row: Callable[[JSONPath, Mapping[str, Any]], None] | None = None,
+        on_status: Callable[[int], None] | None = None,
+        on_primitive_value: Callable[[JSONPath, Any], None] | None = None,
         on_response_headers: Callable[[Mapping[str, str]], None] | None = None,
         prefer_specific: bool = False,
         path_style: str = "url",
@@ -734,6 +852,8 @@ class DiscoveryCollector:
         def on_primitive(item: tuple[JSONPath, Any]) -> None:
             nonlocal required_seen, invalid_row
             path, value = item
+            if on_primitive_value is not None:
+                on_primitive_value(path, value)
             if row_validators is not None:
                 for prefix, (wanted, _validator) in row_validators.items():
                     if path[: len(prefix)] != prefix:
@@ -794,6 +914,8 @@ class DiscoveryCollector:
 
         def on_response(status: int, response_headers: Mapping[str, str]) -> None:
             nonlocal stop_reason
+            if on_status is not None:
+                on_status(status)
             if status != 200:
                 stop_reason = "access_denied" if status in {401, 403} else f"HTTP {status}"
                 raise StopStream
@@ -881,32 +1003,66 @@ class DiscoveryCollector:
 
         try:
             check_deadline()
-            if kind == "zip":
-                with BoundedZipFile(stream, check_deadline=check_deadline) as archive:
-                    for member in archive.infolist():
-                        check_deadline()
-                        if member.is_dir():
-                            continue
-                        with archive.open(member) as member_stream:
-                            self._scan_member_stream(source, member.filename, member_stream)
-                    self.mark_accessible_source()
-            elif kind == "tar":
-                with open_tar_stream(stream, check=check_deadline) as tar_archive:
-                    for member in tar_archive:
-                        check_deadline()
-                        if not member.isfile():
-                            continue
-                        member_stream = tar_archive.extractfile(member)
-                        if member_stream is None:
-                            self.partial(source, "member_unreadable")
-                            continue
-                        with member_stream:
-                            self._scan_member_stream(source, member.name, member_stream)
-                    self.mark_accessible_source()
-            else:
+            if kind not in {"zip", "tar"}:
                 self.partial(source, f"unsupported_archive:{kind}")
+                return
+            for ordinal, (name, member) in enumerate(iter_payload_members(stream, kind, check_deadline)):
+                self._scan_member_stream(
+                    source, name, member, object_path=concat_discovery_text(source, f"/member/{ordinal}/file/", name)
+                )
+            self.mark_accessible_source()
+        except NestedSchedulerCancelled:
+            raise
         except (OSError, EOFError, tarfile.TarError, zipfile.BadZipFile, RuntimeError, ValueError) as exc:
             self.partial(source, f"archive_error:{type(exc).__name__}")
+
+    def scan_base64_payload(self, source: Text, encoded: Any, *, field_name: str | None = None) -> None:
+        """Scan a field whose API schema explicitly declares base64 bytes."""
+
+        def check() -> None:
+            if not self.allowed():
+                raise TimeoutError("discover_time")
+
+        if not isinstance(encoded, (str, DiskBackedText)):
+            self.partial(source, "invalid_base64_value")
+            return
+        try:
+            with decoded_base64_file(encoded, check) as (stream, _size):
+                self._scan_retained_payload(source, stream, field_name=field_name)
+        except (ValueError, UnicodeError):
+            self.partial(source, "invalid_base64_value")
+        except TimeoutError:
+            self.partial(source, "discover_time")
+        except OSError:
+            self.partial(source, "storage_failure")
+
+    def _scan_retained_payload(
+        self,
+        source: Text,
+        stream: Any,
+        *,
+        key: Text = "",
+        prefer_specific: bool = False,
+        field_name: str | None = None,
+        source_complete: bool = True,
+    ) -> None:
+        def check() -> None:
+            if not self.allowed():
+                raise TimeoutError("discover_time")
+
+        def publish(item: Any, place: Text) -> None:
+            self.add(place, item, charge=False, prefer_specific=prefer_specific, field_name=field_name)
+
+        scan_payload_file(
+            stream,
+            source,
+            publish=publish,
+            partial=lambda reason: self.partial(source, reason),
+            check=check,
+            key=key,
+            source_complete=source_complete,
+        )
+        self.mark_accessible_source()
 
     def _scan_member_stream(
         self,
@@ -918,13 +1074,28 @@ class DiscoveryCollector:
         charge: bool = True,
         prefer_specific: bool = False,
     ) -> None:
-        """Spool one archive member in bounded reads, then classify and scan it.
+        """Read declared text incrementally; classify other members before scanning.
 
-        The first pass avoids emitting a text finding from a prefix of a binary
-        member. The temporary file is removed when the member completes.
+        Archive/binary/encoded and JSON prefixes retain their dedicated readers.
+        A later text decoding error preserves only already completed findings.
         """
         portion = max(1, min(self.remaining, 64 * 1024))
-        with tempfile.SpooledTemporaryFile(max_size=min(self.remaining, 1024 * 1024)) as spool:
+        path = object_path or concat_discovery_text(source, "/file/", name)
+        suffix = name[-32:].lower() if isinstance(name, str) else ""
+        if isinstance(name, DiskBackedText):
+            for part in name.iter_text_chunks():
+                if not self.allowed():
+                    return
+                suffix = (suffix + part)[-32:].lower()
+        declared_text = suffix.endswith(
+            (".csv", ".env", ".txt", ".log", ".ini", ".conf", ".properties", ".toml", ".yaml", ".yml", ".xml")
+        )
+        early_scanner: DiscoveryTextStream | None = None
+        early_decoder: Any = None
+        early_probe = bytearray()
+        early_decided = not declared_text
+
+        with ExitStack() as cleanup, tempfile.SpooledTemporaryFile(max_size=min(self.remaining, 1024 * 1024)) as spool:
             decoder = codecs.getincrementaldecoder("utf-8")("strict")
             binary = False
             while self.allowed():
@@ -941,20 +1112,75 @@ class DiscoveryCollector:
                     except UnicodeDecodeError:
                         binary = True
                 spool.write(chunk)
+                early_data = chunk
+                if not early_decided:
+                    needed = min(512 - len(early_probe), len(chunk))
+                    early_probe.extend(chunk[:needed])
+                    if len(early_probe) < 512:
+                        continue
+                    early_decided = True
+                    probe = bytes(early_probe)
+                    early_data = probe + chunk[needed:]
+                    encoding = "utf-16" if probe.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+                    if not probe.startswith(
+                        (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08", b"\x1f\x8b")
+                    ) and not is_tar_header(probe):
+                        try:
+                            sample = codecs.getincrementaldecoder(encoding)("strict").decode(probe)
+                        except UnicodeError:
+                            sample = ""
+                        explicit_text = sample and "\0" not in sample and not _json_container_prefix(sample)
+                        if explicit_text and (
+                            not encoded_text_prefix(sample)
+                            or _scan_text(sample, "$", set(detector_names()) - {"high_entropy"})
+                        ):
+                            early_decoder = codecs.getincrementaldecoder(encoding)("strict")
+                            early_scanner = DiscoveryTextStream(
+                                lambda value: self.add(path, value, charge=False, prefer_specific=prefer_specific),
+                                lambda reason: self.partial(path, reason),
+                                portion=portion,
+                            )
+                            cleanup.callback(early_scanner.close)
+                if early_scanner is not None:
+                    try:
+                        text = early_decoder.decode(early_data)
+                        broken = re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", text)
+                        if broken is not None:
+                            early_scanner.feed(text[: broken.start()])
+                            self.partial(path, "binary_or_unsupported_encoding")
+                            early_scanner.close()
+                            early_scanner = None
+                            binary = True
+                        else:
+                            early_scanner.feed(text)
+                    except UnicodeError:
+                        self.partial(path, "invalid_text_encoding")
+                        if early_scanner is not None:
+                            early_scanner.close()
+                        early_scanner = None
             else:
                 return
+            if early_scanner is not None:
+                try:
+                    early_scanner.feed(early_decoder.decode(b"", final=True))
+                    early_scanner.finish()
+                    return
+                except UnicodeError:
+                    self.partial(path, "invalid_text_encoding")
+                    early_scanner.close()
             if not binary:
                 try:
                     decoder.decode(b"", final=True)
                 except UnicodeDecodeError:
                     binary = True
-            if binary:
-                self.partial(source, f"binary_or_non_utf8:{name}")
-                return
             spool.seek(0)
+            probe = spool.read(512)
+            spool.seek(0)
+            if binary or needs_payload_reader(probe, name):
+                self._scan_retained_payload(path, spool, key=name, prefer_specific=prefer_specific)
+                return
             prefix = spool.read(4096).lstrip()
             spool.seek(0)
-            path = object_path or concat_discovery_text(source, "/file/", name)
             if encoded_text_prefix(prefix):
                 encoded = DiskBackedText()
                 decoded = None
@@ -1019,10 +1245,12 @@ class DiscoveryCollector:
     def result(self) -> dict[str, Any]:
         if self._spool is not None:
             self._spool.finish()
+            self.findings = self._spool.bounded_inline_view(max_findings=FINDING_SPOOL_THRESHOLD)
         reasons = self.partial_reasons.copy()
         if self._additional_partial_reports:
             reasons.append(f"additional_partial_reports:{self._additional_partial_reports}")
         return {
+            **({"sources": self.source_manifest.result()} if self.source_manifest is not None else {}),
             "status": (
                 "unavailable"
                 if not self._sources and reasons and self._all_partial_access_denied
@@ -1039,87 +1267,103 @@ class DiscoveryCollector:
             "partial_reasons": reasons,
             "live_emitted": self._live_emitted,
             "emitted_fingerprints": (
-                self._spool.emitted_fingerprints() if self._spool is not None else sorted(self._emitted_fingerprints)
+                self._spool.emitted_fingerprints()
+                if self.findings is self._spool and self._spool is not None
+                else list(self._spool.emitted_fingerprints())
+                if self._spool is not None
+                else []
             ),
         }
 
 
 def merge_discovery_results(*results: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """Combine separate accessible surfaces while retaining live-output provenance."""
+    """Merge value identities without discarding source locations or live provenance."""
     present = [item for item in results if isinstance(item, Mapping)]
     if not present:
         return None
-    use_spool = any(isinstance(item.get("findings"), SpoolingFindings) for item in present)
-    findings: list[dict[str, Any]] = SpoolingFindings() if use_spool else []
-    retained_value_chars = 0
-    seen: set[tuple[str, str]] = set()
-    emitted: set[str] = set()
+    registry: OccurrenceRegistry | None = None
     reasons: list[str] = []
+    source_manifest = SourceManifest()
+    has_manifest = False
     for item in present:
-        item_findings = item.get("findings")
-        if not isinstance(item_findings, list):
-            item_findings = []
+        if isinstance(item.get("sources"), list):
+            has_manifest = True
+            source_manifest.merge(item["sources"])
+        rows = item.get("findings")
+        if not isinstance(rows, list):
+            rows = []
         fingerprints = item.get("emitted_fingerprints")
         emitted_this = (
-            {str(value) for value in fingerprints}
+            set(fingerprints)
             if isinstance(fingerprints, list) and not isinstance(fingerprints, SpoolingFingerprints)
             else set()
         )
-        if isinstance(fingerprints, SpoolingFingerprints):
-            pass  # The spool carries emission flags alongside each finding.
-        elif isinstance(fingerprints, list):
-            emitted.update(emitted_this)
-        elif item.get("live_emitted"):
-            emitted.update(str(value.get("fingerprint")) for value in item_findings if isinstance(value, Mapping))
         finding_rows = (
-            item_findings.iter_with_emission()
-            if isinstance(item_findings, SpoolingFindings)
+            rows.iter_with_emission()
+            if isinstance(rows, SpoolingFindings)
             else (
                 (
-                    finding,
-                    str(finding.get("fingerprint")) in emitted_this
+                    row,
+                    str(row.get("fingerprint")) in emitted_this
                     or bool(item.get("live_emitted"))
                     and not isinstance(fingerprints, list),
                 )
-                for finding in item_findings
-                if isinstance(finding, Mapping)
+                for row in rows
+                if isinstance(row, Mapping)
             )
         )
         for finding, was_emitted in finding_rows:
-            if not isinstance(finding, Mapping):
-                continue
-            identity = (str(finding.get("type")), str(finding.get("fingerprint")))
-            value = finding.get("value", "")
-            value_chars = len(value) if isinstance(value, str) else 0
+            if registry is None:
+                registry = OccurrenceRegistry()
+            locations = finding.get("locations")
+            if not isinstance(locations, list) or not locations:
+                if finding.get("object_path") is not None:
+                    locations = [
+                        {
+                            "source_kind": "content",
+                            "object_path": finding["object_path"],
+                            "source": finding.get("source"),
+                        }
+                    ]
+                else:
+                    locations = [{"locator_kind": "unavailable", "source_kind": "content"}]
+                    if "source_locator_unavailable" not in reasons:
+                        reasons.append("source_locator_unavailable")
             if (
-                not isinstance(findings, SpoolingFindings)
-                and identity not in seen
-                and (
-                    isinstance(value, DiskBackedText)
-                    or len(findings) >= FINDING_SPOOL_THRESHOLD
-                    or retained_value_chars + value_chars > FINDING_SPOOL_MAX_CHARS
-                )
+                int(finding.get("occurrence_count") or 0) > len(locations)
+                and "source_locations_incomplete" not in reasons
             ):
-                spool = SpoolingFindings()
-                for previous in findings:
-                    spool.add(previous, emitted=str(previous.get("fingerprint")) in emitted)
-                findings = spool
-                seen.clear()
-            if isinstance(findings, SpoolingFindings):
-                findings.add(finding, emitted=was_emitted, merge_emission=True)
-            elif identity not in seen:
-                seen.add(identity)
-                findings.append(dict(finding))
-                retained_value_chars += value_chars
-        for reason in item.get("partial_reasons") or []:
+                reasons.append("source_locations_incomplete")
+            for location in locations:
+                registry.add(
+                    finding,
+                    location=location,
+                    emitted=was_emitted,
+                    merge_emission=True,
+                    identity=("value", fingerprint(finding["value"])) if "value" in finding else None,
+                )
+        for reason in item.get("partial_reasons") or ():
             if isinstance(reason, str) and reason not in reasons:
                 reasons.append(reason)
+    findings: list[dict[str, Any]] = []
+    emitted: list[str] = []
+    if registry is not None:
+        registry.finish()
+        findings = registry.bounded_inline_view(max_findings=FINDING_SPOOL_THRESHOLD)
+        emitted = registry.emitted_fingerprints() if findings is registry else list(registry.emitted_fingerprints())
     statuses = {str(item.get("status")) for item in present}
-    if isinstance(findings, SpoolingFindings):
-        findings.finish()
     sources = {str(item.get("source")) for item in present}
-    status = "complete" if statuses == {"complete"} else "unavailable" if statuses == {"unavailable"} else "partial"
+    status = (
+        "unavailable"
+        if statuses == {"unavailable"}
+        else "partial"
+        if reasons
+        else "complete"
+        if statuses == {"complete"}
+        else "partial"
+    )
     return {
+        **({"sources": source_manifest.result()} if has_manifest else {}),
         "status": status,
         "source": next(iter(sources)) if len(sources) == 1 else "mixed",
         "bytes_read": sum(int(item.get("bytes_read") or 0) for item in present),
@@ -1127,25 +1371,36 @@ def merge_discovery_results(*results: Mapping[str, Any] | None) -> dict[str, Any
         "findings": findings,
         "partial_reasons": reasons,
         "live_emitted": bool(emitted) or any(bool(item.get("live_emitted")) for item in present),
-        "emitted_fingerprints": (
-            findings.emitted_fingerprints() if isinstance(findings, SpoolingFindings) else sorted(emitted)
-        ),
+        "emitted_fingerprints": emitted,
     }
 
 
 def _json_page(collector: DiscoveryCollector, getter: Any, path: str, source: str) -> list[dict[str, Any]] | None:
-    body = collector.read(getter, path, source)
-    if body is None:
-        return None
-    try:
-        data = json.loads(body)
-    except (ValueError, UnicodeError):
-        collector.partial(source, "invalid_json")
-        return None
-    if not isinstance(data, list) or any(not isinstance(item, Mapping) for item in data):
-        collector.partial(source, "invalid_list")
-        return None
-    return data
+    category = "repository_catalog_pages" if "/repositories" in path else "project_catalog_pages"
+    with collector.source_attempt(
+        collector.module + "." + category, scope="selected_target_validated_JSON_responses"
+    ) as evidence:
+
+        def tracked(*args: Any) -> Any:
+            result = getter(*args)
+            evidence.status = result[0]
+            return result
+
+        body = collector.read(tracked, path, source)
+        if body is None:
+            return None
+        try:
+            data = json.loads(body)
+        except (ValueError, UnicodeError):
+            collector.partial(source, "invalid_json")
+            return None
+        if not isinstance(data, list) or any(not isinstance(item, Mapping) for item in data):
+            collector.partial(source, "invalid_list")
+            return None
+        if all(isinstance(item.get("name"), str) and item["name"] for item in data):
+            collector.mark_accessible_source()
+            evidence.accept()
+        return data
 
 
 def _page_fingerprint(value: Any, collector: DiscoveryCollector) -> bytes:
@@ -1264,6 +1519,34 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
     """Read accessible GitLab source, CI variables, logs and artifacts."""
     from .modules.gitlab import actions
 
+    if collector.source_manifest is None:
+        collector.source_manifest = SourceManifest()
+    manifest = collector.source_manifest
+    for name in (
+        "project_catalog",
+        "branch_catalog",
+        "repository_tree",
+        "repository_files",
+        "commit_catalog",
+        "commit_diffs",
+        "historical_files",
+        "project_variable_catalog",
+        "project_variable_values",
+        "job_catalog",
+        "job_traces",
+        "job_artifacts",
+        "group_variable_catalog",
+        "group_variable_values",
+        "instance_variable_catalog",
+        "instance_variable_values",
+        "wiki_contents",
+        "snippet_contents",
+        "package_files",
+    ):
+        manifest.declare("gitlab." + name)
+    manifest.request("gitlab.project_catalog", scope="selected_or_accessible_project_metadata")
+    project_catalog_events = collector.partial_events
+
     timeout = float(getattr(ctx.args, "timeout", 5.0) or 5.0)
     token = str(getattr(ctx.credential, "token", "") or "") or None
     headers = actions._gitlab_api_headers(token)
@@ -1280,6 +1563,12 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
             headers=headers,
             response_size_cap=cap,
         )
+
+    def project_get(path: str, cap: int) -> tuple[int, bytes, dict[str, str], str | None]:
+        response = get(path, cap)
+        if response[0] in {401, 403}:
+            manifest.finish("gitlab.project_catalog", complete=False, denied=True)
+        return response
 
     def get_range(path: str, cap: int, offset: int) -> tuple[int, bytes, dict[str, str], str | None]:
         # The synchronous GitLab HTTP adapter retains several copies of a
@@ -1299,22 +1588,37 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
             response_size_cap=cap,
         )
 
-    def scan_ranged_content(path: str, source: str, *, immutable: bool = False, media_type: str = "") -> None:
+    def scan_ranged_content(
+        path: str, source: str, *, immutable: bool = False, media_type: str = ""
+    ) -> tuple[bool, int | None]:
+        response_status: int | None = None
+
+        def tracked_range(endpoint: str, cap: int, offset: int) -> tuple[int, bytes, dict[str, str], str | None]:
+            nonlocal response_status
+            response = get_range(endpoint, cap, offset)
+            response_status = response[0]
+            return response
+
+        def on_status(status: int) -> None:
+            nonlocal response_status
+            response_status = status
+
         with tempfile.SpooledTemporaryFile(max_size=min(collector.remaining, 1024 * 1024)) as spool:
             previous_reasons = len(collector.partial_reasons)
-            if _download_http_ranges(collector, get_range, path, source, spool, require_validator=not immutable):
+            if _download_http_ranges(collector, tracked_range, path, source, spool, require_validator=not immutable):
+                before = collector.partial_events
                 _scan_spooled_blob(collector, spool, source, media_type, prefer_specific=True)
-                return
+                return collector.partial_events == before, response_status
             new_reasons = collector.partial_reasons[previous_reasons:]
             range_error = new_reasons[0].removeprefix(f"{source}: ").lower() if len(new_reasons) == 1 else ""
             if range_error not in {"response_truncated", "range_unsupported"} and not any(
                 marker in range_error for marker in ("timed out", "timeout", "wrong version number")
             ):
-                return
+                return False, response_status
             state = getattr(ctx, "lifecycle_state", None)
             pool = getattr(state, "http", None)
             if pool is None or not callable(getattr(pool, "request_stream", None)):
-                return
+                return False, response_status
             from .clients.http_api import build_http_target_url
 
             url = build_http_target_url(
@@ -1334,10 +1638,15 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
                 prefer_specific=True,
                 allow_cross_origin_redirects=True,
                 preserve_authorization_on_cross_origin=True,
+                on_status=on_status,
             ):
                 del collector.partial_reasons[previous_reasons : previous_reasons + 1]
+                return True, response_status
+            return False, response_status
 
-    def stream_json_page(path: str, source: str) -> tuple[list[dict[str, Any]] | None, dict[str, str]]:
+    def stream_json_value(
+        path: str, source: str, status_callback: Callable[[int], None] | None = None
+    ) -> tuple[Any, dict[str, str]]:
         state = getattr(ctx, "lifecycle_state", None)
         pool = getattr(state, "http", None)
         if not callable(getattr(pool, "request_stream", None)):
@@ -1346,7 +1655,7 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
         assert pool is not None
         from .clients.http_api import build_http_target_url
 
-        document = DiskJSONDocument()
+        document = DiskJSONDocument(deadline=collector.deadline)
         response_headers: dict[str, str] = {}
         response_status = 0
 
@@ -1354,6 +1663,8 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
             nonlocal response_status
             response_status = status
             response_headers.update(received)
+            if status_callback is not None:
+                status_callback(status)
 
         def on_chunk(chunk: bytes) -> None:
             collector.bytes_read += len(chunk)
@@ -1374,11 +1685,28 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
                 preserve_authorization_on_cross_origin=True,
             )
             if response.error or response.truncated or response_status != 200:
-                collector.partial(source, str(response.error or f"HTTP {response_status}"))
+                collector.partial(
+                    source,
+                    "access_denied"
+                    if response_status in {401, 403}
+                    else str(response.error or f"HTTP {response_status}"),
+                )
+                if response_status == 200:
+                    return document.partial_value(completed_arrays_only=True), response_headers
                 return None, response_headers
             payload = document.finish()
         except (OSError, ValueError, UnicodeError) as exc:
             collector.partial(source, f"invalid_stream:{exc}")
+            if response_status == 200:
+                return document.partial_value(completed_arrays_only=True), response_headers
+            return None, response_headers
+        finally:
+            document.close()
+        return payload, response_headers
+
+    def stream_json_page(path: str, source: str) -> tuple[list[dict[str, Any]] | None, dict[str, str]]:
+        payload, response_headers = stream_json_value(path, source)
+        if payload is None:
             return None, response_headers
         if not isinstance(payload, (list, SpoolingValues)):
             collector.partial(source, "invalid_list")
@@ -1390,6 +1718,64 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
                 return None, response_headers
             rows.append(item)
         return rows, response_headers
+
+    def read_document(path: str, source: str) -> tuple[Mapping[str, Any] | None, int | None]:
+        status: int | None = None
+
+        def on_status(value: int) -> None:
+            nonlocal status
+            status = value
+
+        cap = collector.cap()
+        if not cap:
+            return None, status
+        try:
+            status, body, received, error = get(path, cap)
+            collector.bytes_read += len(body)
+            if error or status != 200:
+                collector.partial(source, "access_denied" if status in {401, 403} else str(error or f"HTTP {status}"))
+                return None, status
+            if str(received.get("x-redposture-truncated") or "").lower() == "true":
+                value, _headers = stream_json_value(path, source, on_status)
+            else:
+                value = json.loads(body)
+        except (OSError, ValueError, UnicodeError) as exc:
+            collector.partial(source, f"invalid_document:{exc}")
+            return None, status
+        if not isinstance(value, Mapping):
+            collector.partial(source, "invalid_document_object")
+            return None, status
+        return value, status
+
+    def source_pages(base: str, source: str, kind: str, *, count_catalog: bool = False) -> Iterator[Mapping[str, Any]]:
+        manifest.request(kind, scope="selected_projects")
+        denied = False
+
+        def tracked_get(path: str, cap: int) -> tuple[int, bytes, dict[str, str], str | None]:
+            nonlocal denied
+            response = get(path, cap)
+            denied |= response[0] in {401, 403}
+            return response
+
+        iterator = iter(_pages(collector, tracked_get, base, source, stream_page=stream_json_page))
+        complete, finished = True, False
+        try:
+            while True:
+                before = collector.partial_events
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    complete &= collector.partial_events == before
+                    finished = True
+                    if complete:
+                        collector.mark_accessible_source()
+                    break
+                complete &= collector.partial_events == before
+                if count_catalog:
+                    manifest.read(kind)
+                yield item
+        finally:
+            manifest.finish(kind, complete=complete and finished, denied=denied)
 
     def list_projects() -> SpoolingRecords | None:
 
@@ -1407,7 +1793,7 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
                 if not cap:
                     return projects if projects else None
                 try:
-                    status, body, page_headers, error = get(path, cap)
+                    status, body, page_headers, error = project_get(path, cap)
                 except (OSError, ValueError) as exc:
                     collector.partial("projects/list", str(exc))
                     return projects if projects else None
@@ -1469,7 +1855,9 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
             seen_pages.close()
             projects.finish()
 
-    def pages(base: str, source: str) -> Any:
+    def pages(base: str, source: str, kind: str | None = None) -> Any:
+        if kind is not None:
+            return source_pages(base, source, kind, count_catalog=True)
         return _pages(
             collector,
             get,
@@ -1478,7 +1866,30 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
             stream_page=stream_json_page,
         )
 
+    def source_content(kind: str, path: str, source: str, *, immutable: bool = False, media_type: str = "") -> None:
+        manifest.request(kind, scope="selected_projects")
+        with collector.source_guard(manifest, kind):
+            ok, status = scan_ranged_content(path, source, immutable=immutable, media_type=media_type)
+            if ok:
+                manifest.read(kind)
+            manifest.finish(kind, complete=ok, denied=status in {401, 403})
+
+    def source_value(kind: str, source: str, value: Any) -> None:
+        manifest.request(kind, scope="selected_projects_or_parent_groups")
+        if not isinstance(value, Mapping) or any(
+            not isinstance(item, (str, DiskBackedText)) for item in value.values()
+        ):
+            collector.partial(source, "variable_value_unavailable")
+            manifest.finish(kind, complete=False)
+            return
+        with collector.source_guard(manifest, kind):
+            before = collector.partial_events
+            if collector.add(source, value, charge=False, prefer_specific=True):
+                manifest.read(kind)
+            manifest.finish(kind, complete=collector.partial_events == before)
+
     token_scope = bool(token and record.get("token_valid") is True)
+
     projects = record.get("token_projects" if token_scope else "public_projects")
     selected = record.get("project_filters")
     filters = [str(value) for value in selected if str(value).strip()] if isinstance(selected, list) else []
@@ -1492,6 +1903,7 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
         if not filters:
             if not any(reason.startswith("projects/list:") for reason in collector.partial_reasons):
                 collector.partial("projects", "project_list_unavailable")
+            manifest.finish("gitlab.project_catalog", complete=False)
             return
         projects = []
     extra_projects: list[Mapping[str, Any]] = []
@@ -1503,7 +1915,7 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
         ):
             continue
         source = f"project/{ref}/details"
-        body = collector.read(get, "/api/v4/projects/" + quote(ref, safe=""), source)
+        body = collector.read(project_get, "/api/v4/projects/" + quote(ref, safe=""), source)
         if body is None:
             continue
         try:
@@ -1515,6 +1927,8 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
             collector.partial(source, "project_identity_unavailable")
             continue
         extra_projects.append(selected_project)
+    manifest.read("gitlab.project_catalog", len(projects) + len(extra_projects))
+    manifest.finish("gitlab.project_catalog", complete=collector.partial_events == project_catalog_events)
     group_ids: set[int] = set()
     for project in itertools.chain(projects, extra_projects):
         if not isinstance(project, Mapping) or not collector.allowed():
@@ -1534,7 +1948,7 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
         ):
             group_ids.add(namespace["id"])
 
-        for branch in pages(key + "/repository/branches", source + "/branches"):
+        for branch in pages(key + "/repository/branches", source + "/branches", "gitlab.branch_catalog"):
             branch_name = str(branch.get("name") or "")
             if not branch_name:
                 collector.partial(source + "/branches", "branch_name_unavailable")
@@ -1543,14 +1957,15 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
             for item in pages(
                 key + f"/repository/tree?recursive=true&ref={ref}",
                 source + f"/branch/{branch_name}/tree",
+                "gitlab.repository_tree",
             ):
                 if item.get("type") != "blob" or not isinstance(item.get("path"), str):
                     continue
                 path = str(item["path"])
                 file_path = key + f"/repository/files/{quote(path, safe='')}/raw?ref={ref}&lfs=true"
-                scan_ranged_content(file_path, source + f"/branch/{branch_name}/file/{path}")
+                source_content("gitlab.repository_files", file_path, source + f"/branch/{branch_name}/file/{path}")
 
-        commits = pages(key + "/repository/commits?all=true", source + "/history")
+        commits = pages(key + "/repository/commits?all=true", source + "/history", "gitlab.commit_catalog")
         for commit in commits:
             sha = str(commit.get("id") or "")
             if not sha:
@@ -1561,6 +1976,7 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
             for diff in pages(
                 key + f"/repository/commits/{quote(sha, safe='')}/diff",
                 source + f"/commit/{sha}/diff",
+                "gitlab.commit_diffs",
             ):
                 if diff.get("collapsed") or diff.get("too_large"):
                     collector.partial(source + f"/commit/{sha}", "diff_truncated")
@@ -1573,32 +1989,48 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
                 file_path = (
                     key + f"/repository/files/{quote(path, safe='')}/raw?ref={quote(historical_ref, safe='')}&lfs=true"
                 )
-                scan_ranged_content(file_path, source + f"/commit/{sha}/file/{path}", immutable=True)
+                source_content(
+                    "gitlab.historical_files", file_path, source + f"/commit/{sha}/file/{path}", immutable=True
+                )
 
         if token:
-            for variable in pages(key + "/variables", source + "/variables"):
+            for variable in pages(key + "/variables", source + "/variables", "gitlab.project_variable_catalog"):
                 variable_key = str(variable.get("key") or "")
                 if not variable_key or "value" not in variable:
                     collector.partial(source + "/variables", "variable_value_unavailable")
                     continue
-                collector.add(
+                source_value(
+                    "gitlab.project_variable_values",
                     source + f"/variable/{variable_key}",
                     {variable_key: variable["value"]},
-                    charge=False,
-                    prefer_specific=True,
                 )
 
-        for job in pages(key + "/jobs", source + "/jobs"):
+        for job in pages(key + "/jobs", source + "/jobs", "gitlab.job_catalog"):
             job_id = job.get("id")
             if type(job_id) is not int:
                 collector.partial(source + "/jobs", "job_id_unavailable")
                 continue
-            scan_ranged_content(key + f"/jobs/{job_id}/trace", source + f"/job/{job_id}/trace")
+            source_content("gitlab.job_traces", key + f"/jobs/{job_id}/trace", source + f"/job/{job_id}/trace")
             artifact = job.get("artifacts_file")
             if isinstance(artifact, Mapping) and artifact.get("filename"):
-                scan_ranged_content(
-                    key + f"/jobs/{job_id}/artifacts", source + f"/job/{job_id}/artifacts", media_type="zip"
+                source_content(
+                    "gitlab.job_artifacts",
+                    key + f"/jobs/{job_id}/artifacts",
+                    source + f"/job/{job_id}/artifacts",
+                    media_type="zip",
                 )
+
+        from .modules.gitlab.discover import discover_project_extras
+
+        discover_project_extras(
+            collector,
+            project,
+            source,
+            pages=source_pages,
+            document=read_document,
+            content=scan_ranged_content,
+            manifest=manifest,
+        )
 
     if token:
         pending = sorted(group_ids)
@@ -1609,16 +2041,15 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
                 continue
             visited_groups.add(group_id)
             source = f"group/{group_id}/variables"
-            for variable in pages(f"/api/v4/groups/{group_id}/variables", source):
+            for variable in pages(f"/api/v4/groups/{group_id}/variables", source, "gitlab.group_variable_catalog"):
                 variable_key = str(variable.get("key") or "")
                 if not variable_key or "value" not in variable:
                     collector.partial(source, "variable_value_unavailable")
                     continue
-                collector.add(
+                source_value(
+                    "gitlab.group_variable_values",
                     f"group/{group_id}/variable/{variable_key}",
                     {variable_key: variable["value"]},
-                    charge=False,
-                    prefer_specific=True,
                 )
             group_body = collector.read(get, f"/api/v4/groups/{group_id}", f"group/{group_id}/details")
             if group_body is not None:
@@ -1632,28 +2063,93 @@ def discover_gitlab_sources(ctx: Any, record: Mapping[str, Any], collector: Disc
                     pending.append(parent_id)
         token_user = record.get("token_user")
         if isinstance(token_user, Mapping) and token_user.get("is_admin") is True:
-            for variable in pages("/api/v4/admin/ci/variables", "admin/ci/variables"):
+            for variable in pages(
+                "/api/v4/admin/ci/variables", "admin/ci/variables", "gitlab.instance_variable_catalog"
+            ):
                 variable_key = str(variable.get("key") or "")
                 if variable_key and "value" in variable:
-                    collector.add(f"admin/ci/variable/{variable_key}", {variable_key: variable["value"]}, charge=False)
+                    source_value(
+                        "gitlab.instance_variable_values",
+                        f"admin/ci/variable/{variable_key}",
+                        {variable_key: variable["value"]},
+                    )
 
 
 def _registry_json(collector: DiscoveryCollector, getter: Any, path: str, source: str) -> Mapping[str, Any] | None:
-    body = collector.read(getter, path, source)
-    if body is None:
-        return None
+    category = (
+        "repository_catalog_pages"
+        if "/_catalog" in path
+        else "tag_catalog_pages"
+        if "/tags/list" in path
+        else "oci_manifests"
+        if "/manifests/" in path
+        else "component_catalog_pages"
+    )
+    with collector.source_attempt(
+        collector.module + "." + category, scope="selected_target_validated_JSON_responses"
+    ) as evidence:
+
+        def tracked(*args: Any) -> Any:
+            result = getter(*args)
+            evidence.status = result[0]
+            return result
+
+        body = collector.read(tracked, path, source)
+        if body is None:
+            return None
+        try:
+            data = json.loads(body)
+        except (ValueError, UnicodeError):
+            collector.partial(source, "invalid_json")
+            return None
+        if not isinstance(data, Mapping):
+            collector.partial(source, "invalid_object")
+            return None
+        if category == "repository_catalog_pages":
+            value = data.get("repositories")
+            valid = isinstance(value, list) and all(isinstance(item, str) for item in value)
+        elif category == "tag_catalog_pages":
+            value = data.get("tags")
+            valid = value is None or isinstance(value, list) and all(isinstance(item, str) for item in value)
+        elif category == "component_catalog_pages":
+            valid = isinstance(data.get("items"), list)
+        else:
+            valid = True  # Descriptor validation is performed by the manifest traversal.
+        if valid:
+            collector.mark_accessible_source()
+            evidence.accept()
+        return data
+
+
+def _catalog_incomplete(collector: DiscoveryCollector, category: str) -> None:
+    if collector.source_manifest is None:
+        collector.source_manifest = SourceManifest()
+    kind = collector.module + "." + category
+    collector.source_manifest.declare(kind)
+    collector.source_manifest.finish(kind, complete=False)
+
+
+@contextmanager
+def _catalog_completion(collector: DiscoveryCollector, category: str) -> Iterator[None]:
+    if collector.source_manifest is None:
+        collector.source_manifest = SourceManifest()
+    kind = collector.module + "." + category
+    collector.source_manifest.declare(kind)
+    before = collector.partial_events
     try:
-        data = json.loads(body)
-    except (ValueError, UnicodeError):
-        collector.partial(source, "invalid_json")
-        return None
-    if not isinstance(data, Mapping):
-        collector.partial(source, "invalid_object")
-        return None
-    return data
+        with collector.source_guard(collector.source_manifest, kind):
+            yield
+    finally:
+        if collector.partial_events != before:
+            _catalog_incomplete(collector, category)
 
 
 def _registry_catalog(collector: DiscoveryCollector, getter: Any) -> list[str]:
+    with _catalog_completion(collector, "repository_catalog_pages"):
+        return _read_registry_catalog(collector, getter)
+
+
+def _read_registry_catalog(collector: DiscoveryCollector, getter: Any) -> list[str]:
     repositories: list[str] = []
     seen: set[str] = set()
     last: str | None = None
@@ -1679,6 +2175,11 @@ def _registry_catalog(collector: DiscoveryCollector, getter: Any) -> list[str]:
 
 
 def _registry_tags(collector: DiscoveryCollector, getter: Any, repository: str) -> list[str]:
+    with _catalog_completion(collector, "tag_catalog_pages"):
+        return _read_registry_tags(collector, getter, repository)
+
+
+def _read_registry_tags(collector: DiscoveryCollector, getter: Any, repository: str) -> list[str]:
     tags: list[str] = []
     seen: set[str] = set()
     last: str | None = None
@@ -1716,16 +2217,19 @@ def _harbor_repositories(collector: DiscoveryCollector, getter: Any) -> list[str
             return repositories
         project_signature = tuple(str(project.get("name") or "") for project in projects)
         if project_signature and project_signature in seen_project_pages:
+            _catalog_incomplete(collector, "project_catalog_pages")
             collector.partial("harbor/projects", "repeated_page")
             return repositories
         seen_project_pages.add(project_signature)
         for project in projects:
             name = str(project.get("name") or "")
             if not name:
+                _catalog_incomplete(collector, "project_catalog_pages")
                 collector.partial("harbor/projects", "project_name_unavailable")
                 continue
             seen_repo_pages: set[tuple[str, ...]] = set()
             repo_page = 1
+            repo_complete = False
             while collector.allowed():
                 repo_path = f"/api/v2.0/projects/{quote(name, safe='')}/repositories?page_size=100&page={repo_page}"
                 items = _json_page(collector, getter, repo_path, f"harbor/project/{name}/repositories")
@@ -1742,11 +2246,15 @@ def _harbor_repositories(collector: DiscoveryCollector, getter: Any) -> list[str
                         repositories.append(repository)
                         seen_repositories.add(repository)
                 if len(items) < 100:
+                    repo_complete = True
                     break
                 repo_page += 1
+            if not repo_complete:
+                _catalog_incomplete(collector, "repository_catalog_pages")
         if len(projects) < 100:
             return repositories
         page += 1
+    _catalog_incomplete(collector, "project_catalog_pages")
     return repositories
 
 
@@ -1859,6 +2367,7 @@ def _download_http_blob_stream(
     headers: Mapping[str, str],
     timeout: float,
     expected_digest: str | None = None,
+    on_status: Callable[[int], None] | None = None,
 ) -> bool:
     """Copy one HTTP asset directly to disk and verify its advertised digest."""
     digest = None
@@ -1871,6 +2380,8 @@ def _download_http_blob_stream(
     def on_response(received_status: int, _received_headers: Mapping[str, str]) -> None:
         nonlocal status
         status = received_status
+        if on_status is not None:
+            on_status(received_status)
 
     def on_chunk(chunk: bytes) -> None:
         if status != 200:
@@ -1912,16 +2423,20 @@ def _download_http_blob_stream(
 def _scan_spooled_blob(
     collector: DiscoveryCollector, spool: Any, source: str, media_type: str, *, prefer_specific: bool = False
 ) -> None:
-    size = spool.tell()
+    size = spool.seek(0, 2)
     if not size:
         collector.mark_accessible_source()
         return
     spool.seek(0)
-    prefix = spool.read(64)
+    prefix = spool.read(512)
     spool.seek(0)
-    if prefix.startswith(b"\x1f\x8b") or "tar+" in media_type or media_type.endswith((".tar", ".tar.gz", ".tgz")):
-        collector.scan_archive_file(source, spool, "tar")
-    elif "zip" in media_type or prefix.startswith(b"PK\x03\x04"):
+    if "tar+" in media_type or media_type.endswith((".tar", ".tar.gz", ".tar.gzip", ".tgz")):
+        # A declared layer may be an empty TAR with no nonzero header. Keep
+        # that type hint while the shared reader validates the gzip trailer.
+        collector._scan_retained_payload(source, spool, key="content.tar", prefer_specific=prefer_specific)
+    elif needs_payload_reader(prefix, source):
+        collector._scan_retained_payload(source, spool, prefer_specific=prefer_specific)
+    elif "zip" in media_type:
         collector.scan_archive_file(source, spool, "zip")
     elif size <= min(collector.remaining, 1024 * 1024):
         body = spool.read()
@@ -1950,11 +2465,51 @@ def _scan_registry_blob(
     *,
     range_getter: Any | None = None,
 ) -> None:
+    category = next((name for name in ("config", "layer", "artifact") if "/" + name + "/" in source), "blob")
+    with collector.source_attempt(
+        collector.module + ".oci_" + category, scope="selected_images_decoded_payloads"
+    ) as evidence:
+
+        def tracked(*args: Any) -> Any:
+            result = getter(*args)
+            evidence.status = result[0]
+            return result
+
+        def tracked_range(*args: Any) -> Any:
+            assert range_getter is not None
+            result = range_getter(*args)
+            evidence.status = result[0]
+            return result
+
+        _read_registry_blob(
+            collector,
+            tracked,
+            repository,
+            digest,
+            source,
+            media_type,
+            range_getter=tracked_range if range_getter is not None else None,
+            evidence=evidence,
+        )
+
+
+def _read_registry_blob(
+    collector: DiscoveryCollector,
+    getter: Any,
+    repository: str,
+    digest: str,
+    source: str,
+    media_type: str,
+    *,
+    range_getter: Any | None,
+    evidence: SourceRead,
+) -> None:
     path = f"/v2/{quote(repository, safe='/')}/blobs/{quote(digest, safe=':')}"
     if range_getter is not None:
         with tempfile.SpooledTemporaryFile(max_size=min(collector.remaining, 1024 * 1024)) as spool:
             if _download_http_ranges(collector, range_getter, path, source, spool, expected_digest=digest):
                 _scan_spooled_blob(collector, spool, source, media_type)
+                evidence.accept()
         return
     # This legacy no-Range path is used only when the streaming adapter is
     # absent. Never turn the removed CLI byte budget into an unbounded HTTP
@@ -1976,6 +2531,7 @@ def _scan_registry_blob(
                 collector.partial(source, "binary_or_non_utf8")
                 return
         collector.add(source, value, charge=False)
+    evidence.accept()
 
 
 def _scan_registry_manifest(
@@ -1989,8 +2545,15 @@ def _scan_registry_manifest(
     range_getter: Any | None = None,
 ) -> None:
     source = f"image/{repository}/{reference}"
+
+    def invalid(reason: str) -> None:
+        collector.partial(source, reason)
+        if collector.source_manifest is not None:
+            collector.source_manifest.declare(collector.module + ".oci_manifests")
+            collector.source_manifest.finish(collector.module + ".oci_manifests", complete=False)
+
     if depth > 4:
-        collector.partial(source, "manifest_depth_limit")
+        invalid("manifest_depth_limit")
         return
     path = f"/v2/{quote(repository, safe='/')}/manifests/{quote(reference, safe=':')}"
     manifest = _registry_json(collector, getter, path, source + "/manifest")
@@ -2006,7 +2569,7 @@ def _scan_registry_manifest(
                     collector, getter, repository, digest, seen_blobs, depth=depth + 1, range_getter=range_getter
                 )
             else:
-                collector.partial(source, "invalid_child_manifest")
+                invalid("invalid_child_manifest")
         return
     for category, descriptors in (
         ("config", [manifest.get("config")]),
@@ -2014,11 +2577,11 @@ def _scan_registry_manifest(
         ("artifact", manifest.get("blobs") or []),
     ):
         if not isinstance(descriptors, list):
-            collector.partial(source, f"invalid_{category}_descriptors")
+            invalid(f"invalid_{category}_descriptors")
             continue
         for descriptor in descriptors:
             if not isinstance(descriptor, Mapping) or not descriptor.get("digest"):
-                collector.partial(source, f"invalid_{category}_descriptor")
+                invalid(f"invalid_{category}_descriptor")
                 continue
             digest = str(descriptor["digest"])
             if (repository, digest) in seen_blobs:
@@ -2043,17 +2606,27 @@ def _discover_nexus_assets(
     range_getter: Any | None = None,
     stream_headers: Mapping[str, str] | None = None,
 ) -> None:
-    repositories = collector.read(getter, "/service/rest/v1/repositories", "nexus/repositories")
-    if repositories is None:
-        return
-    try:
-        items = json.loads(repositories)
-    except (ValueError, UnicodeError):
-        collector.partial("nexus/repositories", "invalid_json")
-        return
-    if not isinstance(items, list):
-        collector.partial("nexus/repositories", "invalid_list")
-        return
+    with collector.source_attempt("nexus.repository_catalog_pages", scope="validated_JSON_responses") as evidence:
+
+        def tracked(*args: Any) -> Any:
+            result = getter(*args)
+            evidence.status = result[0]
+            return result
+
+        repositories = collector.read(tracked, "/service/rest/v1/repositories", "nexus/repositories")
+        if repositories is None:
+            return
+        try:
+            items = json.loads(repositories)
+        except (ValueError, UnicodeError):
+            collector.partial("nexus/repositories", "invalid_json")
+            return
+        if not isinstance(items, list):
+            collector.partial("nexus/repositories", "invalid_list")
+            return
+        if all(isinstance(item, Mapping) and item.get("name") for item in items):
+            collector.mark_accessible_source()
+            evidence.accept()
     selected_repo = str(getattr(ctx.args, "repository", "") or "")
     selected_asset = str(getattr(ctx.args, "asset", "") or "")
 
@@ -2074,6 +2647,7 @@ def _discover_nexus_assets(
             collector.add(f"nexus/repository/{name}/metadata", item, charge=False)
         continuation: str | None = None
         seen_tokens: set[str] = set()
+        catalog_complete = False
         while collector.allowed():
             query = {"repository": name}
             if continuation:
@@ -2084,14 +2658,17 @@ def _discover_nexus_assets(
                 break
             components = page.get("items")
             if not isinstance(components, list):
+                _catalog_incomplete(collector, "component_catalog_pages")
                 collector.partial(f"nexus/repository/{name}/components", "invalid_items")
                 break
             for component in components:
                 if not isinstance(component, Mapping):
+                    _catalog_incomplete(collector, "component_catalog_pages")
                     collector.partial(f"nexus/repository/{name}/components", "invalid_component")
                     continue
                 assets = component.get("assets") or []
                 if not isinstance(assets, list):
+                    _catalog_incomplete(collector, "component_catalog_pages")
                     collector.partial(f"nexus/repository/{name}/assets", "invalid_assets")
                     continue
                 if selected_asset:
@@ -2105,6 +2682,7 @@ def _discover_nexus_assets(
                 )
                 for asset in assets:
                     if not isinstance(asset, Mapping):
+                        _catalog_incomplete(collector, "component_catalog_pages")
                         collector.partial(f"nexus/repository/{name}/assets", "invalid_asset")
                         continue
                     asset_path = str(asset.get("path") or "")
@@ -2121,68 +2699,89 @@ def _discover_nexus_assets(
                     # never follow the advertised host or send credentials there.
                     source = f"nexus/repository/{name}/asset/{asset_path.lstrip('/')}"
                     asset_endpoint = parsed.path + ("?" + parsed.query if parsed.query else "")
-                    if range_getter is None:
-                        body = collector.read(getter, asset_endpoint, source)
-                        if body is None:
-                            continue
-                        with tempfile.SpooledTemporaryFile(max_size=min(collector.remaining, 1024 * 1024)) as spool:
-                            spool.write(body)
-                            _scan_spooled_blob(collector, spool, source, asset_path, prefer_specific=True)
-                    else:
-                        checksums = asset.get("checksum")
-                        digest = None
-                        if isinstance(checksums, Mapping):
-                            for algorithm in ("sha256", "sha1"):
-                                value = checksums.get(algorithm)
-                                if isinstance(value, str) and value:
-                                    digest = f"{algorithm}:{value.lower()}"
-                                    break
-                        with tempfile.SpooledTemporaryFile(max_size=min(collector.remaining, 1024 * 1024)) as spool:
-                            state = getattr(ctx, "lifecycle_state", None)
-                            pool = getattr(state, "http", None)
-                            if callable(getattr(pool, "request_stream", None)):
-                                from .clients.http_api import build_http_target_url
+                    with collector.source_attempt(
+                        "nexus.asset_contents", scope="selected_assets_decoded_payloads"
+                    ) as evidence:
 
-                                endpoint_path = str(getattr(state, "base_path", "") or "") + asset_endpoint
-                                asset_url = build_http_target_url(
-                                    str(getattr(state, "host", None) or ctx.host),
-                                    int(getattr(state, "port", None) or ctx.port),
-                                    endpoint_path,
-                                    default_scheme=str(
-                                        getattr(state, "scheme", None)
-                                        or ("https" if int(ctx.port) in {443, 5001} else "http")
-                                    ),
-                                )
-                                downloaded = _download_http_blob_stream(
-                                    collector,
-                                    pool,
-                                    asset_url,
-                                    source,
-                                    spool,
-                                    headers=stream_headers or {},
-                                    timeout=float(getattr(ctx.args, "timeout", 5.0) or 5.0),
-                                    expected_digest=digest,
-                                )
-                            else:
-                                downloaded = _download_http_ranges(
-                                    collector,
-                                    range_getter,
-                                    asset_endpoint,
-                                    source,
-                                    spool,
-                                    expected_digest=digest,
-                                    require_validator=True,
-                                )
-                            if downloaded:
+                        def tracked_getter(*args: Any) -> Any:
+                            result = getter(*args)
+                            evidence.status = result[0]
+                            return result
+
+                        def tracked_range(*args: Any) -> Any:
+                            assert range_getter is not None
+                            result = range_getter(*args)
+                            evidence.status = result[0]
+                            return result
+
+                        if range_getter is None:
+                            body = collector.read(tracked_getter, asset_endpoint, source)
+                            if body is None:
+                                continue
+                            with tempfile.SpooledTemporaryFile(max_size=min(collector.remaining, 1024 * 1024)) as spool:
+                                spool.write(body)
                                 _scan_spooled_blob(collector, spool, source, asset_path, prefer_specific=True)
+                                evidence.accept()
+                        else:
+                            checksums = asset.get("checksum")
+                            digest = None
+                            if isinstance(checksums, Mapping):
+                                for algorithm in ("sha256", "sha1"):
+                                    value = checksums.get(algorithm)
+                                    if isinstance(value, str) and value:
+                                        digest = f"{algorithm}:{value.lower()}"
+                                        break
+                            with tempfile.SpooledTemporaryFile(max_size=min(collector.remaining, 1024 * 1024)) as spool:
+                                state = getattr(ctx, "lifecycle_state", None)
+                                pool = getattr(state, "http", None)
+                                if callable(getattr(pool, "request_stream", None)):
+                                    from .clients.http_api import build_http_target_url
+
+                                    endpoint_path = str(getattr(state, "base_path", "") or "") + asset_endpoint
+                                    asset_url = build_http_target_url(
+                                        str(getattr(state, "host", None) or ctx.host),
+                                        int(getattr(state, "port", None) or ctx.port),
+                                        endpoint_path,
+                                        default_scheme=str(
+                                            getattr(state, "scheme", None)
+                                            or ("https" if int(ctx.port) in {443, 5001} else "http")
+                                        ),
+                                    )
+                                    downloaded = _download_http_blob_stream(
+                                        collector,
+                                        pool,
+                                        asset_url,
+                                        source,
+                                        spool,
+                                        headers=stream_headers or {},
+                                        timeout=float(getattr(ctx.args, "timeout", 5.0) or 5.0),
+                                        expected_digest=digest,
+                                        on_status=lambda status: setattr(evidence, "status", status),
+                                    )
+                                else:
+                                    downloaded = _download_http_ranges(
+                                        collector,
+                                        tracked_range,
+                                        asset_endpoint,
+                                        source,
+                                        spool,
+                                        expected_digest=digest,
+                                        require_validator=True,
+                                    )
+                                if downloaded:
+                                    _scan_spooled_blob(collector, spool, source, asset_path, prefer_specific=True)
+                                    evidence.accept()
             next_token = str(page.get("continuationToken") or "")
             if not next_token:
+                catalog_complete = True
                 break
             if next_token in seen_tokens:
                 collector.partial(f"nexus/repository/{name}/components", "repeated_page")
                 break
             seen_tokens.add(next_token)
             continuation = next_token
+        if not catalog_complete:
+            _catalog_incomplete(collector, "component_catalog_pages")
     if selected_asset and not matched_asset:
         collector.partial("nexus/asset", "selector_not_found")
 
@@ -2190,6 +2789,24 @@ def _discover_nexus_assets(
 def discover_registry_sources(ctx: Any, record: Mapping[str, Any], collector: DiscoveryCollector, product: str) -> None:
     """Read accessible Nexus assets and OCI manifests/configs/layers."""
     from .modules.registry import actions
+
+    if collector.source_manifest is None:
+        collector.source_manifest = SourceManifest()
+    for name in (
+        "oci_endpoint",
+        "repository_catalog_pages",
+        "tag_catalog_pages",
+        "oci_manifests",
+        "oci_config",
+        "oci_layer",
+        "oci_artifact",
+    ):
+        collector.source_manifest.declare(product + "." + name)
+    if product == "harbor":
+        collector.source_manifest.declare(product + ".project_catalog_pages")
+    if product == "nexus":
+        collector.source_manifest.declare(product + ".component_catalog_pages")
+        collector.source_manifest.declare(product + ".asset_contents")
 
     timeout = float(getattr(ctx.args, "timeout", 5.0) or 5.0)
     anonymous = record.get("status") in {"open_no_auth", "invalid_credentials_anonymous"}
@@ -2233,11 +2850,17 @@ def discover_registry_sources(ctx: Any, record: Mapping[str, Any], collector: Di
         # its OCI connector is hosted on another port. A 404 /v2 probe proves
         # this address cannot serve OCI manifests or blobs.
         if record.get("probe_status") == 404:
+            collector.source_manifest.request(product + ".oci_endpoint", scope="this_address_detect_probe")
+            collector.source_manifest.finish(product + ".oci_endpoint", complete=False, unsupported=True)
             if getattr(ctx.args, "image", None) or getattr(ctx.args, "tag", None):
                 collector.partial("nexus/oci", "OCI endpoint unavailable on this address")
             return
     if record.get("is_registry") is not True:
+        collector.source_manifest.request(product + ".oci_endpoint", scope="this_address_detect_probe")
+        collector.source_manifest.finish(product + ".oci_endpoint", complete=False, unsupported=True)
         return
+    collector.source_manifest.request(product + ".oci_endpoint", scope="this_address_detect_probe")
+    collector.source_manifest.finish(product + ".oci_endpoint", complete=True)
     image = str(getattr(ctx.args, "image", "") or "")
     repository = str(getattr(ctx.args, "repository", "") or "")
     tag = str(getattr(ctx.args, "tag", "") or "")
@@ -2382,6 +3005,24 @@ def discover_portainer_sources(
     """Read visible stack files and selected Docker environment data via Portainer."""
     from . import web_panels
     from .clients.http_session import HttpSessionPool
+    from .modules.portainer.discover import scan_container_logs
+
+    if collector.source_manifest is None:
+        collector.source_manifest = SourceManifest()
+    manifest = collector.source_manifest
+    for name in (
+        "container_logs",
+        "environment_metadata",
+        "container_catalog",
+        "stack_catalog",
+        "stack_files",
+        "container_inspect",
+        "swarm_config_catalog",
+        "swarm_config_contents",
+        "swarm_secret_metadata",
+    ):
+        manifest.declare("portainer." + name)
+    manifest.declare("portainer.swarm_secret_values", implemented=False)
 
     ui_value = record.get("ui")
     ui = ui_value if isinstance(ui_value, Mapping) else {}
@@ -2405,6 +3046,36 @@ def discover_portainer_sources(
             retries=0,
         )
     ) as pool:
+        last_status = 0
+
+        @contextmanager
+        def source_attempt(kind: str, scope: str = "selected_environments") -> Iterator[Callable[[int], None]]:
+            nonlocal last_status
+            manifest.request(kind, scope=scope)
+            before = collector.partial_events
+            last_status = 0
+            read_count: int | None = None
+            finished = False
+
+            def acknowledge(count: int = 1) -> None:
+                nonlocal read_count
+                read_count = count
+
+            try:
+                yield acknowledge
+                finished = True
+            except (NestedSchedulerCancelled, KeyboardInterrupt):
+                collector.partial(kind, "cancelled")
+                raise
+            finally:
+                complete = finished and read_count is not None and collector.partial_events == before
+                if complete:
+                    manifest.read(kind, read_count or 0)
+                manifest.finish(kind, complete=complete, denied=last_status in {401, 403})
+
+        def remember_status(status: int) -> None:
+            nonlocal last_status
+            last_status = status
 
         def get(path: str, cap: int) -> tuple[int, bytes, dict[str, str], str | None]:
             response = web_panels._get(
@@ -2415,6 +3086,7 @@ def discover_portainer_sources(
                 response_size_cap=cap,
                 timeout=min(timeout, max(0.001, collector.deadline - time.monotonic())),
             )
+            remember_status(response.status)
             response_headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
             if response.truncated:
                 response_headers["x-redposture-truncated"] = "true"
@@ -2424,7 +3096,7 @@ def discover_portainer_sources(
         streamed_secrets = object()
         swarm_unavailable = object()
 
-        def get_json(
+        def raw_json(
             path: str,
             source: str,
             *,
@@ -2446,6 +3118,7 @@ def discover_portainer_sources(
                     response_size_cap=cap,
                     timeout=min(timeout, max(0.001, collector.deadline - time.monotonic())),
                 )
+                remember_status(response.status)
                 if response.truncated and response.status == 200 and not response.error:
                     document = DiskJSONDocument()
                     stream_status = 0
@@ -2459,6 +3132,7 @@ def discover_portainer_sources(
                     def on_response(status: int, _received: Mapping[str, str]) -> None:
                         nonlocal stream_status
                         stream_status = status
+                        remember_status(status)
 
                     def on_chunk(chunk: bytes) -> None:
                         if stream_status != 200:
@@ -2524,8 +3198,15 @@ def discover_portainer_sources(
                     response_size_cap=cap,
                     timeout=min(timeout, max(0.001, collector.deadline - time.monotonic())),
                 )
+                remember_status(response.status)
                 if response.truncated:
                     excluded = {"GraphDriver", "HostnamePath", "HostsPath", "LogPath", "ResolvConfPath", "ShmPath"}
+                    inspected_tty: bool | None = None
+
+                    def inspect_primitive(parts: JSONPath, value: Any) -> None:
+                        nonlocal inspected_tty
+                        if parts == ("Config", "Tty") and type(value) is bool:
+                            inspected_tty = value
 
                     def skip(path_parts: JSONPath) -> bool:
                         return any(part in excluded for part in path_parts if isinstance(part, str)) or any(
@@ -2542,7 +3223,11 @@ def discover_portainer_sources(
                         root_kind="object",
                         exclude=skip,
                         prefer_specific=True,
+                        on_status=remember_status,
+                        on_primitive_value=inspect_primitive,
                     )
+                    if inspected_tty is not None:
+                        return {"Config": {"Tty": inspected_tty}}
                     return streamed
                 if response.error or response.status != 200:
                     collector.partial(
@@ -2589,6 +3274,7 @@ def discover_portainer_sources(
                             exclude=lambda _path: True,
                             required_containers={(): "array"},
                             row_validators={(): (frozenset({"ID", "Id"}), record_config)},
+                            on_status=remember_status,
                         )
                         if not complete and not rows:
                             return None
@@ -2610,6 +3296,7 @@ def discover_portainer_sources(
                             root_kind="array",
                             required_containers={(): "array"},
                             row_validators={(): (frozenset(), record_secret)},
+                            on_status=remember_status,
                             prefer_specific=True,
                         )
                         if not complete and not secret_count:
@@ -2626,13 +3313,41 @@ def discover_portainer_sources(
                 collector.partial(source, "invalid_json")
                 return None
 
+        def get_json(path: str, source: str, **kwargs: Any) -> Any:
+            if path == "/api/stacks":
+                kind, array = "portainer.stack_catalog", True
+            elif path.endswith("/json"):
+                kind, array = "portainer.container_inspect", False
+            elif path.endswith("/configs"):
+                kind, array = "portainer.swarm_config_catalog", True
+            elif path.endswith("/secrets"):
+                kind, array = "portainer.swarm_secret_metadata", True
+            else:
+                return raw_json(path, source, **kwargs)
+            with source_attempt(kind) as acknowledge:
+                result = raw_json(path, source, **kwargs)
+                if result is streamed or result is streamed_secrets:
+                    acknowledge(1)  # One fully parsed wire source, catalog row count may be disk-backed.
+                elif isinstance(result, list if array else Mapping):
+                    acknowledge(len(result) if isinstance(result, list) else 1)
+                elif result is not None and result is not swarm_unavailable:
+                    collector.partial(source, "invalid_list" if array else "invalid_inspect")
+                return result
+
         environments = inventory.get("environments")
         env_records = environments.get("records") if isinstance(environments, Mapping) else None
+        manifest.request("portainer.environment_metadata", scope="selected_inventory")
         if not isinstance(env_records, list):
+            manifest.finish("portainer.environment_metadata", complete=False)
             collector.partial("portainer/environments", "inventory_unavailable")
             return
         if not env_records:
             collector.partial("portainer/environments", "no_accessible_environments (access_denied_or_none)")
+        env_complete = (
+            isinstance(environments, Mapping) and not environments.get("partial") and not environments.get("status")
+        )
+        manifest.read("portainer.environment_metadata", len(env_records))
+        manifest.finish("portainer.environment_metadata", complete=bool(env_complete))
         for environment in env_records:
             if isinstance(environment, Mapping):
                 collector.add(
@@ -2649,50 +3364,66 @@ def discover_portainer_sources(
                 collector.add(f"portainer/stack/{stack_id}/metadata", stack, charge=False, prefer_specific=True)
                 stack_path = f"/api/stacks/{stack_id}/file"
                 stack_source = f"portainer/stack/{stack_id}/file"
-                stack_cap = collector.cap(10 * 1024 * 1024)
-                if stack_cap:
-                    stack_response = web_panels._get(
-                        pool,
-                        base,
-                        stack_path,
-                        headers=headers,
-                        response_size_cap=stack_cap,
-                        timeout=min(timeout, max(0.001, collector.deadline - time.monotonic())),
-                    )
-                    if stack_response.truncated:
-                        collector.stream_json_text_field(
+                with source_attempt("portainer.stack_files") as acknowledge:
+                    stack_cap = collector.cap(10 * 1024 * 1024)
+                    if stack_cap:
+                        stack_response = web_panels._get(
                             pool,
-                            base.rstrip("/") + stack_path,
-                            stack_source,
-                            "StackFileContent",
+                            base,
+                            stack_path,
                             headers=headers,
-                            timeout=timeout,
-                            prefer_specific=True,
+                            response_size_cap=stack_cap,
+                            timeout=min(timeout, max(0.001, collector.deadline - time.monotonic())),
                         )
-                    elif stack_response.error or stack_response.status != 200:
-                        collector.partial(
-                            stack_source,
-                            "access_denied"
-                            if stack_response.status in {401, 403}
-                            else stack_response.error or f"HTTP {stack_response.status}",
-                        )
-                    elif collector.charge(len(stack_response.body)):
-                        try:
-                            stack_file = json.loads(stack_response.body)
-                        except (ValueError, UnicodeError):
-                            collector.partial(stack_source, "invalid_json")
-                        else:
-                            if isinstance(stack_file, Mapping) and isinstance(stack_file.get("StackFileContent"), str):
-                                collector.add(
-                                    stack_source, stack_file["StackFileContent"], charge=False, prefer_specific=True
-                                )
+                        remember_status(stack_response.status)
+                        if stack_response.truncated:
+                            collector.stream_json_text_field(
+                                pool,
+                                base.rstrip("/") + stack_path,
+                                stack_source,
+                                "StackFileContent",
+                                headers=headers,
+                                timeout=timeout,
+                                prefer_specific=True,
+                            )
+                        elif stack_response.error or stack_response.status != 200:
+                            collector.partial(
+                                stack_source,
+                                "access_denied"
+                                if stack_response.status in {401, 403}
+                                else stack_response.error or f"HTTP {stack_response.status}",
+                            )
+                        elif collector.charge(len(stack_response.body)):
+                            try:
+                                stack_file = json.loads(stack_response.body)
+                            except (ValueError, UnicodeError):
+                                collector.partial(stack_source, "invalid_json")
                             else:
-                                collector.partial(stack_source, "file_content_unavailable")
+                                if isinstance(stack_file, Mapping) and isinstance(
+                                    stack_file.get("StackFileContent"), str
+                                ):
+                                    collector.add(
+                                        stack_source, stack_file["StackFileContent"], charge=False, prefer_specific=True
+                                    )
+                                else:
+                                    collector.partial(stack_source, "file_content_unavailable")
+                    if stack_cap:
+                        acknowledge(1)
         elif stacks is not None:
             collector.partial("portainer/stacks", "invalid_list")
 
         containers = inventory.get("containers")
         container_records = containers.get("records") if isinstance(containers, Mapping) else None
+        manifest.request("portainer.container_catalog", scope="selected_inventory")
+        catalog_complete = (
+            isinstance(container_records, list)
+            and isinstance(containers, Mapping)
+            and not containers.get("partial")
+            and not containers.get("status")
+        )
+        manifest.finish("portainer.container_catalog", complete=bool(catalog_complete))
+        if catalog_complete and isinstance(container_records, list):
+            manifest.read("portainer.container_catalog", len(container_records))
         if not isinstance(container_records, list) and env_records:
             collector.partial("portainer/containers", "inventory_unavailable")
             container_records = []
@@ -2701,6 +3432,13 @@ def discover_portainer_sources(
         selected_ids = {
             int(item["Id"]) for item in env_records if isinstance(item, Mapping) and type(item.get("Id")) is int
         }
+        if (
+            not container_records
+            and isinstance(containers, Mapping)
+            and not containers.get("partial")
+            and not containers.get("status")
+        ):
+            manifest.request("portainer.container_logs", scope="selected_environments_empty_container_catalog")
         for container in container_records:
             if not isinstance(container, Mapping):
                 continue
@@ -2715,12 +3453,36 @@ def discover_portainer_sources(
                 source,
                 stream_large=True,
             )
-            if data is streamed:
-                continue
             if isinstance(data, Mapping):
                 collector.add(source, _portainer_discovery_view(data), charge=False, prefer_specific=True)
-            elif data is not None:
+            elif data is not None and data is not streamed:
                 collector.partial(source, "invalid_inspect")
+            if collector.allowed():
+                manifest.request("portainer.container_logs", scope="selected_environments")
+                config = data.get("Config") if isinstance(data, Mapping) else None
+                tty = config.get("Tty") if isinstance(config, Mapping) else None
+                tty = tty if type(tty) is bool else None
+                logs_path = f"/api/endpoints/{endpoint_id}/docker/containers/{quote(container_id, safe='')}/logs"
+                logs_path += "?stdout=1&stderr=1&timestamps=0&follow=0&tail=all"
+                with collector.source_guard(manifest, "portainer.container_logs"):
+                    before_logs = collector.bytes_read
+                    ok, status = scan_container_logs(
+                        collector,
+                        pool,
+                        base.rstrip("/") + logs_path,
+                        source + "/logs",
+                        tty=tty,
+                        headers=headers,
+                        timeout=timeout,
+                    )
+                    if status == 200 and collector.bytes_read >= before_logs:
+                        manifest.read("portainer.container_logs")
+                    manifest.finish(
+                        "portainer.container_logs",
+                        complete=ok,
+                        denied=status in {401, 403},
+                        unsupported=status in {404, 405, 501},
+                    )
 
         for endpoint_id in sorted(selected_ids):
             source = f"portainer/environment/{endpoint_id}"
@@ -2735,6 +3497,7 @@ def discover_portainer_sources(
                 swarm = info.get("Swarm") if isinstance(info, Mapping) else None
                 if isinstance(swarm, Mapping) and str(swarm.get("LocalNodeState") or "").lower() == "inactive":
                     # Neither configs nor secrets exist on Docker Standalone.
+                    manifest.finish("portainer.swarm_config_catalog", complete=False, unsupported=True)
                     continue
                 collector.partial(source + "/configs", "HTTP 503")
             if isinstance(configs, list):
@@ -2749,71 +3512,76 @@ def discover_portainer_sources(
                             continue
                         if not seen_configs.claim(config_id):
                             continue
-                        detail = get_json(
-                            f"/api/endpoints/{endpoint_id}/docker/configs/{quote(config_id, safe='')}",
-                            source + f"/config/{config_id}",
-                            stream_document=True,
-                        )
-                        if isinstance(detail, Mapping):
-                            spec = detail.get("Spec")
-                            encoded = spec.get("Data") if isinstance(spec, Mapping) else None
-                            if isinstance(detail, DiskContainer):
-                                metadata: Mapping[str, Any] = _PortainerConfigMetadataView(detail, "")
-                            else:
-                                ordinary_metadata = dict(detail)
-                                if isinstance(spec, Mapping):
-                                    ordinary_metadata["Spec"] = {
-                                        key: value for key, value in spec.items() if key != "Data"
-                                    }
-                                metadata = ordinary_metadata
-                            collector.add(
-                                source + f"/config/{config_id}/metadata", metadata, charge=False, prefer_specific=True
+                        with source_attempt("portainer.swarm_config_contents") as acknowledge:
+                            detail = get_json(
+                                f"/api/endpoints/{endpoint_id}/docker/configs/{quote(config_id, safe='')}",
+                                source + f"/config/{config_id}",
+                                stream_document=True,
                             )
-                            if isinstance(encoded, DiskBackedText):
-                                decoded_value = DiskBackedText()
-                                decoder = codecs.getincrementaldecoder("utf-8")("replace")
-                                pending = ""
-                                completed = False
-                                try:
-                                    for part in encoded.iter_text_chunks():
-                                        if not collector.allowed():
-                                            break
-                                        pending += part
-                                        whole = len(pending) - len(pending) % 4
-                                        if whole:
-                                            decoded = base64.b64decode(pending[:whole], validate=True)
-                                            decoded_value.append_text(decoder.decode(decoded))
-                                            collector.bytes_read += len(decoded)
-                                            pending = pending[whole:]
-                                    else:
-                                        if pending:
-                                            raise ValueError("incomplete base64")
-                                        decoded_value.append_text(decoder.decode(b"", final=True))
-                                        decoded_value.finish()
-                                        completed = True
-                                        collector.scan_disk_text(
-                                            source + f"/config/{config_id}/value", decoded_value, prefer_specific=True
-                                        )
-                                except ValueError:
-                                    collector.partial(source + f"/config/{config_id}", "invalid_base64")
-                                finally:
-                                    if not completed:
-                                        decoded_value.close()
-                            elif isinstance(encoded, str):
-                                try:
-                                    decoded = base64.b64decode(encoded, validate=True)
-                                except ValueError:
-                                    collector.partial(source + f"/config/{config_id}", "invalid_base64")
+                            if isinstance(detail, Mapping):
+                                spec = detail.get("Spec")
+                                encoded = spec.get("Data") if isinstance(spec, Mapping) else None
+                                if isinstance(detail, DiskContainer):
+                                    metadata: Mapping[str, Any] = _PortainerConfigMetadataView(detail, "")
                                 else:
-                                    if collector.charge(len(decoded)):
-                                        collector.add(
-                                            source + f"/config/{config_id}/value",
-                                            decoded.decode("utf-8", "replace"),
-                                            charge=False,
-                                            prefer_specific=True,
-                                        )
-                        elif detail is not None:
-                            collector.partial(source + f"/config/{config_id}", "invalid_inspect")
+                                    ordinary_metadata = dict(detail)
+                                    if isinstance(spec, Mapping):
+                                        ordinary_metadata["Spec"] = {
+                                            key: value for key, value in spec.items() if key != "Data"
+                                        }
+                                    metadata = ordinary_metadata
+                                collector.add(
+                                    source + f"/config/{config_id}/metadata",
+                                    metadata,
+                                    charge=False,
+                                    prefer_specific=True,
+                                )
+                                if isinstance(encoded, DiskBackedText):
+                                    # Data is arbitrary config bytes, not necessarily
+                                    # UTF-8. Decode base64 before the shared format
+                                    # dispatcher, without replacement characters.
+                                    with tempfile.SpooledTemporaryFile(max_size=65536) as decoded_file:
+                                        pending = ""
+                                        try:
+                                            for part in encoded.iter_text_chunks():
+                                                if not collector.allowed():
+                                                    break
+                                                pending += part
+                                                whole = len(pending) - len(pending) % 4
+                                                if whole:
+                                                    decoded = base64.b64decode(pending[:whole], validate=True)
+                                                    decoded_file.write(decoded)
+                                                    collector.bytes_read += len(decoded)
+                                                    pending = pending[whole:]
+                                            else:
+                                                if pending:
+                                                    raise ValueError("incomplete base64")
+                                                decoded_file.seek(0)
+                                                collector._scan_retained_payload(
+                                                    source + f"/config/{config_id}/value",
+                                                    decoded_file,
+                                                    prefer_specific=True,
+                                                )
+                                        except ValueError:
+                                            collector.partial(source + f"/config/{config_id}", "invalid_base64")
+                                elif isinstance(encoded, str):
+                                    try:
+                                        decoded = base64.b64decode(encoded, validate=True)
+                                    except ValueError:
+                                        collector.partial(source + f"/config/{config_id}", "invalid_base64")
+                                    else:
+                                        if collector.charge(len(decoded)):
+                                            collector.add(
+                                                source + f"/config/{config_id}/value",
+                                                decoded,
+                                                charge=False,
+                                                prefer_specific=True,
+                                            )
+                                else:
+                                    collector.partial(source + f"/config/{config_id}", "config_data_unavailable")
+                                acknowledge(1)
+                            elif detail is not None:
+                                collector.partial(source + f"/config/{config_id}", "invalid_inspect")
             elif configs is not None:
                 collector.partial(source + "/configs", "invalid_list")
             secrets = get_json(
@@ -2824,6 +3592,9 @@ def discover_portainer_sources(
             )
             if secrets is swarm_unavailable:
                 collector.partial(source + "/secrets", "HTTP 503")
+            if secrets is streamed_secrets or isinstance(secrets, list) and secrets:
+                manifest.request("portainer.swarm_secret_values", implemented=False, scope="API_exposes_metadata_only")
+                manifest.finish("portainer.swarm_secret_values", complete=False, unsupported=True)
             if secrets is streamed_secrets:
                 collector.partial(source + "/secrets", "secret_values_not_exposed_by_api")
             if isinstance(secrets, list) and secrets:

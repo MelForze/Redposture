@@ -7,7 +7,7 @@ import json
 import re
 import threading
 import time
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing
 from dataclasses import replace
 from typing import Any
@@ -25,6 +25,7 @@ from ...clients.http_session import HttpSessionPool
 from ...clients.scoped_http import HttpLifecycleState, ScopedHttpClient
 from ...detection_steps import DetectionRequests, run_requests
 from ...discovery_frontier import DiscoveryFrontier
+from ...discovery_sources import SourceManifest
 from ...discovery_spool import SpoolingFindings, SpoolingRecords
 from ...html_fingerprint import markup_evidence
 from ...storage_discovery import DiscoveryCollector
@@ -576,6 +577,28 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     args = ctx.args
     discover = bool(getattr(args, "discover", False))
     collector = DiscoveryCollector("jenkins", ctx, prior) if discover else None
+    source_manifest = SourceManifest()
+    if discover:
+        for kind in ("artifact_contents", "job_catalog", "job_configs", "build_logs", "build_envs"):
+            source_manifest.declare("jenkins." + kind)
+        assert collector is not None
+        collector.source_manifest = source_manifest
+    source_started: dict[str, int] = {}
+
+    def begin_source(kind: str, scope: str) -> None:
+        source_manifest.request(kind, scope=scope)
+        assert collector is not None
+        source_started[kind] = collector.partial_events
+
+    def finish_source(kind: str, *, ok: bool, status: int | None = None, unsupported: bool = False) -> None:
+        if ok:
+            source_manifest.read(kind)
+        source_manifest.finish(
+            kind,
+            complete=ok and collector is not None and collector.partial_events == source_started.get(kind),
+            denied=status in {401, 403},
+            unsupported=unsupported,
+        )
 
     def incomplete(reason: str, resource: str = "jobs", *, collector_reason: str | None = None) -> None:
         result[resource + "_partial"] = True
@@ -604,7 +627,12 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         else None
     )
 
-    def stream_discovery_text(path: str, source: str) -> bool | None:
+    def stream_discovery_text(
+        path: str,
+        source: str,
+        media_type: str = "",
+        on_status: Callable[[int], None] | None = None,
+    ) -> bool | None:
         if collector is None or not isinstance(client, ScopedHttpClient):
             return None
         pool = client.pool
@@ -621,7 +649,26 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             timeout=float(getattr(args, "timeout", 5.0) or 5.0),
             allow_cross_origin_redirects=False,
             prefer_specific=True,
+            media_type=media_type,
+            on_status=on_status,
         )
+
+    def read_artifact(path: str, source: str, media_type: str) -> tuple[bool, int | None]:
+        assert collector is not None
+        statuses: list[int] = []
+        streamed = stream_discovery_text(path, source, media_type, statuses.append)
+        if streamed is not None:
+            return streamed, statuses[-1] if statuses else None
+        response = _get_discovery(client, base, path, basic, collector)
+        if response is None or response.error or response.status != 200:
+            collector.partial(
+                source,
+                "access_denied"
+                if response is not None and response.status in {401, 403}
+                else "artifact_content_unavailable",
+            )
+            return False, response.status if response is not None else None
+        return collector.add(source, response.body, charge=False, prefer_specific=True), response.status
 
     if show_jobs:
         result["jobs_requested"] = show_jobs
@@ -632,17 +679,35 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             else "jobs[name,url,color,lastBuild[number,result]]"
         )
         if collector is not None:
+            source_manifest.request("jenkins.job_catalog", scope="selected_jobs")
+            catalog_events = collector.partial_events
             jobs, response = _discovery_jobs(client, base, "/api/json?tree=" + job_tree, basic, collector)
         else:
             response = _get(client, base, "/api/json?tree=" + job_tree, basic)
             jobs = _entries(_json_object(response), "jobs")
         if jobs is None:
+            if discover:
+                source_manifest.finish(
+                    "jenkins.job_catalog", complete=False, denied=response is not None and response.status in {401, 403}
+                )
             result["jobs_access"] = "denied" if response is not None and response.status in {401, 403} else "unknown"
             incomplete(
                 "jobs list unavailable",
                 collector_reason="access_denied" if response is not None and response.status in {401, 403} else None,
             )
         else:
+            if discover:
+                source_manifest.read("jenkins.job_catalog", len(jobs))
+                source_manifest.finish(
+                    "jenkins.job_catalog",
+                    complete=collector is not None
+                    and collector.partial_events == catalog_events
+                    and response is not None
+                    and response.status == 200
+                    and not response.error
+                    and not response.truncated,
+                    denied=response is not None and response.status in {401, 403},
+                )
             discovery_job_limit = (
                 len(jobs)
                 if discover and type(getattr(args, "show_jobs", None)) is not int
@@ -686,18 +751,32 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                         incomplete("discover budget exhausted")
                         break
                     config_source = f"job.{job_name}.config"
-                    config_streamed = stream_discovery_text(path + "/config.xml", config_source)
+                    begin_source("jenkins.job_configs", "selected_jobs")
+                    config_statuses: list[int] = []
+                    config_streamed = stream_discovery_text(
+                        path + "/config.xml", config_source, on_status=config_statuses.append
+                    )
                     config_response = (
                         _get_discovery(client, base, path + "/config.xml", basic, collector)
                         if config_streamed is None
                         else None
                     )
                     if config_streamed is True:
-                        pass
+                        finish_source("jenkins.job_configs", ok=True)
                     elif config_response is not None and config_response.status == 200 and not config_response.error:
                         job_configs.append({"job": job_name, "config": config_response.text})
                         collector.add(config_source, config_response.text, charge=False, prefer_specific=True)
+                        finish_source("jenkins.job_configs", ok=True)
                     else:
+                        finish_source(
+                            "jenkins.job_configs",
+                            ok=False,
+                            status=config_response.status
+                            if config_response is not None
+                            else config_statuses[-1]
+                            if config_statuses
+                            else None,
+                        )
                         incomplete(
                             f"{job_name}: config unavailable (HTTP {config_response.status if config_response else 'budget'})"
                         )
@@ -705,12 +784,29 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                         break
                     job_class = str(item.get("_class") or "").lower()
                     if "folder" in job_class or "multibranch" in job_class:
+                        source_manifest.request("jenkins.job_catalog", scope="selected_jobs_recursive")
+                        child_catalog_events = collector.partial_events
                         children, children_response = _discovery_jobs(
                             client, base, path + "/api/json?tree=" + job_tree, basic, collector
                         )
                         if children is None:
+                            source_manifest.finish(
+                                "jenkins.job_catalog",
+                                complete=False,
+                                denied=children_response is not None and children_response.status in {401, 403},
+                            )
                             incomplete(f"{job_name}: nested jobs unavailable")
                         else:
+                            source_manifest.read("jenkins.job_catalog", len(children))
+                            source_manifest.finish(
+                                "jenkins.job_catalog",
+                                complete=collector.partial_events == child_catalog_events
+                                and children_response is not None
+                                and children_response.status == 200
+                                and not children_response.error
+                                and not children_response.truncated,
+                                denied=children_response is not None and children_response.status in {401, 403},
+                            )
                             for child in children:
                                 child_name = child.get("name")
                                 if not isinstance(child_name, str) or not child_name:
@@ -752,26 +848,65 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                             incomplete("discover budget exhausted")
                             break
                         log_source = f"job.{job_name}.build.{number}.log"
-                        log_streamed = stream_discovery_text(path + f"/{number}/consoleText", log_source)
+                        begin_source("jenkins.build_logs", "selected_jobs_builds")
+                        log_statuses: list[int] = []
+                        log_streamed = stream_discovery_text(
+                            path + f"/{number}/consoleText", log_source, on_status=log_statuses.append
+                        )
                         log_response = (
                             _get_discovery(client, base, path + f"/{number}/consoleText", basic, collector)
                             if log_streamed is None
                             else None
                         )
                         if log_streamed is True:
-                            pass
+                            finish_source("jenkins.build_logs", ok=True)
                         elif log_response is not None and log_response.status == 200 and not log_response.error:
                             build_logs.append({"job": job_name, "build": number, "log": log_response.text})
                             collector.add(log_source, log_response.text, charge=False, prefer_specific=True)
+                            finish_source("jenkins.build_logs", ok=True)
                         else:
+                            finish_source(
+                                "jenkins.build_logs",
+                                ok=False,
+                                status=log_response.status
+                                if log_response is not None
+                                else log_statuses[-1]
+                                if log_statuses
+                                else None,
+                            )
                             incomplete(
                                 f"{job_name}/{number}: console unavailable (HTTP {log_response.status if log_response else 'budget'})"
                             )
                         if not collector.allowed():
                             break
+                        from .discover import scan_build_artifacts
+
+                        artifact_count = getattr(args, "show_artifacts", None)
+
+                        def build_artifact_path(
+                            relative: str,
+                            job_path: str = path,
+                            build_number: int = number,
+                        ) -> str | None:
+                            return _artifact_url("", job_path, build_number, relative)
+
+                        scan_build_artifacts(
+                            collector,
+                            build_path=path + f"/{number}",
+                            source=f"job.{job_name}.build.{number}",
+                            get_page=lambda artifact_page: _get_discovery(
+                                client, base, artifact_page, basic, collector, allow_truncated=True
+                            ),
+                            artifact_path=build_artifact_path,
+                            read_content=read_artifact,
+                            manifest=source_manifest,
+                            limit=artifact_count if type(artifact_count) is int else None,
+                        )
                         env_path = path + f"/{number}/injectedEnvVars/api/json"
+                        begin_source("jenkins.build_envs", "injected_env_plugin_selected_builds")
                         env_response = _get_discovery(client, base, env_path, basic, collector, allow_truncated=True)
                         if env_response is not None and env_response.truncated:
+                            env_statuses = [env_response.status]
                             if isinstance(client, ScopedHttpClient) and collector.stream_json_scalars(
                                 client.pool,
                                 base + env_path,
@@ -779,11 +914,14 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                                 headers={"Accept": "application/json", **({"Authorization": basic} if basic else {})},
                                 timeout=float(getattr(args, "timeout", 5.0) or 5.0),
                                 root_kind="object",
+                                on_status=env_statuses.append,
                                 exclude=lambda source_path: not source_path or source_path[0] != "envMap",
                                 required_containers={(): "object", ("envMap",): "object"},
                                 prefer_specific=True,
                             ):
+                                finish_source("jenkins.build_envs", ok=True)
                                 continue
+                            finish_source("jenkins.build_envs", ok=False, status=env_statuses[-1])
                             incomplete(f"{job_name}/{number}: environment stream unavailable")
                             continue
                         env_data = _json_object(env_response) if env_response is not None else None
@@ -794,12 +932,21 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                                 collector.add(
                                     f"job.{job_name}.build.{number}.env", env_map, charge=False, prefer_specific=True
                                 )
+                                finish_source("jenkins.build_envs", ok=True)
                             else:
+                                finish_source("jenkins.build_envs", ok=False)
                                 incomplete(f"{job_name}/{number}: invalid environment map")
                         elif env_response is None or env_response.status != 404:
+                            finish_source(
+                                "jenkins.build_envs",
+                                ok=False,
+                                status=env_response.status if env_response is not None else None,
+                            )
                             incomplete(
                                 f"{job_name}/{number}: environment unavailable (HTTP {env_response.status if env_response else 'budget'})"
                             )
+                        else:
+                            finish_source("jenkins.build_envs", ok=False, status=404, unsupported=True)
                 result["jobs_count"] = len(result["jobs"])
                 for spool in (result["jobs"], job_configs, build_logs, build_envs, pending, visited):
                     spool.finish()
@@ -926,6 +1073,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             result["queue_access"] = "allowed"
     if collector is not None:
         result["content_discovery"] = collector.result()
+        result["content_discovery"]["sources"] = source_manifest.result()
     return result
 
 

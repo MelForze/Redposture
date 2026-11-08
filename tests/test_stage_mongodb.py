@@ -77,8 +77,14 @@ def test_mongodb_discovery_scans_each_cursor_document_before_next_read() -> None
         discovery_collector=collector,
     )
     assert result["content_discovery"]["status"] == "complete"
-    assert len(result["content_discovery"]["findings"]) == 2
-    assert any(item["type"] == "gitlab_token" for item in result["content_discovery"]["findings"])
+    findings = result["content_discovery"]["findings"]
+    # Generic-field and provider evidence describe the same value at one
+    # source, rather than two independently discovered secrets.
+    assert len(findings) == 1
+    assert findings[0]["type"] == "gitlab_token"
+    assert findings[0]["value"] == "glpat-abcdefghijklmnopqrst"
+    assert findings[0]["occurrence_count"] == 1
+    assert len(findings[0]["locations"]) == 1
     assert len(result["documents"]) == 2
 
 

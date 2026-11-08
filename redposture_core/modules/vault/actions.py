@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import re
+from contextlib import nullcontext
 from typing import Any
 from urllib.parse import quote
 
@@ -16,6 +17,7 @@ from ...clients.http_api import (
 from ...clients.scoped_http import ScopedHttpClient
 from ...detection_steps import DetectionRequests, run_requests
 from ...discovery_frontier import DiscoveryFrontier
+from ...discovery_sources import SourceManifest
 from ...discovery_spool import SpoolingRecords
 from ...discovery_values import DiskBackedText
 from ...json_stream import JSONPath, JSONScalarStream
@@ -511,112 +513,169 @@ def _discover_kv(
         if not isinstance(name, str):
             partial = True
             continue
-        if (selected and name != selected) or mount.get("type") != "kv":
+        mount_type = mount.get("type")
+        if (selected and name != selected) or mount_type not in {"kv", "cubbyhole", "generic"}:
             continue
         if not safe_vault_path(name) or name.startswith("/"):
             partial = True
             continue
-        version = str(mount.get("options", {}).get("version") or "1")
+        source_kind = "vault.cubbyhole" if mount_type == "cubbyhole" else "vault.kv"
+        manifest = collector.source_manifest
+        if manifest is not None:
+            manifest.request(source_kind)
+        before_errors = collector.partial_events
+        before_reasons = len(reasons)
+        version = str(mount.get("options", {}).get("version") or "1") if mount_type == "kv" else "1"
         listing = "metadata" if version == "2" else ""
         content = "data" if version == "2" else ""
-        with DiscoveryFrontier() as frontier:
-            frontier.enqueue("d:")
-            while (queued := frontier.pop()) is not None:
-                if not budget.allowed():
-                    partial = True
-                    reasons.append("discover_time")
-                    return items, read_count, snapshot_partial, partial, reasons
-                full = queued[2:]
-                if queued.startswith("d:"):
-                    list_path = f"/v1/{quote(name, safe='/')}{listing + '/' if listing else ''}{quote(full, safe='/')}"
-                    response = _request(
-                        budget.scoped(client), base, list_path, token=token, method="LIST", timeout=budget.timeout()
-                    )
-                    if response.status == 200 and response.truncated and not response.error:
-                        streamed = _stream_kv_keys(client, base, list_path, token, name, full, budget, frontier)
-                        if not streamed:
-                            partial = True
-                            reasons.append("incomplete KV key listing")
-                        collector.mark_accessible_source()
-                        continue
-                    if not budget.consume(response):
-                        return items, read_count, snapshot_partial, True, ["response or byte limit"]
-                    if response.status == 405 and budget.allowed():
+        with collector.source_guard(manifest, source_kind) if manifest is not None else nullcontext():
+            with DiscoveryFrontier() as frontier:
+                frontier.enqueue("d:")
+                while (queued := frontier.pop()) is not None:
+                    if not budget.allowed():
+                        partial = True
+                        reasons.append("discover_time")
+                        if manifest is not None:
+                            manifest.finish(source_kind, complete=False)
+                        return items, read_count, snapshot_partial, partial, reasons
+                    full = queued[2:]
+                    if queued.startswith("d:"):
+                        list_path = (
+                            f"/v1/{quote(name, safe='/')}{listing + '/' if listing else ''}{quote(full, safe='/')}"
+                        )
                         response = _request(
-                            budget.scoped(client), base, list_path + "?list=true", token=token, timeout=budget.timeout()
+                            budget.scoped(client), base, list_path, token=token, method="LIST", timeout=budget.timeout()
                         )
                         if response.status == 200 and response.truncated and not response.error:
                             streamed = _stream_kv_keys(client, base, list_path, token, name, full, budget, frontier)
                             if not streamed:
                                 partial = True
+                                if manifest is not None:
+                                    manifest.finish(source_kind, complete=False)
                                 reasons.append("incomplete KV key listing")
                             collector.mark_accessible_source()
                             continue
                         if not budget.consume(response):
+                            if manifest is not None:
+                                manifest.finish(source_kind, complete=False)
                             return items, read_count, snapshot_partial, True, ["response or byte limit"]
-                    data = _json(response)
-                    keys = (
-                        data.get("data", {}).get("keys")
-                        if isinstance(data, dict) and isinstance(data.get("data"), dict)
-                        else None
-                    )
-                    if response.status != 200 or not isinstance(keys, list):
-                        partial = True
-                        reasons.append(f"{name}{full}: list {response.status or 'error'}")
-                        continue
-                    collector.mark_accessible_source()
-                    for key in keys:
-                        if not _enqueue_kv_key(frontier, name, full, key):
+                        if response.status == 405 and budget.allowed():
+                            response = _request(
+                                budget.scoped(client),
+                                base,
+                                list_path + "?list=true",
+                                token=token,
+                                timeout=budget.timeout(),
+                            )
+                            if response.status == 200 and response.truncated and not response.error:
+                                streamed = _stream_kv_keys(client, base, list_path, token, name, full, budget, frontier)
+                                if not streamed:
+                                    partial = True
+                                    if manifest is not None:
+                                        manifest.finish(source_kind, complete=False)
+                                    reasons.append("incomplete KV key listing")
+                                collector.mark_accessible_source()
+                                continue
+                            if not budget.consume(response):
+                                if manifest is not None:
+                                    manifest.finish(source_kind, complete=False)
+                                return items, read_count, snapshot_partial, True, ["response or byte limit"]
+                        data = _json(response)
+                        if (
+                            mount_type == "cubbyhole"
+                            and response.status == 404
+                            and not full
+                            and isinstance(data, dict)
+                            and data.get("errors") == []
+                        ):
+                            collector.mark_accessible_source()
+                            continue
+                        keys = (
+                            data.get("data", {}).get("keys")
+                            if isinstance(data, dict) and isinstance(data.get("data"), dict)
+                            else None
+                        )
+                        if response.status != 200 or not isinstance(keys, list):
                             partial = True
-                    continue
-                read_path = f"/v1/{quote(name, safe='/')}{content + '/' if content else ''}{quote(full, safe='/')}"
-                read = _request(budget.scoped(client), base, read_path, token=token, timeout=budget.timeout())
-                if read.status == 200 and read.truncated and not read.error:
-                    if not callable(getattr(client.pool, "request_stream", None)):
-                        return items, read_count, snapshot_partial, True, ["incomplete KV value"]
-                    headers = {"Accept": "application/json"}
-                    if token:
-                        headers["X-Vault-Token"] = token
-                    value_path: JSONPath = ("data", "data") if version == "2" else ("data",)
+                            if manifest is not None:
+                                manifest.finish(source_kind, complete=False, denied=response.status in {401, 403})
+                            denied = " access_denied" if response.status in {401, 403} else ""
+                            reasons.append(f"{name}{full}: list {response.status or 'error'}{denied}")
+                            continue
+                        collector.mark_accessible_source()
+                        for key in keys:
+                            if not _enqueue_kv_key(frontier, name, full, key):
+                                partial = True
+                                if manifest is not None:
+                                    manifest.finish(source_kind, complete=False)
+                        continue
+                    read_path = f"/v1/{quote(name, safe='/')}{content + '/' if content else ''}{quote(full, safe='/')}"
+                    read = _request(budget.scoped(client), base, read_path, token=token, timeout=budget.timeout())
+                    if read.status == 200 and read.truncated and not read.error:
+                        if not callable(getattr(client.pool, "request_stream", None)):
+                            if manifest is not None:
+                                manifest.finish(source_kind, complete=False)
+                            return items, read_count, snapshot_partial, True, ["incomplete KV value"]
+                        headers = {"Accept": "application/json"}
+                        if token:
+                            headers["X-Vault-Token"] = token
+                        value_path: JSONPath = ("data", "data") if version == "2" else ("data",)
 
-                    def outside_value(path: JSONPath, prefix: JSONPath = value_path) -> bool:
-                        return path[: len(prefix)] != prefix
+                        def outside_value(path: JSONPath, prefix: JSONPath = value_path) -> bool:
+                            return path[: len(prefix)] != prefix
 
-                    source = f"kv_dump_items.{name}{full}"
-                    if not collector.stream_json_scalars(
-                        client.pool,
-                        base + read_path,
-                        source,
-                        headers=headers,
-                        timeout=budget.timeout(),
-                        root_kind="object",
-                        exclude=outside_value,
-                        required_prefix=value_path,
+                        source = f"kv_dump_items.{name}{full}"
+                        if not collector.stream_json_scalars(
+                            client.pool,
+                            base + read_path,
+                            source,
+                            headers=headers,
+                            timeout=budget.timeout(),
+                            root_kind="object",
+                            exclude=outside_value,
+                            required_prefix=value_path,
+                        ):
+                            if manifest is not None:
+                                manifest.finish(source_kind, complete=False)
+                            return items, read_count, snapshot_partial, True, ["incomplete KV value"]
+                        read_count += 1
+                        if manifest is not None:
+                            manifest.read(source_kind)
+                        snapshot_partial = True
+                        continue
+                    if not budget.consume(read):
+                        if manifest is not None:
+                            manifest.finish(source_kind, complete=False)
+                        return items, read_count, snapshot_partial, True, ["response or byte limit"]
+                    body = _json(read)
+                    value = body.get("data") if isinstance(body, dict) else None
+                    if version == "2" and isinstance(value, dict):
+                        value = value.get("data")
+                    if read.status != 200 or value is None:
+                        partial = True
+                        if manifest is not None:
+                            manifest.finish(source_kind, complete=False, denied=read.status in {401, 403})
+                        denied = " access_denied" if read.status in {401, 403} else ""
+                        reasons.append(f"{name}{full}: read {read.status or 'error'}{denied}")
+                        continue
+                    if not collector.charge(len(read.body)) or not collector.add(
+                        f"kv_dump_items.{name}{full}", {full.rsplit("/", 1)[-1]: value}, charge=False
                     ):
-                        return items, read_count, snapshot_partial, True, ["incomplete KV value"]
+                        if manifest is not None:
+                            manifest.finish(source_kind, complete=False)
+                        return items, read_count, snapshot_partial, True, ["discover_time"]
                     read_count += 1
-                    snapshot_partial = True
-                    continue
-                if not budget.consume(read):
-                    return items, read_count, snapshot_partial, True, ["response or byte limit"]
-                body = _json(read)
-                value = body.get("data") if isinstance(body, dict) else None
-                if version == "2" and isinstance(value, dict):
-                    value = value.get("data")
-                if read.status != 200 or value is None:
-                    partial = True
-                    reasons.append(f"{name}{full}: read {read.status or 'error'}")
-                    continue
-                if not collector.charge(len(read.body)) or not collector.add(
-                    f"kv_dump_items.{name}{full}", {full.rsplit("/", 1)[-1]: value}, charge=False
-                ):
-                    return items, read_count, snapshot_partial, True, ["discover_time"]
-                read_count += 1
-                if len(items) < _MAX_KEYS and snapshot_bytes + len(read.body) <= 1024 * 1024:
-                    items.append({"key": name + full, "value": value})
-                    snapshot_bytes += len(read.body)
-                else:
-                    snapshot_partial = True
+                    if manifest is not None:
+                        manifest.read(source_kind)
+                    if len(items) < _MAX_KEYS and snapshot_bytes + len(read.body) <= 1024 * 1024:
+                        items.append({"key": name + full, "value": value})
+                        snapshot_bytes += len(read.body)
+                    else:
+                        snapshot_partial = True
+        if manifest is not None:
+            manifest.finish(
+                source_kind, complete=collector.partial_events == before_errors and len(reasons) == before_reasons
+            )
     return items, read_count, snapshot_partial, partial, reasons[:20]
 
 
@@ -632,6 +691,10 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     credential = getattr(ctx, "credential", None)
     token = getattr(credential, "token", None) if prior.get("token_valid") is True else None
     budget = ReadBudget(ctx.args, started_at=getattr(ctx, "discovery_started_at", None)) if discover else None
+    collector = DiscoveryCollector("vault", ctx, prior) if discover else None
+    if collector is not None:
+        collector.source_manifest = SourceManifest()
+        collector.source_manifest.request("vault.mounts", scope="metadata_catalog_only")
     requested: list[str] = []
     access: list[str] = []
     if show_mounts or discover:
@@ -639,6 +702,13 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         mounts, status = _inventory_section(client, base, "/v1/sys/mounts", token, budget, stream_large_mounts=discover)
         access.append(status)
         result["mounts_access"] = status
+        if collector is not None:
+            assert collector.source_manifest is not None
+            collector.source_manifest.finish(
+                "vault.mounts", complete=mounts is not None and status == "allowed", denied=status == "denied"
+            )
+            if mounts is not None:
+                collector.source_manifest.read("vault.mounts", len(mounts))
         if mounts is not None:
             result["mounts_count"] = len(mounts)
             result["mounts"] = mounts if show_mounts else None
@@ -646,7 +716,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 result["mounts_snapshot_partial"] = True
             if discover:
                 assert budget is not None
-                collector = DiscoveryCollector("vault", ctx, prior)
+                assert collector is not None and collector.source_manifest is not None
                 items, read_count, snapshot_partial, partial, reasons = _discover_kv(
                     client,
                     base,
@@ -662,18 +732,38 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 result["kv_discovery_reasons"] = reasons
                 result["kv_secrets_read"] = read_count
                 if getattr(ctx.args, "mount", None) and not any(
-                    item["path"] == ctx.args.mount and item.get("type") == "kv" for item in mounts
+                    item["path"] == ctx.args.mount and item.get("type") in {"kv", "generic", "cubbyhole", "transit"}
+                    for item in mounts
                 ):
                     result["kv_discovery_partial"] = True
-                    result["kv_discovery_reasons"] = ["selected KV mount unavailable"]
+                    result["kv_discovery_reasons"] = ["selected discovery mount unavailable"]
                 for reason in result["kv_discovery_reasons"]:
                     collector.partial("vault/kv", reason)
                 if result["kv_discovery_partial"] and not result["kv_discovery_reasons"]:
                     collector.partial("vault/kv", "incomplete")
+                from .discover import discover_transit_mount
+
+                selected = getattr(ctx.args, "mount", None)
+                for mount in mounts:
+                    if selected and mount.get("path") != selected:
+                        continue
+                    if mount.get("type") == "transit":
+                        discover_transit_mount(
+                            client, base, str(mount["path"]), token, budget, collector, collector.source_manifest
+                        )
+                    elif mount.get("type") not in {"kv", "generic", "cubbyhole", "system"}:
+                        collector.source_manifest.request("vault.unsupported_engines", implemented=False)
+                        collector.source_manifest.finish("vault.unsupported_engines", complete=False, unsupported=True)
+                        collector.partial(
+                            "vault/" + str(mount.get("path")), "unsupported_readonly_engine:" + str(mount.get("type"))
+                        )
                 result["content_discovery"] = collector.result()
         elif discover:
             result["kv_discovery_partial"] = True
             result["kv_discovery_reasons"] = [f"mount listing {status}"]
+            assert collector is not None
+            collector.partial("vault/mounts", "access_denied" if status == "denied" else "mount_catalog_unavailable")
+            result["content_discovery"] = collector.result()
     if show_auth:
         requested.append("auth")
         methods, status = _inventory_section(client, base, "/v1/sys/auth", token, budget)

@@ -109,10 +109,13 @@ def test_interrupted_build_log_keeps_complete_early_finding_and_marks_partial(mo
                 return HttpResponse(200, json.dumps(body).encode(), {})
             if path.endswith("/injectedEnvVars/api/json"):
                 return HttpResponse(200, b'{"envMap":{}}', {})
+            if "/api/json?tree=artifacts" in path:
+                return HttpResponse(200, b'{"artifacts":[]}', {})
             raise AssertionError(path)
 
-        def request_stream(self, _method, url, *, on_chunk, **_kwargs):
+        def request_stream(self, _method, url, *, on_chunk, on_response, **_kwargs):
             streamed.append(url)
+            on_response(200, {})
             if url.endswith("/config.xml"):
                 on_chunk(b"<project/>")
                 return HttpResponse(200, b"", {})

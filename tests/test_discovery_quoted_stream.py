@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from io import BytesIO
@@ -70,6 +71,9 @@ def test_pem_block_stays_one_complete_finding_across_text_portions(label, kind, 
     collector._scan_member_stream("source", "credential.pem", BytesIO(pem.encode()), prefer_specific=True)
     result = collector.result()
     assert result["status"] == "complete", result["partial_reasons"]
+    if label == "CERTIFICATE":
+        assert result["findings"] == []
+        return
     assert len(result["findings"]) == 1
     finding = result["findings"][0]
     assert finding["type"] == kind
@@ -176,11 +180,15 @@ def test_escaped_quote_split_at_portion_boundary_is_part_of_the_value(slashes) -
 )
 def test_large_contextual_value_never_becomes_an_ignored_neutral_run(prefix, tail, kind) -> None:
     value = "a" * 100_000
-    matches, _size, covered = _scan_portioned_value({"message": prefix + value + tail}, "$.source", 512)
+    body = base64.b64encode(("qa:" + value).encode()).decode() if kind == "basic_auth" else value
+    matches, _size, covered = _scan_portioned_value({"message": prefix + body + tail}, "$.source", 512)
     assert covered
     selected = [match for match in matches if match.detector == kind]
     assert len(selected) == 1
-    assert digest(selected[0].value) == hashlib.sha256(value.encode()).hexdigest()
+    expected = "Basic " + body if kind == "basic_auth" else value
+    assert digest(selected[0].value) == hashlib.sha256(expected.encode()).hexdigest()
+    if kind == "basic_auth":
+        assert "password" in selected[0].detector_aliases
 
 
 def test_pem_body_does_not_replace_the_whole_key_with_an_auth_fragment() -> None:
@@ -200,12 +208,15 @@ def test_pem_body_does_not_replace_the_whole_key_with_an_auth_fragment() -> None
 @pytest.mark.parametrize(
     "body,expected",
     [
-        ("abcdefgh", "abcdefgh"),
-        ("abcdefgh=", "abcdefgh="),
-        ("abcdefgh==", "abcdefgh=="),
-        ("abcdefgh===", "abcdefgh=="),
-        ("abcdefgh=tail", "abcdefgh="),
+        ("abcdefgh", None),
+        ("abcdefgh=", None),
+        ("abcdefgh==", None),
+        ("abcdefgh===", None),
+        ("abcdefgh=tail", None),
         ("abcdefg", None),
+        (base64.b64encode(b"qa:inactive-password").decode(), "inactive-password"),
+        (base64.b64encode(b"qa:inactive-password1").decode(), "inactive-password1"),
+        (base64.b64encode(b"qa:inactive-password12").decode(), "inactive-password12"),
     ],
 )
 def test_basic_padding_matches_complete_detector_grammar(body, expected) -> None:
@@ -214,4 +225,4 @@ def test_basic_padding_matches_complete_detector_grammar(body, expected) -> None
     matches, _, covered = _scan_portioned_value({"message": text}, "$.source", 64)
     assert covered
     actual = [match.value for match in matches if match.detector == "basic_auth"]
-    assert actual == ([] if expected is None else [expected])
+    assert actual == ([] if expected is None else ["Basic " + body])

@@ -97,10 +97,11 @@ def test_streamed_elastic_mixed_auth_log_keeps_completed_secret(kind, size) -> N
     findings = list(engine.accumulator.findings())
     assert not engine.coverage.truncated_reasons
     assert len(findings) == 1
-    assert findings[0].secret_type == ("password" if kind == "basic" else "bearer_token")
+    assert findings[0].secret_type == ("basic_auth" if kind == "basic" else "bearer_token")
     actual = findings[0].value
     digest = actual.digest if isinstance(actual, DiskBackedText) else hashlib.sha256(actual.encode()).hexdigest()
-    assert digest == hashlib.sha256(secret.encode()).hexdigest()
+    expected = "Basic " + token if kind == "basic" else secret
+    assert digest == hashlib.sha256(expected.encode()).hexdigest()
 
 
 @pytest.mark.parametrize("shape", ["assignment", "xml", "encoded_json"])

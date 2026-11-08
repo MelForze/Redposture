@@ -36,11 +36,25 @@ def test_golden_normalizes_per_run_probe_ids_kafka_partitions_and_keeper_order()
 
     kafka_a = {
         "module": "kafka",
-        "content_discovery": {"findings": [{"object_path": "$.topic.orders.partition.1.offset.3.api_key"}]},
+        "content_discovery": {
+            "findings": [
+                {
+                    "object_path": "$.topic.orders.partition.1.offset.3.api_key",
+                    "locations": [{"object": "topic.orders.partition.1.offset.3"}],
+                }
+            ]
+        },
     }
     kafka_b = {
         "module": "kafka",
-        "content_discovery": {"findings": [{"object_path": "$.topic.orders.partition.2.offset.4.api_key"}]},
+        "content_discovery": {
+            "findings": [
+                {
+                    "object_path": "$.topic.orders.partition.2.offset.4.api_key",
+                    "locations": [{"object": "topic.orders.partition.2.offset.4"}],
+                }
+            ]
+        },
     }
     assert verifier._normalize_for_golden(kafka_a) == verifier._normalize_for_golden(kafka_b)
     kafka_b["content_discovery"]["findings"][0]["object_path"] = "$.topic.payments.partition.2.offset.4.api_key"
@@ -807,3 +821,17 @@ def test_postgres_implementation_golden_keeps_product_scope_and_evidence(module)
     assert before != verifier._normalize_for_golden(payload("16.15", scope="proxy_console"))
     assert before != verifier._normalize_for_golden(payload("16.15", evidence="startup_error"))
     assert before != verifier._normalize_for_golden({"module": module})
+
+
+def test_kafka_partition_normalization_preserves_topic_and_non_location_content() -> None:
+    verifier = _load_postrun_verifier()
+    first: dict[str, object] = {"module": "kafka", "object": "topic.orders.partition.1.offset.3"}
+    second: dict[str, object] = {"module": "kafka", "object": "topic.orders.partition.2.offset.4"}
+    assert verifier._normalize_for_golden(first) != verifier._normalize_for_golden(second)
+    first["locations"] = [{"object": "topic.orders.partition.1.offset.3"}]
+    second = {
+        "module": "kafka",
+        "object": first["object"],
+        "locations": [{"object": "topic.payments.partition.2.offset.4"}],
+    }
+    assert verifier._normalize_for_golden(first) != verifier._normalize_for_golden(second)

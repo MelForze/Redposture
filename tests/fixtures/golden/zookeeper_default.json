@@ -15,102 +15,219 @@
     "can_delete_znode": null,
     "connect_error": null,
     "content_discovery": {
-      "bytes_inspected": 1015,
+      "bytes_inspected": 709,
       "bytes_read": 665,
       "emitted_fingerprints": [],
       "findings": [
         {
           "confidence": "high",
+          "detectors": [
+            "credential_pair",
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./config/services/grafana.grafana",
+          "locations": [
+            {
+              "object": "znode./config/services/grafana",
+              "object_path": "$.znode./config/services/grafana",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.znode./config/services/grafana",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "password",
           "value": "admin"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "credential_pair",
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./config/services/kafka.kafka",
+          "locations": [
+            {
+              "object": "znode./config/services/kafka",
+              "object_path": "$.znode./config/services/kafka",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.znode./config/services/kafka",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "password",
           "value": "metricspass"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "credential_uri"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./config/services/postgres.postgres",
+          "locations": [
+            {
+              "object": "znode./config/services/postgres",
+              "object_path": "$.znode./config/services/postgres",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.znode./config/services/postgres",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "connection_string",
           "value": "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "credential_uri"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./config/services/postgres.postgres",
+          "locations": [
+            {
+              "object": "znode./observability/remote_write_url",
+              "object_path": "$.znode./observability/remote_write_url",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.znode./observability/remote_write_url",
+          "occurrence_count": 1,
           "source": "anonymous",
-          "type": "url_credentials",
-          "value": "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./observability/remote_write_url.remote_write_url",
-          "source": "anonymous",
-          "type": "url_credentials",
+          "type": "connection_string",
           "value": "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "credential_uri"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./redposture/app/api_key.api_key",
+          "locations": [
+            {
+              "object": "znode./redposture/cache/redis_uri",
+              "object_path": "$.znode./redposture/cache/redis_uri",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.znode./redposture/cache/redis_uri",
+          "occurrence_count": 1,
           "source": "anonymous",
-          "type": "api_key",
-          "value": "rp-zk-key-2026"
+          "type": "connection_string",
+          "value": "redis://default:redis@redis:6379/0"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field",
+            "plausible_value"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./redposture/app/jwt_secret.jwt_secret",
-          "source": "anonymous",
-          "type": "generic_secret",
-          "value": "rp-jwt-lab-2026"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./redposture/app/oidc_client_secret.oidc_client_secret",
+          "locations": [
+            {
+              "object": "znode./redposture/app/oidc_client_secret",
+              "object_path": "$.znode./redposture/app/oidc_client_secret",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.znode./redposture/app/oidc_client_secret",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "client_secret",
           "value": "oidc-client-secret-lab"
         },
         {
           "confidence": "high",
+          "detectors": [
+            "sensitive_field"
+          ],
           "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./redposture/cache/redis_uri.redis_uri",
-          "source": "anonymous",
-          "type": "connection_string",
-          "value": "redis://default:redis@redis:6379/0"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./redposture/cache/redis_uri.redis_uri",
-          "source": "anonymous",
-          "type": "url_credentials",
-          "value": "redis://default:redis@redis:6379/0"
-        },
-        {
-          "confidence": "high",
-          "fingerprint": "<DOCKER_ID>",
-          "object_path": "$.znode./redposture/db/password.password",
+          "locations": [
+            {
+              "object": "znode./redposture/db/password",
+              "object_path": "$.znode./redposture/db/password",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.znode./redposture/db/password",
+          "occurrence_count": 1,
           "source": "anonymous",
           "type": "password",
           "value": "postgres"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "znode./redposture/app/api_key",
+              "object_path": "$.znode./redposture/app/api_key",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.znode./redposture/app/api_key",
+          "occurrence_count": 1,
+          "source": "anonymous",
+          "type": "api_key",
+          "value": "rp-zk-key-2026"
+        },
+        {
+          "confidence": "medium",
+          "detectors": [
+            "sensitive_field"
+          ],
+          "fingerprint": "<DOCKER_ID>",
+          "locations": [
+            {
+              "object": "znode./redposture/app/jwt_secret",
+              "object_path": "$.znode./redposture/app/jwt_secret",
+              "source": "anonymous",
+              "source_kind": "content"
+            }
+          ],
+          "object_path": "$.znode./redposture/app/jwt_secret",
+          "occurrence_count": 1,
+          "source": "anonymous",
+          "type": "generic_secret",
+          "value": "rp-jwt-lab-2026"
         }
       ],
       "live_emitted": false,
       "partial_reasons": [],
       "source": "anonymous",
+      "sources": [
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "zookeeper.znode_data",
+          "implemented": true,
+          "read": 26,
+          "requested": 26,
+          "scope": "selected_or_reachable_znodes",
+          "unsupported": false
+        },
+        {
+          "complete": true,
+          "denied": 0,
+          "id": "zookeeper.znode_children",
+          "implemented": true,
+          "read": 26,
+          "requested": 26,
+          "scope": "reachable_parent_children_responses",
+          "unsupported": false
+        }
+      ],
       "status": "complete"
     },
     "credential_auth_probe_results": {},

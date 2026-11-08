@@ -16,7 +16,7 @@
     "cap_modify": true,
     "cap_read": true,
     "checked_endpoints": 41,
-    "credential_hits": 33,
+    "credential_hits": 21,
     "detection_signals": [
       "proxmox.probe",
       "proxmox.product_fingerprint"
@@ -24,6 +24,138 @@
     "detection_status": "confirmed",
     "discover_bytes_scanned": 7413,
     "discover_creds": true,
+    "discover_sources": [
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.auth_metadata",
+        "implemented": true,
+        "read": 3,
+        "requested": 3,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.node_catalog",
+        "implemented": true,
+        "read": 1,
+        "requested": 1,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.qemu_catalog",
+        "implemented": true,
+        "read": 2,
+        "requested": 2,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.lxc_catalog",
+        "implemented": true,
+        "read": 2,
+        "requested": 2,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.qemu_configs",
+        "implemented": true,
+        "read": 3,
+        "requested": 3,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.lxc_configs",
+        "implemented": true,
+        "read": 2,
+        "requested": 2,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.storage_catalog",
+        "implemented": true,
+        "read": 2,
+        "requested": 2,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.storage_content_catalog",
+        "implemented": true,
+        "read": 8,
+        "requested": 8,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.storage_contents",
+        "implemented": true,
+        "read": 10,
+        "requested": 10,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.syslog",
+        "implemented": true,
+        "read": 2,
+        "requested": 2,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.reports",
+        "implemented": true,
+        "read": 2,
+        "requested": 2,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.task_catalog",
+        "implemented": true,
+        "read": 2,
+        "requested": 2,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      },
+      {
+        "complete": true,
+        "denied": 0,
+        "id": "proxmox.other_api",
+        "implemented": true,
+        "read": 2,
+        "requested": 2,
+        "scope": "selected_api_responses",
+        "unsupported": false
+      }
+    ],
     "endpoint_results": [
       {
         "error": null,
@@ -276,168 +408,456 @@
     "findings": [
       {
         "endpoint": "/nodes/pve-edge-01/syslog",
-        "reason": "uri_with_auth",
-        "sample": "https://backup-agent:RcL0n3Pass!2026@s3.lab.internal/proxmox"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/syslog",
-        "reason": "url_basic_auth",
-        "sample": "https://backup-agent:RcL0n3Pass!2026@"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/syslog",
+            "object": "/nodes/pve-edge-01/syslog",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "connection_string",
+        "rule_ids": [
+          "credential_uri"
+        ],
+        "sample": "https://backup-agent:RcL0n3Pass!2026@s3.lab.internal/proxmox",
+        "type": "connection_string"
       },
       {
         "endpoint": "/nodes/pve-edge-01/report",
-        "reason": "text_ceph_mon_secret",
-        "sample": "ceph_mon_secret=ceph-mon-secret-lab-2026"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/report",
+            "object": "/nodes/pve-edge-01/report",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "generic_secret",
+        "rule_ids": [
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "sample": "ceph-mon-secret-lab-2026",
+        "type": "generic_secret"
       },
       {
         "endpoint": "/nodes/pve-edge-01/report",
-        "reason": "uri_with_auth",
-        "sample": "https://backupsvc:BackupSvc!2026@pbs.lab.internal:8007/api2/json"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/report",
-        "reason": "url_basic_auth",
-        "sample": "https://backupsvc:BackupSvc!2026@"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/report",
+            "object": "/nodes/pve-edge-01/report",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "connection_string",
+        "rule_ids": [
+          "credential_uri"
+        ],
+        "sample": "https://backupsvc:BackupSvc!2026@pbs.lab.internal:8007/api2/json",
+        "type": "connection_string"
       },
       {
         "endpoint": "/nodes/pve-core-02/syslog",
-        "reason": "text_pbs_password",
-        "sample": "pbs_password=PBSPipelinePassword!2026"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-core-02/syslog",
+            "object": "/nodes/pve-core-02/syslog",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "password",
+        "rule_ids": [
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "sample": "PBSPipelinePassword!2026",
+        "type": "password"
       },
       {
         "endpoint": "/nodes/pve-core-02/report",
-        "reason": "uri_with_auth",
-        "sample": "smtp://alerting:SMTPRelay!2026@mail.lab.internal:587"
-      },
-      {
-        "endpoint": "/nodes/pve-core-02/report",
-        "reason": "url_basic_auth",
-        "sample": "smtp://alerting:SMTPRelay!2026@"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-core-02/report",
+            "object": "/nodes/pve-core-02/report",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "connection_string",
+        "rule_ids": [
+          "credential_uri"
+        ],
+        "sample": "smtp://alerting:SMTPRelay!2026@mail.lab.internal:587",
+        "type": "connection_string"
       },
       {
         "endpoint": "/nodes/pve-edge-01/qemu/101/config",
-        "reason": "json_cipassword",
-        "sample": "GitLabCloudInit!2026"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/qemu/101/config",
+            "object": "/nodes/pve-edge-01/qemu/101/config",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "password",
+        "rule_ids": [
+          "sensitive_field",
+          "plausible_value"
+        ],
+        "sample": "GitLabCloudInit!2026",
+        "type": "password"
       },
       {
         "endpoint": "/nodes/pve-edge-01/qemu/102/config",
-        "reason": "json_cipassword",
-        "sample": "KubeNodeCloudInit!2026"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/qemu/102/config",
+            "object": "/nodes/pve-edge-01/qemu/102/config",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "password",
+        "rule_ids": [
+          "sensitive_field",
+          "plausible_value"
+        ],
+        "sample": "KubeNodeCloudInit!2026",
+        "type": "password"
       },
       {
         "endpoint": "/nodes/pve-edge-01/lxc/301/config",
-        "reason": "json_password",
-        "sample": "RedisLxcRoot!2026"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/lxc/301/config",
+            "object": "/nodes/pve-edge-01/lxc/301/config",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "password",
+        "rule_ids": [
+          "sensitive_field",
+          "plausible_value"
+        ],
+        "sample": "RedisLxcRoot!2026",
+        "type": "password"
       },
       {
         "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
-        "reason": "text_db_password",
-        "sample": "db_password=GitlabDB-Internal-2026"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+            "object": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "password",
+        "rule_ids": [
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "sample": "GitlabDB-Internal-2026",
+        "type": "password"
       },
       {
         "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
-        "reason": "text_download_token",
-        "sample": "download_token=proxmox-download-token-2026"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+            "object": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+            "object": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+            "object": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-core-02/storage/local-zfs/download?volumeid=local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
+            "object": "/nodes/pve-core-02/storage/local-zfs/download?volumeid=local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-core-02/storage/pbs-prod/download?volumeid=pbs-prod%3Abackup%2Fvm%2F201%2F2026-03-04T00%3A30%3A00Z",
+            "object": "/nodes/pve-core-02/storage/pbs-prod/download?volumeid=pbs-prod%3Abackup%2Fvm%2F201%2F2026-03-04T00%3A30%3A00Z",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 5,
+        "reason": "bearer_token",
+        "rule_ids": [
+          "bearer_auth"
+        ],
+        "sample": "eyJhbGciOiJIUzI1NiJ9.mock-signature",
+        "type": "bearer_token"
       },
       {
         "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
-        "reason": "authorization_bearer",
-        "sample": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.mock-signature"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+            "object": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+            "object": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+            "object": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-core-02/storage/local-zfs/download?volumeid=local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
+            "object": "/nodes/pve-core-02/storage/local-zfs/download?volumeid=local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-core-02/storage/pbs-prod/download?volumeid=pbs-prod%3Abackup%2Fvm%2F201%2F2026-03-04T00%3A30%3A00Z",
+            "object": "/nodes/pve-core-02/storage/pbs-prod/download?volumeid=pbs-prod%3Abackup%2Fvm%2F201%2F2026-03-04T00%3A30%3A00Z",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 5,
+        "reason": "generic_secret",
+        "rule_ids": [
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "sample": "proxmox-download-token-2026",
+        "type": "generic_secret"
+      },
+      {
+        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+            "object": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-qemu-101-2026_03_04-03_00_02.vma.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+            "object": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+            "object": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-core-02/storage/local-zfs/download?volumeid=local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
+            "object": "/nodes/pve-core-02/storage/local-zfs/download?volumeid=local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
+            "source_kind": "pve_response"
+          },
+          {
+            "endpoint": "/nodes/pve-core-02/storage/pbs-prod/download?volumeid=pbs-prod%3Abackup%2Fvm%2F201%2F2026-03-04T00%3A30%3A00Z",
+            "object": "/nodes/pve-core-02/storage/pbs-prod/download?volumeid=pbs-prod%3Abackup%2Fvm%2F201%2F2026-03-04T00%3A30%3A00Z",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 5,
+        "reason": "generic_secret",
+        "rule_ids": [
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "sample": "pbssigned-2026",
+        "type": "generic_secret"
       },
       {
         "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
-        "reason": "uri_with_auth",
-        "sample": "redis://default:RedisApp!2026@redis-lxc-01:6379/0"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
-        "reason": "url_basic_auth",
-        "sample": "redis://default:RedisApp!2026@"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
-        "reason": "text_download_token",
-        "sample": "download_token=proxmox-download-token-2026"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/local-lvm/download?volumeid=local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
-        "reason": "authorization_bearer",
-        "sample": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.mock-signature"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+            "object": "/nodes/pve-edge-01/storage/local-lvm/content/local-lvm%3Abackup%2Fvzdump-lxc-301-2026_03_04-03_10_04.tar.zst",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "connection_string",
+        "rule_ids": [
+          "credential_uri"
+        ],
+        "sample": "redis://default:RedisApp!2026@redis-lxc-01:6379/0",
+        "type": "connection_string"
       },
       {
         "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/content/nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
-        "reason": "text_kube_token",
-        "sample": "kube_token=sha256~k8s-bootstrap-token-2026"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
-        "reason": "text_download_token",
-        "sample": "download_token=proxmox-download-token-2026"
-      },
-      {
-        "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/download?volumeid=nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
-        "reason": "authorization_bearer",
-        "sample": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.mock-signature"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-edge-01/storage/nfs-backup/content/nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+            "object": "/nodes/pve-edge-01/storage/nfs-backup/content/nfs-backup%3Abackup%2Fvzdump-qemu-102-2026_03_04-04_00_01.vma.zst",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "generic_secret",
+        "rule_ids": [
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "sample": "sha256~k8s-bootstrap-token-2026",
+        "type": "generic_secret"
       },
       {
         "endpoint": "/nodes/pve-core-02/qemu/201/config",
-        "reason": "json_cipassword",
-        "sample": "PostgresVmInit!2026"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-core-02/qemu/201/config",
+            "object": "/nodes/pve-core-02/qemu/201/config",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "password",
+        "rule_ids": [
+          "sensitive_field",
+          "plausible_value"
+        ],
+        "sample": "PostgresVmInit!2026",
+        "type": "password"
       },
       {
         "endpoint": "/nodes/pve-core-02/lxc/401/config",
-        "reason": "json_password",
-        "sample": "BackupAgentRoot!2026"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-core-02/lxc/401/config",
+            "object": "/nodes/pve-core-02/lxc/401/config",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "password",
+        "rule_ids": [
+          "sensitive_field",
+          "plausible_value"
+        ],
+        "sample": "BackupAgentRoot!2026",
+        "type": "password"
       },
       {
         "endpoint": "/nodes/pve-core-02/storage/local-zfs/content/local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
-        "reason": "text_postgres_password",
-        "sample": "postgres_password=PgPrimaryRoot!2026"
-      },
-      {
-        "endpoint": "/nodes/pve-core-02/storage/local-zfs/download?volumeid=local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
-        "reason": "text_download_token",
-        "sample": "download_token=proxmox-download-token-2026"
-      },
-      {
-        "endpoint": "/nodes/pve-core-02/storage/local-zfs/download?volumeid=local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
-        "reason": "authorization_bearer",
-        "sample": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.mock-signature"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-core-02/storage/local-zfs/content/local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
+            "object": "/nodes/pve-core-02/storage/local-zfs/content/local-zfs%3Abackup%2Fvzdump-qemu-201-2026_03_04-02_30_00.vma.zst",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "password",
+        "rule_ids": [
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "sample": "PgPrimaryRoot!2026",
+        "type": "password"
       },
       {
         "endpoint": "/nodes/pve-core-02/storage/pbs-prod/content/pbs-prod%3Abackup%2Fvm%2F201%2F2026-03-04T00%3A30%3A00Z",
-        "reason": "text_backup_api_key",
-        "sample": "backup_api_key=pbspm-1f7a3f90-559f-4f6a-9a20-<DOCKER_HEX>"
-      },
-      {
-        "endpoint": "/nodes/pve-core-02/storage/pbs-prod/download?volumeid=pbs-prod%3Abackup%2Fvm%2F201%2F2026-03-04T00%3A30%3A00Z",
-        "reason": "text_download_token",
-        "sample": "download_token=proxmox-download-token-2026"
-      },
-      {
-        "endpoint": "/nodes/pve-core-02/storage/pbs-prod/download?volumeid=pbs-prod%3Abackup%2Fvm%2F201%2F2026-03-04T00%3A30%3A00Z",
-        "reason": "authorization_bearer",
-        "sample": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.mock-signature"
-      },
-      {
-        "endpoint": "/sdn",
-        "reason": "json_dns_api_key",
-        "sample": "dns-api-token-2026"
-      },
-      {
-        "endpoint": "/sdn",
-        "reason": "uri_with_auth",
-        "sample": "https://netbox:NetboxApiKey!2026@netbox.lab.internal/api"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/nodes/pve-core-02/storage/pbs-prod/content/pbs-prod%3Abackup%2Fvm%2F201%2F2026-03-04T00%3A30%3A00Z",
+            "object": "/nodes/pve-core-02/storage/pbs-prod/content/pbs-prod%3Abackup%2Fvm%2F201%2F2026-03-04T00%3A30%3A00Z",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "api_key",
+        "rule_ids": [
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "sample": "pbspm-1f7a3f90-559f-4f6a-9a20-<DOCKER_HEX>",
+        "type": "api_key"
       },
       {
         "endpoint": "/sdn",
-        "reason": "url_basic_auth",
-        "sample": "https://netbox:NetboxApiKey!2026@"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/sdn",
+            "object": "/sdn",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "api_key",
+        "rule_ids": [
+          "sensitive_field",
+          "plausible_value"
+        ],
+        "sample": "dns-api-token-2026",
+        "type": "api_key"
+      },
+      {
+        "endpoint": "/sdn",
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/sdn",
+            "object": "/sdn",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "connection_string",
+        "rule_ids": [
+          "credential_uri"
+        ],
+        "sample": "https://netbox:NetboxApiKey!2026@netbox.lab.internal/api",
+        "type": "connection_string"
       },
       {
         "endpoint": "/cluster/backup",
-        "reason": "json_password",
-        "sample": "pbs-job-password-2026"
+        "fingerprint": "<DOCKER_ID>",
+        "locations": [
+          {
+            "endpoint": "/cluster/backup",
+            "object": "/cluster/backup",
+            "source_kind": "pve_response"
+          }
+        ],
+        "occurrence_count": 1,
+        "reason": "password",
+        "rule_ids": [
+          "sensitive_field",
+          "plausible_value"
+        ],
+        "sample": "pbs-job-password-2026",
+        "type": "password"
       }
     ],
     "grant_path": null,

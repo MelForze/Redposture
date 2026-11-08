@@ -8,19 +8,20 @@ import sqlite3
 import tempfile
 import time
 from collections.abc import Callable, Mapping
+from contextlib import closing
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
+from ...discovery_context import JSONFieldContext
 from ...discovery_frontier import DiscoveryFrontier
-from ...discovery_paths import Text, concat_discovery_text, json_discovery_path, path_suffix
+from ...discovery_occurrences import OccurrenceRegistry
+from ...discovery_paths import Text, concat_discovery_text, json_discovery_path
 from ...discovery_rendering import iter_disk_discovery_finding_line_chunks
-from ...discovery_spool import SpoolingRecords, SpoolingStrings
+from ...discovery_spool import SpoolingStrings
 from ...discovery_values import DiskBackedText, iter_json_chunks
 from ...json_stream import JSONPath, JSONScalarStream
 from ...rendering import sanitize_report_line
-from ...secret_detection import fingerprint, is_secret_field_name
-from ...storage_discovery import DiscoveryCollector
+from ...secret_detection import fingerprint
 
 
 class FindingIndex:
@@ -50,7 +51,11 @@ class FindingIndex:
 
 
 def finding_type(reason: str) -> str:
+    from ...discovery_rules import SCALAR_DETECTOR_TYPES
+
     name = reason.lower()
+    if name in SCALAR_DETECTOR_TYPES or name in {"generic_secret", "high_entropy", "api_key"}:
+        return name
     if "password" in name or "passwd" in name:
         return "password"
     if "token" in name:
@@ -69,7 +74,7 @@ class StreamedPayload(bytes):
         return super().__new__(cls, b"{}")
 
     def __init__(self) -> None:
-        self.findings = SpoolingRecords()
+        self.findings = ProxmoxFindings()
         self.names: dict[str, SpoolingStrings] = {}
         self.permissions: dict[str, bool] = {}
         self.bytes_read = 0
@@ -86,6 +91,38 @@ class StreamedPayload(bytes):
         self.findings.finish()
         for names in self.names.values():
             names.finish()
+
+
+class ProxmoxFindings(OccurrenceRegistry):
+    """Keep the PVE projection while sharing value/occurrence storage."""
+
+    def append(self, finding: dict[str, Any]) -> None:
+        value = finding["sample"]
+        identity = fingerprint(value)
+        payload = {
+            **finding,
+            "fingerprint": identity,
+            "type": finding.get("type") or finding_type(finding.get("reason", "")),
+        }
+        original_place = {
+            "source_kind": "pve_response",
+            "object": finding["endpoint"],
+            "endpoint": finding["endpoint"],
+            "path": finding["path"],
+        }
+        for place in finding.get("locations") or (original_place,):
+            self.add(payload, identity=("value", identity), location=place)
+
+    def iter_appended(self, after: int):
+        # Reading during collection must not call __getitem__/finish and close
+        # the writer. Ordinals are contiguous insertion IDs (no row deletion).
+        with closing(sqlite3.connect(self._path)) as db:
+            for row in db.execute(
+                "SELECT ordinal,payload,occurrence_count,locations_bytes FROM findings "
+                "WHERE ordinal>? AND ordinal<=? ORDER BY ordinal",
+                (after, len(self)),
+            ):
+                yield self._finding(row)
 
 
 _CAPABILITIES = frozenset(
@@ -123,10 +160,18 @@ class _ResponseScanner:
         self.pending: list[str] = []
         self.pending_size = 0
         self.large: DiskBackedText | None = None
-        self.decoder = JSONScalarStream(self.string, on_primitive=self.primitive, deadline=deadline)
+        self.contexts = JSONFieldContext(self.inspect, self.payload.partial_reasons.append, deadline=deadline)
+        self.decoder = JSONScalarStream(
+            self.string,
+            on_primitive=self.primitive,
+            deadline=deadline,
+            on_container=self.contexts.container,
+            on_container_end=self.contexts.end,
+        )
         self.text_decoder = codecs.getincrementaldecoder("utf-8")("strict")
         self.plain: DiskBackedText | None = None
         self.kind: str | None = None
+        self.storage_failed = False
 
     def emit(self, finding: dict[str, Any]) -> None:
         value = finding["sample"]
@@ -136,8 +181,9 @@ class _ResponseScanner:
         identity = hasher.hexdigest()
         if not self.seen.claim(identity):
             return
+        before = len(self.payload.findings)
         self.payload.findings.append(finding)
-        if self.on_finding is not None:
+        if self.on_finding is not None and len(self.payload.findings) > before:
             self.on_finding(finding)
 
     @staticmethod
@@ -146,10 +192,12 @@ class _ResponseScanner:
             path = path[1:]
         return json_discovery_path(path)
 
-    def inspect(self, path: JSONPath, value: Any) -> None:
+    def inspect(self, path: JSONPath, value: Any, field_name: str | None = None) -> None:
         from . import actions
 
         name = path[-1] if path and isinstance(path[-1], (str, DiskBackedText)) else None
+        if actions._pve_auth_metadata_field(self.endpoint, name):
+            return
         full_path = self.path(path)
         parent_path = self.path(path[:-1]) if name is not None else full_path
         if len(path) == 3 and path[0] == "data" and isinstance(path[1], int) and name in _NAVIGATION:
@@ -172,63 +220,20 @@ class _ResponseScanner:
             and actions._PVE_CONFIG_DIGEST_RE.fullmatch(value)
         ):
             return
-        if (
-            isinstance(value, DiskBackedText)
-            or isinstance(full_path, DiskBackedText)
-            or isinstance(parent_path, DiskBackedText)
-        ):
-            if (
-                name is None
-                and isinstance(value, DiskBackedText)
-                and value.byte_length <= 65_536
-                and isinstance(full_path, str)
-            ):
-                # PVE reports and download metadata use product-specific key/value
-                # syntax. Preserve those exact findings for small text responses.
-                text_findings: list[dict[str, str]] = []
-                actions._collect_text_findings(
-                    "".join(value.iter_text_chunks()),
-                    self.endpoint,
-                    text_findings,
-                    set(),
-                    path=full_path,
-                    limit=None,
-                )
-                for finding in text_findings:
-                    self.emit(dict(finding))
-                return
-            now = time.monotonic()
-            context = SimpleNamespace(
-                args=SimpleNamespace(discover_time=max(0.000001, self.deadline - now)),
-                discovery_started_at=now,
-                host="",
-                port=0,
-                live_emit=None,
-            )
-            collector = DiscoveryCollector("proxmox", context, {})
-            source = concat_discovery_text(self.endpoint, path_suffix(parent_path, "$"))
-            if isinstance(value, DiskBackedText):
-                collector.scan_disk_text(source, value, key=name)
-            else:
-                collector.add(source, {name: value} if name is not None else value, charge=False)
-            report = collector.result()
-            self.payload.partial_reasons.extend(report["partial_reasons"])
-            for item in report["findings"]:
-                place = item["object_path"]
-                local = concat_discovery_text("$", path_suffix(place, "$." + self.endpoint))
-                reason = item["type"]
-                field = name if isinstance(name, str) else ""
-                if reason == "generic_secret" and is_secret_field_name(field):
-                    reason = "json_" + field.lower()
-                self.emit({"endpoint": self.endpoint, "reason": reason, "path": local, "sample": item["value"]})
-            return
-        found: list[dict[str, str]] = []
-        if name is not None:
-            actions._collect_json_findings({name: value}, self.endpoint, found, set(), path=parent_path)
-        elif isinstance(value, str):
-            actions._collect_text_findings(value, self.endpoint, found, set(), path=full_path, limit=None)
+        found: list[dict[str, Any]] = []
+        complete = actions._collect_shared_findings(
+            value if field_name is not None or name is None else {name: value},
+            self.endpoint,
+            found,
+            set(),
+            path=full_path if field_name is not None or name is None else parent_path,
+            field_name=field_name,
+            deadline=self.deadline,
+        )
+        if not complete:
+            self.payload.partial_reasons.append("incomplete_payload")
         for finding in found:
-            self.emit(dict(finding))
+            self.emit(finding)
 
     def string(self, path: JSONPath, text: str, final: bool) -> None:
         if self.large is None:
@@ -244,15 +249,15 @@ class _ResponseScanner:
         if final:
             if self.large is not None:
                 self.large.finish()
-                self.inspect(path, self.large)
+                self.contexts.value(path, self.large)
                 self.large = None
             else:
-                self.inspect(path, "".join(self.pending))
+                self.contexts.value(path, "".join(self.pending))
             self.pending = []
             self.pending_size = 0
 
     def primitive(self, item: tuple[JSONPath, Any]) -> None:
-        self.inspect(*item)
+        self.contexts.value(*item)
 
     def feed(self, data: bytes) -> None:
         self.payload.bytes_read += len(data)
@@ -279,13 +284,18 @@ class _ResponseScanner:
             self.plain = None
 
     def close(self) -> None:
-        self.decoder.close()
-        if self.large is not None:
-            self.large.close()
-        if self.plain is not None:
-            self.plain.close()
-        self.payload.finish()
-        self.seen.close()
+        try:
+            self.contexts.close(flush=not self.storage_failed and time.monotonic() < self.deadline)
+        finally:
+            self.decoder.close()
+            if self.large is not None:
+                self.large.close()
+            if self.plain is not None:
+                self.plain.close()
+            try:
+                self.payload.finish()
+            finally:
+                self.seen.close()
 
 
 def stream_proxmox_response(
@@ -297,6 +307,7 @@ def stream_proxmox_response(
     timeout: float,
     deadline: float,
     on_finding: Callable[[dict[str, Any]], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[int, StreamedPayload, dict[str, str], str | None]:
     scanner = _ResponseScanner(endpoint, deadline, on_finding)
     status = 0
@@ -307,6 +318,10 @@ def stream_proxmox_response(
         status = code
 
     def chunk(data: bytes) -> None:
+        if cancelled is not None and cancelled():
+            from ...scheduler import NestedSchedulerCancelled
+
+            raise NestedSchedulerCancelled("Proxmox discovery cancelled")
         nonlocal failed
         if status != 200 or failed:
             return
@@ -317,6 +332,10 @@ def stream_proxmox_response(
         except (ValueError, UnicodeError):
             failed = True
             scanner.payload.partial_reasons.append("invalid_json_or_utf8")
+        except OSError:
+            failed = True
+            scanner.storage_failed = True
+            scanner.payload.partial_reasons.append("storage_failure")
 
     try:
         response = pool.request_stream(
@@ -339,6 +358,14 @@ def stream_proxmox_response(
                 scanner.finish()
             except (ValueError, UnicodeError):
                 scanner.payload.partial_reasons.append("invalid_json")
+            except OSError:
+                scanner.storage_failed = True
+                scanner.payload.partial_reasons.append("storage_failure")
+        try:
+            scanner.contexts.close(flush=not scanner.storage_failed and time.monotonic() < deadline)
+        except OSError:
+            scanner.storage_failed = True
+            scanner.payload.partial_reasons.append("storage_failure")
         result_headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
         if scanner.payload.partial_reasons:
             result_headers["x-redposture-discovery-error"] = "; ".join(scanner.payload.partial_reasons[:4])
@@ -379,9 +406,13 @@ def write_proxmox_views(record: dict[str, Any]) -> str:
             with DiscoveryFrontier() as urls:
                 for finding in record.get("findings") or ():
                     endpoint = str(finding.get("endpoint") or "")
-                    if urls.claim(endpoint):
-                        any_url = True
-                        line(f"{prefix} [*] {scheme}://{record['host']}:{record['port']}/api2/json{endpoint}")
+                    for location in finding.get("locations") or ({"endpoint": endpoint},):
+                        source_endpoint = location.get("endpoint") or endpoint
+                        if urls.claim(source_endpoint):
+                            any_url = True
+                            line(
+                                f"{prefix} [*] {scheme}://{record['host']}:{record['port']}/api2/json{source_endpoint}"
+                            )
                     if record.get("_discover_findings_streamed"):
                         continue
                     value = finding.get("sample")

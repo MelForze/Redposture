@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from redposture_core.discovery_values import iter_json_chunks
 from redposture_core.modules.elastic.discover import FindingAccumulator, scan_value_tree
 from scripts.verify_elastic_discover_corpus import verify_records
 
@@ -47,14 +48,20 @@ def test_shared_discover_corpus_covers_all_exported_types_and_document_locations
             accumulator.add(detection, location)
 
     findings = accumulator.findings()
-    by_key = {(finding.secret_type, finding.value): finding for finding in findings}
+
+    def value_key(value):
+        return json.dumps(
+            json.loads("".join(iter_json_chunks(value))), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+
+    by_key = {(finding.secret_type, value_key(finding.value)): finding for finding in findings}
     expected_documents = [
         item
         for item in manifest["findings"]
         if any(location.get("source_kind") == "document" for location in item.get("locations", []))
     ]
     for expected in expected_documents:
-        key = (expected["secret_type"], expected["value"])
+        key = (expected["secret_type"], value_key(expected["value"]))
         assert key in by_key
         finding = by_key[key]
         for expected_location in expected["locations"]:

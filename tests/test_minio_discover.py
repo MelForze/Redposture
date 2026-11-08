@@ -4,6 +4,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from redposture_core.clients.minio_api import MinioResponse, S3Error
 from redposture_core.discovery_values import DiskBackedText
 from redposture_core.modules.minio import discover
@@ -396,8 +398,10 @@ def test_minio_live_discovery_streams_full_disk_value(monkeypatch) -> None:
     result["secret_findings"][0]["value"].close()
 
 
-def test_large_bare_jwt_across_ranges_is_complete_and_not_a_prefix() -> None:
-    token = "eyJhbGciOiJIUzI1NiJ9." + "YWJj" * 80_000 + ".c2ln"
+@pytest.mark.parametrize("valid_payload", [True, False])
+def test_large_bare_jwt_across_ranges_is_complete_and_not_a_prefix(valid_payload: bool) -> None:
+    payload = "eyJkYXRhIjoi" + "YWJj" * 80_000 + "In0" if valid_payload else "YWJj" * 80_000
+    token = "eyJhbGciOiJIUzI1NiJ9." + payload + ".c2lnbmF0dXJl"
     body = ("ordinary log\n" + token + "\npassword=qa-later-password\n").encode()
     result = discover.discover_secrets(
         _Client({"auth.log": (200, body)}),
@@ -406,9 +410,10 @@ def test_large_bare_jwt_across_ranges_is_complete_and_not_a_prefix() -> None:
     )
     assert result.coverage_complete is True, result.partial_reasons
     tokens = [finding["value"] for finding in result.findings if finding["type"] == "jwt"]
-    assert len(tokens) == 1
-    assert isinstance(tokens[0], DiskBackedText)
-    assert "".join(tokens[0].iter_text_chunks()) == token
+    assert len(tokens) == int(valid_payload)
+    if valid_payload:
+        assert isinstance(tokens[0], DiskBackedText)
+        assert "".join(tokens[0].iter_text_chunks()) == token
     assert any(finding["value"] == "qa-later-password" for finding in result.findings)
 
 
@@ -419,7 +424,7 @@ def test_interrupted_bare_jwt_does_not_emit_a_valid_looking_prefix() -> None:
                 return MinioResponse(http_status=0, headers={}, body=b"", transport_error="connection closed")
             return super().get_object_range(bucket, key, start=start, length=length, signed=signed)
 
-    token = "eyJhbGciOiJIUzI1NiJ9." + "YWJj" * 80_000 + ".c2ln"
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJkYXRhIjoi" + "YWJj" * 80_000 + "In0.c2lnbmF0dXJl"
     result = discover.discover_secrets(
         Interrupted({"auth.log": (200, token.encode())}),
         [_obj("auth.log", size=len(token))],

@@ -1,0 +1,282 @@
+{
+  "version": 2,
+  "provenance": "Manually authored configs/logs/metadata with inactive seeded values. Labels chosen before first measurement. No detector-generated expected answers. Frozen local holdout; not external blind review or production sample.",
+  "cases": [
+    {
+      "id": "app-db-password",
+      "body": {
+        "db": {
+          "password": "winter-rotation!42"
+        }
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "winter-rotation!42",
+          "path": "$.db.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "unicode-password",
+      "body": {
+        "password": "пароль с пробелом;λ!42"
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "пароль с пробелом;λ!42",
+          "path": "$.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "quoted-log",
+      "body": {
+        "message": "password=\"lake breeze; evening!\""
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "lake breeze; evening!",
+          "path": "$.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "uri-password",
+      "body": {
+        "database_url": "postgres://reader:harbor%40night@db.invalid/app"
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "harbor@night",
+          "path": "$.database_url"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "sql-log",
+      "body": {
+        "message": "ALTER USER reader IDENTIFIED BY 'boat''s lantern!';"
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "boat's lantern!",
+          "path": "$.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "short-password",
+      "body": {
+        "password": "7"
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "7",
+          "path": "$.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "semantic-setting",
+      "body": {
+        "name": "password",
+        "value": "meadow-evening!83"
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "meadow-evening!83",
+          "path": "$.value"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "xml-config",
+      "body": {
+        "config": "<password>river&lt;bend!42</password>"
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "river<bend!42",
+          "path": "$.config",
+          "embedded_path": "$.config.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "csv-backup",
+      "body": {
+        "data": "user,password\nreader,orchard-evening!29\n"
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "orchard-evening!29",
+          "path": "$.data",
+          "embedded_path": "$.data.csv[1].password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "leading-whitespace-password",
+      "body": {
+        "password": "  cedar-hill!42  "
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "  cedar-hill!42  ",
+          "path": "$.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "explicit-password-with-escape",
+      "body": {
+        "password": "rose\"garden\\pond!42"
+      },
+      "expected": [
+        {
+          "type": "password",
+          "value": "rose\"garden\\pond!42",
+          "path": "$.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "candidate-neutral",
+      "body": {
+        "message": "received qR7xN2pV5tC8fK3sM9zD6aL4bE1 completed"
+      },
+      "expected": [
+        {
+          "type": "high_entropy",
+          "value": "qR7xN2pV5tC8fK3sM9zD6aL4bE1",
+          "path": "$.message",
+          "confidence": "low"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "healthy-service",
+      "body": {
+        "status": "healthy",
+        "replicas": 3,
+        "message": "startup finished"
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "credential-metadata",
+      "body": {
+        "token_count": 42,
+        "password_length": 20,
+        "credential_status": "valid"
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "public-routes",
+      "body": {
+        "url": "https://example.invalid/api/status",
+        "method": "GET",
+        "status": 200
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "database-no-password",
+      "body": {
+        "database_url": "postgres://reader@db.invalid/app"
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "masked-password",
+      "body": {
+        "password": "********"
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "template-password",
+      "body": {
+        "password": "${DATABASE_PASSWORD}"
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "disabled-auth",
+      "body": {
+        "auth_enabled": false,
+        "password_required": true
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "ordinary-logs",
+      "body": {
+        "message": "user reader connected; items=12, time=43ms"
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "empty-config",
+      "body": {},
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "empty-password",
+      "body": {
+        "password": ""
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "checksum-metadata",
+      "body": {
+        "checksum": "qR7xN2pV5tC8fK3sM9zD6aL4bE1"
+      },
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "public-key-metadata",
+      "body": {
+        "public_key": "ordinary-public-material"
+      },
+      "expected": [],
+      "status": "complete"
+    }
+  ],
+  "annotation_revision": "V1 incorrectly assumed embedded XML/CSV use only the outer JSON field in all DTO readers. V2 declares their exact schema-derived inner path plus the Elastic outer JSON Pointer contract; all input bodies, values and types unchanged. Initial v1 results retained. Not a fresh blind holdout after v1 inspection."
+}

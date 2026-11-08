@@ -72,10 +72,13 @@ def test_discover_emits_verified_credential_before_live_findings_without_duplica
             "MINIO\t127.0.0.1\t19000\t [+] minioadmin:minioadmin (admin:True)",
         ]
         assert ctx.live_emit is not None
+        ready = {**prior, **({"buckets": [{"name": "bucket"}]} if show_buckets else {})}
+        if show_buckets:
+            assert ctx.emit_ready_inventory is not None
+            ctx.emit_ready_inventory(ready)
         ctx.live_emit(['MINIO\t127.0.0.1\t19000\t [!] Secret Value="test" Place="bucket/key$"'])
         return {
-            **prior,
-            **({"buckets": [{"name": "bucket"}]} if show_buckets else {}),
+            **ready,
             "discover_requested": True,
             "discover_coverage": "complete",
             "discover_coverage_percent": 100.0,
@@ -96,12 +99,15 @@ def test_discover_emits_verified_credential_before_live_findings_without_duplica
             workers=1,
         )
     )
-    assert emitted[2].endswith('[!] Secret Value="test" Place="bucket/key$"')
+    finding_index = next(i for i, line in enumerate(emitted) if 'Value="test"' in line)
     assert sum("[+] minioadmin:minioadmin" in line for line in emitted) == 1
     assert sum("[*] MinIO (auth required:" in line for line in emitted) == 1
     assert any("Discover Secrets (status:complete)" in line for line in emitted)
     if show_buckets:
-        assert any("Buckets Enumeration (Count:1)" in line for line in emitted)
+        enum_indices = [i for i, line in enumerate(emitted) if "Buckets Enumeration (Count:1)" in line]
+        assert len(enum_indices) == 1 and enum_indices[0] < finding_index
+    else:
+        assert finding_index == 2
     assert output_path.read_text(encoding="utf-8").splitlines() == emitted
     assert "\x1b[" not in output_path.read_text(encoding="utf-8")
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import tempfile
 import time
@@ -12,8 +13,10 @@ from typing import Any
 from ...clients.zookeeper import _ZK_ERR_NOAUTH, _ZK_ERR_NONODE, _ZK_ERR_OK, _join_znode_path
 from ...discovery_bytes import SpoolBytes
 from ...discovery_frontier import DiscoveryFrontier
+from ...discovery_sources import SourceManifest
 from ...discovery_spool import SpoolingRecords, SpoolingStrings
 from ...discovery_values import DiskBackedText, iter_json_chunks
+from ...scheduler import NestedSchedulerCancelled
 from ...storage_discovery import DiscoveryCollector
 
 
@@ -21,6 +24,9 @@ def discover_znodes(ctx: Any, prior: Mapping[str, Any], client: Any, options: Ma
     """Read each reachable node once and scan completed values before moving on."""
     payload = dict(prior)
     collector = DiscoveryCollector(str(payload.get("module") or "zookeeper"), ctx, payload)
+    collector.source_manifest = SourceManifest()
+    for category in ("znode_data", "znode_children"):
+        collector.source_manifest.declare(collector.module + "." + category)
     # Discovery has a target-wide time limit; byte limits are not a stop rule.
     collector.remaining = 2**63 - 1
     selected = str(options.get("query_znode") or "").strip()
@@ -29,86 +35,115 @@ def discover_znodes(ctx: Any, prior: Mapping[str, Any], client: Any, options: Ma
     explicit_dump = bool(options.get("dump")) and not bool(getattr(ctx.args, "_discover_implicit_dump", False))
     names = SpoolingStrings() if show else None
     dump_rows = SpoolingRecords() if explicit_dump else None
-    with DiscoveryFrontier() as frontier:
-        frontier.enqueue(selected or "/")
-        while (path := frontier.pop()) is not None:
-            if not collector.allowed():
-                break
-            if path != "/":
-                visited_count += 1
-                if names is not None:
-                    names.append(path)
-            source = f"znode.{path}"
-            try:
-                data, error, _stat = client.get_data_discovery(path, deadline=collector.deadline)
-                if error == _ZK_ERR_OK:
-                    collector.mark_accessible_source()
-                    decoded: str | DiskBackedText | None = None
-                    if data:
-                        collector.bytes_read += len(data)
-                        try:
-                            if isinstance(data, SpoolBytes):
-                                decoded = data.decode("utf-8")
-                            else:
-                                decoded = data.decode("utf-8")
-                        except UnicodeDecodeError:
-                            # Binary znodes remain readable but are not secret
-                            # text. Explicit dump renders them as base64.
-                            decoded = None
-                        if isinstance(decoded, DiskBackedText):
-                            collector.scan_disk_text(source, decoded, key=path.rsplit("/", 1)[-1])
-                        elif isinstance(decoded, str):
-                            collector.add(source, {path.rsplit("/", 1)[-1]: decoded}, charge=False)
-                    if dump_rows is not None:
-                        if data is None:
-                            shown: str | DiskBackedText = "<nil>"
-                        elif not data:
-                            shown = "<empty>"
-                        elif decoded is not None:
-                            shown = decoded
-                        elif isinstance(data, SpoolBytes):
-                            encoded = data.base64_text()
-                            shown = DiskBackedText()
-                            shown.append_text("<")
-                            try:
-                                for chunk in encoded.iter_text_chunks():
-                                    shown.append_text(chunk)
-                            finally:
-                                encoded.close()
-                            shown.append_text(">")
-                            shown.finish()
-                        else:
-                            shown = f"<base64:{base64.b64encode(data).decode('ascii')}>"
-                        dump_rows.append({"path": path, "value": shown})
-                elif error == _ZK_ERR_NOAUTH:
-                    collector.partial(source, "access_denied")
-                    if dump_rows is not None:
-                        dump_rows.append({"path": path, "value": "<Access Denied>"})
-                elif error != _ZK_ERR_NONODE:
-                    collector.partial(source, f"getData:{error}")
-            except (TimeoutError, ConnectionError, OSError, RuntimeError, ValueError) as exc:
-                collector.partial(source, str(exc))
-                if time.monotonic() >= collector.deadline or getattr(client, "sock", object()) is None:
+    walk_complete = False
+    try:
+        with DiscoveryFrontier() as frontier:
+            frontier.enqueue(selected or "/")
+            while (path := frontier.pop()) is not None:
+                if not collector.allowed():
                     break
+                if path != "/":
+                    visited_count += 1
+                    if names is not None:
+                        names.append(path)
+                source = f"znode.{path}"
+                try:
+                    with collector.source_attempt(
+                        collector.module + ".znode_data", scope="selected_or_reachable_znodes"
+                    ) as evidence:
+                        data, error, _stat = client.get_data_discovery(path, deadline=collector.deadline)
+                        evidence.status = 403 if error == _ZK_ERR_NOAUTH else 200 if error == _ZK_ERR_OK else None
+                        if error == _ZK_ERR_OK:
+                            collector.mark_accessible_source()
+                            decoded: str | DiskBackedText | None = None
+                            if data:
+                                collector.bytes_read += len(data)
+                                key = path.rsplit("/", 1)[-1]
+                                if isinstance(data, SpoolBytes):
+                                    with data.reader() as stream:
+                                        collector._scan_retained_payload(source, stream, field_name=key)
+                                else:
+                                    with io.BytesIO(data) as memory_stream:
+                                        collector._scan_retained_payload(source, memory_stream, field_name=key)
+                                if dump_rows is not None:
+                                    try:
+                                        decoded = data.decode("utf-8")
+                                    except UnicodeDecodeError:
+                                        # Inventory remains exact base64; discovery has
+                                        # independently classified the raw payload.
+                                        decoded = None
+                            if dump_rows is not None:
+                                if data is None:
+                                    shown: str | DiskBackedText = "<nil>"
+                                elif not data:
+                                    shown = "<empty>"
+                                elif decoded is not None:
+                                    shown = decoded
+                                elif isinstance(data, SpoolBytes):
+                                    encoded = data.base64_text()
+                                    shown = DiskBackedText()
+                                    shown.append_text("<")
+                                    try:
+                                        for chunk in encoded.iter_text_chunks():
+                                            shown.append_text(chunk)
+                                    finally:
+                                        encoded.close()
+                                    shown.append_text(">")
+                                    shown.finish()
+                                else:
+                                    shown = f"<base64:{base64.b64encode(data).decode('ascii')}>"
+                                dump_rows.append({"path": path, "value": shown})
+                        elif error == _ZK_ERR_NOAUTH:
+                            collector.partial(source, "access_denied")
+                            if dump_rows is not None:
+                                dump_rows.append({"path": path, "value": "<Access Denied>"})
+                        elif error != _ZK_ERR_NONODE:
+                            collector.partial(source, f"getData:{error}")
+                        if error == _ZK_ERR_OK:
+                            evidence.accept()
+                        elif error == _ZK_ERR_NONODE:
+                            evidence.complete = True  # Confirmed absence, not a read value.
+                except NestedSchedulerCancelled:
+                    raise
+                except (TimeoutError, ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                    collector.partial(source, str(exc))
+                    if time.monotonic() >= collector.deadline or getattr(client, "sock", object()) is None:
+                        break
 
-            if selected:
-                continue
-            try:
+                if selected:
+                    continue
+                try:
+                    with collector.source_attempt(
+                        collector.module + ".znode_children", scope="reachable_parent_children_responses"
+                    ) as evidence:
 
-                def enqueue(name: str) -> None:
-                    frontier.enqueue(_join_znode_path(path, name))
+                        def enqueue(name: str) -> None:
+                            frontier.enqueue(_join_znode_path(path, name))
 
-                error, _stat = client.read_children_discovery(path, enqueue, deadline=collector.deadline)
-                if error == _ZK_ERR_OK:
-                    collector.mark_accessible_source()
-                elif error == _ZK_ERR_NOAUTH:
-                    collector.partial(source, "access_denied")
-                elif error != _ZK_ERR_NONODE:
-                    collector.partial(source, f"getChildren:{error}")
-            except (TimeoutError, ConnectionError, OSError, RuntimeError, ValueError) as exc:
-                collector.partial(source, str(exc))
-                if time.monotonic() >= collector.deadline or getattr(client, "sock", object()) is None:
-                    break
+                        error, _stat = client.read_children_discovery(path, enqueue, deadline=collector.deadline)
+                        evidence.status = 403 if error == _ZK_ERR_NOAUTH else 200 if error == _ZK_ERR_OK else None
+                        if error == _ZK_ERR_OK:
+                            collector.mark_accessible_source()
+                        elif error == _ZK_ERR_NOAUTH:
+                            collector.partial(source, "access_denied")
+                        elif error != _ZK_ERR_NONODE:
+                            collector.partial(source, f"getChildren:{error}")
+                        if error == _ZK_ERR_OK:
+                            evidence.accept()
+                        elif error == _ZK_ERR_NONODE:
+                            evidence.complete = True
+                except NestedSchedulerCancelled:
+                    raise
+                except (TimeoutError, ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                    collector.partial(source, str(exc))
+                    if time.monotonic() >= collector.deadline or getattr(client, "sock", object()) is None:
+                        break
+            else:
+                walk_complete = True
+    finally:
+        if not walk_complete:
+            for category in ("znode_data", "znode_children"):
+                collector.source_manifest.finish(collector.module + "." + category, complete=False)
 
     discovery = collector.result()
     if names is not None:

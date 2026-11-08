@@ -38,7 +38,7 @@ def test_large_native_map_key_keeps_finding_and_complete_path_after_source_clean
     assert [(m.detector, "".join(m.value.iter_text_chunks())) for m in matches] == [("password", "known-secret")]
     path = matches[0].object_path
     assert isinstance(path, DiskBackedText)
-    assert path.digest == hashlib.sha256(("$." + text).encode()).hexdigest()
+    assert path.digest == hashlib.sha256(("$[" + json.dumps(text) + "]").encode()).hexdigest()
 
 
 def test_json_encoder_streams_disk_backed_mapping_key():
@@ -210,7 +210,9 @@ def test_large_composite_native_key_is_scanned_without_materializing_it(shape):
     matches, _, complete = _scan_portioned_value(mapping, "$", 65536)
     assert complete and len(matches) == 1
     assert "".join(matches[0].value.iter_text_chunks()) == "known-secret"
-    assert matches[0].object_path.digest == hashlib.sha256(("$." + repr(original)).encode()).hexdigest()
+    assert (
+        matches[0].object_path.digest == hashlib.sha256(("$[" + json.dumps(repr(original)) + "]").encode()).hexdigest()
+    )
 
 
 def test_composite_key_render_obeys_expired_source_deadline():

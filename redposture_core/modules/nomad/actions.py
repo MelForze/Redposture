@@ -7,6 +7,7 @@ import json
 import re
 import uuid
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any
 from urllib.parse import urlencode
 
@@ -194,6 +195,8 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     states: list[str] = []
     discover = bool(getattr(ctx.args, "discover", False))
     collector = DiscoveryCollector("nomad", ctx, prior) if discover else None
+    if collector is not None:
+        collector.declare_sources("job_catalog_pages", "job_specs")
     job_frontier = DiscoveryFrontier() if discover else None
     job_specs: list[dict[str, Any]] = []
     job_snapshot_bytes = 0
@@ -218,174 +221,206 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         complete = False
         error: str | None = None
         snapshot_limited = False
-        while budget.allowed():
-            response = _get(ctx, prior["api_endpoint"], page_path, token, budget=budget)
-            if (
-                name == "jobs"
-                and discover
-                and response.status == 200
-                and response.truncated
-                and not response.error
-                and page_size > 1
-            ):
-                page_size = max(1, page_size // 2)
-                page_base = path + f"&per_page={page_size}"
-                page_path = page_base + ("&" + urlencode({"next_token": page_cursor}) if page_cursor else "")
-                continue
-            streamed_rows = None
-            streamed_page_complete = True
-            if (
-                name == "jobs"
-                and collector is not None
-                and response.status == 200
-                and response.truncated
-                and not response.error
-            ):
-                pool = getattr(ctx.lifecycle_state, "http", None)
-                if callable(getattr(pool, "request_stream", None)):
-                    streamed_rows = SpoolingRecords()
-                    response_headers: dict[str, str] = {}
-                    headers = {"Accept": "application/json"}
-                    if token:
-                        headers["X-Nomad-Token"] = token
+        catalog_denied = False
+        if name == "jobs" and collector is not None:
+            assert collector.source_manifest is not None
+            collector.source_manifest.request("nomad.job_catalog_pages", scope="selected_namespace_validated_pages")
 
-                    def append_catalog_row(
-                        _path: JSONPath,
-                        row: Mapping[str, Any],
-                        rows: SpoolingRecords | None = streamed_rows,
-                    ) -> None:
-                        assert rows is not None
-                        rows.append(dict(row))
+        def observe_catalog_status(status: int) -> None:
+            nonlocal catalog_denied
+            catalog_denied |= status in {401, 403}
 
-                    streamed_page_complete = collector.stream_json_scalars(
-                        pool,
-                        prior["api_endpoint"] + page_path,
-                        "nomad/jobs/catalog",
-                        headers=headers,
-                        timeout=budget.timeout(),
-                        root_kind="array",
-                        exclude=lambda _path: True,
-                        row_validators={
-                            (): (
-                                frozenset({"ID", "Namespace", "Name", "Status", "Type"}),
-                                lambda row: (
-                                    isinstance(row.get("ID"), str)
-                                    and safe_path(row["ID"])
-                                    and safe_path(row.get("Namespace") or _namespace(ctx))
-                                ),
-                            )
-                        },
-                        on_row=append_catalog_row,
-                        on_response_headers=response_headers.update,
-                    )
-                    streamed_rows.finish()
-                    response = HttpResponse(200, b"[]", response_headers)
-            if not budget.consume(response):
-                error = "response or byte limit"
-                break
-            data = streamed_rows if streamed_rows is not None else json_value(response)
-            if name == "members" and isinstance(data, dict):
-                data = data.get("Members")
-            state = access(response, _rows(data, key))
-            if state != "allowed":
-                error = f"HTTP {response.status}" if response.status != 200 else "invalid collection"
-                break
-            next_token = next((value for k, value in response.headers.items() if k.lower() == "x-nomad-nexttoken"), "")
-            any_page_allowed = True
-            if name == "jobs" and collector is not None:
-                collector.mark_accessible_source()
-            if discover:
-                for row in data:
-                    row_size = len(json.dumps(row, ensure_ascii=False).encode("utf-8"))
-                    if len(rows) < 5000 and snapshot_bytes + row_size <= 1024 * 1024:
-                        rows.append(row)
-                        snapshot_bytes += row_size
-                    else:
-                        snapshot_limited = True
-            else:
-                remaining = max(0, 5000 - len(rows))
-                rows.extend(data[:remaining])
-                snapshot_limited |= len(data) > remaining
-            if name == "jobs" and collector is not None and job_frontier is not None:
-                for row in data:
-                    if not budget.allowed():
-                        budget.partial = True
-                        error = "discovery budget reached"
-                        break
-                    namespace = row.get("Namespace") or _namespace(ctx)
-                    identifier = row["ID"]
-                    if not safe_path(namespace) or namespace == "*" or not safe_path(identifier):
-                        budget.partial = True
-                        collector.partial("nomad/jobs", "invalid job identifier or namespace")
-                        continue
-                    if not job_frontier.claim("k:" + namespace + "\0" + identifier):
-                        continue
-                    detail_path = _job_path(ctx, identifier, namespace)
-                    response = _get(ctx, prior["api_endpoint"], detail_path, token, budget=budget)
-                    if response.status == 200 and response.truncated and not response.error:
-                        pool = getattr(ctx.lifecycle_state, "http", None)
-                        if callable(getattr(pool, "request_stream", None)):
-                            headers = {"Accept": "application/json"}
-                            if token:
-                                headers["X-Nomad-Token"] = token
-                            source = f"job_specs.{namespace}.{identifier}"
-                            streamed = collector.stream_json_scalars(
-                                pool,
-                                prior["api_endpoint"] + detail_path,
-                                source,
-                                headers=headers,
-                                timeout=budget.timeout(),
-                                root_kind="object",
-                                required_prefix=("ID",),
-                                expected_string=(("ID",), identifier),
-                                path_style="dot",
-                            )
-                            if streamed:
-                                continue
-                            budget.partial = True
-                            collector.partial("nomad/jobs", "incomplete job specification")
-                            continue
-                    if not budget.consume(response):
-                        budget.partial = True
-                        collector.partial("nomad/jobs", "incomplete job specification")
-                        continue
-                    spec = json_value(response)
-                    if response.status != 200 or not isinstance(spec, dict) or spec.get("ID") != identifier:
-                        budget.partial = True
-                        collector.partial("nomad/jobs", f"{identifier}: HTTP {response.status or 'error'}")
-                        continue
-                    source = f"job_specs.{namespace}.{identifier}"
-                    if not collector.add(source, spec):
-                        budget.partial = True
-                        error = "discovery budget reached"
-                        break
-                    if len(job_specs) < 5000 and job_snapshot_bytes + len(response.body) <= 1024 * 1024:
-                        job_specs.append({"namespace": namespace, "job": identifier, "spec": spec})
-                        job_snapshot_bytes += len(response.body)
-                if error:
+        with (
+            collector.source_guard(collector.source_manifest, "nomad.job_catalog_pages")
+            if name == "jobs" and collector is not None and collector.source_manifest is not None
+            else nullcontext()
+        ):
+            while budget.allowed():
+                response = _get(ctx, prior["api_endpoint"], page_path, token, budget=budget)
+                catalog_denied |= response.status in {401, 403}
+                if (
+                    name == "jobs"
+                    and discover
+                    and response.status == 200
+                    and response.truncated
+                    and not response.error
+                    and page_size > 1
+                ):
+                    page_size = max(1, page_size // 2)
+                    page_base = path + f"&per_page={page_size}"
+                    page_path = page_base + ("&" + urlencode({"next_token": page_cursor}) if page_cursor else "")
+                    continue
+                streamed_rows = None
+                streamed_page_complete = True
+                if (
+                    name == "jobs"
+                    and collector is not None
+                    and response.status == 200
+                    and response.truncated
+                    and not response.error
+                ):
+                    pool = getattr(ctx.lifecycle_state, "http", None)
+                    if callable(getattr(pool, "request_stream", None)):
+                        streamed_rows = SpoolingRecords()
+                        response_headers: dict[str, str] = {}
+                        headers = {"Accept": "application/json"}
+                        if token:
+                            headers["X-Nomad-Token"] = token
+
+                        def append_catalog_row(
+                            _path: JSONPath,
+                            row: Mapping[str, Any],
+                            rows: SpoolingRecords | None = streamed_rows,
+                        ) -> None:
+                            assert rows is not None
+                            rows.append(dict(row))
+
+                        streamed_page_complete = collector.stream_json_scalars(
+                            pool,
+                            prior["api_endpoint"] + page_path,
+                            "nomad/jobs/catalog",
+                            headers=headers,
+                            timeout=budget.timeout(),
+                            root_kind="array",
+                            exclude=lambda _path: True,
+                            row_validators={
+                                (): (
+                                    frozenset({"ID", "Namespace", "Name", "Status", "Type"}),
+                                    lambda row: (
+                                        isinstance(row.get("ID"), str)
+                                        and safe_path(row["ID"])
+                                        and safe_path(row.get("Namespace") or _namespace(ctx))
+                                    ),
+                                )
+                            },
+                            on_row=append_catalog_row,
+                            on_response_headers=response_headers.update,
+                            on_status=observe_catalog_status,
+                        )
+                        streamed_rows.finish()
+                        response = HttpResponse(200, b"[]", response_headers)
+                if not budget.consume(response):
+                    error = "response or byte limit"
                     break
-            elif snapshot_limited:
-                budget.partial = True
-                error = "item limit"
-                break
-            if not streamed_page_complete:
-                error = "incomplete streamed collection"
-                budget.partial = True
-                break
-            if not next_token:
-                complete = True
-                break
-            repeated = (
-                not job_frontier.claim("p:" + next_token) if job_frontier is not None else next_token in next_seen
-            )
-            if repeated or (len(rows) >= 5000 and not discover):
-                budget.partial = True
-                error = "pagination repeated a token" if repeated else "item limit"
-                break
-            if job_frontier is None:
-                next_seen.add(next_token)
-            page_cursor = next_token
-            page_path = page_base + ("&" if "?" in page_base else "?") + urlencode({"next_token": next_token})
+                data = streamed_rows if streamed_rows is not None else json_value(response)
+                if name == "members" and isinstance(data, dict):
+                    data = data.get("Members")
+                state = access(response, _rows(data, key))
+                if state != "allowed":
+                    error = f"HTTP {response.status}" if response.status != 200 else "invalid collection"
+                    break
+                next_token = next(
+                    (value for k, value in response.headers.items() if k.lower() == "x-nomad-nexttoken"), ""
+                )
+                any_page_allowed = True
+                if name == "jobs" and collector is not None:
+                    assert collector.source_manifest is not None
+                    collector.source_manifest.read("nomad.job_catalog_pages")
+                if name == "jobs" and collector is not None:
+                    collector.mark_accessible_source()
+                if discover:
+                    for row in data:
+                        row_size = len(json.dumps(row, ensure_ascii=False).encode("utf-8"))
+                        if len(rows) < 5000 and snapshot_bytes + row_size <= 1024 * 1024:
+                            rows.append(row)
+                            snapshot_bytes += row_size
+                        else:
+                            snapshot_limited = True
+                else:
+                    remaining = max(0, 5000 - len(rows))
+                    rows.extend(data[:remaining])
+                    snapshot_limited |= len(data) > remaining
+                if name == "jobs" and collector is not None and job_frontier is not None:
+                    for row in data:
+                        if not budget.allowed():
+                            budget.partial = True
+                            error = "discovery budget reached"
+                            break
+                        namespace = row.get("Namespace") or _namespace(ctx)
+                        identifier = row["ID"]
+                        if not safe_path(namespace) or namespace == "*" or not safe_path(identifier):
+                            budget.partial = True
+                            collector.partial("nomad/jobs", "invalid job identifier or namespace")
+                            continue
+                        if not job_frontier.claim("k:" + namespace + "\0" + identifier):
+                            continue
+                        with collector.source_attempt(
+                            "nomad.job_specs", scope="selected_namespace_job_specifications"
+                        ) as evidence:
+                            detail_path = _job_path(ctx, identifier, namespace)
+                            response = _get(ctx, prior["api_endpoint"], detail_path, token, budget=budget)
+                            evidence.status = response.status
+                            evidence.unsupported = response.status in {404, 405, 501}
+                            if response.status == 200 and response.truncated and not response.error:
+                                pool = getattr(ctx.lifecycle_state, "http", None)
+                                if callable(getattr(pool, "request_stream", None)):
+                                    headers = {"Accept": "application/json"}
+                                    if token:
+                                        headers["X-Nomad-Token"] = token
+                                    source = f"job_specs.{namespace}.{identifier}"
+                                    streamed = collector.stream_json_scalars(
+                                        pool,
+                                        prior["api_endpoint"] + detail_path,
+                                        source,
+                                        headers=headers,
+                                        timeout=budget.timeout(),
+                                        root_kind="object",
+                                        on_status=lambda status: setattr(evidence, "status", status),
+                                        required_prefix=("ID",),
+                                        expected_string=(("ID",), identifier),
+                                        path_style="dot",
+                                    )
+                                    if streamed:
+                                        evidence.accept()
+                                        continue
+                                    budget.partial = True
+                                    collector.partial("nomad/jobs", "incomplete job specification")
+                                    continue
+                            if not budget.consume(response):
+                                budget.partial = True
+                                collector.partial("nomad/jobs", "incomplete job specification")
+                                continue
+                            spec = json_value(response)
+                            if response.status != 200 or not isinstance(spec, dict) or spec.get("ID") != identifier:
+                                budget.partial = True
+                                collector.partial("nomad/jobs", f"{identifier}: HTTP {response.status or 'error'}")
+                                continue
+                            source = f"job_specs.{namespace}.{identifier}"
+                            if not collector.add(source, spec):
+                                budget.partial = True
+                                error = "discovery budget reached"
+                                break
+                            evidence.accept()
+                            if len(job_specs) < 5000 and job_snapshot_bytes + len(response.body) <= 1024 * 1024:
+                                job_specs.append({"namespace": namespace, "job": identifier, "spec": spec})
+                                job_snapshot_bytes += len(response.body)
+                    if error:
+                        break
+                elif snapshot_limited:
+                    budget.partial = True
+                    error = "item limit"
+                    break
+                if not streamed_page_complete:
+                    error = "incomplete streamed collection"
+                    budget.partial = True
+                    break
+                if not next_token:
+                    complete = True
+                    break
+                repeated = (
+                    not job_frontier.claim("p:" + next_token) if job_frontier is not None else next_token in next_seen
+                )
+                if repeated or (len(rows) >= 5000 and not discover):
+                    budget.partial = True
+                    error = "pagination repeated a token" if repeated else "item limit"
+                    break
+                if job_frontier is None:
+                    next_seen.add(next_token)
+                page_cursor = next_token
+                page_path = page_base + ("&" if "?" in page_base else "?") + urlencode({"next_token": next_token})
+        if name == "jobs" and collector is not None:
+            assert collector.source_manifest is not None
+            collector.source_manifest.finish("nomad.job_catalog_pages", complete=complete, denied=catalog_denied)
         budget.partial |= not complete
         if any_page_allowed:
             state = "allowed"

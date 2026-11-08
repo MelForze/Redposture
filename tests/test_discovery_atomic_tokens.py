@@ -16,7 +16,7 @@ from redposture_core.storage_discovery import DiscoveryCollector
 @pytest.mark.parametrize(
     ("prefix", "middle", "suffix", "detector"),
     [
-        ("eyJhbGciOiJIUzI1NiJ9.", "YWJj", ".c2ln", "jwt"),
+        ("eyJhbGciOiJIUzI1NiJ9.eyJkYXRhIjoi", "YWJj", "In0.c2lnbmF0dXJl", "jwt"),
         ("glsa_", "Ab0_", "tail", "grafana_token"),
         ("sk-proj-", "Ab0_", "tail", "api_token"),
         ("dckr_pat_", "Ab0_", "tail", "docker_token"),
@@ -44,7 +44,7 @@ def test_neutral_disk_token_keeps_full_value_without_materializing(prefix, middl
 def test_streamed_neutral_jwt_waits_for_end_and_keeps_exact_value(reader, interrupted) -> None:
     from redposture_core.clients.http_api import HttpResponse
 
-    token = "eyJhbGciOiJIUzI1NiJ9." + "YWJj" * 80_000 + ".c2ln"
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJkYXRhIjoi" + "YWJj" * 80_000 + "In0.c2lnbmF0dXJl"
     body = json.dumps({"message": token}).encode()
     if interrupted:
         body = body[:-2]
@@ -85,7 +85,7 @@ def test_large_neutral_token_keeps_later_completed_finding(reader) -> None:
 
     from redposture_core.clients.http_api import HttpResponse
 
-    token = "eyJhbGciOiJIUzI1NiJ9." + "YWJj" * 400 + ".c2ln"
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJkYXRhIjoi" + "YWJj" * 400 + "In0.c2lnbmF0dXJl"
     text = token + "\npassword=qa-late-password\n"
     payload = json.dumps({"message": text}).encode()
 
@@ -129,7 +129,7 @@ def test_neutral_size_and_partial_prefix_are_not_secret_evidence(bad) -> None:
 
 
 def test_materialized_neutral_token_uses_same_complete_disk_path() -> None:
-    token = "eyJhbGciOiJIUzI1NiJ9." + "YWJj" * 1000 + ".c2ln"
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJkYXRhIjoi" + "YWJj" * 1000 + "In0.c2lnbmF0dXJl"
     matches, size, covered = _scan_portioned_value({"message": token}, "$", 512)
     assert covered
     assert size >= len(token)
@@ -143,7 +143,7 @@ def test_materialized_neutral_token_uses_same_complete_disk_path() -> None:
 def test_completed_large_token_is_emitted_before_later_source_failure(reader) -> None:
     from redposture_core.clients.http_api import HttpResponse
 
-    token = "eyJhbGciOiJIUzI1NiJ9." + "YWJj" * 1000 + ".c2ln"
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJkYXRhIjoi" + "YWJj" * 1000 + "In0.c2lnbmF0dXJl"
     head = json.dumps({"message": token}).encode()[:-1] + (b',"later":' if reader == "scalars" else b"")
     emitted: list[str] = []
 

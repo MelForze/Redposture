@@ -57,7 +57,7 @@ def test_large_config_keeps_full_secret_and_skips_public_digest():
     found = payload.findings[0]
     from redposture_core.modules.proxmox.discovery import finding_type
 
-    assert finding_type(found["reason"]) == "token"
+    assert finding_type(found["reason"]) == "generic_secret"
     assert isinstance(found["sample"], DiskBackedText)
     assert found["sample"].digest == hashlib.sha256(value.encode()).hexdigest()
     assert found["path"].endswith("api_token")
@@ -87,8 +87,13 @@ def test_plain_report_preserves_legacy_uri_and_assignment_findings():
     status, payload, headers, error = read(body, "/nodes/pve-edge-01/report")
     assert status == 200 and error is None
     reasons = {item["reason"] for item in payload.findings}
-    assert "uri_with_auth" in reasons
-    assert "text_ceph_mon_secret" in reasons
+    assert "connection_string" in reasons
+    assert any(
+        item["sample"] == "https://backupsvc:BackupSvc!2026@pbs.lab.internal:8007/api2/json"
+        for item in payload.findings
+    )
+    assert "generic_secret" in reasons
+    assert any(item["sample"] == "ceph-mon-secret-lab-2026" for item in payload.findings)
     assert "x-redposture-discovery-error" not in headers
 
 
@@ -100,8 +105,13 @@ def test_json_wrapped_report_preserves_uri_and_assignment_findings():
     status, payload, headers, error = read(json.dumps({"data": report}).encode(), "/nodes/pve-edge-01/report")
     assert status == 200 and error is None
     reasons = {item["reason"] for item in payload.findings}
-    assert "uri_with_auth" in reasons
-    assert "text_ceph_mon_secret" in reasons
+    assert "connection_string" in reasons
+    assert any(
+        item["sample"] == "https://backupsvc:BackupSvc!2026@pbs.lab.internal:8007/api2/json"
+        for item in payload.findings
+    )
+    assert "generic_secret" in reasons
+    assert any(item["sample"] == "ceph-mon-secret-lab-2026" for item in payload.findings)
     assert "x-redposture-discovery-error" not in headers
 
 
@@ -137,8 +147,8 @@ def test_report_labelled_hex_and_prefixed_token_remain_findings():
     status, payload, headers, error = read(json.dumps({"data": report}).encode(), "/nodes/pve-edge-01/report")
     assert status == 200 and error is None
     assert "x-redposture-discovery-error" not in headers
-    assert any(item["reason"] == "text_api_token" for item in payload.findings)
-    assert any(item["reason"] == "opaque_token" for item in payload.findings)
+    assert any(item["sample"] == "8d" * 16 for item in payload.findings)
+    assert any(item["sample"] == "glpat-" + "A7b9" * 6 for item in payload.findings)
 
 
 def test_small_json_wrapped_report_preserves_findings_in_regular_reader():
@@ -152,7 +162,11 @@ def test_small_json_wrapped_report_preserves_findings_in_regular_reader():
         findings,
         set(),
     )
-    assert {item["reason"] for item in findings} >= {"uri_with_auth", "url_basic_auth"}
+    assert len(findings) == 1
+    assert (
+        findings[0]["reason"] == "connection_string"
+        and findings[0]["sample"] == "https://backupsvc:BackupSvc!2026@pbs.lab.internal:8007/api2/json"
+    )
 
 
 def test_long_finding_file_output_uses_airflow_finding_palette(capsys):

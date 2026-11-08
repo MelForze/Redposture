@@ -15,9 +15,10 @@ from ....data_discovery import _scan_portioned_value
 from ....discovery_matches import SpoolingSecretMatches
 from ....discovery_options import DEFAULT_DISCOVER_TIME
 from ....discovery_paths import concat_discovery_text
+from ....discovery_sources import SourceManifest
 from ....discovery_values import DiskBackedText
 from ....scheduler import NestedSchedulerCancelled
-from ....secret_detection import detector_names, fingerprint
+from ....secret_detection import detector_matches, detector_names, fingerprint
 from .catalog import CatalogTree
 from .checkpoint import CheckpointStore, InMemoryCheckpointStore
 from .findings import FindingStore
@@ -56,7 +57,7 @@ def _coverage_key(database: str, table: str, column: str) -> str:
 
 
 def _finding_key(detector: str, value: str | DiskBackedText) -> str:
-    return f"{detector}:{fingerprint(value)}"
+    return f"value:{fingerprint(value)}"
 
 
 def _initial_finding(raw: dict[str, Any]) -> dict[str, Any]:
@@ -65,12 +66,9 @@ def _initial_finding(raw: dict[str, Any]) -> dict[str, Any]:
         value["object_path"] = concat_discovery_text("", value["object_path"])
     value.setdefault("occurrences", 0)
     value.setdefault("location_count", 0)
-    # Locations are capped at 100 when collected; resume must reopen this
-    # small mutable list, not append to a finalized checkpoint array spool.
-    value["locations"] = [dict(location) for location in value.get("locations") or []]
-    for location in value["locations"]:
-        if isinstance(location.get("object_path"), DiskBackedText):
-            location["object_path"] = concat_discovery_text("", location["object_path"])
+    # The keyed registry imports checkpoint arrays incrementally; do not
+    # rebuild a large location catalog merely to resume one target.
+    value["locations"] = value.get("locations") or []
     return value
 
 
@@ -100,7 +98,7 @@ def _scan_rows(
             coverage_item["bytes_scanned"] += _estimate_bytes([raw_value])
             try:
                 matches, _, covered = _scan_portioned_value(raw_value, "$", 65_536, _deadline=deadline)
-                matches = SpoolingSecretMatches(match for match in matches if match.detector in enabled)
+                matches = SpoolingSecretMatches(match for match in matches if detector_matches(match, enabled))
                 if not covered:
                     coverage_item["scan_incomplete"] = True
                 if not matches:
@@ -116,7 +114,7 @@ def _scan_rows(
             if coverage_item.get("scan_incomplete"):
                 complete = False
             for match in matches:
-                if match.detector not in enabled or not isinstance(match.value, (str, DiskBackedText)):
+                if not detector_matches(match, enabled) or not isinstance(match.value, (str, DiskBackedText)):
                     continue
                 object_path = "$" if match.object_path == f"$.{column}" else match.object_path
                 key = _finding_key(match.detector, match.value)
@@ -149,13 +147,15 @@ def _scan_rows(
                         "scanned_context": {"chunk_id": chunk.chunk_id},
                     }
                 finding["last_seen"] = now
-                if location not in finding["locations"]:
-                    finding["occurrences"] += 1
-                    finding["location_count"] += 1
-                    if len(finding["locations"]) < 100:
-                        finding["locations"].append(location)
                 try:
-                    findings[key] = finding
+                    if isinstance(findings, FindingStore):
+                        findings.record_location(key, finding, location)
+                    else:
+                        if location not in finding["locations"]:
+                            finding["occurrences"] += 1
+                            finding["location_count"] += 1
+                            finding["locations"].append(location)
+                        findings[key] = finding
                 except OSError as exc:
                     coverage_item["scan_incomplete"] = True
                     coverage_item["scan_error"] = str(exc)
@@ -236,19 +236,55 @@ def run_discovery(
     findings = FindingStore()
     for key, value in (state.get("findings") or {}).items():
         if isinstance(value, dict):
-            findings[str(key)] = _initial_finding(value)
+            identity = (
+                _finding_key(str(value.get("type") or ""), value["value"])
+                if isinstance(value.get("value"), (str, DiskBackedText))
+                else str(key)
+            )
+            findings.import_finding(identity, _initial_finding(value))
     metadata = CatalogTree()
     coverage = metadata.mapping()
     for key, value in (state.get("coverage") or {}).items():
         if isinstance(value, dict):
             coverage[str(key)] = value
 
+    source_manifest = SourceManifest()
+    for kind in ("database_catalog", "table_catalog", "column_catalog", "partition_catalog", "table_chunks"):
+        source_manifest.declare("clickhouse." + kind)
+    source_manifest.declare("clickhouse.unsupported_columns", implemented=False)
+
     def query_inventory_with_budget(query: str) -> tuple[list[list[Any]] | None, str | None]:
+        if bool(getattr(nested_scheduler, "cancelled", False)):
+            raise NestedSchedulerCancelled("ClickHouse catalog discovery cancelled")
         if deadline is not None and time.monotonic() >= deadline:
             return None, "discover_time"
-        rows, error = query_rows(query)
+        lowered = query.lower()
+        category = (
+            "column_catalog"
+            if "system.columns" in lowered or "describe" in lowered
+            else "partition_catalog"
+            if "system.parts" in lowered
+            else "table_catalog"
+            if "system.tables" in lowered or "show tables" in lowered
+            else "database_catalog"
+        )
+        kind = "clickhouse." + category
+        source_manifest.request(kind, scope="fresh_catalog_query_responses")
+        try:
+            rows, error = query_rows(query)
+        except BaseException:
+            source_manifest.finish(kind, complete=False)
+            raise
         if deadline is not None and time.monotonic() >= deadline:
+            source_manifest.finish(kind, complete=False)
             return None, "discover_time"
+        if rows is not None and error is None:
+            source_manifest.read(kind)
+        source_manifest.finish(
+            kind,
+            complete=rows is not None and error is None,
+            denied=bool(error and _error_kind(error) == "permission_denied"),
+        )
         return rows, error
 
     # Inventory loops read this callable metadata without wrapping/consuming rows.
@@ -735,6 +771,12 @@ def run_discovery(
         return ()
 
     def record_result(chunk: ScanChunk, result: Any) -> tuple[ScanChunk, ...]:
+        kind = "clickhouse.table_chunks"
+        source_manifest.request(kind, scope="fresh_data_chunk_attempts_excluding_checkpoint_reuse")
+        if result.error is None:
+            source_manifest.read(kind)
+        if result.error and _error_kind(result.error) == "permission_denied":
+            source_manifest.finish(kind, complete=False, denied=True)
         children = record_result_impl(chunk, result)
         # Any continuation/split has transferred its live frontier above.
         # Completed/error ranges need no in-memory history: the checkpoint
@@ -792,8 +834,10 @@ def run_discovery(
         item.get("scan_incomplete") or item.get("status") not in {"complete", "excluded", "unsupported_type"}
         for item in coverage.values()
     )
-    searchable_count = total_chunks = completed_chunks = 0
+    searchable_count = total_chunks = completed_chunks = unsupported_count = 0
     for item in coverage.values():
+        if item.get("status") == "unsupported_type":
+            unsupported_count += 1
         if item.get("status") not in {"excluded", "unsupported_type"}:
             searchable_count += 1
             total_chunks += int(item.get("total_chunks") or 0)
@@ -805,8 +849,18 @@ def run_discovery(
         if total_chunks
         else 0.0
     )
+    incomplete_locations = findings.has_incomplete_locations()
+    if incomplete_locations:
+        incomplete = True
     status = "partial" if incomplete else "complete"
+    source_manifest.finish("clickhouse.table_chunks", complete=not incomplete)
+    if unsupported_count:
+        source_manifest.request(
+            "clickhouse.unsupported_columns", implemented=False, scope="type_filter_metadata_only_no_value_reads"
+        )
+        source_manifest.finish("clickhouse.unsupported_columns", complete=False, unsupported=True)
     report = {
+        "sources": source_manifest.result(),
         "status": status,
         "checkpoint": str(config.checkpoint) if config.checkpoint is not None else None,
         "resumed": config.resume,
@@ -822,7 +876,8 @@ def run_discovery(
         "scan_errors": scan_errors,
         "bytes_scanned": inspected_bytes,
         "partial_reasons": ([budget_reason] if budget_reason else [])
-        + (["source_scan_incomplete"] if any(item.get("scan_incomplete") for item in coverage.values()) else []),
+        + (["source_scan_incomplete"] if any(item.get("scan_incomplete") for item in coverage.values()) else [])
+        + (["legacy_locations_incomplete"] if incomplete_locations else []),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "redacted": False,
         "detectors": list(enabled),
