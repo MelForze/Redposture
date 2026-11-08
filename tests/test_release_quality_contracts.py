@@ -167,7 +167,8 @@ def test_every_audit_module_obeys_mixed_target_output_contract(module: str) -> N
             "record_count": len(targets),
             "detected_count": 1,
             "operational_failure_count": 2,
-            "conclusive_negative_count": 3,
+            # foreign-http and ssh only; the confirmed service is positive.
+            "conclusive_negative_count": 2,
             "reason": "partial_operational_failure",
         }
     ]

@@ -2970,6 +2970,12 @@ _GOLDEN_LABEL_VOLATILE_FIELDS: dict[str, frozenset[str]] = {
 }
 # Volatile fields limited to a specific nested result collection.
 _GOLDEN_CONTEXT_VOLATILE_FIELDS: dict[tuple[str, str], frozenset[str]] = {
+    # Like server_version above, the SQL-reported patch follows the lab image.
+    # Product, scope and read-only evidence remain part of the snapshot.
+    ("postgres", "server_implementation"): frozenset({"version"}),
+    ("mongodb", "server_implementation"): frozenset({"version"}),
+    ("clickhouse", "server_implementation"): frozenset({"version"}),
+    ("oracle", "server_implementation"): frozenset({"version"}),
     ("gitlab", "token_user"): frozenset(
         {"last_activity_on", "local_time", "current_sign_in_at", "last_sign_in_at", "confirmed_at"}
     ),

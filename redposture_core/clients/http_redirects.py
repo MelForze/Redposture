@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Generator, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -28,8 +28,23 @@ def http_origin(url: str) -> tuple[str, str, int]:
     )
 
 
-def follow_redirects(
-    send: RequestSender,
+def is_redirect_policy_error(response: HttpResponse) -> bool:
+    """A completed redirect policy decision needs no larger sync re-read."""
+    return (
+        response.status in REDIRECT_STATUSES
+        and bool(response.error)
+        and str(response.error).startswith(
+            (
+                "cross-origin redirect blocked:",
+                "redirect loop detected",
+                "redirect limit exceeded (",
+                "unsupported HTTP redirect URL:",
+            )
+        )
+    )
+
+
+def _redirect_requests(
     method: str,
     url: str,
     *,
@@ -38,7 +53,7 @@ def follow_redirects(
     allow_cross_origin: bool = True,
     preserve_authorization: bool = True,
     prepare_request: RequestPreparer | None = None,
-) -> HttpResponse:
+) -> Generator[tuple[str, str, dict[str, str], bytes | None], HttpResponse, HttpResponse]:
     """Follow HTTP redirects independently of retry/replay policy.
 
     All operator-supplied credentials are retained by default. Host follows
@@ -58,7 +73,7 @@ def follow_redirects(
         try:
             origin = http_origin(current_url)
             outgoing = prepare_request(method, current_url, dict(headers), body) if prepare_request else dict(headers)
-            response = send(method, current_url, outgoing, body)
+            response = yield method, current_url, outgoing, body
         except Exception as exc:
             return HttpResponse(
                 0,
@@ -108,6 +123,79 @@ def follow_redirects(
         visited.add(destination)
         current_url = destination
     raise AssertionError("unreachable")
+
+
+def follow_redirects(
+    send: RequestSender,
+    method: str,
+    url: str,
+    *,
+    headers: Mapping[str, str] | None = None,
+    body: bytes | str | None = None,
+    allow_cross_origin: bool = True,
+    preserve_authorization: bool = True,
+    prepare_request: RequestPreparer | None = None,
+) -> HttpResponse:
+    """Drive the shared redirect policy with a synchronous sender."""
+    steps = _redirect_requests(
+        method,
+        url,
+        headers=headers,
+        body=body,
+        allow_cross_origin=allow_cross_origin,
+        preserve_authorization=preserve_authorization,
+        prepare_request=prepare_request,
+    )
+    try:
+        request = next(steps)
+        while True:
+            try:
+                response = send(*request)
+            except Exception as exc:
+                request = steps.throw(exc)
+            else:
+                request = steps.send(response)
+    except StopIteration as result:
+        return result.value
+    finally:
+        steps.close()
+
+
+async def follow_redirects_async(
+    send: Callable[[str, str, dict[str, str], bytes | None], Awaitable[HttpResponse]],
+    method: str,
+    url: str,
+    *,
+    headers: Mapping[str, str] | None = None,
+    body: bytes | str | None = None,
+    allow_cross_origin: bool = True,
+    preserve_authorization: bool = True,
+    passthrough: tuple[type[Exception], ...] = (),
+) -> HttpResponse:
+    """Use the same decisions; cancellation and explicit fallback escape."""
+    steps = _redirect_requests(
+        method,
+        url,
+        headers=headers,
+        body=body,
+        allow_cross_origin=allow_cross_origin,
+        preserve_authorization=preserve_authorization,
+    )
+    try:
+        request = next(steps)
+        while True:
+            try:
+                response = await send(*request)
+            except Exception as exc:
+                if isinstance(exc, passthrough):
+                    raise
+                request = steps.throw(exc)
+            else:
+                request = steps.send(response)
+    except StopIteration as result:
+        return result.value
+    finally:
+        steps.close()
 
 
 class NoAutomaticRedirects(urllib.request.HTTPRedirectHandler):

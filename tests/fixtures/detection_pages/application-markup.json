@@ -1,0 +1,72 @@
+[
+  {
+    "product": "grafana",
+    "version": "11.1.6",
+    "image": "grafana/grafana:11.1.6",
+    "source_sha256": "026f28d51bfb1e653c245529c8ea5d2469b78a54e2eb3d9311087ed25d155578",
+    "title": "Grafana",
+    "body": {
+      "class": "theme-dark app-grafana"
+    },
+    "ids": [
+      "reactRoot"
+    ],
+    "styles": [
+      "public/build/grafana.dark.ac9d572e376a8330bd1a.css"
+    ],
+    "scripts": [
+      "public/build/runtime.544a5fc1c2f93dbcab1a.js",
+      "public/build/6029.0549a3fcb50e73c4b256.js",
+      "public/build/1247.34022e0fa8ad25da7b32.js",
+      "public/build/4998.ed066aa322d971e471f0.js",
+      "public/build/9778.7ede5a44b045358ee1fb.js",
+      "public/build/app.8222b35d5a14e3d0ea28.js"
+    ]
+  },
+  {
+    "product": "grafana",
+    "version": "13.0.2",
+    "image": "grafana/grafana-oss:13.0.2",
+    "source_sha256": "b4f73700aa9b4bdb650e8b9c3cbd4e54e69e4129d4c0af7fdd05c79a4e98eccc",
+    "title": "Grafana",
+    "body": {
+      "class": "theme-dark app-grafana"
+    },
+    "ids": [
+      "reactRoot"
+    ],
+    "styles": [
+      "public/build/grafana.app.6c9ee06a74ba648e0fa8.css",
+      "public/build/grafana.dark.d5a794927756549b8010.css"
+    ],
+    "scripts": [
+      "public/build/runtime.247ed7e60c9a3110861e.js",
+      "public/build/6029.ced17922ce65e4fd1ef9.js",
+      "public/build/1791.d2121f46d19723228ede.js",
+      "public/build/522.e579a60fe94dd7b6ef93.js",
+      "public/build/6182.0d50a9cb388deb736875.js",
+      "public/build/7457.4455c81525be8fb26b46.js",
+      "public/build/app.b5c3fa1a9a2d09a31940.js"
+    ]
+  },
+  {
+    "product": "minio",
+    "version": "RELEASE.2025-04-22T22-12-26Z",
+    "image": "redposture-minio-qa:RELEASE.2025-04-22T22-12-26Z",
+    "source_sha256": "32a8d72ff60b9dd4d3b25a381f3aa19a73a65d3660bda6a26531e409be7f4dc0",
+    "title": "MinIO Console",
+    "body": {},
+    "ids": [
+      "loader-block",
+      "preload",
+      "root"
+    ],
+    "styles": [
+      "./styles/root-styles.css",
+      "./static/css/main.e60e4760.css"
+    ],
+    "scripts": [
+      "./static/js/main.45669c2e.js"
+    ]
+  }
+]

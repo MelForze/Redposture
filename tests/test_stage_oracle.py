@@ -201,6 +201,31 @@ def _args(**overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
+def test_authenticated_backend_metadata_survives_runtime_json(monkeypatch, tmp_path):
+    _patch_open(monkeypatch, auth_required=True)
+    monkeypatch.setattr(
+        _FakeOracleClient,
+        "server_banner",
+        lambda self: {
+            "banner": "Oracle AI Database 26ai Free Release 23.26.3.0.0",
+            "version": "23.26.3.0.0",
+        },
+    )
+    output = tmp_path / "identity.jsonl"
+    assert (
+        oracle.run_oracle_stage(
+            _args(username="system", password="oracle", no_color=True, output_format="json", output=str(output)),
+            logger=object(),
+        )
+        == 0
+    )
+    raw = output.read_text()
+    row = json.loads(raw.splitlines()[0])
+    assert "\x1b" not in raw
+    identity = row["credential_attempts"][0]["credential_capabilities"]["server_implementation"]
+    assert identity["product"] == "Oracle Database" and identity["version"] == "23.26.3.0.0"
+
+
 def test_audit_oracle_open_no_auth_with_details(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_open(monkeypatch, auth_required=False)
     record = oracle._audit_oracle_host(
@@ -728,7 +753,7 @@ def test_oracle_detection_is_reused_and_all_unlocked_defcreds_are_checked(
     assert status_calls == ["tcp"]  # detect once; deep phase uses its cached fingerprint
     assert probe_calls[:2] == ["FREEPDB1", "ORCLPDB1"]
     assert len(probe_calls) == 12  # one transport, one discovery pass
-    assert len(auth_calls) == 2 * len(oracle._ORACLE_DEFAULT_CREDS) + 1
+    assert len(auth_calls) == 2 * len(oracle._ORACLE_DEFAULT_CREDS)  # No extra selected-pair login for metadata.
     assert {service for _, _, service in auth_calls} == {"FREEPDB1", "ORCLPDB1"}
     record = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
     assert record["status"] == "weak_default_creds"

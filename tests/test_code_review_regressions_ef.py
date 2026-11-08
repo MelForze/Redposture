@@ -227,22 +227,6 @@ def test_fix_e6_retain_records_disabled_emits_debug_marker(monkeypatch: pytest.M
         def iter_target_specs(self):
             return iter([])
 
-    class _FakeSpec:
-        module = "test"
-        label = "TEST"
-        default_port = 1
-        host_stage = None
-        render = None
-        render_module = None
-        colorize = None
-        detect = None
-        auth = None
-        capabilities = None
-        data = None
-        is_detected = None
-        deep_gate = None
-        keep_anonymous_open_no_auth = False
-
     args = argparse.Namespace(
         debug_emit=events.append,
         debug=True,
@@ -250,7 +234,9 @@ def test_fix_e6_retain_records_disabled_emits_debug_marker(monkeypatch: pytest.M
         retries=0,
         workers=1,
     )
-    runner = stage_runtime.AuditCommandRunner(args=args, spec=_FakeSpec(), console=None)
+    runner = stage_runtime.AuditCommandRunner(
+        args=args, spec=stage_runtime.ModuleAuditSpec(module="test", label="TEST", default_port=1), console=None
+    )
     runner.run_plan(_FakePlan())
     assert any("record retention disabled" in event for event in events), f"E6 marker not emitted; events={events!r}"
 

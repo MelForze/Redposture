@@ -42,6 +42,8 @@ For supported endpoints exposing both a backend and a UI, the second surface is 
 
 Detection distinguishes protocol compatibility from an identified product. `PostgreSQL-compatible endpoint` confirms PostgreSQL wire evidence, not an HTTP UI or a specific PostgreSQL/PgBouncer implementation. A startup rejection before an authentication challenge can leave `auth required:unknown`; it does not reject an untested password. UI fingerprints require product-specific evidence from complete responses. Kafka brokers advertising SASL handshake support are checked with read-only mechanism negotiation before Metadata, avoiding an unauthenticated Metadata request on SASL listeners; legacy fallbacks remain available.
 
+After verified PostgreSQL credentials, a read-only SQL probe can add `(backend:PostgreSQL)` and `server_implementation` evidence to JSON. This identifies the SQL-reported backend and does not rule out a proxy. When `--database pgbouncer` is explicitly selected, `SHOW VERSION` can instead confirm `(proxy:PgBouncer)`. Unknown implementations retain the compatible endpoint label; anonymous mass detection sends no additional identity queries. Redis Insight detection accepts the official Docker, Redis Stack, Electron and VS Code build mappings, together with a real product page and valid version; desktop/extension mappings have contract coverage, while Docker and Redis Stack have live coverage.
+
 Supported HTTP modules and UIs can pass an anonymous keep-alive connection from async detection to synchronous authentication or data reads. At most 64 connections wait for this handoff per command, also bounded by the synchronous worker count and available file descriptors. Connections carrying credentials or cookies are excluded. If a transferred connection closes, only its first GET/HEAD may reconnect once; POST and execution requests are never replayed by this mechanism. PostgreSQL can keep a completed session for subsequent reads under the same user, database and TLS policy; each credential candidate still authenticates independently. MongoDB reuses the verified synchronous client. Spray shares the handoff budget across queued targets, and exporters reuse prefetch connections without adding callback retries.
 
 ## Default credential checks
@@ -492,6 +494,24 @@ bash scripts/check_before_push.sh --reuse-venvs
 ```
 
 List local QA sections with `bash scripts/run_full_local_qa.sh --list`, or run all sections with `bash scripts/run_full_local_qa.sh /tmp/redposture_qa_full`.
+
+The optional `detect-performance` section checks detection on deterministic loopback routes, with one warm-up and three measured runs. It reports exact missing/extra/duplicate results, requests, wall/CPU time, first finding, RSS, file descriptors and threads. It runs the real Grafana detector and scheduler with auth/data disabled; these are logical targets on one fixture server, not physical hosts. The fixture's CPU/RSS are included.
+
+```bash
+bash scripts/run_full_local_qa.sh /tmp/redposture_detect_profile --section detect-performance
+python scripts/profile_detection_performance.py --baseline /path/to/before-source --targets 10000 --model mixed --output /tmp/detect-comparison.json
+```
+
+Models are `numeric`, `hostname`, `interim` (HTTP 100 Continue) and `mixed` (DNS, interim replies and 5% slower routes). Both source trees use identical seeds, timeouts, retries and concurrency. Quality failures always fail the profile. With a baseline, a timing regression requires at least three measurements, a median increase over 25% and 0.25 seconds, exceeding three times the observed range. Without a baseline the profile checks quality and records timings; it does not claim absence of a performance regression. Use fresh artifact paths and run profiles separately from stands or CI.
+
+For repeated large profiles on macOS, use `--container-image python:3.12.14-slim` to avoid carrying TCP `TIME_WAIT` between measurements. The image must already exist locally; each run uses a fresh network namespace, 2 CPUs and 768 MiB, with external networking disabled. The QA section accepts the same setting through `REDPOSTURE_PROFILE_CONTAINER_IMAGE`.
+
+`spray --debug` reports separate detect and credential-worker limits, active phases,
+queue/slot counts and periodic progress. JSON diagnostics go to stderr; saved
+credential results remain unchanged. Observers and the reporter are disabled
+without `--debug`; diagnostic service times are summed work, not wall time.
+
+The separate opt-in `module-performance` section compares all 32 detectors in sequential isolated containers. It requires an explicit baseline and measurement image; public auth/data and workflow profiles have their own coverage limits. See [performance profiles](scripts/PERFORMANCE.md) for reproducible commands, quality gates and resource accounting.
 
 ## License
 

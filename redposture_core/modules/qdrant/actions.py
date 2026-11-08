@@ -381,6 +381,17 @@ def _qdrant_collections_from_payload(payload: Any) -> list[str] | None:
 
 
 def _qdrant_looks_like_response(payload: Any) -> bool:
+    if _qdrant_is_root_payload(payload):
+        return True
+    if isinstance(payload, dict):
+        status_value = payload.get("status")
+        if isinstance(status_value, dict):
+            return re.search(r"\bqdrant\b", str(status_value.get("error") or ""), re.I) is not None
+    return False
+
+
+def _qdrant_compatible_response(payload: Any) -> bool:
+    """Generic envelopes trigger correlation but cannot confirm the vendor."""
     if isinstance(payload, dict):
         if _qdrant_is_root_payload(payload):
             return True
@@ -1362,6 +1373,13 @@ def _audit_qdrant_host(
                 is_qdrant = True
             elif _qdrant_looks_like_response(root_payload) or _qdrant_looks_like_response(root_auth_payload):
                 is_qdrant = True
+            if not is_qdrant and (
+                _qdrant_compatible_response(root_payload) or _qdrant_compatible_response(anon_col_payload)
+            ):
+                info_status, info_payload, info_error = _http_json_request(
+                    host, port, "GET", "/service/info", timeout, headers=None, response_size_cap=_DETECT_RESPONSE_CAP
+                )
+                is_qdrant = info_error is None and info_status == 200 and _qdrant_looks_like_response(info_payload)
 
             if not is_qdrant:
                 if anon_col_error:
@@ -2058,10 +2076,26 @@ def _detect_qdrant_steps(ctx: Any, options: dict[str, Any]) -> Any:
         )
         names = _qdrant_collections_from_payload(col_payload) if col_error is None else None
         is_qdrant = (
-            _qdrant_is_root_payload(root_payload)
-            or _qdrant_looks_like_response(root_payload)
-            or _qdrant_looks_like_response(col_payload)
+            root_error is None
+            and root_status == 200
+            and _qdrant_looks_like_response(root_payload)
+            or col_error is None
+            and col_status > 0
+            and _qdrant_looks_like_response(col_payload)
         )
+        compatible_signal = (
+            root_error is None
+            and _qdrant_compatible_response(root_payload)
+            or col_error is None
+            and _qdrant_compatible_response(col_payload)
+        )
+        if not is_qdrant and compatible_signal:
+            info_status, info_payload, info_error = yield DetectCall(
+                _http_json_request,
+                (str(ctx.host), int(ctx.port), "GET", "/service/info", float(getattr(ctx.args, "timeout", 5.0))),
+                {"headers": None, "response_size_cap": _DETECT_RESPONSE_CAP},
+            )
+            is_qdrant = info_error is None and info_status == 200 and _qdrant_looks_like_response(info_payload)
         if is_qdrant:
             anonymous_ok = col_status == 200 and isinstance(names, list)
             record.update(
@@ -2094,7 +2128,12 @@ def _detect_qdrant_steps(ctx: Any, options: dict[str, Any]) -> Any:
             break
         last_error = col_error or root_error
         if last_error is None:
-            record["error"] = "service is not qdrant"
+            record["error"] = (
+                "Qdrant-compatible API; product identity unverified" if compatible_signal else "service is not qdrant"
+            )
+            if compatible_signal:
+                record["operational_failure"] = True
+                record["detection_status"] = "unverified"
             break
         if attempt >= attempts - 1:
             record["error"] = last_error

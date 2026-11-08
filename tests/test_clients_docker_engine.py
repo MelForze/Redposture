@@ -223,11 +223,11 @@ def test_docker_client_json_shape_fallbacks_and_exec_error_paths() -> None:
     QueueConnection.responses = [
         _Response(200, b"[]"),
         _Response(200, b"[]"),
-        _Response(200, b"{}"),
-        _Response(200, b"{}"),
         _Response(200, b"[]"),
         _Response(200, b"[]"),
-        _Response(200, b"{}"),
+        _Response(200, b"[]"),
+        _Response(200, b'{"Volumes": []}'),
+        _Response(200, b'{"LayersSize": 0, "Images": [], "Containers": [], "Volumes": []}'),
     ]
     client = DockerEngineClient("127.0.0.1", 2375, http_connection_cls=QueueConnection)
 
@@ -237,7 +237,7 @@ def test_docker_client_json_shape_fallbacks_and_exec_error_paths() -> None:
     assert client.images() == []
     assert client.networks() == []
     assert client.volumes() == []
-    assert client.system_df() == {}
+    assert client.system_df() == {"LayersSize": 0, "Images": [], "Containers": [], "Volumes": []}
 
     QueueConnection.responses = [_Response(200, b"{}")]
     with pytest.raises(DockerEngineError, match="did not contain Id"):

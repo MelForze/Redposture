@@ -16,15 +16,16 @@ import threading
 import time
 from collections.abc import Mapping
 from contextlib import contextmanager
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
 from .clients.http_api import HttpResponse, infer_http_base_path
+from .clients.http_redirects import is_redirect_policy_error
 from .clients.http_session import HttpSessionPool
 from .detection_steps import run_requests
 from .discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME
+from .html_fingerprint import markup_evidence
 from .rendering import (
     BooleanColorRule,
     CountColorRule,
@@ -88,6 +89,14 @@ _SUFFIXES = (
     "/api/v1/login/status",
 )
 _VERSION = re.compile(r"\b\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9._-]+)?\b")
+# Redis Insight ServerService.getAppType maps these build distributions.
+# Unknown or contradictory metadata is not an additional product signal.
+_REDIS_INSIGHT_BUILDS = {
+    ("DOCKER", "DOCKER_ON_PREMISE"),
+    ("REDIS_STACK_WEB", "REDIS_STACK"),
+    ("ELECTRON", "ELECTRON"),
+    ("VS_CODE", "VS_CODE"),
+}
 _CSRF = re.compile(r"name=['\"](?:csrf_token|_csrf)['\"][^>]*value=['\"]([^'\"]+)", re.I)
 _PGADMIN_CSRF = re.compile(r'"csrfToken"\s*:\s*"([^"\\]+)"')
 _LOCK = ("captcha", "account locked", "too many attempts", "too many requests")
@@ -205,40 +214,15 @@ def _response_contains(response: HttpResponse, *markers: str) -> bool:
     return all(marker.lower() in text for marker in markers)
 
 
-class _PanelMarkup(HTMLParser):
-    """Read actual title/elements, excluding examples in comments or scripts."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.title: list[str] = []
-        self.in_title = False
-        self.elements: set[str] = set()
-        self.identifiers: set[str] = set()
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.elements.add(tag)
-        self.identifiers.update(value for name, value in attrs if name == "id" and value is not None)
-        if tag == "title":
-            self.in_title = True
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "title":
-            self.in_title = False
-
-    def handle_data(self, data: str) -> None:
-        if self.in_title:
-            self.title.append(data)
-
-
 def _product_page(
     response: HttpResponse, title_pattern: str, *, element: str | None = None, identifier: str | None = None
 ) -> bool:
     if response.status != 200 or response.error or response.truncated:
         return False
-    page = _PanelMarkup()
-    page.feed(response.text[:32768])
-    page.close()
-    title = " ".join("".join(page.title).split())
+    page = markup_evidence(response.text[:32768])
+    if page is None:
+        return False
+    title = page.title
     return (bool(re.fullmatch(title_pattern, title, re.I)) or identifier in page.identifiers) and (
         element is None or element in page.elements
     )
@@ -284,11 +268,11 @@ def fingerprint_requests(module: str, base: str, observations: list[bool] | None
             return "portainer", _version(info["Version"]), ["portainer_system_status", "portainer_page"]
     elif module == "mongodb":
         home = yield (base, "/")
+        if not _product_page(home, r".*\bmongo\s+express\b.*") or "/public/img/mongo-express-logo.png" not in home.text:
+            return None
         logo = yield (base, "/public/img/mongo-express-logo.png")
         if (
-            _product_page(home, r".*\bmongo\s+express\b.*")
-            and "/public/img/mongo-express-logo.png" in home.text
-            and logo.status == 200
+            logo.status == 200
             and not logo.error
             and not logo.truncated
             and _header(logo, "content-type").lower().startswith("image/png")
@@ -315,45 +299,44 @@ def fingerprint_requests(module: str, base: str, observations: list[bool] | None
             and isinstance(info["version"].get("number"), str)
         ):
             version = _version(info["version"]["number"])
-            spaces = yield (base, "/api/spaces/space")
-            spaces_info = _json(spaces)
-            if (
-                _header(status, "kbn-name")
-                and isinstance(spaces_info, list)
-                and all(isinstance(item, dict) and isinstance(item.get("id"), str) for item in spaces_info[:3])
-                and _header(spaces, "kbn-name")
-            ):
-                return "kibana", version, ["kibana_status", "kibana_spaces"]
-            saved = yield (base, "/api/saved_objects/_find?type=dashboard&per_page=1")
-            saved_info = _json(saved)
-            if (
-                _header(status, "osd-name")
-                and _header(saved, "osd-name")
-                and isinstance(saved_info, dict)
-                and isinstance(saved_info.get("saved_objects"), list)
-            ):
-                return "opensearch_dashboards", version, ["opensearch_status", "opensearch_saved_objects"]
+            if _header(status, "kbn-name"):
+                spaces = yield (base, "/api/spaces/space")
+                spaces_info = _json(spaces)
+                if (
+                    isinstance(spaces_info, list)
+                    and all(isinstance(item, dict) and isinstance(item.get("id"), str) for item in spaces_info[:3])
+                    and _header(spaces, "kbn-name")
+                ):
+                    return "kibana", version, ["kibana_status", "kibana_spaces"]
+            if _header(status, "osd-name"):
+                saved = yield (base, "/api/saved_objects/_find?type=dashboard&per_page=1")
+                saved_info = _json(saved)
+                if (
+                    _header(saved, "osd-name")
+                    and isinstance(saved_info, dict)
+                    and isinstance(saved_info.get("saved_objects"), list)
+                ):
+                    return "opensearch_dashboards", version, ["opensearch_status", "opensearch_saved_objects"]
     elif module == "redis":
         home = yield (base, "/")
+        if not _product_page(home, r"Redis Insight"):
+            return None
         info = _json((yield (base, "/api/info")))
         if (
-            _product_page(home, r"Redis Insight")
-            and isinstance(info, dict)
-            and info.get("appType") == "DOCKER"
-            and info.get("buildType") == "DOCKER_ON_PREMISE"
+            isinstance(info, dict)
+            and isinstance(info.get("appType"), str)
+            and isinstance(info.get("buildType"), str)
+            and (info["appType"], info["buildType"]) in _REDIS_INSIGHT_BUILDS
+            and isinstance(info.get("appVersion"), str)
+            and _VERSION.fullmatch(info["appVersion"].strip()) is not None
         ):
             return "redis_insight", _version(info.get("appVersion")), ["redis_insight_page", "redis_insight_info"]
     elif module == "postgres":
         login = yield (base, "/login")
-        ping = yield (base, "/misc/ping")
-        if (
-            _product_page(login, r".*\bpgAdmin(?:\s+4)?\b.*")
-            and ping.status == 200
-            and not ping.error
-            and not ping.truncated
-            and ping.text.strip().upper() == "PING"
-        ):
-            return "pgadmin", None, ["pgadmin_login", "pgadmin_ping"]
+        if _product_page(login, r".*\bpgAdmin(?:\s+4)?\b.*"):
+            ping = yield (base, "/misc/ping")
+            if ping.status == 200 and not ping.error and not ping.truncated and ping.text.strip().upper() == "PING":
+                return "pgadmin", None, ["pgadmin_login", "pgadmin_ping"]
         root = yield (base, "/", {"headers": {"Accept": "application/openapi+json"}})
         spec = _json(root)
         if (
@@ -370,6 +353,8 @@ def fingerprint_requests(module: str, base: str, observations: list[bool] | None
             return "kubernetes_dashboard", None, ["dashboard_title", "dashboard_angular_root"]
     elif module == "minio":
         home = yield (base, "/")
+        if not _product_page(home, r".*\bminio console\b.*"):
+            return None
         session = yield (base, "/api/v1/session")
         session_info = None
         if session.status == 403 and not session.error and not session.truncated:
@@ -378,8 +363,7 @@ def fingerprint_requests(module: str, base: str, observations: list[bool] | None
             except (ValueError, UnicodeError):
                 pass
         if (
-            _product_page(home, r".*\bminio console\b.*")
-            and _header(session, "server").lower() == "minio console"
+            _header(session, "server").lower() == "minio console"
             and isinstance(session_info, dict)
             and session_info.get("message") == "invalid session"
         ):
@@ -593,8 +577,15 @@ async def detect_panel_async(
         try:
 
             async def send(base: str, path: str, options: dict[str, Any] | None = None) -> HttpResponse:
-                response = await http.get(base + path, headers=(options or {}).get("headers", {}))
-                if response.truncated or (response.status > 0 and response.error):
+                response = await http.get(
+                    base + path,
+                    headers=(options or {}).get("headers", {}),
+                    allow_cross_origin_redirects=False,
+                    preserve_authorization_on_cross_origin=False,
+                )
+                if response.truncated or (
+                    response.status > 0 and response.error and not is_redirect_policy_error(response)
+                ):
                     raise AsyncHttpFallback("UI response requires synchronous verification")
                 return response
 

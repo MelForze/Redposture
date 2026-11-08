@@ -58,8 +58,8 @@ def _server(routes: dict[str, tuple[int, str, str]]) -> Iterator[int]:
         (
             {
                 "/": (200, "text/html", "<title>Redpanda Console</title>"),
-                "/admin/startup": (200, "application/json", "{}"),
-                "/api/topics": (200, "application/json", '[{"name":"orders"}]'),
+                "/admin/startup": (200, "application/json", '{"isHttpOk":true,"isKafkaOk":true}'),
+                "/api/topics": (200, "application/json", '{"topics":[{"topicName":"orders"}]}'),
             },
             "redpanda_console",
         ),
@@ -230,3 +230,66 @@ def test_kafka_http_surface_saved_json_has_product_and_no_ansi(tmp_path: Path) -
     assert "\x1b[" not in saved
     records = [json.loads(line) for line in saved.splitlines() if line.strip()]
     assert any(record.get("ui_vendor") == "kafka_rest_proxy" for record in records)
+
+
+@pytest.mark.parametrize("fmt", ["txt", "json"])
+@pytest.mark.parametrize(
+    "topics,status,names,partial",
+    [
+        ({"topics": [{"topicName": "billing-invoices"}]}, 200, ["billing-invoices"], False),
+        (
+            {"topics": [{"topicName": "billing-first"}, None, {"topicName": "billing-last"}]},
+            200,
+            ["billing-first", "billing-last"],
+            True,
+        ),
+        ({"message": "forbidden"}, 403, [], True),
+    ],
+)
+def test_redpanda_public_cli_retains_names_and_partial_after_auth_gate(fmt, topics, status, names, partial, tmp_path):
+    output = tmp_path / ("redpanda." + fmt)
+    routes = {
+        "/": (200, "text/html", "<title>Redpanda Console</title>"),
+        "/admin/startup": (200, "application/json", '{"isHttpOk":true,"isKafkaOk":true}'),
+        "/api/topics": (status, "application/json", json.dumps(topics)),
+    }
+    with _server(routes) as port:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parents[1] / "redposture.py"),
+                "kafka",
+                "-t",
+                f"http://127.0.0.1:{port}",
+                "--show-topics",
+                "--timeout",
+                "0.5",
+                "-r",
+                "0",
+                "--no-color",
+                "-f",
+                fmt,
+                "-o",
+                str(output),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    assert result.returncode == 0, result.stdout + result.stderr
+    saved = output.read_text()
+    assert "\x1b" not in saved and "\x1b" not in result.stdout
+    if fmt == "json":
+        rows = [json.loads(line) for line in saved.splitlines() if line.strip()]
+        assert len(rows) == 1
+        record = rows[0]
+        assert record["ui_vendor"] == "redpanda_console"
+        assert record["ui_topics"] == [{"name": name} for name in names]
+        assert record.get("ui_topics_partial", False) is partial
+        assert record["auth_required"] is (None if partial else False)
+    else:
+        for name in names:
+            assert name in saved and name in result.stdout
+        assert ("Topics coverage:partial" in saved) is partial
+        assert ("Topics coverage:partial" in result.stdout) is partial

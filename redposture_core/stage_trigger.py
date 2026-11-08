@@ -799,6 +799,9 @@ def _run_trigger_requests(
             reason = str(event.get("reason") or "-")
             console.debug(f"{host} stage2_gate={gate} reason={reason}")
             return
+        if kind == "detect_fallback_summary":
+            console.debug(str(event["summary"]))
+            return
         if kind == "stage_trace":
             stage_name = str(event.get("stage_name") or "-")
             attempt = int(event.get("attempt") or 1)

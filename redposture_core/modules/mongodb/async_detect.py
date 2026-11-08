@@ -162,6 +162,26 @@ def _finish(ctx: Any, payload: dict[str, Any], cfg: AuditConfig, started: float)
         f"detect_ms=0 auth_ms=0 capabilities_ms=0 data_ms=0 total_ms={elapsed}"
     )
     payload = telemetry.attach(payload, status=status, total_ms=elapsed)
+    state = getattr(ctx, "lifecycle_state", None)
+    if isinstance(state, actions.MongoLifecycleState):
+        tls = bool(getattr(ctx.args, "tls", False))
+        ca_file = getattr(ctx.args, "tls_ca", None)
+        cert_file = getattr(ctx.args, "tls_cert_key", None)
+        state.remember_bootstrap(
+            actions._mongo_session_key(
+                ctx.host,
+                ctx.port,
+                cfg.timeout,
+                None,
+                None,
+                str(getattr(ctx.args, "auth_db", None) or "admin").strip() or "admin",
+                tls,
+                ca_file,
+                cert_file,
+                bool((tls or cert_file) and not ca_file),
+            ),
+            payload,
+        )
     return AuditRecord.from_mapping(payload, module="mongodb", service="mongodb")
 
 

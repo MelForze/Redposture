@@ -3131,6 +3131,44 @@ def _auth_username_from_body(body: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _forbidden_auth_is_backend_authorization(payload: bytes) -> bool:
+    """A generic proxy 403 says nothing about credential acceptance."""
+    body = _load_json_dict(payload)
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict) or error.get("type") != "security_exception":
+        return False
+    reason = error.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return False
+    return (
+        re.search(
+            r"missing authentication|unable to authenticate|failed to authenticate|"
+            r"invalid credentials|authentication (?:required|failed)",
+            reason,
+            re.IGNORECASE,
+        )
+        is None
+    )
+
+
+def _unverified_forbidden_auth(endpoint: str, detail: dict[str, Any]) -> ElasticAuthProbeResult:
+    reason = "forbidden response does not establish credential acceptance"
+    return ElasticAuthProbeResult(
+        valid=None,
+        error=reason,
+        username=None,
+        status=403,
+        endpoint=endpoint,
+        detail={
+            **detail,
+            "type": "credential_acceptance_unverified",
+            "forbidden_reason": detail.get("reason"),
+            "reason": reason,
+        },
+        verification_capability="indeterminate",
+    )
+
+
 def _probe_authenticate(
     host: str,
     port: int,
@@ -3281,6 +3319,13 @@ def _probe_authenticate(
                 verification_capability="identity_endpoint_supported",
             )
         if status in {401, 403}:
+            if status == 403 and not _forbidden_auth_is_backend_authorization(payload):
+                last_result = _unverified_forbidden_auth(endpoint, _parse_elastic_error(status, payload))
+                # A proxy may block one supported API without blocking another.
+                # Do not cache a generic 403 as supported or absent.
+                if endpoint != endpoints[-1]:
+                    continue
+                return last_result
             if capability_state is not None:
                 capability_state.supported_auth_endpoint = endpoint
                 capability_state.unsupported_auth_endpoints.discard(endpoint)
@@ -3365,6 +3410,8 @@ def _probe_authenticate(
         fallback_detail["fallback"] = True
         fallback_detail["fallback_endpoint"] = "/"
         if root_status == 403:
+            if not _forbidden_auth_is_backend_authorization(root_payload):
+                return _unverified_forbidden_auth("/", fallback_detail)
             fallback_detail.update(
                 {
                     "type": "credential_accepted_access_forbidden",
@@ -4449,10 +4496,10 @@ def _audit_elastic_host_steps(
             "port": port,
             "is_elastic": False,
             "status": "fail",
-            # Under heavy local concurrency macOS may report EINVAL for a
-            # closed socket instead of ECONNREFUSED.  Keep that operational
-            # error distinct from a malformed response received from a peer.
-            "operational_failure": "[errno 22]" in str(last_error or "").lower(),
+            # This branch is reached only when the root request returned no
+            # HTTP response. Preserve that fact independently of OS errno or
+            # localized error text; a real non-service response returns above.
+            "operational_failure": True,
             "auth_required": None,
             "server_version": None,
             "provided_credentials": provided_credentials,

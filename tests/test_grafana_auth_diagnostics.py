@@ -11,6 +11,7 @@ import pytest
 from redposture_core.cli_args import parse_args
 from redposture_core.modules.grafana import actions, stage
 from redposture_core.stage_runtime import AuditCommandRunner
+from tests.application_markup import application_page
 
 
 @pytest.mark.parametrize("error", ["backend timeout", "HTTP 404", "HTTP 429", "x" * 500 + "END"])
@@ -48,7 +49,7 @@ def test_rate_limited_api_keeps_unknown_and_full_debug_without_ansi(tmp_path, de
             if self.path == "/api/health":
                 status, payload = 200, json.dumps({"database": "ok", "version": "13.3.0"})
             elif self.path == "/login":
-                status, payload = 200, "<title>Grafana</title>"
+                status, payload = 200, application_page("grafana")
             elif self.path == "/api/login/ping":
                 status, payload = 429, body
                 headers = {"Retry-After": "42"}

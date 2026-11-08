@@ -11,6 +11,7 @@ from ...clients.http_api import http_response_requires_https
 from ...detection_steps import DetectionRequests, run_requests
 from ...discovery_json import DiskJSONDocument
 from ...discovery_values import DiskBackedText
+from ...html_fingerprint import markup_evidence
 from ...storage_discovery import DiscoveryCollector
 from ..token_api import CAP, ReadBudget, access, bases, json_value, request
 
@@ -98,11 +99,11 @@ def _status(data: Any) -> bool:
 def _ui_version(response: Any) -> str | None:
     if response.status != 200 or response.error or response.truncated:
         return None
-    # The title supports the JSON proof; a title alone never identifies Spark.
-    if not re.search(r"<title>\s*Spark Master at spark://[^<]+</title>", response.text, re.I):
+    page = markup_evidence(response.text, capture=("span", "version"))
+    if page is None or not re.fullmatch(r"Spark Master at spark://.+", page.title, re.I):
         return None
-    match = re.search(r'\bclass=[\'"]version[\'"][^>]*>\s*(' + _VERSION + r")\s*<", response.text)
-    return match.group(1) if match else None
+    version = "".join(page.captured).strip()
+    return version if page.capture_finished and re.fullmatch(_VERSION, version) else None
 
 
 def _streamed_master_url(ctx: Any, base: str) -> str | None:

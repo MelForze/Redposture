@@ -222,3 +222,25 @@ def test_composite_key_render_obeys_expired_source_deadline():
     owner.deadline = time.monotonic() - 1
     with pytest.raises(TimeoutError, match="discover_time"):
         owner.display_key(key.node)
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    ["count", "length", "enabled", "name", "type", "endpoint", "policy", "status", "description", "format", "required"],
+)
+@pytest.mark.parametrize("prefix_size", [0, 65530])
+def test_disk_metadata_keys_preserve_suppression_and_explicit_provider_tokens(suffix, prefix_size):
+    key = ("x" * prefix_size + "_" if prefix_size else "") + "password" + suffix.title()
+    provider = "gh" + "p_" + "AccuracyOnly0123456789abcdefghijklmnop"
+    for value in ("qR7xN2/pV5tC8+fK3sM9=zD6aL4", provider):
+        expected = {(m.detector, m.value) for m in scan_value({key: value})}
+        if value != provider:
+            assert expected == set()
+        else:
+            assert ("github_token", provider) in expected
+        owner = NativeValues()
+        mapping = owner.mapping()
+        owner.put(mapping.node, owner.scalar(_disk(key)), owner.scalar(value))
+        matches, _, complete = _scan_portioned_value(mapping, "$", 65536)
+        actual = {(m.detector, "".join(m.value.iter_text_chunks())) for m in matches}
+        assert complete and actual == expected

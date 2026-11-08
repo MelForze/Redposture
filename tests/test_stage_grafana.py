@@ -31,6 +31,7 @@ from redposture_core.stage_grafana import (
     run_grafana_stage,
 )
 from redposture_core.stage_runtime import AuditCredentialRun, AuditHookContext
+from tests.application_markup import application_page
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
@@ -150,7 +151,7 @@ def test_grafana_helper_parsers_and_auth_helpers() -> None:
     assert _header_lookup({"Set-Cookie": "grafana_session=1"}, "set-cookie") == "grafana_session=1"
     assert _header_lookup({}, "missing") is None
 
-    assert _looks_like_grafana_login(200, "<title>Grafana</title>", {}) is True
+    assert _looks_like_grafana_login(200, application_page("grafana"), {}) is True
     assert _looks_like_grafana_login(302, "", {"Location": "/login"}) is False
     assert _looks_like_grafana_login(404, "", {}) is False
 
@@ -232,7 +233,7 @@ def test_grafana_login_with_nonstandard_health_and_protected_api_requires_auth(
         if path == "/api/health":
             return 200, '{"database":"ok"}', {}
         if path == "/login":
-            return 200, "<title>Grafana</title>", {}
+            return 200, application_page("grafana"), {}
         if path == "/api/datasources":
             return 401, '{"message":"Unauthorized"}', {}
         raise AssertionError(path)
@@ -393,7 +394,11 @@ def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.Monke
 def test_grafana_auth_does_not_classify_login_page_as_invalid_password(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_grafana._http_request",
-        lambda *_args, **_kwargs: (200, "<html><title>Grafana login</title></html>", {}),
+        lambda *_args, **_kwargs: (
+            200,
+            application_page("grafana").replace("<title>Grafana</title>", "<title>Grafana login</title>"),
+            {},
+        ),
     )
 
     basic_ok, basic_error = _verify_credentials("127.0.0.1", 3000, 1.0, "admin", "admin")
@@ -489,7 +494,7 @@ def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypat
         if path == "/api/health":
             return 200, '{"database":"ok","commit":"abc","version":"11.0.0"}', {}
         if path == "/login":
-            return 200, "<title>Grafana</title>", {"Content-Type": "text/html"}
+            return 200, application_page("grafana"), {"Content-Type": "text/html"}
         return 404, "", {}
 
     def fake_verify_credentials(
@@ -577,7 +582,7 @@ def test_audit_grafana_classifies_successful_default_credentials_even_if_anonymo
         if path == "/api/health":
             return 200, '{"database":"ok","commit":"abc","version":"11.0.0"}', {}
         if path == "/login":
-            return 200, "<title>Grafana</title>", {"Content-Type": "text/html"}
+            return 200, application_page("grafana"), {"Content-Type": "text/html"}
         return 404, "", {}
 
     def fake_verify_credentials(
@@ -677,7 +682,7 @@ def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> 
         if path == "/api/health":
             return 200, '{"database":"ok","commit":"abc","version":"11.0.0"}', {}
         if path == "/login":
-            return 200, "<title>Grafana</title>", {"Content-Type": "text/html"}
+            return 200, application_page("grafana"), {"Content-Type": "text/html"}
         return 404, "", {}
 
     def fake_verify_credentials(
@@ -1431,7 +1436,7 @@ def test_grafana_defcreds_falls_back_after_api_token_transport_error(
         if path == "/login":
             if method == "POST":
                 return 401, '{"message":"Invalid username or password"}', {}
-            return 200, "<title>Grafana</title>", {}
+            return 200, application_page("grafana"), {}
         if path == "/api/org":
             return 401, '{"message":"Unauthorized"}', {}
         if path == "/api/user":

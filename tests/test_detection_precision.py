@@ -46,7 +46,7 @@ def test_proxmox_detection_requires_product_specific_marker() -> None:
         is False
     )
     assert proxmox._looks_like_proxmox_response(401, b'{"data":null}', {"Server": "pve-api-daemon"}) is True
-    assert proxmox._looks_like_proxmox_response(200, b'{"data":{"clustername":"lab"}}', {}) is True
+    assert proxmox._looks_like_proxmox_response(200, b'{"data":{"clustername":"lab"}}', {}) is False
     assert (
         proxmox._looks_like_proxmox_response(
             200, b'{"data":{"version":"8.2.2","release":"8.2","repoid":"abc1234"}}', {"Server": "nginx"}
@@ -61,7 +61,8 @@ def test_proxmox_detection_requires_product_specific_marker() -> None:
 
 def test_qdrant_detection_rejects_generic_result_envelope() -> None:
     assert qdrant._qdrant_looks_like_response({"result": {}, "status": "ok"}) is False
-    assert qdrant._qdrant_looks_like_response({"result": {"collections": []}, "status": "ok", "time": 0.001}) is True
+    assert qdrant._qdrant_looks_like_response({"result": {"collections": []}, "status": "ok", "time": 0.001}) is False
+    assert qdrant._qdrant_looks_like_response({"title": "qdrant - vector search engine", "version": "1.12.0"}) is True
 
 
 def test_gitlab_version_detection_requires_revision_correlation() -> None:

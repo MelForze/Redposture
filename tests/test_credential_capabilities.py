@@ -136,11 +136,12 @@ def test_jenkins_already_preserves_independent_jobs_access() -> None:
 @pytest.mark.parametrize("fault", [False, True])
 def test_airflow_auth_collects_access_in_each_verified_session(monkeypatch: pytest.MonkeyPatch, fault: bool) -> None:
     from redposture_core.modules.airflow import actions
+    from redposture_core.modules.airflow.types import CredentialResult
 
     monkeypatch.setattr(
         actions,
         "verify_credential",
-        lambda _factory, _gen, user, _password: SimpleNamespace(
+        lambda _factory, _gen, user, _password: CredentialResult(
             state="valid", username=user, bearer_token=None, error_code=None, proof_surface="api"
         ),
     )
@@ -226,6 +227,14 @@ def test_clickhouse_auth_snapshots_capabilities_before_other_sessions(
         return session.username == "one", False, False, 7 if session.username == "one" else 0, None, None
 
     monkeypatch.setattr(actions, "_collect_capabilities", capabilities)
+
+    # This regression isolates ACL snapshots. A compatible server may return
+    # no VERSION_FULL row; product identity has separate positive/denied tests.
+    def identity_rows(_session, query, **_kwargs):
+        assert query == "SELECT version(), value FROM system.build_options WHERE name = 'VERSION_FULL'"
+        return [], None
+
+    monkeypatch.setattr(actions, "_query_rows", identity_rows)
     state = actions.ClickHouseLifecycleState()
     state.auth_required = True
     for user in ("one", "two"):

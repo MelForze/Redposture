@@ -88,7 +88,7 @@ def test_record_requests_and_state_match(monkeypatch, module, case):
         async def close(self):
             pass
 
-        async def get(self, url, *, headers=None):
+        async def get(self, url, *, headers=None, **redirect_policy):
             return response(url, headers)
 
     original = actions.detect_record

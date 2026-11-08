@@ -45,10 +45,19 @@ def test_auth_data_keep_all_capability_checks_but_avoid_second_startup(retained,
         checks.append("databases")
         return ["postgres"], None
 
+    def implementation(sock, query):
+        from redposture_core.modules.postgres.server_identity import VERSION_QUERY
+
+        assert query == VERSION_QUERY
+        checks.append("implementation")
+        banner = "PostgreSQL 17.2 on x86_64-pc-linux-gnu, compiled by gcc 12, 64-bit"
+        return [[banner, "17.2", "170002"]], None
+
     monkeypatch.setattr(actions, "_pg_open_socket", connect)
     monkeypatch.setattr(actions, "_pg_startup_and_auth", auth)
     monkeypatch.setattr(actions, "_collect_postgres_privileges", privileges)
     monkeypatch.setattr(actions, "_pg_query_databases", databases)
+    monkeypatch.setattr(actions, "_pg_query_rows", implementation)
     monkeypatch.setattr(actions, "_pg_collect_database_artifacts", lambda *a, **k: (None, [], [], [], 0, None))
     args = SimpleNamespace(timeout=1, retries=0)
     state = stage._PostgresLifecycleState(sessions=SessionHandoff(None if retained else HttpHandoffBudget(0)))
@@ -63,7 +72,12 @@ def test_auth_data_keep_all_capability_checks_but_avoid_second_startup(retained,
         record = stage._postgres_data(ctx, verified)
         assert record.status == "valid_credentials"
         assert record.extra["database_count"] == 1
-        assert checks == ["privileges", "databases", "privileges", "databases"]
+        expected = ["privileges", "databases", "implementation", "privileges"]
+        if not retained or capability_error is not None:
+            expected.append("implementation")
+        expected.append("databases")
+        assert checks == expected
+        assert record.extra["server_implementation"]["product"] == "PostgreSQL"
         assert len(opened) == len(startup) == (1 if retained and capability_error is None else 2)
     finally:
         if state.sessions is not None:

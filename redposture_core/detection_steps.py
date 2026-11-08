@@ -39,13 +39,16 @@ async def run_async_requests(
         steps.close()
 
 
-def with_async_http_detection(spec: Any, actions: Any, *, api_prefixes: tuple[str, ...]) -> Any:
+def with_async_http_detection(
+    spec: Any, actions: Any, *, api_prefixes: tuple[str, ...], allow_cross_origin_redirects: bool = False
+) -> Any:
     """Bind the opt-in coroutine to exactly this synchronous detector."""
     from dataclasses import replace
 
     from .audit_models import AuditRecord
     from .clients.async_http_detect import AsyncHttpFallback
     from .clients.http_api import http_target_context
+    from .clients.http_redirects import is_redirect_policy_error
 
     if actions.detect_record is not getattr(actions, "_SYNC_DETECT_RECORD", None):
         return spec
@@ -61,8 +64,15 @@ def with_async_http_detection(spec: Any, actions: Any, *, api_prefixes: tuple[st
         with http_target_context(ctx.target, route_state=ctx.lifecycle_state, api_prefixes=api_prefixes):
 
             async def send(base: str, path: str) -> HttpResponse:
-                response = await http.get(base + path, headers={"Accept": "application/json"})
-                if response.truncated or (response.status > 0 and response.error):
+                response = await http.get(
+                    base + path,
+                    headers={"Accept": "application/json"},
+                    allow_cross_origin_redirects=allow_cross_origin_redirects,
+                    preserve_authorization_on_cross_origin=pool is None,
+                )
+                if response.truncated or (
+                    response.status > 0 and response.error and not is_redirect_policy_error(response)
+                ):
                     # A larger/undecodable fingerprint still gets the original
                     # 4 MiB synchronous verification, never a negative verdict.
                     raise AsyncHttpFallback("native fingerprint needs full synchronous response")

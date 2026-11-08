@@ -72,11 +72,13 @@
     "detection_status": "confirmed",
     "discover_bytes_read": 20976170,
     "discover_candidates_count": 10,
-    "discover_coverage": "complete",
+    "discover_coverage": "partial",
     "discover_coverage_percent": 100.0,
     "discover_findings_count": 10,
     "discover_objects_scanned": 10,
-    "discover_partial_reasons": [],
+    "discover_partial_reasons": [
+      "binary_or_unsupported_encoding"
+    ],
     "discover_requested": true,
     "host": "127.0.0.1",
     "identity_kind": "delegated_admin",

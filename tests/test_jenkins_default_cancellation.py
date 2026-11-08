@@ -166,7 +166,7 @@ def test_interrupt_between_detection_and_auth_keeps_product_proof(tmp_path, monk
     def interrupted_deep(*_args, **_kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(runner, "_run_deep_and_close_state", interrupted_deep)
+    monkeypatch.setattr(runner, "_run_deep_and_close_state_steps", interrupted_deep)
     output = tmp_path / f"between-stages.{output_format}"
     with pytest.raises(KeyboardInterrupt):
         runner.run_plan(
@@ -354,7 +354,7 @@ def test_async_detection_proof_survives_interrupt_before_auth(tmp_path, monkeypa
     def interrupted_deep(*_args, **_kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(runner, "_run_deep_and_close_state", interrupted_deep)
+    monkeypatch.setattr(runner, "_run_deep_and_close_state_steps", interrupted_deep)
     monkeypatch.setattr(async_detection, "async_detection_allowed", lambda _args: True)
     output = tmp_path / f"native-interrupt.{output_format}"
     with pytest.raises(KeyboardInterrupt):

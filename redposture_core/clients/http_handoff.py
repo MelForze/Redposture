@@ -103,15 +103,15 @@ class RetainedDetectionHttp(AsyncDetectionHttp):
             await self.close()
         self._pool = pool
 
-    async def _open(
-        self, host: str, port: int, tls: ssl.SSLContext | None, timeout: float
+    async def _open_address(
+        self, address: str, port: int, tls: ssl.SSLContext | None, timeout: float, *, server_hostname: str
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         if self._io is None:
             self._io = RetainedSocketIO()
             self._io.check_supported()
-        sock = await self._io.open((host, port), timeout)
+        sock = await self._io.open((address, port), timeout)
         if tls is not None:
-            sock = await self._io.wrap(tls, sock, server_hostname=host)
+            sock = await self._io.wrap(tls, sock, server_hostname=server_hostname)
         self._socket_context = tls
         self._anonymous = True
         stream = _SocketStream(self._io, sock)

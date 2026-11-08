@@ -154,7 +154,12 @@
         "credential_capabilities": {
           "collection_count": 8,
           "database_count": 5,
-          "database_error": null
+          "database_error": null,
+          "server_implementation": {
+            "evidence": "authenticated_build_info",
+            "product": "MongoDB",
+            "scope": "server_reported"
+          }
         },
         "error": null,
         "ok": true,
@@ -187,7 +192,12 @@
     "credential_capabilities": {
       "collection_count": 8,
       "database_count": 5,
-      "database_error": null
+      "database_error": null,
+      "server_implementation": {
+        "evidence": "authenticated_build_info",
+        "product": "MongoDB",
+        "scope": "server_reported"
+      }
     },
     "credential_state": null,
     "database": null,

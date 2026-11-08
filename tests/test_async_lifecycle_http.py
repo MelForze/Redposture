@@ -80,7 +80,7 @@ def test_native_continuations_preserve_record_requests_and_origin(monkeypatch, m
         async def close(self):
             pass
 
-        async def get(self, url, *, headers=None):
+        async def get(self, url, *, headers=None, **redirect_policy):
             return response(url, headers)
 
     activate = getattr(actions, f"_activate_{module}_transport")

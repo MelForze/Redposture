@@ -85,21 +85,21 @@ def test_jenkins_rejects_invalid_credential_options(
         (
             '{"_class":"hudson.model.Hudson","jobs":[]}',
             '{"authenticated":false,"name":"anonymous","authorities":[]}',
-            "<form>j_username j_password Jenkins</form>",
+            "<title>Jenkins</title><form action='j_spring_security_check'><input name='j_username'><input name='j_password'></form>",
             {},
             True,
         ),
         (
             '{"version":"2.555.2","jobs":[]}',
             '{"authenticated":false,"name":"anonymous","authorities":[]}',
-            "<form>j_username j_password Jenkins</form>",
+            "<title>Jenkins</title><form action='j_spring_security_check'><input name='j_username'><input name='j_password'></form>",
             {},
             True,
         ),
         (
             "{}",
             "{}",
-            "<form>j_username j_password Jenkins</form>",
+            "<title>Jenkins</title><form action='j_spring_security_check'><input name='j_username'><input name='j_password'></form>",
             {"X-Jenkins": "2.555.2"},
             True,
         ),
@@ -215,7 +215,9 @@ def test_jenkins_short_circuit_matches_full_evidence_decision(
         ),
         "/login": _response(
             200,
-            "<form>j_username j_password Jenkins</form>" if login_body else "<form>Corporate SSO</form>",
+            "<title>Jenkins</title><form action='j_spring_security_check'><input name='j_username'><input name='j_password'></form>"
+            if login_body
+            else "<form>Corporate SSO</form>",
             {"X-Jenkins": "2.555.2"} if version_at == "login" else {},
         ),
     }
@@ -341,7 +343,7 @@ class _JenkinsHandler(BaseHTTPRequestHandler):
         elif path.startswith("/ci/pluginManager/api/json"):
             payload = {"plugins": [{"shortName": "git", "version": "5.0.0", "active": True}]}
         elif path == "/ci/login":
-            body = b"<form>j_username j_password Jenkins</form>"
+            body = b"<title>Jenkins</title><form action='j_spring_security_check'><input name='j_username'><input name='j_password'></form>"
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.send_header("X-Jenkins", self.version)
@@ -441,7 +443,7 @@ class _KeepAliveJenkinsHandler(BaseHTTPRequestHandler):
                 {"authenticated": bool(auth), "name": "admin" if auth else "anonymous", "authorities": []}
             ).encode()
         elif self.path == "/login":
-            body = b"<form>j_username j_password Jenkins</form>"
+            body = b"<title>Jenkins</title><form action='j_spring_security_check'><input name='j_username'><input name='j_password'></form>"
         elif self.path.startswith("/computer/api/json"):
             body = b'{"computer":[]}'
         elif self.path.startswith("/queue/api/json"):

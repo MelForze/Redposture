@@ -9,7 +9,7 @@ import ssl as ssl
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
@@ -94,11 +94,17 @@ def _encode_resp_array(parts: list[str | bytes]) -> bytes:
     return b"".join(payload)
 
 
-def _recv_line(sock: socket.socket, max_len: int = 65536) -> bytes:
+class _RespSocket(Protocol):
+    def recv(self, count: int, /) -> bytes: ...
+
+    def sendall(self, data: bytes, /) -> None: ...
+
+
+def _recv_line(sock: _RespSocket, max_len: int = 65536) -> bytes:
     return _run_detect_sync(_recv_line_detect_steps(sock, max_len))
 
 
-def _recv_line_detect_steps(sock: socket.socket, max_len: int = 65536):
+def _recv_line_detect_steps(sock: _RespSocket, max_len: int = 65536):
     data = bytearray()
     while len(data) < max_len:
         ch = yield _DetectCall(sock.recv, (1,), {})
@@ -110,11 +116,11 @@ def _recv_line_detect_steps(sock: socket.socket, max_len: int = 65536):
     raise ValueError("RESP line too long")
 
 
-def _read_resp(sock: socket.socket) -> tuple[str, Any]:
+def _read_resp(sock: _RespSocket) -> tuple[str, Any]:
     return _run_detect_sync(_read_resp_detect_steps(sock))
 
 
-def _read_resp_detect_steps(sock: socket.socket):
+def _read_resp_detect_steps(sock: _RespSocket):
     prefix = yield _DetectCall(_recv_exact, (sock, 1), {})
     if prefix == b"+":
         return ("simple", (yield _DetectCall(_recv_line, (sock,), {})).decode("utf-8", errors="replace"))
@@ -145,11 +151,11 @@ def _read_resp_detect_steps(sock: socket.socket):
     raise ValueError(f"unsupported RESP prefix: {prefix!r}")
 
 
-def _send_cmd(sock: socket.socket, *parts: str | bytes) -> tuple[str, Any]:
+def _send_cmd(sock: _RespSocket, *parts: str | bytes) -> tuple[str, Any]:
     return _run_detect_sync(_send_cmd_detect_steps(sock, *parts))
 
 
-def _send_cmd_detect_steps(sock: socket.socket, *parts: str | bytes):
+def _send_cmd_detect_steps(sock: _RespSocket, *parts: str | bytes):
     try:
         yield _DetectCall(sock.sendall, (_encode_resp_array(list(parts)),), {})
     except (BrokenPipeError, ConnectionResetError) as send_error:
@@ -222,6 +228,66 @@ def _redis_server_identity(response_type: str, response_value: Any) -> tuple[str
 
 def _capture_redis_server_identity(state: RedisAuditLifecycleState) -> None:
     return _run_detect_sync(_capture_redis_server_identity_detect_steps(state))
+
+
+class _IdentityProbeSocket:
+    """Bound just this optional INFO probe, not discovery source contents."""
+
+    def __init__(self, sock: Any, timeout: float) -> None:
+        self.sock = sock
+        self.deadline = time.monotonic() + max(0.001, timeout)
+        self.remaining = 65536 + 128
+
+    def _timeout(self) -> None:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("INFO SERVER identity probe timed out")
+        self.sock.settimeout(remaining)
+
+    def recv(self, count: int) -> bytes:
+        self._timeout()
+        if self.remaining <= 0:
+            raise ValueError("INFO SERVER identity response exceeds 64 KiB")
+        data = self.sock.recv(min(count, self.remaining))
+        self.remaining -= len(data)
+        return data
+
+    def sendall(self, data: bytes) -> None:
+        self._timeout()
+        self.sock.sendall(data)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.sock, name)
+
+
+def _capture_authenticated_redis_identity(state: RedisAuditLifecycleState, args: Any) -> None:
+    from ...server_implementation import redis_implementation
+
+    sock = state.sock
+    original_timeout = state.timeout
+    try:
+        original_timeout = getattr(sock, "gettimeout", lambda: state.timeout)()
+        kind, value = _send_cmd(_IdentityProbeSocket(sock, state.timeout), "INFO", "SERVER")
+        if kind == "bulk":
+            state.server_implementation = redis_implementation(value)
+            if bool(getattr(args, "enum_cve", False)) or bool(getattr(args, "_spray_capabilities", False)):
+                implementation, version = _redis_server_identity(kind, value)
+                if implementation and version:
+                    state.implementation, state.server_version = implementation, version
+        elif kind == "error":
+            state.implementation_probe_error = str(value)
+    except Exception as exc:
+        # AUTH was already verified. Optional metadata failure must not reject
+        # that credential or hand a partial RESP frame to the next command.
+        state.implementation_probe_error = str(exc)
+        _close_redis_lifecycle_socket(state)
+    finally:
+        try:
+            sock.settimeout(original_timeout)
+        except (AttributeError, OSError):
+            pass
+    if state.implementation_probe_error and state.debug_emit is not None:
+        state.debug_emit(f"Redis implementation verification unavailable: {state.implementation_probe_error}")
 
 
 def _capture_redis_server_identity_detect_steps(state: RedisAuditLifecycleState):
@@ -691,6 +757,8 @@ class RedisAuditLifecycleState:
     transport_mode: str = "plaintext"
     implementation: str | None = None
     server_version: str | None = None
+    server_implementation: dict[str, str] | None = None
+    implementation_probe_error: str | None = None
 
 
 class _RedisAuthenticationRejected(Exception):
@@ -815,6 +883,10 @@ def _redis_lifecycle_record(state: RedisAuditLifecycleState, *, include_data: bo
     }
     if state.protected_mode:
         payload.update(_protected_mode_metadata())
+    if state.server_implementation is not None:
+        payload["server_implementation"] = dict(state.server_implementation)
+    if state.implementation_probe_error is not None:
+        payload["implementation_probe_error"] = state.implementation_probe_error
     attempts = max(1, state.retries + 1)
     telemetry = StageTelemetryBuilder(
         host=state.host,
@@ -915,6 +987,8 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
     exhaustive_credentials = bool(getattr(ctx.args, "defcreds", False))
     state.key_count = None
     state.key_count_error = None
+    state.server_implementation = None
+    state.implementation_probe_error = None
     if credential.username is None and credential.password is None:
         state.status = "open_no_auth" if state.auth_required is False else "auth_required"
         return _redis_lifecycle_record(state, include_data=False)
@@ -949,15 +1023,12 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
                             state.key_count, state.key_count_error = _count_redis_keys(state.sock)
                         except (OSError, ValueError, ConnectionError) as exc:
                             state.key_count_error = str(exc)
-                    if bool(getattr(ctx.args, "enum_cve", False)) or bool(
-                        getattr(ctx.args, "_spray_capabilities", False)
-                    ):
-                        _capture_redis_server_identity(state)
+                    _capture_authenticated_redis_identity(state, ctx.args)
                     if not exhaustive_credentials:
                         state.active_username = credential.username
                         state.active_password = credential.password
                         state.active_source = "default"
-                    elif state.selected_sock is None:
+                    elif state.active_source == "anonymous":
                         state.selected_sock = state.sock
                         state.sock = None
                         state.active_username = credential.username
@@ -990,13 +1061,12 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
                         state.key_count, state.key_count_error = _count_redis_keys(state.sock)
                     except (OSError, ValueError, ConnectionError) as exc:
                         state.key_count_error = str(exc)
-                if bool(getattr(ctx.args, "enum_cve", False)) or bool(getattr(ctx.args, "_spray_capabilities", False)):
-                    _capture_redis_server_identity(state)
+                _capture_authenticated_redis_identity(state, ctx.args)
                 if not exhaustive_credentials:
                     state.active_username = credential.username
                     state.active_password = credential.password
                     state.active_source = credential.source
-                elif state.selected_sock is None:
+                elif state.active_source == "anonymous":
                     state.selected_sock = state.sock
                     state.sock = None
                     state.active_username = credential.username
@@ -1117,6 +1187,8 @@ def redis_data_hook(ctx: Any, _auth_record: AuditRecord) -> AuditRecord:
     # exhaustive sweep. Deep actions deliberately use the first confirmed
     # identity, so reconnect and restore that selected credential first.
     if bool(getattr(args, "defcreds", False)):
+        state.server_implementation = _auth_record.extra.get("server_implementation")
+        state.implementation_probe_error = _auth_record.extra.get("implementation_probe_error")
         state.status = str(_auth_record.status)
         state.error = _auth_record.extra.get("error")
         state.active_username = ctx.credential.username
@@ -1130,8 +1202,8 @@ def redis_data_hook(ctx: Any, _auth_record: AuditRecord) -> AuditRecord:
             "valid_credentials",
             "weak_default_creds",
         }
+        _close_redis_lifecycle_socket(state)
         if state.selected_sock is not None:
-            _close_redis_lifecycle_socket(state)
             state.sock = state.selected_sock
             state.selected_sock = None
     dump_batch, dump_delay = _redis_reset_lifecycle_data(state, args)

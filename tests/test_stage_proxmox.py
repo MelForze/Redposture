@@ -280,7 +280,7 @@ def _install_proxmox_lifecycle_request_spy(
             )
         if path == "/access" and not auth_headers:
             if anonymous_access:
-                return 200, _json_payload({"clustername": "lab"}), {}, None
+                return 200, _json_payload({"clustername": "lab"}), {"Server": "pve-api-daemon"}, None
             return 401, _json_payload({"message": "authentication required"}), {"Server": "pve-api-daemon"}, None
         if path == "/access" and deep_error is not None:
             raise deep_error

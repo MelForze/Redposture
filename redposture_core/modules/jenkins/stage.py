@@ -135,7 +135,7 @@ def build_jenkins_plan(args: Any) -> AuditCommandPlan:
 
 def build_jenkins_spec(args: Any) -> ModuleAuditSpec:
     def _state(ctx: Any) -> HttpLifecycleState:
-        return HttpLifecycleState(
+        return actions.JenkinsLifecycleState(
             HttpSessionPool(
                 timeout=float(getattr(ctx.args, "timeout", 5.0) or 5.0),
                 retries=int(getattr(ctx.args, "retries", 0) or 0),
@@ -236,7 +236,10 @@ def build_jenkins_spec(args: Any) -> ModuleAuditSpec:
     )
 
     return with_async_http_detection(
-        spec, actions, api_prefixes=("/api", "/login", "/whoAmI", "/job", "/pluginManager", "/computer", "/queue")
+        spec,
+        actions,
+        api_prefixes=("/api", "/login", "/whoAmI", "/job", "/pluginManager", "/computer", "/queue"),
+        allow_cross_origin_redirects=True,
     )
 
 

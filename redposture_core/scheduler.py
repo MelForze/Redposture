@@ -7,12 +7,16 @@ import itertools
 import queue
 import threading
 import time
+import weakref
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator
+from concurrent.futures import Future
 from contextlib import contextmanager
 from contextvars import Context, copy_context
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar, cast
+
+from .runtime_diagnostics import RuntimeDiagnostics
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -20,6 +24,25 @@ K = TypeVar("K")
 
 _STOP = object()
 _POOL_SEQUENCE = itertools.count(1)
+_PAUSE_READY = object()
+_PAUSE_SOURCE = object()
+WorkPause = float | Future[Any]
+
+
+def run_paused_sync(steps: Generator[WorkPause, None, R], *, sleep: Callable[[float], None] = time.sleep) -> R:
+    """Compatibility driver for callers without a cooperative coordinator."""
+    try:
+        while True:
+            try:
+                pause = next(steps)
+            except StopIteration as done:
+                return cast(R, done.value)
+            if isinstance(pause, Future):
+                pause.result()
+            elif pause > 0:
+                sleep(pause)
+    finally:
+        steps.close()
 
 
 class NestedSchedulerCancelled(RuntimeError):
@@ -30,6 +53,7 @@ class NestedSchedulerCancelled(RuntimeError):
 class _Task(Generic[T]):
     index: int
     item: T
+    queued_at_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -77,7 +101,9 @@ class _DaemonWorkerPool(Generic[T, R]):
         worker: Callable[[T], R],
         key_fn: Callable[[T], Any] | None,
         per_key_limit: int,
+        observer: RuntimeDiagnostics | None = None,
     ) -> None:
+        self._observer = observer
         self._tasks: queue.Queue[_Task[T] | object] = queue.Queue(maxsize=max_inflight)
         self.results: queue.SimpleQueue[_Outcome[T, R]] = queue.SimpleQueue()
         self._cancelled = threading.Event()
@@ -98,19 +124,31 @@ class _DaemonWorkerPool(Generic[T, R]):
     def submit(self, task: _Task[T]) -> None:
         if self._cancelled.is_set():
             raise RuntimeError("scheduler is cancelled")
+        if self._observer is not None:
+            task = _Task(task.index, task.item, time.perf_counter_ns())
         self._tasks.put(task)
+        if self._observer is not None:
+            self._observer.queue("deep_tasks", self._tasks.qsize())
 
     def _worker_loop(self) -> None:
         while True:
             queued = self._tasks.get()
             try:
+                if self._observer is not None:
+                    self._observer.queue("deep_tasks", self._tasks.qsize())
                 if queued is _STOP:
                     return
                 task = cast(_Task[T], queued)
                 if self._cancelled.is_set():
                     continue
                 try:
-                    value = self._limiter.run(task.item, self._worker)
+                    if self._observer is None:
+                        value = self._limiter.run(task.item, self._worker)
+                    else:
+                        if task.queued_at_ns is not None:
+                            self._observer.duration("queue_wait", (time.perf_counter_ns() - task.queued_at_ns) / 1e9)
+                        with self._observer.measure("finish"):
+                            value = self._limiter.run(task.item, self._worker)
                 except BaseException as exc:  # noqa: BLE001 - transported to the caller thread
                     if not self._cancelled.is_set():
                         self.results.put(_Outcome(index=task.index, item=task.item, error=exc))
@@ -159,7 +197,9 @@ class BoundedScheduler(Generic[T, R]):
         max_workers: int,
         max_inflight: int | None = None,
         per_key_limit: int | None = None,
+        observer: RuntimeDiagnostics | None = None,
     ) -> None:
+        self.observer = observer
         self.max_workers = max(1, int(max_workers))
         self.max_inflight = max(self.max_workers, int(max_inflight or self.max_workers * 2))
         self.per_key_limit = max(1, int(per_key_limit or self.max_inflight))
@@ -177,6 +217,7 @@ class BoundedScheduler(Generic[T, R]):
             worker=worker,
             key_fn=key_fn,
             per_key_limit=self.per_key_limit,
+            observer=self.observer,
         )
         source = enumerate(items)
         exhausted = False
@@ -215,6 +256,8 @@ class BoundedScheduler(Generic[T, R]):
         items: Iterable[T],
         worker: Callable[[T], R],
         children: Callable[[T, R], Iterable[T]],
+        *,
+        prioritize_children: Callable[[T, R], bool] | None = None,
     ) -> Iterator[tuple[T, R]]:
         """Schedule finite dependent jobs as their parent finishes, in one pool.
 
@@ -227,6 +270,7 @@ class BoundedScheduler(Generic[T, R]):
             worker=worker,
             key_fn=None,
             per_key_limit=self.max_inflight,
+            observer=self.observer,
         )
         source = iter(items)
         pending: deque[T] = deque()
@@ -257,7 +301,11 @@ class BoundedScheduler(Generic[T, R]):
                 if outcome.error is not None:
                     raise outcome.error
                 value = cast(R, outcome.value)
-                pending.extend(children(outcome.item, value))
+                new_items = list(children(outcome.item, value))
+                if new_items and prioritize_children is not None and prioritize_children(outcome.item, value):
+                    pending.extendleft(reversed(new_items))
+                else:
+                    pending.extend(new_items)
                 yield outcome.item, value
         finally:
             if complete:
@@ -268,23 +316,38 @@ class BoundedScheduler(Generic[T, R]):
     def iter_paused(
         self,
         items: Iterable[T],
-        worker: Callable[[T], Generator[float, None, R]],
+        worker: Callable[[T], Generator[WorkPause, None, R]],
         *,
         cancelled: threading.Event | None = None,
         poll_source: bool = False,
+        source_wakeup: Callable[[Callable[[], None] | None], None] | None = None,
     ) -> Iterator[tuple[T, R]]:
         """Run bounded resumable jobs; yielded delays never occupy workers.
 
         Contexts and generators stay attached to a job across pool threads.
         max_inflight also bounds parked lifecycle state and open connections.
         """
-        states: dict[int, tuple[T, Context, Generator[float, None, R] | None]] = {}
+        states: dict[int, tuple[T, Context, Generator[WorkPause, None, R] | None]] = {}
         parked: list[tuple[float, int]] = []
+        waiting: dict[int, Future[Any]] = {}
+        ready: deque[int] = deque()
+        pause_started: dict[int, float] = {}
         source = enumerate(items)
         exhausted = False
         running: set[int] = set()
         finished = False
         abandoned = threading.Event()
+
+        def record_pause(index: int) -> None:
+            if self.observer is not None:
+                pause_started[index] = time.monotonic()
+                self.observer.queue("finish_wait", len(pause_started))
+
+        def end_pause(index: int) -> None:
+            started = pause_started.pop(index, None)
+            if started is not None and self.observer is not None:
+                self.observer.duration("finish_wait", max(0.0, time.monotonic() - started))
+                self.observer.queue("finish_wait", len(pause_started))
 
         def step(index: int) -> tuple[bool, Any]:
             item, context, generator = states[index]
@@ -310,13 +373,26 @@ class BoundedScheduler(Generic[T, R]):
             worker=step,
             key_fn=None,
             per_key_limit=self.max_inflight,
+            observer=self.observer,
         )
+
+        if source_wakeup is not None:
+            pool_ref = weakref.ref(pool)
+
+            def source_ready() -> None:
+                owner = pool_ref()
+                if owner is not None and not abandoned.is_set():
+                    owner.results.put(_Outcome(index=-1, item=-1, value=(False, _PAUSE_SOURCE)))
+
+            source_wakeup(source_ready)
         try:
             while True:
                 if cancelled is not None and cancelled.is_set():
                     return
                 while len(running) < self.max_workers:
-                    if parked and parked[0][0] <= time.monotonic():
+                    if ready:
+                        index = ready.popleft()
+                    elif parked and parked[0][0] <= time.monotonic():
                         _, index = heapq.heappop(parked)
                     elif not exhausted and len(states) < self.max_inflight:
                         try:
@@ -331,6 +407,7 @@ class BoundedScheduler(Generic[T, R]):
                         states[index] = (item, copy_context(), None)
                     else:
                         break
+                    end_pause(index)
                     running.add(index)
                     pool.submit(_Task(index=index, item=index))
                 if not states and exhausted:
@@ -343,6 +420,13 @@ class BoundedScheduler(Generic[T, R]):
                     outcome = pool.results.get(timeout=timeout)
                 except queue.Empty:
                     continue
+                if outcome.value == (False, _PAUSE_SOURCE):
+                    continue
+                if outcome.value == (False, _PAUSE_READY):
+                    if outcome.index in waiting:
+                        waiting.pop(outcome.index)
+                        ready.append(outcome.index)
+                    continue
                 running.remove(outcome.index)
                 if outcome.error is not None:
                     raise outcome.error
@@ -350,9 +434,23 @@ class BoundedScheduler(Generic[T, R]):
                 if done:
                     item, _, _ = states.pop(outcome.index)
                     yield item, cast(R, value)
+                elif isinstance(value, Future):
+                    record_pause(outcome.index)
+                    waiting[outcome.index] = value
+                    pool_ref = weakref.ref(pool)
+
+                    def awakened(_future: Future[Any], index: int = outcome.index, ref: Any = pool_ref) -> None:
+                        owner = ref()
+                        if owner is not None and not abandoned.is_set():
+                            owner.results.put(_Outcome(index=index, item=index, value=(False, _PAUSE_READY)))
+
+                    value.add_done_callback(awakened)
                 else:
                     heapq.heappush(parked, (time.monotonic() + max(0.0, float(value)), outcome.index))
+                    record_pause(outcome.index)
         finally:
+            if source_wakeup is not None:
+                source_wakeup(None)
             close_source = getattr(items, "close", None)
             if poll_source and callable(close_source):
                 close_source()
@@ -373,6 +471,11 @@ class BoundedScheduler(Generic[T, R]):
                             continue
                         if cleanup_error is None:
                             cleanup_error = exc
+            for index in tuple(pause_started):
+                end_pause(index)
+            states.clear()
+            waiting.clear()
+            ready.clear()
             if cleanup_error is not None:
                 raise cleanup_error
 
@@ -407,6 +510,105 @@ class BoundedScheduler(Generic[T, R]):
                 yield outcome.item, cast(R, outcome.value)
         finally:
             outcomes.close()
+
+
+class _PausedWorkerPool(Generic[T, R]):
+    """Queue-compatible bridge to the bounded, Context-preserving step scheduler.
+
+    Only a yielded socket-free delay is parked. Normal synchronous calls still
+    use exactly max_workers daemon workers. The coordinator owns every idle
+    continuation; cancellation closes it in the Context in which it was made.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_workers: int,
+        max_inflight: int,
+        worker: Callable[[T], Generator[WorkPause, None, R]],
+        observer: RuntimeDiagnostics | None = None,
+    ) -> None:
+        self._tasks: queue.Queue[_Task[T]] = queue.Queue(maxsize=max_inflight)
+        self.results: queue.SimpleQueue[_Outcome[T, R]] = queue.SimpleQueue()
+        self._cancelled, self._closed = threading.Event(), threading.Event()
+        self._source_wake: Callable[[], None] | None = None
+        self._source_wake_lock = threading.Lock()
+        owner = self
+
+        def set_source_wakeup(callback: Callable[[], None] | None) -> None:
+            with self._source_wake_lock:
+                self._source_wake = callback
+
+        class Source:
+            def __iter__(self) -> Source:
+                return self
+
+            def __next__(self) -> _Task[T]:
+                if owner._cancelled.is_set() or (owner._closed.is_set() and owner._tasks.empty()):
+                    raise StopIteration
+                task = owner._tasks.get_nowait()
+                owner._tasks.task_done()
+                return task
+
+            def close(self) -> None:
+                owner._closed.set()
+
+        def work(task: _Task[T]) -> Generator[WorkPause, None, _Outcome[T, R]]:
+            try:
+                result = yield from worker(task.item)
+            except GeneratorExit:
+                raise
+            except BaseException as exc:  # noqa: BLE001 - transport to the owning consumer
+                return _Outcome(index=task.index, item=task.item, error=exc)
+            return _Outcome(index=task.index, item=task.item, value=result)
+
+        def run() -> None:
+            try:
+                scheduler: BoundedScheduler[_Task[T], _Outcome[T, R]] = BoundedScheduler(
+                    max_workers=max_workers, max_inflight=max_inflight, observer=observer
+                )
+                for _task, result in scheduler.iter_paused(
+                    Source(), work, cancelled=self._cancelled, poll_source=True, source_wakeup=set_source_wakeup
+                ):
+                    if not self._cancelled.is_set():
+                        self.results.put(result)
+            except BaseException as exc:  # noqa: BLE001 - also wake the consumer on a bad yielded delay
+                if not self._cancelled.is_set():
+                    self.results.put(_Outcome(index=-1, item=cast(T, None), error=exc))
+
+        self._thread = threading.Thread(
+            target=copy_context().run, args=(run,), name="redposture-paused-finish", daemon=True
+        )
+        self._thread.start()
+
+    def submit(self, task: _Task[T]) -> None:
+        if self._closed.is_set() or self._cancelled.is_set():
+            raise RuntimeError("paused scheduler is closed")
+        self._tasks.put(task)
+        with self._source_wake_lock:
+            wake = self._source_wake
+        if wake is not None:
+            wake()
+
+    def close(self) -> None:
+        self._closed.set()
+        self._thread.join(5)
+        if self._thread.is_alive():
+            self.cancel()
+            raise RuntimeError("paused finish coordinator did not stop")
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+        self._closed.set()
+        while True:
+            try:
+                self._tasks.get_nowait()
+            except queue.Empty:
+                break
+            else:
+                self._tasks.task_done()
+        if threading.current_thread() is not self._thread:
+            self._thread.join(0.1)
 
 
 @dataclass

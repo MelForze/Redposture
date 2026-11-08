@@ -15,6 +15,7 @@ from ...clients.http_api import http_response_origin, http_response_requires_htt
 from ...clients.http_session import HttpSessionPool
 from ...clients.rabbitmq_api import RabbitMQClient, RabbitMQResponse
 from ...detection_io import DetectCall, run_sync
+from ...html_fingerprint import document_title
 
 # guest:guest is the vendor default; the remaining pairs are common weak
 # deployment credentials, not additional RabbitMQ factory defaults.
@@ -171,7 +172,7 @@ def _detect_detect_record_steps(ctx: Any) -> Any:
     if not confirmed and not response.error:
         root = yield DetectCall(client.get, ("/",), {})
         ui = not root.error and bool(
-            re.search(rb"<title\b[^>]*>\s*RabbitMQ\s+Management\b[^<]*</title\s*>", root.body, re.I)
+            re.match(r"RabbitMQ\s+Management\b", document_title(root.body.decode("utf-8", errors="replace")), re.I)
         )
         evidence["management_ui"] = ui
         # A generic HTML login page is not an API verifier.

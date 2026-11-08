@@ -41,7 +41,7 @@ class Native:
     async def close(self):
         pass
 
-    async def get(self, url, *, headers=None):
+    async def get(self, url, *, headers=None, **redirect_policy):
         await asyncio.sleep(0)
         return self.respond(url, headers)
 
@@ -206,7 +206,7 @@ def test_cancellation_closes_unclaimed_sync_session(monkeypatch):
         entered = asyncio.Event()
 
         class Waiting(Native):
-            async def get(self, url, *, headers=None):
+            async def get(self, url, *, headers=None, **redirect_policy):
                 entered.set()
                 await asyncio.Event().wait()
 

@@ -29,6 +29,7 @@ from h2.exceptions import ProtocolError as H2ProtocolError
 from redposture_core.cli_args import parse_args
 from redposture_core.module_registry import AUDIT_MODULE_NAMES
 from redposture_core.stage_runtime import AuditCommandRunner
+from tests.application_markup import application_page
 
 TOKEN_API_PRODUCTS = ("vault", "nomad", "jupyter")
 HTTP_PRODUCTS = (
@@ -137,7 +138,7 @@ def _http_response(product: str, path: str, *, proxy_headers: bool = False, orig
     elif product == "grafana":
         payload = {"database": "ok", "version": "11.0.0", "commit": "abc123"}
         if path == "/login":
-            payload = "<title>Grafana</title>"
+            payload = application_page("grafana")
             headers["Content-Type"] = "text/html"
     elif product == "jenkins":
         payload = {"name": "Jenkins"}
@@ -146,7 +147,10 @@ def _http_response(product: str, path: str, *, proxy_headers: bool = False, orig
         elif path == "/whoAmI/api/json":
             payload = {"authenticated": False, "name": "anonymous", "authorities": ["anonymous"]}
         elif path == "/login":
-            payload = "<form>j_username j_password Jenkins</form>"
+            payload = (
+                '<title>Jenkins</title><form action="j_spring_security_check">'
+                '<input name="j_username"><input name="j_password"></form>'
+            )
             headers["Content-Type"] = "text/html"
         if not proxy_headers:
             headers["X-Jenkins"] = "2.541.3"
@@ -472,6 +476,7 @@ def _product_server(
     compressed: bool = False,
     redirect_from: str | None = None,
     relative_redirect: bool = False,
+    origin_host: str = "127.0.0.1",
 ) -> Iterator[tuple[int, list[bytes]]]:
     requests: list[bytes] = []
 
@@ -498,7 +503,7 @@ def _product_server(
                         )
                         location = prefix + endpoint
                         if not relative_redirect:
-                            location = f"http://127.0.0.1:{server.server_address[1]}" + location
+                            location = f"http://{origin_host}:{server.server_address[1]}" + location
                         self.request.sendall(
                             f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode()
                         )
@@ -512,7 +517,7 @@ def _product_server(
                             product,
                             path[len(prefix) :] or "/",
                             proxy_headers=proxy_headers,
-                            origin=f"http://127.0.0.1:{server.server_address[1]}{prefix}",
+                            origin=f"http://{origin_host}:{server.server_address[1]}{prefix}",
                         )
                         self.request.sendall(_gzip_response(reply) if compressed else reply)
                 else:

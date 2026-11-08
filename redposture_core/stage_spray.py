@@ -17,6 +17,7 @@ import threading
 import time
 from bisect import bisect_right
 from collections.abc import Generator, Iterable, Iterator, Sequence
+from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from itertools import zip_longest
@@ -32,7 +33,9 @@ from .module_registry import AUDIT_MODULE_NAMES
 from .network_proxy import RuntimeNetworkConfig
 from .progress import make_command_progress
 from .rendering import BooleanColorRule, collect_boolean_spans, format_report_line_for_console
+from .runtime_diagnostics import RuntimeDiagnostics, observe_phase
 from .scheduler import BoundedScheduler
+from .spray_diagnostics import SprayDiagnostics
 from .spray_render import render_spray_line
 from .stage_runtime import (
     AuditCommandRunner,
@@ -1212,7 +1215,9 @@ class SpraySink:
         *,
         debug: bool = False,
         group_targets: bool = False,
+        observer: RuntimeDiagnostics | None = None,
     ) -> None:
+        self._runtime_stats = observer
         self.output = output
         self.fmt = fmt
         self.candidates = candidates
@@ -1294,6 +1299,7 @@ class SpraySink:
         with self.lock:
             self._emit_locked(module, host, port, index, status, evidence, detail)
 
+    @observe_phase("write")
     def _emit_locked(
         self, module: str, host: str, port: int, index: int | None, status: str, evidence: str, detail: str
     ) -> None:
@@ -1423,6 +1429,10 @@ def run_spray_stage(args: Any, logger: Any) -> int:
             gate = RateGate(args.origin_rate, args.account_interval, journal=journal)
 
             console = Console(debug=args.debug, no_color=args.no_color, structured_output=args.output_format == "json")
+            diagnostics = SprayDiagnostics(console.debug) if args.debug else None
+            if diagnostics is not None:
+                for ns in module_args.values():
+                    ns._runtime_observer = diagnostics.work
             group_targets = args.output_format == "txt" and len(modules) > 1
             sink = SpraySink(
                 args.output,
@@ -1431,6 +1441,7 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                 console,
                 debug=bool(args.debug),
                 group_targets=group_targets,
+                observer=diagnostics.work if diagnostics is not None else None,
             )
             progress = make_command_progress(
                 "SPRAY",
@@ -1480,7 +1491,9 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                 # The shared scheduler bounds the queue and uses daemon workers,
                 # so Ctrl+C cannot be held up by a blocked socket.
                 scheduler: BoundedScheduler[tuple[str, Any, str, int, Any], None] = BoundedScheduler(
-                    max_workers=args.workers, max_inflight=args.workers * 2
+                    max_workers=args.workers,
+                    max_inflight=args.workers * 2,
+                    observer=diagnostics.work if diagnostics is not None else None,
                 )
 
                 def work(job: tuple[str, Any, str, int, Any]) -> Generator[float, None, None]:
@@ -1520,7 +1533,13 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                 )
                 if limit:
                     source = PreparedSource(
-                        _spray_jobs(modules, module_args), logger, gate, journal, limit, args.workers
+                        _spray_jobs(modules, module_args),
+                        logger,
+                        gate,
+                        journal,
+                        limit,
+                        args.workers,
+                        observer=diagnostics.detect if diagnostics is not None else None,
                     )
 
                     def prepared_work(pair: Any) -> Generator[float, None, None]:
@@ -1535,17 +1554,23 @@ def run_spray_stage(args: Any, logger: Any) -> int:
                     outcomes = scheduler.iter_paused(source, prepared_work, cancelled=gate.cancelled, poll_source=True)
                 else:
                     outcomes = scheduler.iter_paused(_spray_jobs(modules, module_args), work, cancelled=gate.cancelled)
-                try:
-                    for _job, _result in outcomes:
-                        pass
-                    completed_normally = True
-                except KeyboardInterrupt:
-                    gate.cancel()
-                    raise
-                finally:
-                    close = getattr(outcomes, "close", None)
-                    if callable(close):
-                        close()
+                reporting = (
+                    diagnostics.reporting(targets=target_count, detect_limit=limit, workers=args.workers)
+                    if diagnostics is not None
+                    else nullcontext()
+                )
+                with reporting:
+                    try:
+                        for _job, _result in outcomes:
+                            pass
+                        completed_normally = True
+                    except KeyboardInterrupt:
+                        gate.cancel()
+                        raise
+                    finally:
+                        close = getattr(outcomes, "close", None)
+                        if callable(close):
+                            close()
             finally:
                 journal.on_result = None
                 progress_stop.set()

@@ -163,6 +163,20 @@ class DiscoveryTextStream:
         else:
             self.emit({key: value} if key is not None else value)
 
+    def _begin_xml(self, match: re.Match[str]) -> None:
+        if match.start():
+            self.emit(self.pending[: match.start()])
+        self.xml_name = match.group(1)
+        self.xml_quote = self.xml_tail = ""
+        self.xml_attributes = DiscoveryTextStream(
+            self._xml_attribute,
+            self.partial,
+            portion=self.limit,
+            _attributes="input" if self.xml_name.lower() == "input" else True,
+        )
+        self.mode = "xml_header"
+        self.pending = self.pending[match.end() :]
+
     def _drain(self) -> None:
         while self.pending:
             if (
@@ -349,6 +363,17 @@ class DiscoveryTextStream:
                 self.pending = self.pending[boundary.end() :]
                 self._complete()
                 continue
+            xml = None if self.attributes else _XML_HEAD.search(self.pending)
+            if xml is not None and xml.start() <= self.limit:
+                # A field assignment or PEM header cannot cross '<'. Only
+                # the prefix can precede this tag. Avoid searching all later
+                # attributes again for every neutral tag in a dense document.
+                prefix_end = xml.start()
+                if _PEM.search(self.pending, 0, prefix_end) is None and not any(
+                    is_secret_field_name(match.group(1)) for match in _ASSIGNMENT.finditer(self.pending, 0, prefix_end)
+                ):
+                    self._begin_xml(xml)
+                    continue
             assignment = next(
                 (
                     m
@@ -358,25 +383,13 @@ class DiscoveryTextStream:
                 None,
             )
             pem = _PEM.search(self.pending)
-            xml = None if self.attributes else _XML_HEAD.search(self.pending)
             if (
                 xml is not None
                 and xml.start() <= self.limit
                 and (assignment is None or xml.start() <= assignment.start())
                 and (pem is None or xml.start() < pem.start())
             ):
-                if xml.start():
-                    self.emit(self.pending[: xml.start()])
-                self.xml_name = xml.group(1)
-                self.xml_quote = self.xml_tail = ""
-                self.xml_attributes = DiscoveryTextStream(
-                    self._xml_attribute,
-                    self.partial,
-                    portion=self.limit,
-                    _attributes="input" if self.xml_name.lower() == "input" else True,
-                )
-                self.mode = "xml_header"
-                self.pending = self.pending[xml.end() :]
+                self._begin_xml(xml)
                 continue
             auth = _AUTH.search(self.pending)
             sql_password = _SQL_PASSWORD.search(self.pending)

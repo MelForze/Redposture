@@ -209,13 +209,35 @@ def _detect_proxmox_detect_steps(ctx: AuditHookContext) -> Any:
     )
     use_https = _proxmox_use_https(ctx)
     detected = actions._looks_like_proxmox_response(status, payload, response_headers)
+    endpoint_results = [{"path": "/access", "status": status, "error": error, "method": "GET"}]
+    compatible_signal = error is None and (
+        status in {401, 403} or status == 200 and actions._proxmox_access_hint(payload)
+    )
+    if not detected and compatible_signal:
+        version_status, version_payload, version_headers, version_error = yield DetectCall(
+            actions._proxmox_request,
+            (ctx.host, ctx.port, "/version", cfg.timeout, cfg.retries),
+            {
+                "pve_api_token": "",
+                "use_https": use_https,
+                "insecure": True,
+                "proxy": _proxmox_proxy(ctx.args),
+                "auth_headers": {},
+            },
+        )
+        endpoint_results.append({"path": "/version", "status": version_status, "error": version_error, "method": "GET"})
+        detected = version_error is None and actions._looks_like_proxmox_response(
+            version_status, version_payload, version_headers
+        )
     if error:
         record_status = "fail"
         detected = False
         error_text = error
     elif not detected:
         record_status = "fail"
-        error_text = "service is not proxmox"
+        error_text = (
+            "Proxmox-compatible API; product identity unverified" if compatible_signal else "service is not proxmox"
+        )
     elif status == 200:
         record_status = "open_no_auth"
         error_text = None
@@ -238,14 +260,20 @@ def _detect_proxmox_detect_steps(ctx: AuditHookContext) -> Any:
             "auth_method": "anonymous",
             "auth_attempts": [],
             "use_https": use_https,
-            "checked_endpoints": 1,
-            "successful_endpoints": int(status == 200),
-            "endpoint_results": [{"path": "/access", "status": status, "error": error, "method": "GET"}],
+            "checked_endpoints": len(endpoint_results),
+            "successful_endpoints": sum(item["status"] == 200 and item["error"] is None for item in endpoint_results),
+            "endpoint_results": endpoint_results,
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": error_text,
         }
     )
     record = _proxmox_with_action_contract(record, ctx.args)
+    if compatible_signal and not detected:
+        record = replace(
+            record,
+            auth_required=None,
+            extra={**record.extra, "operational_failure": True, "detection_status": "unverified"},
+        )
     if isinstance(ctx.lifecycle_state, _ProxmoxLifecycleState):
         ctx.lifecycle_state.detect_record = record
     return record

@@ -15,6 +15,7 @@ import pytest
 
 from redposture_core.cli_args import parse_args
 from redposture_core.stage_runtime import AuditCommandRunner
+from tests.application_markup import application_page
 
 
 @contextmanager
@@ -33,7 +34,7 @@ def _http_service(kind: str, version: str, *, renderer_version: str | None = Non
                 elif self.path == "/login":
                     status = 200
                     headers = {"Content-Type": "text/html"}
-                    body = b"<html><head><title>Grafana</title></head><body>login</body></html>"
+                    body = application_page("grafana").encode()
                 elif self.path == "/api/datasources":
                     status = 200
                     body = b"[]"

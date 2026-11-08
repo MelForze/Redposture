@@ -12,6 +12,7 @@ from typing import Any
 
 from .async_detection import AsyncDetectScheduler, async_detection_allowed
 from .clients.http_handoff import HttpHandoffBudget
+from .runtime_diagnostics import RuntimeDiagnostics
 from .stage_runtime import AuditCommandRunner, AuditCredentialRun, AuditHookContext
 
 _SHARED_HANDOFF_BUDGET: ContextVar[Any] = ContextVar("spray_handoff_budget", default=None)
@@ -104,7 +105,18 @@ _DONE = object()
 class PreparedSource:
     """Pollable bounded source; waiting for I/O never blocks spray cooldowns."""
 
-    def __init__(self, items: Any, logger: Any, gate: Any, journal: Any, limit: int, workers: int):
+    def __init__(
+        self,
+        items: Any,
+        logger: Any,
+        gate: Any,
+        journal: Any,
+        limit: int,
+        workers: int,
+        *,
+        observer: RuntimeDiagnostics | None = None,
+    ):
+        self._observer = observer
         self._handoff_budget = HttpHandoffBudget(min(64, max(1, workers)))
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, workers * 2))
         self._stop = threading.Event()
@@ -116,6 +128,8 @@ class PreparedSource:
             while not self._stop.is_set():
                 try:
                     self._queue.put(value, timeout=0.02)
+                    if observer is not None:
+                        observer.queue("prepared", self._queue.qsize())
                     return True
                 except queue.Full:
                     pass
@@ -141,6 +155,7 @@ class PreparedSource:
                 detect_workers=limit,
                 deep_workers=1,
                 max_inflight=limit + workers * 2,
+                observer=observer,
             ).iter_completed(items, prepare, lambda _job, value: value, cancel_event=self._stop)
             try:
                 for job, value in outcomes:
@@ -160,6 +175,8 @@ class PreparedSource:
 
     def __next__(self):
         value = self._queue.get_nowait()
+        if self._observer is not None:
+            self._observer.queue("prepared", self._queue.qsize())
         if value is _DONE:
             if self._error is not None:
                 raise self._error

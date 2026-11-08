@@ -55,6 +55,8 @@ class DualProtocolMinioServer(socketserver.ThreadingTCPServer):
         super().__init__(address, handler)
         self.tls_context = tls_context
         self.plaintext_requests = 0
+        self.plaintext_paths: list[str] = []
+        self.plaintext_authorizations: list[str] = []
         self.tls_requests: list[tuple[str, str]] = []
 
 
@@ -94,8 +96,10 @@ class DualProtocolMinioHandler(socketserver.BaseRequestHandler):
         server = cast(DualProtocolMinioServer, self.server)
         first = self.request.recv(1, socket.MSG_PEEK)
         if first != b"\x16":
-            self._read_request(self.request)
+            raw_path, headers = self._read_request(self.request)
             server.plaintext_requests += 1
+            server.plaintext_paths.append(raw_path)
+            server.plaintext_authorizations.append(headers.get("authorization", ""))
             self._reply(self.request, 400, b"Client sent an HTTP request to an HTTPS server.")
             return
 
@@ -155,10 +159,14 @@ def test_http_tls_required_upgrades_to_self_signed_https_for_defcreds(
         assert "minioadmin:minioadmin" in result.stdout
         assert "S3 API:unverified" not in result.stdout
         assert "credential verification unavailable" not in result.stdout
-        # Explicit HTTP URLs check Console as an independent surface (two
-        # read-only probes) before the S3 API transport upgrade. A failed UI
-        # fingerprint must not be retried after S3 detection.
-        assert server.plaintext_requests == 3
+        # Console's mandatory root page reports TLS-required, so its dependent
+        # session probe is skipped. The independent S3 origin probe still runs
+        # and upgrades to HTTPS before health or signed credential requests;
+        # the failed UI fingerprint is not repeated.
+        assert server.plaintext_requests == 2
+        assert server.plaintext_paths == ["/", "/"]
+        assert server.plaintext_authorizations == ["", ""]
+        assert any(path == "/minio/health/live" for path, _auth in server.tls_requests)
         assert any(authorization for _path, authorization in server.tls_requests)
         assert any("Credential=minioadmin/" in authorization for _path, authorization in server.tls_requests)
     finally:

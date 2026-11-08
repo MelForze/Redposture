@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from http.client import HTTPException
 from typing import Any
 
 from ...audit_models import AuditRecord
 from ...clients.async_http_detect import AsyncHttpFallback
-from ...clients.docker_engine import DockerEngineClient, DockerEngineHTTPError, DockerHTTPResponse
+from ...clients.docker_engine import (
+    DockerEngineClient,
+    DockerEngineConnectionError,
+    DockerEngineHTTPError,
+    DockerHTTPResponse,
+    normalize_docker_error,
+)
 from ...clients.http_session import HttpSessionPool
 from ...detection_io import HttpRead, detection_thread_locals, run_async
 from ...stage_runtime import _prepare_host_stage_call
@@ -61,6 +68,18 @@ def bind(spec: Any) -> Any:
                     pool, "GET", url, {"headers": req_headers, "response_size_cap": response_size_cap}
                 )
                 if response.error:
+                    failure = getattr(http, "last_exception", None)
+                    if (
+                        response.status == 0
+                        and isinstance(failure, OSError)
+                        and not isinstance(failure, (TimeoutError, HTTPException))
+                    ):
+                        normalized = normalize_docker_error(failure)
+                        # Preserve the sync client's normalization and continue
+                        # its original plaintext/TLS decision tree. Timeouts
+                        # and HTTP framing/EOF keep the original sync recovery.
+                        if normalized != "connection timeout":
+                            raise DockerEngineConnectionError(normalized) from failure
                     raise AsyncHttpFallback("Docker transport error needs original normalization")
                 reason = getattr(http, "last_reason", None)
                 if reason is None:

@@ -489,9 +489,6 @@ def _looks_like_proxmox_response(
         return False
     data = parsed.get("data")
     if status == 200 and isinstance(data, dict):
-        pve_fields = {"clustername", "ticket", "CSRFPreventionToken", "cap"}
-        if pve_fields.intersection(data):
-            return True
         # /api2/json/version has a product-specific three-field response. A
         # reverse proxy may replace Server: pve-api-daemon with Server: nginx.
         version = data.get("version")
@@ -518,6 +515,19 @@ def _looks_like_proxmox_response(
             "invalid pve ticket",
             "pve ticket",
         )
+    )
+
+
+def _proxmox_access_hint(payload: bytes) -> bool:
+    """A compatible access envelope warrants correlation, not confirmation."""
+    parsed = _parse_json_payload(payload)
+    if not isinstance(parsed, dict):
+        return False
+    data = parsed.get("data")
+    return (
+        isinstance(data, list)
+        or isinstance(data, dict)
+        and bool({"clustername", "ticket", "CSRFPreventionToken", "cap"}.intersection(data))
     )
 
 

@@ -24,6 +24,7 @@ from ...json_stream import JSONPath, JSONScalarStream
 from ...scheduler import NestedSchedulerCancelled
 from ...secret_detection import fingerprint, scan_value
 from .enumerate import ObjectInfo
+from .payloads import needs_payload_reader, scan_payload_file
 
 
 class ObjectReader(Protocol):
@@ -218,7 +219,7 @@ def _read_and_scan(
     offset = object_read = 0
     read_any = False
     complete = False
-    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
     seen_frontier: DiscoveryFrontier | None = None
     seen_bytes = 0
     seen_normalized = False
@@ -227,6 +228,30 @@ def _read_and_scan(
     json_value: _Value | None = None
     replay = None
     json_parser: _JSONDocuments | None = None
+    payload_spool: Any = None
+    format_probe = b""
+    format_decided = False
+    binary_text = False
+
+    def feed_decoded(chunk: bytes, *, final: bool = False) -> None:
+        nonlocal payload_spool, binary_text
+        if payload_spool is not None:
+            payload_spool.write(chunk)
+            return
+        try:
+            text = decoder.decode(chunk, final=final)
+        except UnicodeDecodeError as exc:
+            result._partial("unsupported_text_encoding")
+            # exc.object includes any pending UTF-8 prefix from the previous
+            # portion. Commit its valid prefix before abandoning the candidate.
+            scanner.feed(exc.object[: exc.start].decode("utf-8"))
+            scanner.close()
+            binary_text = True
+            payload_spool = tempfile.SpooledTemporaryFile(max_size=65_536)
+            payload_spool.write(exc.object[exc.start :])
+        else:
+            scanner.feed(text)
+
     semantic_portion = max(64, min(budget.chunk_size, 65536))
 
     def publish(value: Any, object_path: Text = "$") -> None:
@@ -241,7 +266,11 @@ def _read_and_scan(
         ):
             # The prefix probe already established plain-text syntax. Do not
             # send a bounded log line back through the JSON prefix heuristic.
-            matches, covered = scan_value(value, object_path=object_path), True
+            reasons: list[str] = []
+            matches = scan_value(value, object_path=object_path, _on_incomplete=reasons.append)
+            covered = not reasons
+            for reason in reasons:
+                result._partial(reason)
         else:
             matches, _, covered = _scan_portioned_value(value, object_path, semantic_portion, _deadline=deadline)
         if not covered:
@@ -307,7 +336,7 @@ def _read_and_scan(
             json_value.close()
             json_value = None
         for chunk in replay_chunks():
-            scanner.feed(decoder.decode(chunk))
+            feed_decoded(chunk)
         if replay is not None:
             replay.close()
 
@@ -341,17 +370,37 @@ def _read_and_scan(
             plain_fallback(invalid_json=True)
             return False
 
-    def feed(chunk: bytes) -> None:
-        nonlocal content_kind, probe_open, replay
+    def feed_text(chunk: bytes) -> None:
+        nonlocal content_kind, probe_open, replay, binary_text, payload_spool, json_value
+        if binary_text:
+            assert payload_spool is not None
+            payload_spool.write(chunk)
+            return
+        if b"\0" in chunk:
+            boundary = chunk.index(b"\0")
+            if boundary:
+                feed_text(chunk[:boundary])
+            result._partial("binary_or_unsupported_encoding")
+            scanner.close()
+            if json_parser is not None:
+                json_parser.close()
+            if json_value is not None:
+                json_value.close()
+                json_value = None
+            binary_text = True
+            if payload_spool is None:
+                payload_spool = tempfile.SpooledTemporaryFile(max_size=65_536)
+            payload_spool.write(chunk[boundary:])
+            return
         if content_kind == "text":
-            scanner.feed(decoder.decode(chunk))
+            feed_decoded(chunk)
             return
         prefix = chunk.lstrip(b" \t\r\n")
         if replay is None and probe_open is None and prefix and prefix[0] not in b"{[":
             # No undecided prefix needs replay and no JSON parser was used.
             # Feed the exact bytes, including leading whitespace, as before.
             content_kind = "text"
-            scanner.feed(decoder.decode(chunk))
+            feed_decoded(chunk)
             return
         if replay is None:
             replay = tempfile.SpooledTemporaryFile(max_size=65536)
@@ -378,6 +427,31 @@ def _read_and_scan(
         for pending in replay_chunks():
             if not feed_json(pending):
                 break
+
+    def feed(chunk: bytes) -> None:
+        nonlocal payload_spool, format_probe, format_decided
+        if payload_spool is not None:
+            payload_spool.write(chunk)
+            return
+        if not format_decided:
+            format_probe += chunk
+            if len(format_probe) < 4:
+                return
+            format_decided = True
+            if needs_payload_reader(format_probe, str(obj.key)):
+                payload_spool = tempfile.SpooledTemporaryFile(max_size=65_536)
+                payload_spool.write(format_probe)
+            else:
+                feed_text(format_probe)
+            format_probe = b""
+            return
+        feed_text(chunk)
+
+    def check_payload() -> None:
+        if cancelled is not None and cancelled():
+            raise NestedSchedulerCancelled("MinIO discovery cancelled")
+        if budget.expired():
+            raise TimeoutError("discover_time")
 
     try:
         while budget.max_object_size is None or object_read < budget.max_object_size:
@@ -440,6 +514,20 @@ def _read_and_scan(
             finally:
                 budget.release(length)
         if complete:
+            if not format_decided and format_probe:
+                if needs_payload_reader(format_probe, str(obj.key)):
+                    payload_spool = tempfile.SpooledTemporaryFile(max_size=65_536)
+                    payload_spool.write(format_probe)
+                else:
+                    feed_text(format_probe)
+            if payload_spool is not None:
+                payload_spool.seek(0)
+                scan_payload_file(
+                    payload_spool, "$", publish=publish, partial=result._partial, check=check_payload, key=str(obj.key)
+                )
+                if read_any:
+                    result.objects_scanned += 1
+                return True
             if content_kind == "json":
                 try:
                     assert json_parser is not None
@@ -448,9 +536,10 @@ def _read_and_scan(
                     plain_fallback(invalid_json=True)
             elif content_kind is None:
                 plain_fallback()
-            if content_kind == "text":
-                scanner.feed(decoder.decode(b"", final=True))
-                scanner.finish()
+            if content_kind == "text" and not binary_text:
+                feed_decoded(b"", final=True)
+                if not binary_text:
+                    scanner.finish()
         else:
             result._partial("object_truncated")
         if read_any:
@@ -466,6 +555,8 @@ def _read_and_scan(
         result._partial("storage_failure")
         return True
     finally:
+        if payload_spool is not None:
+            payload_spool.close()
         if replay is not None:
             replay.close()
         if json_parser is not None:

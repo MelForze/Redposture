@@ -219,6 +219,11 @@
           "database_count": 1,
           "query_error": null,
           "readable_tables": 7,
+          "server_implementation": {
+            "evidence": "sql_version_and_settings",
+            "product": "PostgreSQL",
+            "scope": "sql_backend"
+          },
           "superuser": true
         },
         "credential_verification": "verified",
@@ -227,6 +232,11 @@
         "password": "postgres",
         "password_sent": true,
         "protocol_evidence": "postgresql_wire",
+        "server_implementation": {
+          "evidence": "sql_version_and_settings",
+          "product": "PostgreSQL",
+          "scope": "sql_backend"
+        },
         "service_identity": "postgresql_compatible",
         "source": "default",
         "startup_complete": true,
@@ -354,6 +364,11 @@
     "provided_password": null,
     "provided_username": "postgres",
     "readable_tables": 7,
+    "server_implementation": {
+      "evidence": "sql_version_and_settings",
+      "product": "PostgreSQL",
+      "scope": "sql_backend"
+    },
     "service": "postgres",
     "service_identity": "postgresql_compatible",
     "show_columns": false,

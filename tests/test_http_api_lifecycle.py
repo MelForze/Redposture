@@ -14,6 +14,7 @@ import redposture_core.stage_kubeapi as kubeapi
 import redposture_core.stage_qdrant as qdrant
 from redposture_core.cli_args import parse_args
 from redposture_core.stage_runtime import AuditCommandRunner
+from tests.application_markup import application_page
 
 
 def _run(module: Any, name: str, args: Any):
@@ -53,7 +54,7 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
         if path == "/login":
             if method == "POST":
                 return 401, '{"message":"Invalid username or password"}', {}
-            return 200, "<title>Grafana</title>", {}
+            return 200, application_page("grafana"), {}
         if path == "/api/org":
             return 401, '{"message":"Unauthorized"}', {}
         if path == "/api/user":
@@ -152,7 +153,7 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
                 if json.loads(_kwargs.get("data") or b"{}") == {"user": "admin", "password": "admin"}:
                     raise OSError("candidate transport failure")
                 return 401, '{"message":"Invalid username or password"}', {}
-            return 200, "<title>Grafana</title>", {}
+            return 200, application_page("grafana"), {}
         if path == "/api/org":
             return 401, '{"message":"Unauthorized"}', {}
         if path == "/api/user":
@@ -336,14 +337,12 @@ def test_gitlab_invalid_token_runs_public_data_once_without_reclassification(
             return 200, b'{"version":"17.0.0"}', {}, None
         if path == "/api/v4/user":
             return 401, b"", {}, None
+        if path.startswith("/api/v4/projects?"):
+            paginations.append(token)
+            return 200, b'[{"id":1,"path_with_namespace":"public/demo"}]', {}, None
         return 200, b"", {}, None
 
-    def fake_paginate(_host, _port, _timeout, *, token, **_kwargs):
-        paginations.append(token)
-        return ([{"id": 1, "path_with_namespace": "public/demo"}], None) if token is None else ([], None)
-
     monkeypatch.setattr(gitlab, "_http_request", fake_http)
-    monkeypatch.setattr(gitlab, "_paginate_projects", fake_paginate)
     args = parse_args(["gitlab", "-t", "127.0.0.1", "--port", "80", "--token", "invalid", "--format", "json"])
     result = _run(gitlab, "gitlab", args)
 

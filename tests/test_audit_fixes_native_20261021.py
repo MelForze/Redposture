@@ -58,9 +58,12 @@ def test_nat02_http_inventory_retains_all_received_items(vendor, port, path, con
         def request(self, method, url, **kwargs):
             request_path = urlsplit(url).path
             if request_path == path:
-                value = [{"name": name} for name in names] if vendor == "redpanda_console" else names
+                value = {"topics": [{"topicName": name} for name in names]} if vendor == "redpanda_console" else names
                 return HttpResponse(200, json.dumps(value).encode(), {"Content-Type": content_type})
-            values = {"/v3/clusters": {"kind": "KafkaClusterList", "data": []}, "/admin/startup": {}}
+            values = {
+                "/v3/clusters": {"kind": "KafkaClusterList", "data": []},
+                "/admin/startup": {"isHttpOk": True, "isKafkaOk": True},
+            }
             if request_path in values:
                 return HttpResponse(200, json.dumps(values[request_path]).encode(), {})
             if request_path == "/":

@@ -209,13 +209,33 @@ def normalize_mongodb_error(exc: BaseException) -> str:
     if not text:
         return "mongodb operation failed"
     lower = text.lower()
+    # These are server decisions, not words in a timeout/configuration footer.
+    if getattr(exc, "code", None) == 18:
+        return "authentication failed"
+    if getattr(exc, "code", None) == 13:
+        return "authorization denied"
+    # Async PyMongo reports ECONNREFUSED as "Connect call failed" followed by
+    # "configured timeouts". Inspect the actual errno before that generic text.
+    # A multi-address error containing a genuine timeout is not all-refused.
+    errnos: set[int | None] = set()
+    for index, error in enumerate(re.finditer(r"\[errno\s+(-?\d+)\]", text, flags=re.IGNORECASE)):
+        if index >= 32:
+            errnos.add(None)  # Ambiguous oversized diagnostic; do not guess.
+            break
+        errnos.add(int(error.group(1)))
+    if errnos.intersection({60, 110}) or "timed out" in lower:
+        return "connection timeout"
+    if errnos and errnos.issubset({61, 111}):
+        return "connection refused (service is not listening on target port)"
+    if errnos and errnos.issubset({8, -2}):
+        return "dns lookup failed"
     if "connection refused" in lower:
         return "connection refused (service is not listening on target port)"
     if "timed out" in lower or "timeout" in lower or "serverselectiontimeouterror" in lower:
         return "connection timeout"
-    if "authentication failed" in lower or getattr(exc, "code", None) == 18:
+    if "authentication failed" in lower:
         return "authentication failed"
-    if getattr(exc, "code", None) == 13 or "not authorized" in lower or "unauthorized" in lower:
+    if "not authorized" in lower or "unauthorized" in lower:
         return "authorization denied"
     if "name or service not known" in lower or "temporary failure in name resolution" in lower:
         return "dns lookup failed"
@@ -403,14 +423,24 @@ def open_mongodb_client(
     return client_cls(uri, **kwargs)
 
 
+def _close_mongodb_client(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if callable(close):
+        from .mongodb_retirement import MONGODB_RETIREMENTS, mongodb_monitor_threads
+
+        monitors = mongodb_monitor_threads(client)
+        close()
+        # Only a successful driver close guarantees its monitors were
+        # signalled. Never wait on a still-running client after an error.
+        MONGODB_RETIREMENTS.retire(monitors)
+
+
 class MongoAuditClient:
     def __init__(self, client: Any) -> None:
         self.client = client
 
     def close(self) -> None:
-        close = getattr(self.client, "close", None)
-        if callable(close):
-            close()
+        _close_mongodb_client(self.client)
 
     def hello(self) -> dict[str, Any]:
         try:
@@ -541,9 +571,7 @@ class MongoAuditClient:
 
 def close_quietly(client: Any) -> None:
     try:
-        close = getattr(client, "close", None)
-        if callable(close):
-            close()
+        _close_mongodb_client(client)
     except Exception:
         return
 

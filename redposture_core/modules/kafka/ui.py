@@ -25,6 +25,7 @@ from ...discovery_json import DiskJSONDocument
 from ...discovery_options import DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
 from ...discovery_spool import SpoolingRecords, SpoolingStrings, SpoolingValues
 from ...discovery_values import iter_json_chunks
+from ...html_fingerprint import markup_evidence
 from ...storage_discovery import DiscoveryCollector
 from ...ui_export import UIExport
 from ...utils import utc_now_iso
@@ -34,9 +35,6 @@ from .discovery import read_events
 _AUTH_TYPES = {"DISABLED", "LOGIN_FORM", "LDAP", "OAUTH2"}
 _VERSION = re.compile(r"^v?[0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9._-]+)?$")
 _CSRF = re.compile(r'name=["\']_csrf["\'][^>]*value=["\']([^"\']+)', re.I)
-_LOGIN_USER = re.compile(r'name=["\']username["\']', re.I)
-_LOGIN_PASSWORD = re.compile(r'name=["\']password["\']', re.I)
-_KAFBAT_TITLE = re.compile(r"<title>\s*Kafbat UI\s*</title>", re.I)
 _MAX_CLUSTERS = 20
 _MAX_TOPICS = 200
 _MAX_DUMP_TOPICS = 2_000
@@ -129,6 +127,8 @@ def _base(ctx: Any, scheme: str) -> str:
             "/api/info",
             "/api/config/authentication",
             "/api/clusters",
+            "/actuator/info",
+            "/auth",
             "/login",
             "/topics",
             "/v3/clusters",
@@ -431,6 +431,81 @@ def detect_ui(ctx: Any, state: Any) -> dict[str, Any]:
     return _run_detect_sync(_detect_ui_detect_steps(ctx, state))
 
 
+def _provectus_form_detect_steps(pool: Any, base: str, responses: tuple[HttpResponse, ...]):
+    """Confirm the legacy protected API using its public release identity.
+
+    Only an observed same-origin /auth form redirect enables the extra probe;
+    generic foreign HTTP responses incur no additional actuator request.
+    """
+    origin = urlsplit(base)
+    login_path = origin.path.rstrip("/") + "/auth"
+    form_seen = False
+    for response in responses:
+        if response.error or response.truncated or response.status not in {200, 406} or not response.redirected:
+            continue
+        try:
+            final = urlsplit(response.final_url or "")
+            if (
+                final.scheme != origin.scheme
+                or final.hostname != origin.hostname
+                or (final.port or (443 if final.scheme == "https" else 80))
+                != (origin.port or (443 if origin.scheme == "https" else 80))
+                or final.username is not None
+                or final.password is not None
+                or final.path != login_path
+            ):
+                continue
+        except ValueError:
+            continue
+        if response.status == 406:
+            # Spring's generated login form rejects the API reader's JSON
+            # Accept header. Negotiate HTML only on the observed /auth route.
+            response = yield _HttpRead(
+                pool,
+                "GET",
+                base.rstrip("/") + "/auth",
+                {
+                    "headers": {"Accept": "text/html"},
+                    "response_size_cap": 64 * 1024,
+                    "allow_cross_origin_redirects": False,
+                    "preserve_authorization_on_cross_origin": False,
+                },
+            )
+            if response.error or response.truncated or response.status != 200:
+                return None
+        page = markup_evidence(response.text[:8192])
+        allowed_actions = {login_path, base.rstrip("/") + "/auth", "auth", "./auth", ""}
+        if page is not None and any(
+            {"username", "password"}.issubset(form.inputs) and (form.action or "") in allowed_actions
+            for form in page.forms
+        ):
+            form_seen = True
+            break
+    if not form_seen:
+        return None
+    response = yield _DetectCall(_get, (pool, base, "/actuator/info"), {})
+    data = _json(response)
+    build = data.get("build") if isinstance(data, dict) else None
+    git = data.get("git") if isinstance(data, dict) else None
+    commit = git.get("commit") if isinstance(git, dict) else None
+    revision = commit.get("id") if isinstance(commit, dict) else None
+    if isinstance(revision, dict):
+        revision = revision.get("full") or revision.get("abbrev")
+    version = build.get("version") if isinstance(build, dict) else None
+    if (
+        not isinstance(build, dict)
+        or build.get("artifact") != "kafka-ui-api"
+        or build.get("name") != "kafka-ui-api"
+        or build.get("group") != "com.provectus"
+        or not isinstance(version, str)
+        or not _VERSION.fullmatch(version)
+        or not isinstance(revision, str)
+        or not re.fullmatch(r"[0-9a-fA-F]{7,64}", revision)
+    ):
+        return None
+    return version
+
+
 def _detect_ui_detect_steps(ctx: Any, state: Any):
     """Confirm UI only after two independent product-specific API responses."""
     target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
@@ -493,11 +568,13 @@ def _detect_ui_detect_steps(ctx: Any, state: Any):
         branded_login = False
         if clusters is None and (info_ok or (mode == "LOGIN_FORM" and authorization_ok)):
             login_probe = yield _DetectCall(_get, (pool, base, "/login"), {})
-            branded_login = bool(login_probe.status == 200 and _KAFBAT_TITLE.search(login_probe.text[:8192]))
+            page = markup_evidence(login_probe.text[:8192])
+            complete_login = login_probe.status == 200 and not login_probe.error and not login_probe.truncated
+            branded_login = bool(complete_login and page is not None and page.title.casefold() == "kafbat ui")
             login_form = bool(
-                login_probe.status == 200
-                and _LOGIN_USER.search(login_probe.text)
-                and _LOGIN_PASSWORD.search(login_probe.text)
+                complete_login
+                and page is not None
+                and any({"username", "password"}.issubset(form.inputs) for form in page.forms)
             )
             if branded_login:
                 brand = "kafbat"
@@ -512,6 +589,37 @@ def _detect_ui_detect_steps(ctx: Any, state: Any):
             or (clusters is not None and api_mode is not None and authorization_ok)
             or (api_mode == "LOGIN_FORM" and authorization_ok and branded_login)
         )
+        if not confirmed and mode in {None, "LOGIN_FORM"}:
+            legacy_version = yield from _provectus_form_detect_steps(
+                pool, base, (info_response, auth_response, authorization_response, cluster_response)
+            )
+            if legacy_version is not None:
+                state.ui_base = base
+                state.ui_vendor = "provectus"
+                state.ui_auth_type = "LOGIN_FORM"
+                state.ui_login_path = "/auth"
+                state.ui_anonymous_clusters = None
+                return {
+                    "timestamp": utc_now_iso(),
+                    "host": str(ctx.host),
+                    "port": int(ctx.port),
+                    "is_kafka": True,
+                    "is_kafka_ui": True,
+                    "kafka_interface": "ui",
+                    "ui_vendor": "provectus",
+                    "ui_base": base,
+                    "ui_auth_type": "LOGIN_FORM",
+                    "ui_auth_type_source": "observed_login_form",
+                    "ui_login_path": "/auth",
+                    "version": legacy_version,
+                    "auth_required": True,
+                    "status": "auth_required",
+                    "detection_status": "confirmed",
+                    "detection_signals": ["ui_actuator_release_identity", "ui_same_origin_auth_form_redirect"],
+                    "cluster_count": None,
+                    "credential_verification_status": "available",
+                    "error": None,
+                }
         if confirmed:
             if clusters is None and cluster_payload == []:
                 clusters = []
@@ -521,8 +629,19 @@ def _detect_ui_detect_steps(ctx: Any, state: Any):
             auth_required = mode != "DISABLED" if mode is not None else False if clusters is not None else None
             if brand is None:
                 home = yield _DetectCall(_get, (pool, base, "/"), {})
-                page = home.text[:8192].lower() if home.status == 200 else ""
-                brand = "kafbat" if "kafbat" in page else "provectus" if "provectus" in page else None
+                page = (
+                    markup_evidence(home.text[:8192])
+                    if home.status == 200 and not home.error and not home.truncated
+                    else None
+                )
+                visible = " ".join(page.visible).casefold() if page is not None else ""
+                brand = (
+                    "kafbat"
+                    if re.search(r"\bkafbat\b", visible)
+                    else "provectus"
+                    if re.search(r"\bprovectus\b", visible)
+                    else None
+                )
             state.ui_vendor = brand
             return {
                 "timestamp": utc_now_iso(),
@@ -573,7 +692,11 @@ def authenticate_ui(ctx: Any, record: dict[str, Any], state: Any) -> dict[str, A
     pool = state.ui_http
     if not base or pool is None or state.ui_auth_type != "LOGIN_FORM":
         return payload
-    login = pool.request_once("GET", base + "/login", response_size_cap=64 * 1024)
+    login_path = payload.get("ui_login_path") or getattr(state, "ui_login_path", "/login")
+    if not isinstance(login_path, str) or login_path not in {"/login", "/auth"}:
+        payload.update(status="unknown_auth", provided_credentials_ok=None, error="unsupported UI login endpoint")
+        return payload
+    login = pool.request_once("GET", base + login_path, response_size_cap=64 * 1024)
     cookie = _cookie(login)
     csrf_match = _CSRF.search(login.text)
     fields = {"username": user, "password": password}
@@ -583,7 +706,7 @@ def authenticate_ui(ctx: Any, record: dict[str, Any], state: Any) -> dict[str, A
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     if cookie:
         headers["Cookie"] = cookie
-    response = pool.request_once("POST", base + "/login", headers=headers, body=body, response_size_cap=64 * 1024)
+    response = pool.request_once("POST", base + login_path, headers=headers, body=body, response_size_cap=64 * 1024)
     updated_cookie = _cookie(response) or cookie
     location = _header(response, "location").lower()
     limited = response.status == 429

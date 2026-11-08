@@ -786,6 +786,7 @@ def _try_credentials(
     health_candidate: dict[str, Any] | None = None
     reflection_candidate: dict[str, Any] | None = None
     first_matched_candidate: dict[str, Any] | None = None
+    first_verified_candidate: dict[str, Any] | None = None
     attempt_history: list[dict[str, Any]] = []
     for candidate in candidates:
         auth_header = _credential_auth_header(candidate)
@@ -877,8 +878,14 @@ def _try_credentials(
                 if required
             ]
             rejected = bool(protected) and all(protected)
-        verdict = "valid" if candidate_ok else "rejected" if rejected else "unverified"
-        attempt_history.append({"candidate": dict(candidate), "ok": bool(candidate_ok), "verdict": verdict})
+        # Authentication on one previously protected RPC remains evidence of
+        # valid credentials even when the requested capability is denied.
+        # Continue looking for that capability; never promote its permission.
+        identity_ok = health_ok or reflection_ok
+        if identity_ok and first_verified_candidate is None:
+            first_verified_candidate = dict(candidate)
+        verdict = "valid" if identity_ok else "rejected" if rejected else "unverified"
+        attempt_history.append({"candidate": dict(candidate), "ok": bool(identity_ok), "verdict": verdict})
         last_attempt["attempts"] = [dict(item) for item in attempt_history]
         if candidate_ok:
             if first_matched_candidate is None:
@@ -886,7 +893,8 @@ def _try_credentials(
             if not continue_after_success:
                 return True, first_matched_candidate, last_attempt
 
-    return first_matched_candidate is not None, first_matched_candidate, last_attempt
+    matched = first_matched_candidate or first_verified_candidate
+    return matched is not None, matched, last_attempt
 
 
 def _format_status_label(status: str) -> str:
@@ -1143,6 +1151,11 @@ def _audit_grpc_host_detect_steps(
     )
     health_auth_used = _session_state.health_auth_used
     reflection_auth_used = _session_state.reflection_auth_used
+    # Preserve the anonymous verifier boundary before displaying cached access
+    # as authenticated. A later lifecycle pass still sends this candidate's
+    # credentials and must count its own successful protected RPC response.
+    health_verifier_access = health_access
+    reflection_verifier_access = reflection_access
     if health_auth_used is not None and health_access == _ACCESS_AUTH_REQUIRED:
         health_access = _ACCESS_AUTHENTICATED
     if reflection_auth_used is not None and reflection_access == _ACCESS_AUTH_REQUIRED:
@@ -1172,8 +1185,8 @@ def _audit_grpc_host_detect_steps(
                 "use_tls": use_tls,
                 "protocol_flavor": protocol_flavor,
                 "candidates": auth_candidates,
-                "health_access": health_access,
-                "reflection_access": reflection_access,
+                "health_access": health_verifier_access,
+                "reflection_access": reflection_verifier_access,
                 "required_capability": required_credential_capability,
                 "session": native_session,
                 "tls_config": _session_state.tls_config,

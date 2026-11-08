@@ -28,7 +28,14 @@ from .discover import (
     list_dag_sources,
     list_variable_keys,
 )
-from .types import AirflowCapabilities, AirflowDetection, AnonymousResult, CredentialResult, ResourceAccess
+from .types import (
+    AirflowCapabilities,
+    AirflowDetection,
+    AnonymousResult,
+    AuthResourceEvidence,
+    CredentialResult,
+    ResourceAccess,
+)
 
 # Модуль использует detect/auth хуки, а не монолитный host_stage; None корректно и
 # удовлетворяет architecture-guard (наличие имени `host_stage = `).
@@ -374,12 +381,38 @@ def verify_credential(pool_client_factory: Any, generation: str, username: str, 
                 (_ENDPOINTS["v1"]["keys"], "variables"),
                 (_ENDPOINTS["v1"]["connections"], "connections"),
             ):
-                authenticated = _resource_access(client, path, collection)
+                sample_path = f"{path}?limit=1&offset=0"
+                authenticated_response = client.get(sample_path, authed=True)
+                authenticated = _resource_access_from_response(authenticated_response, collection)
                 if authenticated.status != "allowed":
                     continue
                 anonymous = _resource_access(pool_client_factory(), path, collection, authed=False)
                 if anonymous.status == "denied":
-                    return CredentialResult(state="valid_but_restricted", username=username, error_code="403")
+                    return CredentialResult(
+                        state="valid_but_restricted",
+                        username=username,
+                        error_code="403",
+                        resource_evidence=_auth_resource_evidence(
+                            client,
+                            generation,
+                            username,
+                            password,
+                            (
+                                (
+                                    "dags",
+                                    _ENDPOINTS["v1"]["dags"],
+                                    resp,
+                                    ResourceAccess(status="denied", http_status=403),
+                                ),
+                                (
+                                    "keys" if collection == "variables" else "connections",
+                                    sample_path,
+                                    authenticated_response,
+                                    authenticated,
+                                ),
+                            ),
+                        ),
+                    )
         fab_login = getattr(client, "verify_fab_login", None)
         if callable(fab_login):
             fab_verdict = fab_login(username, password)
@@ -395,8 +428,26 @@ def verify_credential(pool_client_factory: Any, generation: str, username: str, 
                     state="invalid", username=username, error_code=str(resp.http_status), proof_surface="web"
                 )
         return CredentialResult(state="verification_unavailable", username=username, error_code=str(resp.http_status))
-    if resp.http_status == 200 and _looks_like_dag_collection(resp):
-        return CredentialResult(state="valid", username=username)
+    dag_access = _resource_access_from_response(resp, "dags", max_items=None)
+    if resp.http_status == 200 and dag_access.status == "allowed":
+        return CredentialResult(
+            state="valid",
+            username=username,
+            resource_evidence=_auth_resource_evidence(
+                client,
+                generation,
+                username,
+                password,
+                (
+                    (
+                        "dags",
+                        _ENDPOINTS["v1"]["dags"],
+                        resp,
+                        dag_access,
+                    ),
+                ),
+            ),
+        )
     return CredentialResult(state="verification_unavailable", username=username, error_code=str(resp.http_status))
 
 
@@ -411,6 +462,12 @@ def _detect_resource_access_steps(client: AirflowClient, path: str, collection_k
     """Return an exact collection count only for a validated Airflow response."""
 
     resp = yield DetectCall(client.get, (f"{path}?limit=1&offset=0",), {"authed": authed})
+    return _resource_access_from_response(resp, collection_key)
+
+
+def _resource_access_from_response(
+    resp: AirflowResponse, collection_key: str, *, max_items: int | None = 1
+) -> ResourceAccess:
     if resp.transport_error:
         return ResourceAccess(status="unknown", error="transport_error")
     if resp.http_status in {401, 403}:
@@ -430,11 +487,34 @@ def _detect_resource_access_steps(client: AirflowClient, path: str, collection_k
         or not isinstance(total, int)
         or isinstance(total, bool)
         or total < 0
-        or len(items) > 1
+        or (max_items is not None and len(items) > max_items)
         or len(items) > total
     ):
         return ResourceAccess(status="unknown", http_status=200, error="invalid_collection")
     return ResourceAccess(status="allowed", count=total, http_status=200)
+
+
+def _auth_resource_evidence(
+    client: AirflowClient,
+    generation: str,
+    username: str,
+    password: str,
+    resources: tuple[tuple[str, str, AirflowResponse, ResourceAccess], ...],
+) -> AuthResourceEvidence | None:
+    """Keep completed same-endpoint proof only; no response bodies survive."""
+    base, prefix = getattr(client, "base_url", None), getattr(client, "base_path", "")
+    if generation != "v1" or not isinstance(base, str) or not isinstance(prefix, str):
+        return None
+    endpoint = base + prefix
+    observed = tuple(
+        (name, access)
+        for name, path, response, access in resources
+        if not response.transport_error
+        and not response.truncated
+        and response.request_url == response.final_url == endpoint + path
+        and access.status in {"allowed", "denied"}
+    )
+    return AuthResourceEvidence(endpoint, username, password, observed) if observed else None
 
 
 def classify_capabilities(client: AirflowClient, generation: str) -> AirflowCapabilities:
@@ -706,7 +786,11 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     merged["default_credentials"] = getattr(credential, "source", "") == "default" and merged["provided_credentials_ok"]
     if merged["provided_credentials_ok"]:
         try:
-            merged = capabilities_record(ctx, merged)
+            merged = (
+                capabilities_record(ctx, merged, auth_evidence=result.resource_evidence)
+                if result.resource_evidence is not None
+                else capabilities_record(ctx, merged)
+            )
         except Exception as exc:
             # Identity proof remains valid even when a resource probe fails.
             merged["credential_capabilities"] = {"capability_error": str(exc)}
@@ -714,7 +798,9 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
+def capabilities_record(
+    ctx: Any, prior: dict[str, Any], *, auth_evidence: AuthResourceEvidence | None = None
+) -> dict[str, Any]:
     merged = dict(prior)
     if isinstance(prior.get("credential_capabilities"), dict):
         return merged
@@ -738,7 +824,25 @@ def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         client = _client_for(
             ctx, basic_user=getattr(credential, "username", None), basic_password=getattr(credential, "password", None)
         )
-    capabilities = classify_capabilities(client, generation)
+    if (
+        auth_evidence is not None
+        and generation == "v1"
+        and isinstance(getattr(credential, "username", None), str)
+        and isinstance(getattr(credential, "password", None), str)
+        and auth_evidence.username == credential.username
+        and auth_evidence.password == credential.password
+        and auth_evidence.endpoint == str(getattr(client, "base_url", "")) + str(getattr(client, "base_path", ""))
+    ):
+        observed = dict(auth_evidence.resources)
+        endpoints = _ENDPOINTS["v1"]
+        capabilities = AirflowCapabilities(
+            dags=observed.get("dags") or _resource_access(client, endpoints["dags"], "dags"),
+            keys=observed.get("keys") or _resource_access(client, endpoints["keys"], "variables"),
+            connections=observed.get("connections")
+            or _resource_access(client, endpoints["connections"], "connections"),
+        )
+    else:
+        capabilities = classify_capabilities(client, generation)
     for name, access in (
         ("dags", capabilities.dags),
         ("keys", capabilities.keys),

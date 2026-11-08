@@ -81,7 +81,12 @@ def build_redis_spec(args: Any) -> ModuleAuditSpec:
         continue_after_credential_success=exhaustive_credentials,
         continue_after_credential_error=exhaustive_credentials,
         fallback_to_anonymous_detect_record=exhaustive_credentials,
-        credential_attempt_detail_fields=("key_count", "key_count_error"),
+        credential_attempt_detail_fields=(
+            "key_count",
+            "key_count_error",
+            "server_implementation",
+            "implementation_probe_error",
+        ),
     )
 
 

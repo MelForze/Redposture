@@ -22,6 +22,7 @@ from ...clients.http_api import (
     HttpApiClient,
     HttpClientConfig,
     build_http_target_url,
+    current_http_target_binding,
     http_response_origin,
     http_response_requires_https,
     http_scheme_candidates,
@@ -31,6 +32,8 @@ from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...credential_evidence import attempt_capabilities
 from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
+from ...html_fingerprint import set_cookie_names
+from ...http_headers import merge_custom_http_headers
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...stage_runtime import (
     StageTelemetryBuilder,
@@ -78,12 +81,18 @@ class GrafanaLifecycleState:
     selected_session: dict[str, str] | None = None
     prefetched_data: dict[str, Any] | None = None
     debug_emit: Callable[[str], None] | None = None
+    control_scope: tuple[Any, ...] | None = field(default=None, repr=False)
+    control_closed: bool = False
+    control_lock: Any = field(default_factory=threading.RLock, repr=False, compare=False)
 
     def close(self) -> None:
-        self.anonymous_responses.clear()
-        self.invalid_responses.clear()
-        self.invalid_login_response = None
-        self.invalid_password_responses.clear()
+        with self.control_lock:
+            self.control_closed = True
+            self.control_scope = None
+            self.anonymous_responses.clear()
+            self.invalid_responses.clear()
+            self.invalid_login_response = None
+            self.invalid_password_responses.clear()
         self.selected_session = None
         self.prefetched_data = None
         self.debug_emit = None
@@ -141,6 +150,35 @@ def grafana_lifecycle_state_factory(ctx: Any) -> GrafanaLifecycleState:
 
 def _activate_grafana_transport(state: GrafanaLifecycleState) -> None:
     _THREAD_LOCAL_HTTP.state = state
+
+
+def _grafana_control_state(host: str, port: int, timeout: float) -> GrafanaLifecycleState | None:
+    """Negative controls belong to one transport, API mount and header policy."""
+    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    if not isinstance(state, GrafanaLifecycleState):
+        return None
+    pool = state.http
+    scope = (
+        pool,
+        state.scheme,
+        state.host or host,
+        state.port or port,
+        current_http_target_binding().base_path,
+        getattr(state, "_http_effective_base_path", None),
+        timeout,
+        *(getattr(pool, name, None) for name in ("insecure", "ca_file", "cert_file", "key_file", "proxy")),
+        tuple(sorted((key.lower(), value) for key, value in merge_custom_http_headers({}).items())),
+    )
+    with state.control_lock:
+        if state.control_closed:
+            return None
+        if state.control_scope != scope:
+            state.anonymous_responses.clear()
+            state.invalid_responses.clear()
+            state.invalid_password_responses.clear()
+            state.invalid_login_response = None
+            state.control_scope = scope
+    return state
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -347,6 +385,44 @@ def _http_request_steps(
         and _grafana_http_sso(response) is not None
     ):
         raise urllib.error.URLError(response.error)
+    # A small, complete anonymous identity response is already an auth control.
+    # Memoize it without another request; large responses still follow the full
+    # reader and are not retained here. Never memoize an authenticated request,
+    # an incomplete frame, or a redirect into a different API origin/mount.
+    if (
+        isinstance(state, GrafanaLifecycleState)
+        and state.http is not None
+        and method.upper() == "GET"
+        and path in {"/api/user", "/api/org", "/api/login/ping", *_GRAFANA_AUTH_FALLBACK_PATHS}
+        and not response.error
+        and not response.truncated
+        and len(response.body) <= 16_384
+        and sum(len(key) + len(value) for key, value in response.headers.items()) <= 8192
+        and response.request_url == url
+        and response.final_url == url
+        and not response.redirect_history
+        and not any(key.lower() in {"authorization", "cookie"} for key in merge_custom_http_headers(outgoing_headers))
+        and _grafana_auth_limit_reason(int(response.status), response_text) is None
+        and (
+            response.status in {401, 403}
+            or (
+                response.status == 200
+                and (
+                    _looks_like_grafana_user(response_text)
+                    if path == "/api/user"
+                    else _looks_like_grafana_org(response_text)
+                    if path == "/api/org"
+                    else _looks_like_grafana_login_ping(response_text)
+                    if path == "/api/login/ping"
+                    else _looks_like_grafana_auth_fallback(path, response_text)
+                )
+            )
+        )
+    ):
+        with state.control_lock:
+            control_state = _grafana_control_state(host, port, timeout)
+            if control_state is state:
+                state.anonymous_responses[path] = (int(response.status), response_text, dict(response.headers))
     return int(response.status), response_text, response.headers
 
 
@@ -409,11 +485,10 @@ def _header_lookup(headers: dict[str, str], name: str) -> str | None:
 def _looks_like_grafana_login(status: int, body: str, headers: dict[str, str]) -> bool:
     if status not in {200, 301, 302, 303, 307, 308}:
         return False
-    text = (body or "").lower()
-    set_cookie = (_header_lookup(headers, "Set-Cookie") or "").lower()
-    if "grafana_session" in set_cookie:
-        return True
-    return bool(re.search(r"<title[^>]*>[^<]*\bgrafana\b[^<]*</title\s*>", text))
+    cookies = set_cookie_names(_header_lookup(headers, "Set-Cookie") or "")
+    from ...product_markup import grafana_application
+
+    return grafana_application(body or "", session_cookie="grafana_session" in cookies)
 
 
 def _grafana_http_sso(response: Any) -> SsoDetection | None:
@@ -489,8 +564,8 @@ def _new_grafana_access(
     host: str, port: int, timeout: float, path: str, *, identity_body: str | None = None
 ) -> tuple[bool | None, str | None]:
     """Attribute a successful response only after comparing anonymous access."""
-    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
-    cache = state.anonymous_responses if isinstance(state, GrafanaLifecycleState) and state.http is not None else {}
+    state = _grafana_control_state(host, port, timeout)
+    cache = state.anonymous_responses if state is not None and state.http is not None else {}
     try:
         if path not in cache:
             cache[path] = _http_request(host, port, path, timeout)
@@ -520,7 +595,7 @@ def _verify_credentials(
         _THREAD_LOCAL_HTTP.verifying_credentials = previous
 
 
-def _grafana_auth_limited(status: int, body: str) -> str | None:
+def _grafana_auth_limit_reason(status: int, body: str) -> str | None:
     detail = str((_load_json_dict(body) or {}).get("message") or body)
     message = detail.lower()
     if status == 429 or any(
@@ -533,7 +608,13 @@ def _grafana_auth_limited(status: int, body: str) -> str | None:
             "account has been locked",
         )
     ):
-        reason = f"Grafana authentication stopped: status={status}; {detail}"
+        return f"Grafana authentication stopped: status={status}; {detail}"
+    return None
+
+
+def _grafana_auth_limited(status: int, body: str) -> str | None:
+    reason = _grafana_auth_limit_reason(status, body)
+    if reason is not None:
         metadata = getattr(_THREAD_LOCAL_HTTP, "credential_result", None)
         if not isinstance(metadata, dict):
             metadata = {}
@@ -657,7 +738,7 @@ def _verify_grafana_fallbacks(
 
 
 def _grafana_token_access(host: str, port: int, timeout: float, path: str) -> tuple[bool | None, str | None]:
-    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    state = _grafana_control_state(host, port, timeout)
     anonymous = state.anonymous_responses if isinstance(state, GrafanaLifecycleState) else {}
     invalid = state.invalid_responses if isinstance(state, GrafanaLifecycleState) else {}
     for cache, key, headers, label in (
@@ -679,7 +760,7 @@ def _grafana_password_control(
     host: str, port: int, timeout: float, username: str, password: str, *, path: str, login: bool = False
 ) -> tuple[bool, str | None]:
     """A known username alone must not be mistaken for password verification."""
-    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    state = _grafana_control_state(host, port, timeout)
     cache = state.invalid_password_responses if isinstance(state, GrafanaLifecycleState) else {}
     key = (("POST " if login else "GET ") + path, username)
     if key not in cache:
@@ -739,7 +820,7 @@ def _verify_grafana_ping(
 
 def _grafana_pair_access(host: str, port: int, timeout: float, path: str, body: str) -> tuple[bool | None, str | None]:
     """Both anonymous and a nonexistent user must fail to reproduce access."""
-    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    state = _grafana_control_state(host, port, timeout)
     anonymous = state.anonymous_responses if isinstance(state, GrafanaLifecycleState) else {}
     invalid = state.invalid_responses if isinstance(state, GrafanaLifecycleState) else {}
     invalid_user = (

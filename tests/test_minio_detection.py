@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from redposture_core.clients.minio_api import MinioResponse, S3Error
 from redposture_core.modules.minio import actions
+from tests.application_markup import application_page
 
 
 class _StubClient:
@@ -53,7 +54,7 @@ def test_console_redirect_does_not_hide_s3_api_signals() -> None:
         root=MinioResponse(
             http_status=200,
             headers={"Content-Type": "text/html"},
-            body=b"<html><title>MinIO Console</title></html>",
+            body=application_page("minio").encode(),
             request_url="http://10.0.0.5:9000/",
             final_url="http://10.0.0.5:8083/",
             redirect_history=("http://10.0.0.5:9000/",),

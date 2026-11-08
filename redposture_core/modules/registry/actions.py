@@ -2127,9 +2127,14 @@ def _detect_registry_steps(ctx: Any, options: Mapping[str, Any]) -> Any:
         payload["status"] = "not_registry"
         payload["auth_required"] = None
         payload["error"] = "vendor registry endpoint is not a plain Docker Registry"
-    elif selected_vendors and not any(payload.get(f"is_{vendor}") is True for vendor in selected_vendors):
+    elif (
+        selected_vendors
+        and payload["status"] != "fail"
+        and not any(payload.get(f"is_{vendor}") is True for vendor in selected_vendors)
+    ):
         # An explicit vendor flag is a product selector. --enum-cve also probes
-        # vendors, but does not narrow a generic Registry scan.
+        # vendors, but does not narrow a generic Registry scan. A failed
+        # transport never proves a clean negative vendor result.
         payload["is_registry"] = False
         payload["status"] = "not_registry"
         payload["auth_required"] = None
@@ -2208,6 +2213,7 @@ def _verify_registry_credential(
     token: str | None,
     *,
     anonymous_probe: _RegistryProbe | None,
+    on_verified_probe: Callable[[_RegistryProbe], None] | None = None,
 ) -> tuple[bool | None, str | None]:
     """Check identity, never treating an anonymously available endpoint as proof."""
     headers = _auth_headers(username, password, token)
@@ -2296,10 +2302,13 @@ def _verify_registry_credential(
         if token is not None:
             if anonymous_probe is None or anonymous_probe[0] != 401:
                 return None, "protected GitLab Registry access was not established"
-            status, body, response_headers, error = _http_request(host, port, "GET", "/v2/", timeout, headers=headers)
+            probe = _http_request(host, port, "GET", "/v2/", timeout, headers=headers)
+            status, body, response_headers, error = probe
             if error:
                 return None, error
             if status == 200 and _registry_probe_has_fingerprint(status, body, response_headers):
+                if on_verified_probe is not None:
+                    on_verified_probe(probe)
                 return True, None
             if status == 401 and _registry_probe_has_fingerprint(status, body, response_headers):
                 return False, "GitLab Registry token rejected"
@@ -2329,10 +2338,13 @@ def _verify_registry_credential(
         return True, None
     if anonymous_probe is None or _registry_probe_state(anonymous_probe)[1] == "open_no_auth":
         return None, "anonymous registry access cannot verify a Basic pair"
-    status, body, response_headers, error = _http_request(host, port, "GET", "/v2/", timeout, headers=headers)
+    probe = _http_request(host, port, "GET", "/v2/", timeout, headers=headers)
+    status, body, response_headers, error = probe
     if error:
         return None, error
     if status == 200 and _registry_probe_has_fingerprint(status, body, response_headers):
+        if on_verified_probe is not None:
+            on_verified_probe(probe)
         return True, None
     if status == 401 and _registry_probe_has_fingerprint(status, body, response_headers):
         return False, "authentication rejected"
@@ -2361,6 +2373,17 @@ def authenticate_registry(ctx: Any, detect_record: Any, options: Mapping[str, An
 
     product = str(options.get("product") or "registry")
     if product != "registry":
+        # Invocation-local handoff: only the protected V2 response that
+        # verified this exact identity may seed its subsequent data phase.
+        # Harbor/Nexus identities and GitLab Basic token exchange use other
+        # endpoints, so they still require their separate registry probe.
+        verified_probes: list[_RegistryProbe] = []
+        key = (credential.username, credential.password, credential.token, str(credential.source))
+        # A new check can revoke an earlier acceptance for this same run.
+        # Data must never consume its old successful response after rejection
+        # or an unavailable verifier; other credential entries stay separate.
+        state.credential_probes.pop(key, None)
+        state.credential_nexus.pop(key, None)
         verified, reason = _verify_registry_credential(
             product,
             str(ctx.host),
@@ -2370,17 +2393,21 @@ def authenticate_registry(ctx: Any, detect_record: Any, options: Mapping[str, An
             credential.password,
             credential.token,
             anonymous_probe=state.anonymous_probe,
+            on_verified_probe=verified_probes.append,
         )
-        key = (credential.username, credential.password, credential.token, str(credential.source))
         headers = _auth_headers(credential.username, credential.password, credential.token)
         if verified is True:
-            state.credential_probes[key] = _http_request(
-                str(ctx.host),
-                int(ctx.port),
-                "GET",
-                "/v2/",
-                float(getattr(ctx.args, "timeout", 5.0)),
-                headers=headers,
+            state.credential_probes[key] = (
+                verified_probes[0]
+                if len(verified_probes) == 1
+                else _http_request(
+                    str(ctx.host),
+                    int(ctx.port),
+                    "GET",
+                    "/v2/",
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    headers=headers,
+                )
             )
             if product == "nexus":
                 state.credential_nexus[key] = _fetch_nexus_info(

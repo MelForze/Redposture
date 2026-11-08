@@ -357,41 +357,64 @@ def test_async_full_discovery_matches_original_classifier(monkeypatch, verdict):
 
 
 def test_full_async_discovery_cancellation_closes_client_and_clears_context(monkeypatch):
-    opened, closed = asyncio.Event(), []
-    original_close = AsyncDetectionHttp.close
+    # close() is deliberately idempotent: request cancellation and context exit
+    # may both call it. Check the actual connection, not the dispatch count.
+    opened, released = asyncio.Event(), asyncio.Event()
+    clients, connections, eof = [], [], []
+    original_factory = async_detect._detection_client
 
-    async def wire(self, url, timeout, headers):
-        if url.endswith("/metrics"):
-            return HttpResponse(200, b"shared_value 1\n", {})
-        opened.set()
-        await asyncio.Future()
+    def factory(**options):
+        client = original_factory(**options)
+        clients.append(client)
+        return client
 
-    async def close(self):
-        closed.append(self)
-        await original_close(self)
-
-    monkeypatch.setattr(AsyncDetectionHttp, "_once", wire)
-    monkeypatch.setattr(AsyncDetectionHttp, "close", close)
+    monkeypatch.setattr(async_detect, "_detection_client", factory)
 
     async def run():
+        async def serve(reader, writer):
+            connections.append(writer)
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                body = b"shared_value 1\n"
+                writer.write(f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+                await writer.drain()
+                await reader.readuntil(b"\r\n\r\n")
+                opened.set()
+                eof.append(await reader.read())
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                released.set()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
         task = asyncio.create_task(
             async_detect.prefetch_discovery(
                 "127.0.0.1",
-                9104,
+                server.sockets[0].getsockname()[1],
                 "http",
                 1,
                 0,
                 [{"name": "alpha", "weak_markers": ["shared_value"], "markers": ["alpha_info"]}],
             )
         )
-        await asyncio.wait_for(opened.wait(), 1)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert async_detect._PREFETCH_CLIENT.get() is None
+        try:
+            await asyncio.wait_for(opened.wait(), 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.wait_for(released.wait(), 2)
+            assert async_detect._PREFETCH_CLIENT.get() is None
+            assert len(clients) == len(connections) == 1
+            assert eof == [b""] and clients[0]._connection is None
+            assert connections[0].is_closing()
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            server.close()
+            await server.wait_closed()
 
     asyncio.run(run())
-    assert len(closed) == 1
 
 
 def test_collect_classifier_error_is_isolated_to_target(monkeypatch):

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-SECTIONS=(fixtures mutation cli-fuzz hypothesis stress focused-services proxy docker-matrix optional-real)
+SECTIONS=(fixtures mutation cli-fuzz hypothesis stress focused-services proxy docker-matrix optional-real detect-performance module-performance)
 DEFAULT_SECTIONS=(fixtures mutation cli-fuzz hypothesis stress focused-services proxy docker-matrix)
 REQUESTED=()
 ARTIFACT_DIR=""
@@ -34,6 +34,8 @@ focused-services  MinIO/KubeAPI, auth, and CVE Docker matrices
 proxy             Proxy end-to-end tests
 docker-matrix     Complete extended Docker service matrix
 optional-real     Exclusive real Proxmox Docker/KVM stand (opt-in)
+detect-performance Detection performance/quality loopback profile (opt-in)
+module-performance All-32 paired detection comparison (opt-in; baseline/image required)
 EOF
 }
 
@@ -142,6 +144,25 @@ fi
 
 execute_section() {
   case "$1" in
+    module-performance)
+      if [[ -z "${REDPOSTURE_MODULE_PROFILE_BASELINE:-}" || -z "${REDPOSTURE_MODULE_PROFILE_IMAGE:-}" ]]; then
+        echo "[error] module-performance requires REDPOSTURE_MODULE_PROFILE_BASELINE and REDPOSTURE_MODULE_PROFILE_IMAGE" >&2
+        return 2
+      fi
+      "${PYTHON_BIN}" scripts/run_qa_with_timeout.py 7200 -- \
+        "${PYTHON_BIN}" scripts/compare_module_performance.py \
+        --before "${REDPOSTURE_MODULE_PROFILE_BASELINE}" --after "${ROOT_DIR}" \
+        --modules all --mode detect --models mixed --targets 1000 \
+        --workers 16 --concurrency 64 --timeout 0.5 --delay-ms 2 --repeats 3 \
+        --container-image "${REDPOSTURE_MODULE_PROFILE_IMAGE}" \
+        --output "${ARTIFACT_DIR}/module-performance"
+      ;;
+    detect-performance)
+      "${PYTHON_BIN}" scripts/run_qa_with_timeout.py 600 -- \
+        "${PYTHON_BIN}" scripts/profile_detection_performance.py \
+        --targets 1000 --model mixed --repeats 3 \
+        --output "${ARTIFACT_DIR}/detect-performance.json"
+      ;;
     fixtures)
       "${PYTHON_BIN}" lab/services/coverage.py "${ARTIFACT_DIR}/service-coverage"
       ;;

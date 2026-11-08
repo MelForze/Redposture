@@ -10,17 +10,41 @@ import asyncio
 import os
 import threading
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Generator, Iterable, Iterator
 from contextvars import copy_context
+from functools import partial
 from typing import Any, Generic, TypeVar, cast
 
 from .detect_backoff import DetectLease, DetectSlots, current_detect_lease
-from .scheduler import _DaemonWorkerPool, _Outcome, _Task
+from .runtime_diagnostics import RuntimeDiagnostics
+from .scheduler import WorkPause, _DaemonWorkerPool, _Outcome, _PausedWorkerPool, _Task
 
 T = TypeVar("T")
 D = TypeVar("D")
 R = TypeVar("R")
 _FINISHED = object()
+
+
+class _PriorityDeque(Generic[T]):
+    """Prefer urgent work without reversing equally urgent batches."""
+
+    def __init__(self) -> None:
+        self._normal: deque[T] = deque()
+        self._prioritized: deque[T] = deque()
+
+    def __len__(self) -> int:
+        return len(self._normal) + len(self._prioritized)
+
+    def append(self, item: T, *, prioritized: bool = False) -> None:
+        (self._prioritized if prioritized else self._normal).append(item)
+
+    def extend(self, items: Iterable[T], *, prioritized: bool = False) -> None:
+        (self._prioritized if prioritized else self._normal).extend(items)
+
+    def popleft(self) -> tuple[T, bool]:
+        if self._prioritized:
+            return self._prioritized.popleft(), True
+        return self._normal.popleft(), False
 
 
 def fd_detect_budget(deep_workers: int, retained_fds: int = 0) -> int | None:
@@ -75,7 +99,9 @@ class AsyncDetectScheduler(Generic[T, D, R]):
         detect_workers: int,
         deep_workers: int,
         max_inflight: int | None = None,
+        observer: RuntimeDiagnostics | None = None,
     ) -> None:
+        self.observer = observer
         self.detect_workers = max(1, int(detect_workers))
         self.deep_workers = max(1, int(deep_workers))
         # Keep a bounded extra wave while the coordinator writes completed
@@ -83,6 +109,10 @@ class AsyncDetectScheduler(Generic[T, D, R]):
         self.max_inflight = (
             max(1, int(max_inflight)) if max_inflight is not None else self.detect_workers * 2 + self.deep_workers * 2
         )
+        if observer is not None:
+            observer.configure(
+                detect_limit=self.detect_workers, deep_workers=self.deep_workers, max_inflight=self.max_inflight
+            )
 
     def iter_completed(
         self,
@@ -93,6 +123,8 @@ class AsyncDetectScheduler(Generic[T, D, R]):
         inline_finish: Callable[[T, D], bool] | None = None,
         cancel_event: threading.Event | None = None,
         detect_children: Callable[[T, D], Iterable[T]] | None = None,
+        prioritize_children: Callable[[T, R], bool] | None = None,
+        finish_steps: Callable[[T, D], Generator[WorkPause, None, R]] | None = None,
     ) -> Iterator[tuple[T, R]]:
         source = iter(items)
 
@@ -133,30 +165,54 @@ class AsyncDetectScheduler(Generic[T, D, R]):
                 wake_loop()
             return finish(*pair)
 
-        pool: _DaemonWorkerPool[tuple[T, D], R] = _DaemonWorkerPool(
-            max_workers=self.deep_workers,
-            max_inflight=self.deep_workers * 2,
-            worker=finish_worker,
-            key_fn=None,
-            per_key_limit=self.deep_workers,
-        )
+        pool: _DaemonWorkerPool[tuple[T, D], R] | _PausedWorkerPool[tuple[T, D], R]
+        if finish_steps is not None:
+
+            def advancing_worker(pair: tuple[T, D]) -> Generator[WorkPause, None, R]:
+                if capacity_blocked.is_set():
+                    wake_loop()
+                assert finish_steps is not None
+                return (yield from finish_steps(*pair))
+
+            pool = _PausedWorkerPool(
+                max_workers=self.deep_workers,
+                max_inflight=self.max_inflight,
+                worker=advancing_worker,
+                observer=self.observer,
+            )
+        else:
+            pool = _DaemonWorkerPool(
+                max_workers=self.deep_workers,
+                max_inflight=self.deep_workers * 2,
+                worker=finish_worker,
+                key_fn=None,
+                per_key_limit=self.deep_workers,
+                observer=self.observer,
+            )
         cancelled = threading.Event()
         done = threading.Event()
         errors: list[BaseException] = []
         credits: DetectSlots
         changed: asyncio.Event
         work_available: asyncio.Event
-        ready: deque[_Task[tuple[T, D]]] = deque()
+        ready: _PriorityDeque[_Task[tuple[T, D]]] = _PriorityDeque()
         followup_indices: set[int] = set()
         followups_outstanding = 0
         loop_ready = threading.Event()
         loop_ref: list[asyncio.AbstractEventLoop] = []
         task_ref: list[asyncio.Task[None]] = []
         counter = 0
-        pending: deque[T] = deque()
+        pending: _PriorityDeque[T] = _PriorityDeque()
         source_lock = threading.Lock()
         roots_done = False
         outstanding = 0
+
+        def record_queues() -> None:
+            if self.observer is not None:
+                self.observer.queue("ready", len(ready))
+                with source_lock:
+                    self.observer.queue("inflight", outstanding)
+                    self.observer.queue("children", len(pending))
 
         async def run() -> None:
             nonlocal credits, changed, work_available
@@ -171,7 +227,10 @@ class AsyncDetectScheduler(Generic[T, D, R]):
             assert task is not None
             task_ref.append(task)
             loop_ready.set()
-            slots = DetectSlots(self.detect_workers)
+            slots = DetectSlots(
+                self.detect_workers,
+                partial(self.observer.queue, "detect_slots") if self.observer is not None else None,
+            )
             live_workers = 0
 
             def replace_waiter() -> None:
@@ -184,7 +243,7 @@ class AsyncDetectScheduler(Generic[T, D, R]):
 
             async def worker() -> None:
                 nonlocal live_workers
-                lease = DetectLease(slots, replace_waiter)
+                lease = DetectLease(slots, replace_waiter, observer=self.observer)
                 lease_token = current_detect_lease.set(lease)
                 try:
                     await consume(lease)
@@ -199,6 +258,7 @@ class AsyncDetectScheduler(Generic[T, D, R]):
                     await credits.acquire()
                     have_item = False
                     followup = False
+                    prioritized = False
                     with source_lock:
                         # Children get priority without monopolizing all root
                         # credits. Once roots end, their unused capacity is free
@@ -208,7 +268,7 @@ class AsyncDetectScheduler(Generic[T, D, R]):
                             or followups_outstanding < self.deep_workers * 2
                             or len(pending) >= self.max_inflight
                         ):
-                            item = pending.popleft()
+                            item, prioritized = pending.popleft()
                             have_item = followup = True
                         elif not roots_done:
                             try:
@@ -217,7 +277,7 @@ class AsyncDetectScheduler(Generic[T, D, R]):
                             except StopIteration:
                                 roots_done = True
                                 if pending:
-                                    item = pending.popleft()
+                                    item, prioritized = pending.popleft()
                                     have_item = followup = True
                         finished = roots_done and not pending and outstanding == 0
                         if have_item:
@@ -232,6 +292,7 @@ class AsyncDetectScheduler(Generic[T, D, R]):
                         work_available.clear()
                         await work_available.wait()
                         continue
+                    record_queues()
                     index = counter
                     counter += 1
                     if followup:
@@ -259,7 +320,9 @@ class AsyncDetectScheduler(Generic[T, D, R]):
                     else:
                         # Total credits bound this queue, including retained
                         # sockets/results. Detect slots do not wait on sync IO.
-                        ready.append(_Task(index, (item, result)))
+                        ready_task = _Task(index, (item, result))
+                        ready.append(ready_task, prioritized=prioritized)
+                        record_queues()
                     changed.set()
 
             async def dispatch() -> None:
@@ -267,7 +330,8 @@ class AsyncDetectScheduler(Generic[T, D, R]):
                     changed.clear()
                     capacity_blocked.clear()
                     while ready and not pool._tasks.full():
-                        pool.submit(ready.popleft())
+                        pool.submit(ready.popleft()[0])
+                        record_queues()
                     if ready:
                         capacity_blocked.set()
                         # A worker may have dequeued just before the flag was
@@ -340,12 +404,15 @@ class AsyncDetectScheduler(Generic[T, D, R]):
                 value = cast(R, outcome.value)
                 yield item, value
                 new_items = list(children(item, value)) if children is not None else []
+                prioritize = bool(new_items and prioritize_children is not None and prioritize_children(item, value))
                 with source_lock:
-                    pending.extend(new_items)
+                    pending.extend(new_items, prioritized=prioritize)
                     outstanding -= 1
                     if outcome.index in followup_indices:
                         followup_indices.remove(outcome.index)
                         followups_outstanding -= 1
+
+                record_queues()
 
                 wake_loop(release=True, source_ready=bool(new_items) or (roots_done and outstanding == 0))
 

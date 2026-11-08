@@ -8,6 +8,7 @@ import pytest
 
 from redposture_core.clients.http_api import HttpResponse, http_target_context
 from redposture_core.modules.grafana import actions
+from tests.application_markup import application_page
 from tests.test_http_effective_origin import SequencePool
 
 
@@ -47,7 +48,7 @@ def setup():
         ("/api/health", 404, b"{}"),
         ("/api/user", 200, b"{}"),
         ("/api/user", 401, b"{}"),
-        ("/login", 200, b"<title>Grafana</title>"),
+        ("/login", 200, application_page("grafana").encode()),
     ],
 )
 def test_canonical_route_preserving_redirect_is_reused_without_inventing_proof(setup, path, status, body):

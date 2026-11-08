@@ -158,6 +158,7 @@ class KafkaLifecycleState:
     ui_http: Any = None
     ui_base: str | None = None
     ui_auth_type: str | None = None
+    ui_login_path: str = "/login"
     ui_vendor: str | None = None
     ui_cookie: str = ""
     ui_csrf: str = ""

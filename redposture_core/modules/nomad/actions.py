@@ -14,6 +14,7 @@ from ...clients.http_api import HttpResponse, http_response_requires_https
 from ...detection_steps import DetectionRequests, run_requests
 from ...discovery_frontier import DiscoveryFrontier
 from ...discovery_spool import SpoolingRecords
+from ...html_fingerprint import markup_evidence
 from ...json_stream import JSONPath
 from ...storage_discovery import DiscoveryCollector
 from ..token_api import ReadBudget, access, bases, json_value, path_value, request, safe_path, verdict
@@ -80,11 +81,14 @@ def detect_requests(ctx: Any) -> DetectionRequests:
         ui_shape = False
         if leader_shape and not (self_shape or nomad_header):
             ui = yield (base, "/ui/")
+            page = markup_evidence(ui.text)
             ui_shape = (
                 ui.status == 200
+                and not ui.error
                 and not ui.truncated
-                and "<title>Nomad</title>" in ui.text
-                and "nomad-ui/config/environment" in ui.text
+                and page is not None
+                and page.title == "Nomad"
+                and any(meta.get("name") == "nomad-ui/config/environment" for meta in page.attributes.get("meta", ()))
             )
         if leader_shape and (self_shape or nomad_header or ui_shape):
             jobs_response = yield (base, _job_path(ctx))

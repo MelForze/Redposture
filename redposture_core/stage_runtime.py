@@ -5,14 +5,16 @@ from __future__ import annotations
 import copy
 import functools
 import inspect
+import itertools
 import json
 import os
 import sys
 import threading
 import time
+import weakref
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable, Generator, Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
@@ -23,6 +25,7 @@ from .audit_config import AuditConfig
 from .audit_models import StageTrace
 from .clients.tls_cache import tls_context_cache_stats
 from .cve import CveCatalog, ProductResolver, enumerate_record, load_catalog, render_finding_lines
+from .detection_diagnostics import FallbackDiagnostics, capture_fallbacks, measure_sync_detect, sync_fallback
 from .discovery_options import DEFAULT_DISCOVER_TIME, UNLIMITED_DISCOVER_BYTES
 from .discovery_rendering import (
     discovery_color_spans,
@@ -41,7 +44,8 @@ from .rendering import (
     sanitize_report_payload,
     suppress_redundant_auth_requirement,
 )
-from .scheduler import BoundedScheduler, SharedNestedScheduler
+from .runtime_diagnostics import RuntimeDiagnostics, observe_async_phase, observe_phase
+from .scheduler import BoundedScheduler, SharedNestedScheduler, WorkPause, run_paused_sync
 from .show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from .targeting import (
     DEFAULT_STREAM_TARGET_WINDOW_SIZE,
@@ -81,6 +85,15 @@ _TARGET_LIVE_EMIT: ContextVar[Callable[[Iterable[str]], None] | None] = ContextV
 _TARGET_DISK_EMIT: ContextVar[Callable[..., None] | None] = ContextVar("audit_target_disk_emit", default=None)
 _TARGET_DISCOVERY_STARTED_AT: ContextVar[float | None] = ContextVar("audit_target_discovery_started_at", default=None)
 _CREDENTIAL_PHASE_EMIT_ACTIVE: ContextVar[bool] = ContextVar("audit_credential_phase_emit_active", default=False)
+_CREDENTIAL_JOB_ID: ContextVar[int | None] = ContextVar("audit_credential_job_id", default=None)
+_CREDENTIAL_JOB_IDS = itertools.count(1)
+
+
+def _credential_job_key() -> int:
+    # Legacy workers keep their thread key. Only opt-in resumable jobs need a
+    # stable, disjoint key while their Context moves between pool threads.
+    key = _CREDENTIAL_JOB_ID.get()
+    return key if key is not None else threading.get_ident()
 
 
 def _merge_debug_events(*records: dict[str, Any]) -> list[str]:
@@ -373,8 +386,15 @@ class LineOutputSink:
     """
 
     def __init__(
-        self, output_path: str | None, emit_line: Callable[[str], None], *, append: bool = False, console: Any = None
+        self,
+        output_path: str | None,
+        emit_line: Callable[[str], None],
+        *,
+        append: bool = False,
+        console: Any = None,
+        observer: RuntimeDiagnostics | None = None,
     ) -> None:
+        self._runtime_stats = observer
         self.output_path = output_path
         self.emit_line = emit_line
         self.console = console
@@ -402,6 +422,7 @@ class LineOutputSink:
                 return
             self._prepare_unlocked()
 
+    @observe_phase("write")
     def emit_many(self, lines: Iterable[str]) -> None:
         # Single choke point for every TXT line reaching the file or the console
         # (streamed sections tee through here too): scrub control characters from
@@ -428,6 +449,7 @@ class LineOutputSink:
                 self.emit_line(line)
             self.output_written = True
 
+    @observe_phase("write")
     def emit_json_chunks(self, chunks: Iterable[str]) -> None:
         """Tee one JSONL record without joining its contents in memory."""
         with self._lock:
@@ -448,6 +470,7 @@ class LineOutputSink:
             sys.stdout.flush()
             self.output_written = True
 
+    @observe_phase("write")
     def emit_discovery_value(
         self,
         module: str,
@@ -502,6 +525,7 @@ class LineOutputSink:
                 sys.stdout.flush()
             self.output_written = True
 
+    @observe_phase("write")
     def emit_text_chunks(self, chunks: Iterable[str]) -> None:
         """Tee one long plain TXT row while retaining only a bounded fragment."""
         with self._lock:
@@ -776,6 +800,9 @@ class ModuleAuditSpec:
     # Optional module-specific product/version resolver for offline CVE
     # enumeration. The shared resolver covers standard record fields.
     cve_product_resolver: ProductResolver | None = None
+    # Appended for positional spec compatibility. Only socket-free admission
+    # yields; auth/data themselves remain synchronous in the same worker cap.
+    auth_wait: Callable[[AuditHookContext, AuditRecord], AbstractContextManager[Iterable[WorkPause]]] | None = None
 
 
 @dataclass(frozen=True)
@@ -1838,6 +1865,8 @@ def is_pre_detect_network_noise(record: AuditRecord | dict[str, Any]) -> bool:
     status = str(status_value or "").lower()
     if status and status not in {"fail", "not_detected", "not_found", "not_service"} and not status.startswith("not_"):
         return False
+    if payload.get("error_kind") == "transport_error":
+        return True
     text = _record_noise_text(record)
     if not text:
         return False
@@ -1856,7 +1885,11 @@ def is_pre_detect_operational_failure(record: AuditRecord | dict[str, Any]) -> b
     payload = record.extra if isinstance(record, AuditRecord) else record
     if _record_looks_detected(record):
         return False
-    if payload.get("operational_failure") is True or payload.get("detection_status") == "transport_failure":
+    if (
+        payload.get("operational_failure") is True
+        or payload.get("detection_status") == "transport_failure"
+        or payload.get("error_kind") == "transport_error"
+    ):
         return True
     text = _record_noise_text(record)
     return bool(text and any(marker in text for marker in _PRE_DETECT_OPERATIONAL_MARKERS))
@@ -2252,9 +2285,16 @@ class AuditCommandRunner:
         )
         self._lifecycle_states: dict[int, Any] = {}
         self._lifecycle_states_lock = threading.Lock()
-        self._transport_stats_lock = threading.Lock()
-        self._transport_pool_ids: set[int] = set()
+        self._transport_stats_lock = threading.RLock()
+        self._transport_pool_refs: dict[int, weakref.ReferenceType[Any]] = {}
+        self._transport_owner_ref = weakref.ref(self)
+        self._transport_uncertain_pools = 0
         self._transport_stats = {"connections": 0, "reused": 0, "requests": 0, "retries": 0}
+        self._fallback_stats = FallbackDiagnostics()
+        self._runtime_stats: RuntimeDiagnostics | None = getattr(args, "_runtime_observer", None)
+        if self._runtime_stats is None and bool(getattr(args, "debug", False)):
+            self._runtime_stats = RuntimeDiagnostics()
+        self._collect_transport_stats = bool(getattr(args, "debug", False)) or self._runtime_stats is not None
         from .clients.http_handoff import HttpHandoffBudget
 
         self._http_handoff_budget = HttpHandoffBudget(64)
@@ -2283,6 +2323,7 @@ class AuditCommandRunner:
         else:
             self.emit_line = print
 
+    @observe_phase("render")
     def _render_record(
         self, record: AuditRecord, render_plan: RenderPlan | None, output_format: str, debug: bool
     ) -> list[str]:
@@ -2423,7 +2464,9 @@ class AuditCommandRunner:
             pass
         if self.console is not None and hasattr(self.console, "set_structured_output"):
             self.console.set_structured_output(plan.output_format == "json")
-        sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append, console=self.console)
+        sink = LineOutputSink(
+            plan.output_path, self.emit_line, append=plan.append, console=self.console, observer=self._runtime_stats
+        )
         sink.prepare()
         if self.console is not None and bool(getattr(self.args, "debug", False)) and plan.target_count > 1:
             port_counts = plan.target_counts_by_port()
@@ -2451,7 +2494,12 @@ class AuditCommandRunner:
         self._live_emit = _emit_live if plan.output_format == "txt" else None
         completed = False
         try:
-            result = self._run_prepared_plan(plan, sink)
+            report_emit = None
+            if bool(getattr(self.args, "debug", False)):
+                report_emit = getattr(self.console, "debug", None) or getattr(self.args, "debug_emit", None)
+            reporting = self._runtime_stats.reporting(report_emit) if self._runtime_stats is not None else nullcontext()
+            with capture_fallbacks(self._fallback_stats), reporting:
+                result = self._run_prepared_plan(plan, sink)
             completed = True
             return result
         finally:
@@ -2474,8 +2522,15 @@ class AuditCommandRunner:
                         f"connections={self._transport_stats['connections']} "
                         f"reused={self._transport_stats['reused']} "
                         f"retries={self._transport_stats['retries']} "
-                        f"tls_contexts={tls_stats['size']} tls_cache_hits={tls_stats['hits']}"
+                        f"tls_contexts={tls_stats['size']} tls_cache_hits={tls_stats['hits']} "
+                        f"complete={self._transport_uncertain_pools == 0} "
+                        f"untracked_snapshots={self._transport_uncertain_pools}"
                     )
+                    for line in self._fallback_stats.debug_lines():
+                        debug_method(line)
+                    if self._runtime_stats is not None:
+                        for line in self._runtime_stats.debug_lines():
+                            debug_method(line)
 
     def _run_prepared_plan(self, plan: AuditCommandPlan, sink: LineOutputSink) -> AuditCommandResult:
         target_count = plan.target_count
@@ -2512,9 +2567,11 @@ class AuditCommandRunner:
             leave=False,
         )
         worker_count = max(1, int(plan.workers or getattr(self.args, "workers", 1) or 1))
+        if self._runtime_stats is not None:
+            self._runtime_stats.configure(targets=target_count, deep_workers=worker_count, detect_limit=0)
         self._http_handoff_budget.limit = min(64, worker_count)
         scheduler: BoundedScheduler[tuple[int, str, int, ScanTargetSpec | None], _AuditPipelineOutcome] = (
-            BoundedScheduler(max_workers=worker_count)
+            BoundedScheduler(max_workers=worker_count, observer=self._runtime_stats)
         )
         emitted_lines = 0
         suppressed_records = 0
@@ -2522,6 +2579,7 @@ class AuditCommandRunner:
         record_count = 0
         detected_count = 0
         operational_failure_count = 0
+        conclusive_negative_count = 0
         status_counts: dict[str, int] = {}
         record_callbacks = _record_callbacks_for_args(self.args)
         render_plan = build_render_plan(self.spec.render_module) if self.spec.render_module is not None else None
@@ -2548,6 +2606,14 @@ class AuditCommandRunner:
         def _run_target(
             item: tuple[int, str, int, ScanTargetSpec | None], prepared: _AuditDetectOutcome | None = None
         ) -> _AuditPipelineOutcome:
+            return run_paused_sync(_run_target_steps(item, prepared))
+
+        def _run_target_steps(
+            item: tuple[int, str, int, ScanTargetSpec | None], prepared: _AuditDetectOutcome | None = None
+        ) -> Generator[WorkPause, None, _AuditPipelineOutcome]:
+            job_token = _CREDENTIAL_JOB_ID.set(
+                -next(_CREDENTIAL_JOB_IDS) if self.spec.auth_wait is not None else _CREDENTIAL_JOB_ID.get()
+            )
             token = _TARGET_LIVE_EMIT.set(_emit_target_live if plan.output_format == "txt" else None)
             disk_token = _TARGET_DISK_EMIT.set(_emit_target_disk if plan.output_format == "txt" else None)
             with fallback_start_lock:
@@ -2560,17 +2626,34 @@ class AuditCommandRunner:
                 else time.monotonic()
             )
             try:
-                if prepared is None:
-                    outcome = self._run_target_pipeline(item[1], item[2], item[3], plan.credential_runs, debug_emit)
-                else:
-                    outcome = self._run_target_pipeline(
-                        item[1], item[2], item[3], plan.credential_runs, debug_emit, prepared_detect=prepared
-                    )
+                with (
+                    capture_fallbacks(self._fallback_stats),
+                    sync_fallback(self.spec.module if fallback_started_at is not None else None),
+                ):
+                    if self.spec.auth_wait is None:
+                        # Keep the established synchronous hook for consumers
+                        # without resumable authentication, including wrappers
+                        # that track worker completion during cancellation.
+                        outcome = (
+                            self._run_target_pipeline(item[1], item[2], item[3], plan.credential_runs, debug_emit)
+                            if prepared is None
+                            else self._run_target_pipeline(
+                                item[1], item[2], item[3], plan.credential_runs, debug_emit, prepared_detect=prepared
+                            )
+                        )
+                    elif prepared is None:
+                        outcome = yield from self._run_target_pipeline_steps(
+                            item[1], item[2], item[3], plan.credential_runs, debug_emit
+                        )
+                    else:
+                        outcome = yield from self._run_target_pipeline_steps(
+                            item[1], item[2], item[3], plan.credential_runs, debug_emit, prepared_detect=prepared
+                        )
                 if self.spec.record_skipped_credential_attempts and not outcome.duplicate_target:
                     with self._credential_ledger_lock:
-                        ledger = self._active_credential_ledgers.get(threading.get_ident())
+                        ledger = self._active_credential_ledgers.get(_credential_job_key())
                         if ledger is not None and not self._audit_cancelled.is_set():
-                            worker_id = threading.get_ident()
+                            worker_id = _credential_job_key()
                             phase_counts = self._credential_phase_counts.pop(worker_id, Counter()).copy()
                             # One atomic handoff: cancellation must see either
                             # the active ledger or the completed record, never both.
@@ -2581,18 +2664,19 @@ class AuditCommandRunner:
                                 ledger["debug_count"],
                             )
                 return outcome
-            except BaseException:
-                if self.spec.record_skipped_credential_attempts:
+            except BaseException as exc:
+                if self.spec.record_skipped_credential_attempts or isinstance(exc, GeneratorExit):
                     self._audit_cancelled.set()
                 raise
             finally:
                 if self.spec.record_skipped_credential_attempts and not self._audit_cancelled.is_set():
                     with self._credential_ledger_lock:
-                        self._active_credential_ledgers.pop(threading.get_ident(), None)
-                        self._credential_phase_counts.pop(threading.get_ident(), None)
+                        self._active_credential_ledgers.pop(_credential_job_key(), None)
+                        self._credential_phase_counts.pop(_credential_job_key(), None)
                 _TARGET_DISCOVERY_STARTED_AT.reset(discovery_token)
                 _TARGET_DISK_EMIT.reset(disk_token)
                 _TARGET_LIVE_EMIT.reset(token)
+                _CREDENTIAL_JOB_ID.reset(job_token)
 
         def _debug_emit(message: str) -> None:
             # BoundedScheduler deliberately detaches active daemon workers on
@@ -2859,9 +2943,10 @@ class AuditCommandRunner:
                         pass
 
         def _finalize_record(record: AuditRecord) -> None:
-            nonlocal operational_failure_count, record_count
+            nonlocal operational_failure_count, record_count, conclusive_negative_count
             ledger_record_id = id(record)
-            record = _with_http_detection_diagnostics(record, confirmed=self._is_detected(record))
+            record_detected = self._is_detected(record)
+            record = _with_http_detection_diagnostics(record, confirmed=record_detected)
             record = self._with_cve_enumeration(record)
             if debug_emit is not None and self.spec.module in _HTTP_DETECTION_MODULES:
                 debug_emit(
@@ -2890,9 +2975,14 @@ class AuditCommandRunner:
             # A confirmed product can still fail operationally in auth/data.
             # Keep its detection evidence, but count the explicit failure so
             # the run is partial and exits nonzero.
-            operational_failure_count += int(
-                record.extra.get("operational_failure") is True or is_pre_detect_operational_failure(record)
+            operational_failure = record.extra.get("operational_failure") is True or is_pre_detect_operational_failure(
+                record
             )
+            operational_failure_count += int(operational_failure)
+            # Count records, including companion surfaces, independently of
+            # the root-only detected_count. A confirmed service is never a
+            # conclusive negative, even when a later auth/data phase fails.
+            conclusive_negative_count += int(not record_detected and not operational_failure)
             status = str(record.status or "")
             status_counts[status] = status_counts.get(status, 0) + 1
             if retain_records:
@@ -2952,11 +3042,19 @@ class AuditCommandRunner:
                     if target is not None:
                         yield (-item[0] - 1, item[1], item[2], target)
 
+            # The runner also sets its ledger flag when a hook raises. Feeding
+            # that flag into the async watch would discard the worker's error
+            # as an operator cancellation before it reaches this consumer.
+            # Closing outcomes below already cancels the async scheduler.
+            finish_options: dict[str, Any] = (
+                {"finish_steps": _run_target_steps} if self.spec.auth_wait is not None else {}
+            )
             outcomes = AsyncDetectScheduler[
                 tuple[int, str, int, ScanTargetSpec | None], _AuditDetectOutcome | None, _AuditPipelineOutcome
             ](
                 detect_workers=detect_concurrency,
                 deep_workers=worker_count,
+                observer=self._runtime_stats,
             ).iter_completed(
                 plan.iter_target_specs(),
                 _detect_item,
@@ -2965,6 +3063,7 @@ class AuditCommandRunner:
                     prepared is not None and prepared.lifecycle_state is None and not self._is_detected(prepared.record)
                 ),
                 detect_children=_detect_children,
+                **finish_options,
             )
             if debug_emit is not None:
                 debug_emit(
@@ -2972,7 +3071,10 @@ class AuditCommandRunner:
                     f"deep_workers={worker_count} policy=fixed"
                 )
         else:
-            outcomes = scheduler.iter_completed(plan.iter_target_specs(), _run_target)
+            if self.spec.auth_wait is not None:
+                outcomes = scheduler.iter_paused(plan.iter_target_specs(), _run_target_steps, cancelled=cancelled)
+            else:
+                outcomes = scheduler.iter_completed(plan.iter_target_specs(), _run_target)
         try:
             for (_idx, _host, _port, _target), outcome in outcomes:
                 if _idx < 0:
@@ -3044,7 +3146,6 @@ class AuditCommandRunner:
         fallback_target_count = record_count or plan.fallback_target_count
         inconclusive = detected_count == 0 and operational_failure_count > 0
         partial = detected_count > 0 and operational_failure_count > 0
-        conclusive_negative_count = max(0, record_count - operational_failure_count)
         no_service_message = (
             f"No {self.spec.label} service detected on {fallback_target_count} target(s)"
             if fallback_target_count > 1
@@ -3197,6 +3298,9 @@ class AuditCommandRunner:
         close_panel_http(state)
 
     def _capture_transport_stats(self, state: Any) -> None:
+        if not self._collect_transport_stats:
+            return
+        local_seen: set[int] = set()
         for candidate in (
             state,
             getattr(state, "http", None),
@@ -3208,15 +3312,47 @@ class AuditCommandRunner:
             stats_fn = getattr(candidate, "stats", None)
             if candidate is None or not callable(stats_fn):
                 continue
+            identity = id(candidate)
+            if identity in local_seen:
+                continue
+            local_seen.add(identity)
             with self._transport_stats_lock:
-                if id(candidate) in self._transport_pool_ids:
+                previous = self._transport_pool_refs.get(identity)
+                if previous is not None and previous() is candidate:
                     continue
-                self._transport_pool_ids.add(id(candidate))
-            stats = stats_fn()
-            with self._transport_stats_lock:
-                for name in self._transport_stats:
-                    self._transport_stats[name] += int(stats.get(name, 0) or 0)
 
+                def discard(
+                    reference: weakref.ReferenceType[Any],
+                    *,
+                    key: int = identity,
+                    owner: weakref.ReferenceType[AuditCommandRunner] = self._transport_owner_ref,
+                ) -> None:
+                    runner = owner()
+                    if runner is not None:
+                        with runner._transport_stats_lock:
+                            if runner._transport_pool_refs.get(key) is reference:
+                                runner._transport_pool_refs.pop(key)
+
+                try:
+                    self._transport_pool_refs[identity] = weakref.ref(candidate, discard)
+                except TypeError:
+                    # Third-party opaque objects cannot be tracked without
+                    # retaining them. Their counters are explicitly approximate,
+                    # rather than growing an unbounded set of recyclable IDs.
+                    self._transport_uncertain_pools += 1
+            try:
+                stats = stats_fn()
+                values = {name: int(stats.get(name, 0) or 0) for name in self._transport_stats}
+            except Exception:
+                # A failed diagnostic must not skip closing its owned sockets.
+                with self._transport_stats_lock:
+                    self._transport_uncertain_pools += 1
+                continue
+            with self._transport_stats_lock:
+                for name, value in values.items():
+                    self._transport_stats[name] += value
+
+    @observe_phase("detect_sync")
     def _run_detect_with_state(
         self,
         host: str,
@@ -3313,6 +3449,7 @@ class AuditCommandRunner:
                 started_at=started_at,
             )
 
+    @observe_async_phase("detect_async")
     async def _run_async_detect_with_state(
         self,
         host: str,
@@ -3460,6 +3597,21 @@ class AuditCommandRunner:
             )
         except AsyncHttpFallback as exc:
             self._close_lifecycle_state(state)
+            surface = None
+            if self._collect_transport_stats:
+                hint = getattr(target, "surface_hint", None)
+                surface = (
+                    hint
+                    if hint in {"backend", "ui"}
+                    else ("mixed" if self.spec.module in web_panels.MODULE_PRODUCTS else "backend")
+                )
+            self._fallback_stats.record(
+                self.spec.module,
+                str(exc),
+                seconds=time.monotonic() - started,
+                requests=http.stats().get("requests", 0),
+                surface=surface,
+            )
             if debug_emit is not None:
                 debug_emit(f"async_detect_fallback host={host} port={port} reason={exc}")
             return None
@@ -3485,10 +3637,11 @@ class AuditCommandRunner:
         finally:
             resolver_fallbacks.reset(resolution_token)
             await http.close()
-            stats = http.stats()
-            with self._transport_stats_lock:
-                for key in self._transport_stats:
-                    self._transport_stats[key] += int(stats.get(key, 0))
+            if self._collect_transport_stats:
+                stats = http.stats()
+                with self._transport_stats_lock:
+                    for key in self._transport_stats:
+                        self._transport_stats[key] += int(stats.get(key, 0))
 
     def _run_target_pipeline(
         self,
@@ -3500,6 +3653,22 @@ class AuditCommandRunner:
         *,
         prepared_detect: _AuditDetectOutcome | None = None,
     ) -> _AuditPipelineOutcome:
+        return run_paused_sync(
+            self._run_target_pipeline_steps(
+                host, port, target, credential_runs, debug_emit, prepared_detect=prepared_detect
+            )
+        )
+
+    def _run_target_pipeline_steps(
+        self,
+        host: str,
+        port: int,
+        target: ScanTargetSpec | None,
+        credential_runs: tuple[AuditCredentialRun, ...],
+        debug_emit: Callable[[str], None] | None,
+        *,
+        prepared_detect: _AuditDetectOutcome | None = None,
+    ) -> Generator[WorkPause, None, _AuditPipelineOutcome]:
         """Run one target's entire lifecycle in a single scheduler worker."""
 
         discovery_started_at = _TARGET_DISCOVERY_STARTED_AT.get() or time.monotonic()
@@ -3513,8 +3682,8 @@ class AuditCommandRunner:
         phase_line_counts: Counter[str] = Counter()
         if self.spec.record_skipped_credential_attempts:
             with self._credential_ledger_lock:
-                self._credential_phase_counts[threading.get_ident()] = phase_line_counts
-                self._active_credential_ledgers[threading.get_ident()] = {
+                self._credential_phase_counts[_credential_job_key()] = phase_line_counts
+                self._active_credential_ledgers[_credential_job_key()] = {
                     "detect": AuditRecord(
                         host=host, port=port, module=self.spec.module, service=self.spec.module, status="unknown"
                     ),
@@ -3762,16 +3931,17 @@ class AuditCommandRunner:
             else:
                 emit_rce_record = _ignore_rce_record
 
-        detect_outcome = (
-            prepared_detect
-            if prepared_detect is not None
-            else self._run_detect_with_state(host, port, target, debug_emit)
-        )
+        with measure_sync_detect():
+            detect_outcome = (
+                prepared_detect
+                if prepared_detect is not None
+                else self._run_detect_with_state(host, port, target, debug_emit)
+            )
         detect_record = detect_outcome.record
         detected = self._is_detected(detect_record)
         if self.spec.record_skipped_credential_attempts:
             with self._credential_ledger_lock:
-                ledger = self._active_credential_ledgers.get(threading.get_ident())
+                ledger = self._active_credential_ledgers.get(_credential_job_key())
                 if ledger is not None:
                     # Preserve proof even if cancellation happens before the
                     # deep lifecycle installs its auth ledger.
@@ -3785,7 +3955,7 @@ class AuditCommandRunner:
                     duplicate = logical_key in self._claimed_logical_targets
                     self._claimed_logical_targets.add(logical_key)
                     if duplicate and self.spec.record_skipped_credential_attempts:
-                        worker_id = threading.get_ident()
+                        worker_id = _credential_job_key()
                         self._active_credential_ledgers.pop(worker_id, None)
                         self._credential_phase_counts.pop(worker_id, None)
                 if duplicate:
@@ -3836,7 +4006,7 @@ class AuditCommandRunner:
                     mode="pipeline",
                 )
             )
-        final_record = self._run_deep_and_close_state(
+        final_record = yield from self._run_deep_and_close_state_steps(
             host,
             port,
             target,
@@ -3892,7 +4062,7 @@ class AuditCommandRunner:
         additional_records: tuple[AuditRecord, ...] = ()
         other_target = self._additional_surface_target(detect_record, target, port)
         if other_target is not None and not (prepared_detect and prepared_detect.additional_surface_scheduled):
-            other = self._run_target_pipeline(
+            other = yield from self._run_target_pipeline_steps(
                 host,
                 port,
                 other_target,
@@ -3940,24 +4110,45 @@ class AuditCommandRunner:
         phase_emit: Callable[..., None] | None = None,
         emit_rce_record: Callable[[AuditRecord], None] | None = None,
     ) -> AuditRecord:
-        try:
-            return self._safe_record(
-                host,
-                port,
-                lambda: self._run_deep_lifecycle(
-                    host,
-                    port,
-                    target,
-                    detect_outcome.record,
-                    credential_runs,
-                    debug_emit,
-                    lifecycle_state=detect_outcome.lifecycle_state,
-                    runtime_stage_telemetry=detect_outcome.runtime_stage_telemetry,
-                    phase_emit=phase_emit,
-                    emit_rce_record=emit_rce_record,
-                ),
-                prior_record=detect_outcome.record,
+        return run_paused_sync(
+            self._run_deep_and_close_state_steps(
+                host, port, target, detect_outcome, credential_runs, debug_emit, phase_emit, emit_rce_record
             )
+        )
+
+    def _run_deep_and_close_state_steps(
+        self,
+        host: str,
+        port: int,
+        target: ScanTargetSpec | None,
+        detect_outcome: _AuditDetectOutcome,
+        credential_runs: tuple[AuditCredentialRun, ...],
+        debug_emit: Callable[[str], None] | None,
+        phase_emit: Callable[..., None] | None = None,
+        emit_rce_record: Callable[[AuditRecord], None] | None = None,
+    ) -> Generator[WorkPause, None, AuditRecord]:
+        try:
+            try:
+                return (
+                    yield from self._run_deep_lifecycle_steps(
+                        host,
+                        port,
+                        target,
+                        detect_outcome.record,
+                        credential_runs,
+                        debug_emit,
+                        lifecycle_state=detect_outcome.lifecycle_state,
+                        runtime_stage_telemetry=detect_outcome.runtime_stage_telemetry,
+                        phase_emit=phase_emit,
+                        emit_rce_record=emit_rce_record,
+                    )
+                )
+            except Exception as exc:
+
+                def fail(error: Exception = exc) -> AuditRecord:
+                    raise error
+
+                return self._safe_record(host, port, fail, prior_record=detect_outcome.record)
         finally:
             self._close_lifecycle_state(detect_outcome.lifecycle_state)
 
@@ -4049,6 +4240,34 @@ class AuditCommandRunner:
         phase_emit: Callable[..., None] | None = None,
         emit_rce_record: Callable[[AuditRecord], None] | None = None,
     ) -> AuditRecord:
+        return run_paused_sync(
+            self._run_deep_lifecycle_steps(
+                host,
+                port,
+                target,
+                detect_record,
+                credential_runs,
+                debug_emit,
+                lifecycle_state,
+                runtime_stage_telemetry,
+                phase_emit,
+                emit_rce_record,
+            )
+        )
+
+    def _run_deep_lifecycle_steps(
+        self,
+        host: str,
+        port: int,
+        target: ScanTargetSpec | None,
+        detect_record: AuditRecord,
+        credential_runs: tuple[AuditCredentialRun, ...],
+        debug_emit: Callable[[str], None] | None,
+        lifecycle_state: Any = None,
+        runtime_stage_telemetry: bool = False,
+        phase_emit: Callable[..., None] | None = None,
+        emit_rce_record: Callable[[AuditRecord], None] | None = None,
+    ) -> Generator[WorkPause, None, AuditRecord]:
         if self._host_stage_is_monolithic:
             return self._run_monolithic_deep_lifecycle(
                 host,
@@ -4079,7 +4298,7 @@ class AuditCommandRunner:
         stop_reason: str | None = None
         if self.spec.record_skipped_credential_attempts:
             with self._credential_ledger_lock:
-                self._active_credential_ledgers[threading.get_ident()] = {
+                self._active_credential_ledgers[_credential_job_key()] = {
                     "detect": detect_record,
                     "candidates": candidates,
                     "attempts": auth_records,
@@ -4122,12 +4341,17 @@ class AuditCommandRunner:
                         if callable(ctx.cancelled) and ctx.cancelled():
                             stop_reason = "cancelled"
                             break
-                        ledger = self._active_credential_ledgers.get(threading.get_ident())
+                        ledger = self._active_credential_ledgers.get(_credential_job_key())
                         if ledger is not None:
                             ledger["current"] = credential
                 auth_started_at = time.monotonic()
                 try:
-                    auth_record = self._auth(ctx, detect_record)
+                    admission = (
+                        self.spec.auth_wait(ctx, detect_record) if self.spec.auth_wait is not None else nullcontext(())
+                    )
+                    with admission as pauses:
+                        yield from pauses
+                        auth_record = self._auth(ctx, detect_record)
                 except TypeError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - isolate a single target/identity
@@ -4206,7 +4430,7 @@ class AuditCommandRunner:
                     selected_record = replace(
                         selected_record, extra={**selected_record.extra, "credential_stop_reason": stop_reason}
                     )
-                ledger = self._active_credential_ledgers.get(threading.get_ident())
+                ledger = self._active_credential_ledgers.get(_credential_job_key())
                 if ledger is not None and debug_emit is not None:
                     history = self._with_attempted_credentials(selected_record, auth_records, force=True)
                     self._debug_credential_ledger(history, debug_emit, start=ledger["debug_count"])
@@ -4232,7 +4456,11 @@ class AuditCommandRunner:
                 lifecycle_state=lifecycle_state,
             )
             try:
-                selected_record = self.spec.rce_probe(probe_ctx, selected_record)
+                if self._runtime_stats is None:
+                    selected_record = self.spec.rce_probe(probe_ctx, selected_record)
+                else:
+                    with self._runtime_stats.measure("rce_probe"):
+                        selected_record = self.spec.rce_probe(probe_ctx, selected_record)
             except Exception as exc:  # noqa: BLE001 - keep a failed proof inconclusive
                 selected_record = replace(
                     selected_record, extra={**selected_record.extra, "rce": None, "rce_probe_error": str(exc)}
@@ -4839,6 +5067,7 @@ class AuditCommandRunner:
             return (yield "host_stage")
         raise TypeError(f"{self.spec.module} spec requires either detect or host_stage")
 
+    @observe_phase("auth")
     def _auth(self, ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRecord:
         if self.spec.module == "portainer" and self.spec.auth is not None:
             return _record_to_model(self.spec.auth(ctx, detect_record))
@@ -4868,6 +5097,7 @@ class AuditCommandRunner:
             return self._host_stage(ctx, run_deep_checks=False)
         return detect_record
 
+    @observe_phase("capabilities")
     def _capabilities(self, ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         if record.extra.get("surface") == "ui":
             return record
@@ -4875,6 +5105,7 @@ class AuditCommandRunner:
             return _record_to_model(self.spec.capabilities(ctx, record))
         return record
 
+    @observe_phase("data")
     def _data(self, ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         if self.spec.module == "portainer" and self.spec.data is not None:
             return _record_to_model(self.spec.data(ctx, record))
@@ -5036,7 +5267,7 @@ class AuditCommandRunner:
             if self._audit_cancelled.is_set():
                 return record
             attempts.append((credential, record))
-            ledger = self._active_credential_ledgers.get(threading.get_ident())
+            ledger = self._active_credential_ledgers.get(_credential_job_key())
             if ledger is not None:
                 ledger["current"] = None
                 if debug_emit is not None:

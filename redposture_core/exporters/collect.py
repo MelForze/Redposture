@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import os
 import ssl
+import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any, cast
 
 from ..constants import COLLECT_DEBUG_ENDPOINTS, COLLECT_EXPORTERS
+from ..detection_diagnostics import FallbackDiagnostics
 from ..logger import AttemptLogger
 from ..scheduler import BoundedScheduler
 from ..stage_runtime import start_audit_progress
@@ -272,6 +274,7 @@ def collect_exporter_debug_data(
     scan_task_fn: Callable[..., Any] | None = None,
 ) -> tuple[int, int]:
     exporters = list(collect_exporters or COLLECT_EXPORTERS)
+    fallback_stats = FallbackDiagnostics()
     endpoints = tuple(collect_debug_endpoints or COLLECT_DEBUG_ENDPOINTS)
     plan_collect = plan_collect_fn or plan_collect_endpoints_for_target
     total = 0
@@ -474,14 +477,37 @@ def collect_exporter_debug_data(
                 kind, host, exporter_name, port, endpoint, item_scheme = job[:6]
                 if kind == "scan":
                     try:
+                        if scan_task_fn is None and scan_task is _NATIVE_SCAN_TASK:
+                            from .async_detect import DiscoveryRecord
+
+                            observations: dict[str, dict[str, Any]] = {}
+
+                            def capture(url: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                                details = http_get_details(url, *args, **kwargs)
+                                observations[url] = details
+                                return details
+
+                            record, hit = scan_task(
+                                host,
+                                port,
+                                scan_exporters,
+                                timeout,
+                                retries,
+                                scheme=item_scheme,
+                                http_get_details_fn=capture,
+                            )
+                            return (DiscoveryRecord(record, observations), hit) if hit is not None else (record, hit)
                         return scan_task(host, port, scan_exporters, timeout, retries, scheme=item_scheme)
                     except Exception as exc:
                         return build_scan_error_record(host, port, exc), None
                 if kind == "plan":
                     snapshots = job[6] if len(job) > 6 else {}
-                    if snapshots and collect_task_fn is collect_task and plan_collect_fn is None:
+                    emitted = job[7] if len(job) > 7 else frozenset()
+                    if (snapshots or emitted) and collect_task_fn is collect_task and plan_collect_fn is None:
                         prefetched = {}
                         for endpoint in endpoints:
+                            if endpoint in emitted:
+                                continue
                             observation = snapshots.get(build_http_url(host, port, endpoint, scheme=item_scheme))
                             if (
                                 observation is not None
@@ -499,6 +525,21 @@ def collect_exporter_debug_data(
                                     scheme=item_scheme,
                                     http_get_details_fn=lambda *a, _value=observation, **kw: _value,
                                 )
+                        # Keep the existing cheap adaptive preflight local to
+                        # this origin, so the next leaf can reuse its socket.
+                        # Completed cached records were already emitted by the
+                        # coordinator and never wait behind this network read.
+                        if (
+                            adaptive_collect
+                            and "/metrics" in endpoints
+                            and "/debug/vars" in endpoints
+                            and "/debug/vars" not in emitted
+                            and "/debug/vars" not in prefetched
+                            and (host, exporter_name, int(port), "/debug/vars") not in completed_jobs
+                        ):
+                            prefetched["/debug/vars"] = collect_task(
+                                host, exporter_name, port, "/debug/vars", timeout, retries, scheme=item_scheme
+                            )
                         return endpoints, prefetched
                     if not preflight_enabled:
                         return endpoints, {}
@@ -554,6 +595,34 @@ def collect_exporter_debug_data(
                         collect_progress.set_total(estimated_jobs)
                     collect_progress.advance()
                     if eligible:
+                        snapshots = dict(getattr(record, "responses", {}))
+                        emitted: set[str] = set()
+                        if collect_task_fn is collect_task and plan_collect_fn is None:
+                            for endpoint in endpoints:
+                                url = build_http_url(host, port, endpoint, scheme=item_scheme)
+                                observation = snapshots.get(url)
+                                if (
+                                    observation is not None
+                                    and not observation.get("error")
+                                    and not observation.get("truncated")
+                                    and 200 <= int(observation.get("status") or 0) < 300
+                                    and (host, str(hit["exporter"]), int(port), endpoint) not in completed_jobs
+                                ):
+                                    cached, ok = collect_task(
+                                        host,
+                                        str(hit["exporter"]),
+                                        int(port),
+                                        endpoint,
+                                        timeout,
+                                        retries,
+                                        scheme=item_scheme,
+                                        http_get_details_fn=lambda *a, _value=observation, **kw: _value,
+                                    )
+                                    scheduled_jobs += 1
+                                    _process_record(cached, ok, pause_before_emit=collect_progress.pause_for_output)
+                                    collect_progress.advance()
+                                    emitted.add(endpoint)
+                                    snapshots.pop(url)
                         yield (
                             "plan",
                             host,
@@ -561,7 +630,8 @@ def collect_exporter_debug_data(
                             int(hit["port"]),
                             None,
                             item_scheme,
-                            getattr(record, "responses", {}),
+                            snapshots,
+                            frozenset(emitted),
                         )
                     return
                 if kind != "plan":
@@ -570,6 +640,8 @@ def collect_exporter_debug_data(
                 estimated_jobs += len(planned_endpoints) - len(endpoints)
                 collect_progress.set_total(estimated_jobs)
                 for endpoint in planned_endpoints:
+                    if len(job) > 7 and endpoint in job[7]:
+                        continue
                     if (host, exporter_name, int(port), endpoint) in completed_jobs:
                         skipped_jobs += 1
                         estimated_jobs -= 1
@@ -635,18 +707,30 @@ def collect_exporter_debug_data(
                 async def _prepare_job(job: tuple[Any, ...]) -> Any:
                     if job[0] != "scan":
                         return None
+                    started = time.monotonic()
                     try:
                         return await prefetch_discovery(
                             job[1], job[3], job[5], timeout, retries, scan_exporters, tls_context
                         )
-                    except AsyncHttpFallback:
+                    except AsyncHttpFallback as exc:
+                        fallback_stats.record(
+                            "exporters-collect",
+                            str(exc),
+                            seconds=time.monotonic() - started,
+                            requests=exc.native_requests,
+                        )
                         return None
                     except Exception as exc:
                         return build_scan_error_record(job[1], job[3], exc), None
 
                 def _finish_job(job: tuple[Any, ...], prepared: Any) -> Any:
                     if job[0] != "scan" or prepared is None:
-                        return _run_job(job)
+                        started = time.monotonic()
+                        try:
+                            return _run_job(job)
+                        finally:
+                            if job[0] == "scan":
+                                fallback_stats.record_sync("exporters-collect", time.monotonic() - started)
                     return prepared
 
                 outcomes = AsyncDetectScheduler[tuple[Any, ...], Any, Any](
@@ -658,6 +742,7 @@ def collect_exporter_debug_data(
                     _prepare_job,
                     _finish_job,
                     children=_child_jobs,
+                    prioritize_children=lambda job, _result: job[0] == "plan",
                     inline_finish=lambda job, prepared: (
                         job[0] == "scan"
                         and prepared is not None
@@ -665,7 +750,9 @@ def collect_exporter_debug_data(
                     ),
                 )
             else:
-                outcomes = scheduler.iter_expanding(roots, _run_job, _child_jobs)
+                outcomes = scheduler.iter_expanding(
+                    roots, _run_job, _child_jobs, prioritize_children=lambda job, _result: job[0] == "plan"
+                )
             try:
                 for job, result in outcomes:
                     if job[0] == "fetch":
@@ -709,6 +796,8 @@ def collect_exporter_debug_data(
             stats_sink["errors"] = transport_errors
     finally:
         _finalize_postprocess()
+        if stats_sink is not None:
+            stats_sink.update(fallback_stats.flat_stats())
         if out_fh is not None:
             out_fh.close()
         if index_fh is not None:

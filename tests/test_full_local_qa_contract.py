@@ -787,3 +787,23 @@ def test_rabbitmq_golden_ignores_queue_depth_but_preserves_queue_metadata() -> N
     assert verifier._normalize_for_golden(left) == verifier._normalize_for_golden(right)
     right["enumeration"]["queues"]["items"][0]["durable"] = False
     assert verifier._normalize_for_golden(left) != verifier._normalize_for_golden(right)
+
+
+@pytest.mark.parametrize("module", ["postgres", "mongodb", "clickhouse", "oracle"])
+def test_postgres_implementation_golden_keeps_product_scope_and_evidence(module) -> None:
+    verifier = _load_postrun_verifier()
+
+    def payload(version, product="PostgreSQL", scope="sql_backend", evidence="sql_version_and_settings"):
+        identity = {"product": product, "version": version, "scope": scope, "evidence": evidence}
+        return {
+            "module": module,
+            "server_implementation": identity,
+            "attempted_credentials": [{"credential_capabilities": {"server_implementation": identity}}],
+        }
+
+    before = verifier._normalize_for_golden(payload("16.4"))
+    assert before == verifier._normalize_for_golden(payload("16.15"))
+    assert before != verifier._normalize_for_golden(payload("16.15", product="PgBouncer"))
+    assert before != verifier._normalize_for_golden(payload("16.15", scope="proxy_console"))
+    assert before != verifier._normalize_for_golden(payload("16.15", evidence="startup_error"))
+    assert before != verifier._normalize_for_golden({"module": module})

@@ -24,7 +24,12 @@
           "database_count": 7,
           "execute_capability": true,
           "execute_capability_reason": "active capability probe complete",
-          "read_capability": true
+          "read_capability": true,
+          "server_implementation": {
+            "evidence": "authenticated_version_and_build_name",
+            "product": "ClickHouse",
+            "scope": "sql_backend"
+          }
         },
         "error": null,
         "ok": true,
@@ -40,7 +45,12 @@
       "database_count": 7,
       "execute_capability": true,
       "execute_capability_reason": "active capability probe complete",
-      "read_capability": true
+      "read_capability": true,
+      "server_implementation": {
+        "evidence": "authenticated_version_and_build_name",
+        "product": "ClickHouse",
+        "scope": "sql_backend"
+      }
     },
     "credentials_source": "provided",
     "database": "default",

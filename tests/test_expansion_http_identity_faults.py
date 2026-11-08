@@ -126,7 +126,7 @@ def test_gitlab_web_post_barriers_stop_identity_and_repeat_attempts(
         "captcha": HttpResponse(200, b'<div class="g-recaptcha"></div>', {}),
         "redirect": HttpResponse(302, b"", {"location": "https://identity.test/login"}),
         "server": HttpResponse(503, b"", {}),
-        "rejected": HttpResponse(422, b"", {}),
+        "rejected": HttpResponse(422, b'<div class="flash-alert">Invalid Login or password.</div>', {}),
     }
 
     class Pool:

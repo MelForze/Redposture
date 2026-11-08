@@ -321,28 +321,53 @@ class DockerEngineClient:
         result = (yield DetectCall(self.request, ("GET", "/info"), {"response_size_cap": 256 * 1024})).json()
         return result if isinstance(result, dict) else {}
 
+    def _inventory_json(self, path: str) -> Any:
+        try:
+            return self.request("GET", path).json()
+        except ValueError as exc:
+            # The audit catches client errors per section, preserving resources
+            # already read instead of losing the whole target on malformed JSON.
+            raise DockerEngineError(f"invalid {path} response: {exc}") from exc
+
+    @staticmethod
+    def _inventory_rows(value: Any, path: str) -> list[dict[str, Any]]:
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            raise DockerEngineError(f"invalid {path} response: expected an array of objects")
+        return value
+
     def containers(self) -> list[dict[str, Any]]:
-        result = self.request("GET", "/containers/json?all=1").json()
-        return result if isinstance(result, list) else []
+        path = "/containers/json?all=1"
+        return self._inventory_rows(self._inventory_json(path), path)
 
     def images(self) -> list[dict[str, Any]]:
-        result = self.request("GET", "/images/json").json()
-        return result if isinstance(result, list) else []
+        path = "/images/json"
+        return self._inventory_rows(self._inventory_json(path), path)
 
     def networks(self) -> list[dict[str, Any]]:
-        result = self.request("GET", "/networks").json()
-        return result if isinstance(result, list) else []
+        path = "/networks"
+        return self._inventory_rows(self._inventory_json(path), path)
 
     def volumes(self) -> list[dict[str, Any]]:
-        result = self.request("GET", "/volumes").json()
-        if isinstance(result, dict):
-            volumes = result.get("Volumes")
-            return volumes if isinstance(volumes, list) else []
-        return []
+        result = self._inventory_json("/volumes")
+        if not isinstance(result, dict) or "Volumes" not in result:
+            raise DockerEngineError("invalid /volumes response: expected Volumes object")
+        volumes = result["Volumes"]
+        # Docker may encode an empty slice as null. A missing field or a
+        # malformed array is different from that valid empty response.
+        return [] if volumes is None else self._inventory_rows(volumes, "/volumes")
 
     def system_df(self) -> dict[str, Any]:
-        result = self.request("GET", "/system/df?verbose=1").json()
-        return result if isinstance(result, dict) else {}
+        path = "/system/df?verbose=1"
+        result = self._inventory_json(path)
+        fields = ("Images", "Containers", "Volumes", "BuildCache")
+        if not isinstance(result, dict) or not any(key in result for key in ("LayersSize", *fields)):
+            raise DockerEngineError(f"invalid {path} response: expected disk usage object")
+        if "LayersSize" in result and type(result["LayersSize"]) is not int:
+            raise DockerEngineError(f"invalid {path} response: expected integer LayersSize")
+        for field in fields:
+            if result.get(field) is not None:
+                self._inventory_rows(result[field], path)
+        return result
 
     def create_exec(self, container_id: str, command: str) -> str:
         encoded = quote(container_id, safe="")

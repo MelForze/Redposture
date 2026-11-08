@@ -6,7 +6,7 @@ import time
 from collections.abc import Iterator
 
 from .discovery_values import DiskBackedText
-from .secret_detection import _NON_SECRET_FIELD_RE, _SECRET_KEY_RE
+from .secret_detection import _NON_SECRET_FIELD_RE, _SECRET_KEY_RE, _SECRET_METADATA_SUFFIXES
 
 
 class _Normalizer:
@@ -81,6 +81,12 @@ class _Profile:
         if final:
             self._accept("", True)
 
+    @property
+    def metadata(self) -> bool:
+        # Metadata suffixes are bounded and contain no sensitive field token.
+        # The prefix may be arbitrarily long; its sensitivity was streamed.
+        return self.secret and self.tail.rsplit("_", 1)[-1] in _SECRET_METADATA_SUFFIXES
+
 
 def disk_key_hint(key: DiskBackedText, deadline: float | None = None) -> str:
     full, tail = _Profile(), _Profile()
@@ -94,10 +100,10 @@ def disk_key_hint(key: DiskBackedText, deadline: float | None = None) -> str:
         tail.feed(part)
     full.feed("", final=True)
     tail.feed("", final=True)
-    if full.excluded:
+    if full.excluded or full.metadata:
         # Field suppression examines the entire key; the entropy rule examines
         # only its final dot component. Preserve both decisions separately.
-        return "hash" if tail.excluded else "hash.data"
+        return "hash" if tail.excluded or tail.metadata else "hash.data"
     if not full.secret:
         return "data"
     if "client_secret" in full.tokens:

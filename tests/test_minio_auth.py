@@ -6,6 +6,7 @@ import pytest
 
 from redposture_core.clients.minio_api import MinioResponse, S3Error
 from redposture_core.modules.minio import actions
+from tests.application_markup import application_page
 
 
 class _StubClient:
@@ -148,7 +149,7 @@ def test_signed_root_redirect_to_console_uses_admin_verifier(admin_response: Min
             assert signed is True
             return admin_response
 
-    console = _resp(200, body=b"<html><title>MinIO Console</title></html>")
+    console = _resp(200, body=application_page("minio").encode())
     assert actions.verify_credential(RedirectClient(console)).state == expected
 
 

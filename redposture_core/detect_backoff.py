@@ -7,18 +7,23 @@ from collections import deque
 from collections.abc import Callable
 from contextvars import ContextVar
 
+from .runtime_diagnostics import RuntimeDiagnostics
+
 
 class DetectSlots:
     """FIFO active slots; consume each waiting Future once, including cancellation."""
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, on_change: Callable[[int], None] | None = None) -> None:
         self.limit = limit
         self.active = 0
+        self.on_change = on_change
         self.waiters: deque[asyncio.Future[None]] = deque()
 
     async def acquire(self) -> None:
         if self.active < self.limit and not self.waiters:
             self.active += 1
+            if self.on_change is not None:
+                self.on_change(self.active)
             return
         future = asyncio.get_running_loop().create_future()
         self.waiters.append(future)
@@ -41,12 +46,21 @@ class DetectSlots:
                 future.set_result(None)
                 count -= 1
         self.active -= count
+        if self.on_change is not None:
+            self.on_change(self.active)
 
 
 class DetectLease:
-    def __init__(self, slots: DetectSlots, replace_waiter: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        slots: DetectSlots,
+        replace_waiter: Callable[[], None],
+        *,
+        observer: RuntimeDiagnostics | None = None,
+    ) -> None:
         self.slots = slots
         self.replace_waiter = replace_waiter
+        self.observer = observer
         self.owner = asyncio.current_task()
         self.held = False
         self.retained_socket = False
@@ -63,7 +77,15 @@ class DetectLease:
     async def pause(self, seconds: float) -> None:
         self.release()
         self.replace_waiter()
-        await asyncio.sleep(seconds)
+        if self.observer is None:
+            await asyncio.sleep(seconds)
+        else:
+            self.observer.adjust_queue("backoff", 1)
+            try:
+                with self.observer.measure("retry_wait"):
+                    await asyncio.sleep(seconds)
+            finally:
+                self.observer.adjust_queue("backoff", -1)
         await self.acquire()
 
 

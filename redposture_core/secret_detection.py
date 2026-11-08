@@ -15,14 +15,16 @@ import math
 import re
 import zlib
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from hashlib import sha256
 from itertools import chain
 from typing import Any
 from urllib.parse import urlsplit
 
 from .discovery_values import DiskBackedText
+from .secret_literals import AssignmentLiterals
 
 
 @dataclass(frozen=True)
@@ -152,12 +154,15 @@ _NON_SECRET_FIELD_RE = re.compile(
     r"(?i)(?:(?:^|_)(?:public_key|api_key_id|access_key_id|secret_key_id|token_id|checksum|hash)(?:$|_)|"
     r"(?:^|_)(?:token_name|nmspcuri)$)"
 )
+_SECRET_METADATA_SUFFIXES = frozenset(
+    {"count", "length", "enabled", "name", "type", "endpoint", "policy", "status", "description", "format", "required"}
+)
 _ASSIGNMENT_RE = re.compile(
     r"(?i)(?<![\w.])(?:--)?((?:[A-Za-z][A-Za-z0-9]{0,32}[._-])*"
     r"(?:password|passwd|pwd|passphrase|pass|credential|credentials|cred|creds|"
     r"client[_-]?secret|api[_-]?secret|apisecret|api[_-]?token|"
     r"auth[_-]?token|refresh[_-]?token|secret[_-]?key|apikey|secret|token))"
-    r"[\"']?\s*(?:=>|[:=])\s*(?:[\"']([^\"'\s,;<>]+)[\"']|([^\s,;&<>]+))"
+    r"[\"']?\s*(?:=>|[:=])\s*(?:[\"']([^\"'\s,;]+)[\"']|([^\s,;&<>]+))"
 )
 _SQL_PASSWORD_RE = re.compile(r"(?i)\b(?:WITH\s+)?PASSWORD\s+['\"]([^'\"\s;]{4,})['\"]")
 _XML_ELEMENT_RE = re.compile(r"(?is)<([A-Za-z][\w:.-]{0,79})\b[^>]{0,2048}>([^<>]{4,4096})</\1\s*>")
@@ -240,14 +245,26 @@ def _is_secret_sentinel(value: Any) -> bool:
 
 def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
     found: list[SecretMatch] = []
+    literals = AssignmentLiterals(text, is_secret_field_name)
     for name, confidence, pattern in _candidate_patterns(text):
         if name not in enabled:
             continue
         for match in pattern.finditer(text):
             value = match.group(1) if match.lastindex else match.group(0)
+            overlap = literals.overlap(*match.span())
+            if overlap is not None and overlap.value != value:
+                continue
             if value and not _is_secret_sentinel(value):
                 found.append(SecretMatch(name, confidence, path, value))
+    # Consumers collapse equal value/place findings in scan order. Preserve
+    # provider-specific classifications before the generic assignment label.
+    for literal in literals.items:
+        detector = _key_detector(literal.name)
+        if detector in enabled and literal.value and not _is_secret_sentinel(literal.value):
+            found.append(SecretMatch(detector, "high", path, literal.value))
     for match in _ASSIGNMENT_RE.finditer(text):
+        if literals.overlap(*match.span()) is not None or not is_secret_field_name(match.group(1)):
+            continue
         value = match.group(2) or match.group(3) or ""
         detector = _key_detector(match.group(1))
         if detector in enabled and len(value) >= 4 and not _is_secret_sentinel(value):
@@ -259,16 +276,12 @@ def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
     for match in _XML_ELEMENT_RE.finditer(text):
         detector = _key_detector(match.group(1))
         value = html.unescape(match.group(2).strip())
-        if (
-            _SECRET_KEY_RE.search(_normalize_secret_key(match.group(1)))
-            and detector in enabled
-            and not _is_secret_sentinel(value)
-        ):
+        if is_secret_field_name(match.group(1)) and detector in enabled and not _is_secret_sentinel(value):
             found.append(SecretMatch(detector, "high", path, value))
     for tag in _XML_TAG_RE.finditer(text):
         attrs = {name.lower(): html.unescape(raw) for name, _quote, raw in _XML_ATTR_RE.findall(tag.group(2))}
         named = attrs.get("name", "") if tag.group(1).lower() == "input" else ""
-        if named and _SECRET_KEY_RE.search(_normalize_secret_key(named)):
+        if named and is_secret_field_name(named):
             value = attrs.get("value", "")
             detector = _key_detector(named)
             if value and detector in enabled and not _is_secret_sentinel(value):
@@ -276,12 +289,16 @@ def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
         for name, value in attrs.items():
             normalized = _normalize_secret_key(name.removeprefix("data-"))
             detector = _key_detector(normalized)
-            if _SECRET_KEY_RE.search(normalized) and value and detector in enabled and not _is_secret_sentinel(value):
+            if is_secret_field_name(normalized) and value and detector in enabled and not _is_secret_sentinel(value):
                 found.append(SecretMatch(detector, "high", path, value))
     if "url_credentials" in enabled:
         found.extend(SecretMatch("url_credentials", "high", path, value) for value in _url_credential(text))
     path_field = _normalize_secret_key(path.rsplit(".", 1)[-1])
-    if "high_entropy" in enabled and not _NON_SECRET_FIELD_RE.search(path_field):
+    if (
+        "high_entropy" in enabled
+        and not _NON_SECRET_FIELD_RE.search(path_field)
+        and not is_secret_metadata_field(path_field)
+    ):
         explicit_values = {match.value for match in found if isinstance(match.value, str)}
         if "=" not in text and text in explicit_values and _WORD_RE.fullmatch(text):
             # The entropy loop has exactly one unmodified candidate, already
@@ -297,6 +314,8 @@ def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
         # depends on that bound, not on the number of earlier findings.
         value_lengths = sorted({len(value) for value in explicit_values if len(value) <= 256})
         for token_match in chain((first_word,), words):
+            if literals.overlap(*token_match.span()) is not None:
+                continue
             candidate = token_match.group(0)
             if "=" in candidate:
                 key, assigned = candidate.split("=", 1)
@@ -346,6 +365,18 @@ def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
 
 
 def _normalize_secret_key(key: str) -> str:
+    """Normalize schema names without retaining long paths or custom strings."""
+    if type(key) is str and len(key) <= 128:
+        return _cached_normalized_secret_key(key)
+    return _uncached_normalized_secret_key(key)
+
+
+@lru_cache(maxsize=4096)
+def _cached_normalized_secret_key(key: str) -> str:
+    return _uncached_normalized_secret_key(key)
+
+
+def _uncached_normalized_secret_key(key: str) -> str:
     """Normalize delimited, camelCase and acronym-based field names."""
     separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
     separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
@@ -355,7 +386,18 @@ def _normalize_secret_key(key: str) -> str:
 def is_secret_field_name(key: str) -> bool:
     """Whether a mapping key can identify a secret without inspecting its value."""
     normalized = _normalize_secret_key(key)
-    return bool(_SECRET_KEY_RE.search(normalized)) and not bool(_NON_SECRET_FIELD_RE.search(normalized))
+    return (
+        bool(_SECRET_KEY_RE.search(normalized))
+        and not bool(_NON_SECRET_FIELD_RE.search(normalized))
+        and not is_secret_metadata_field(normalized)
+    )
+
+
+def is_secret_metadata_field(key: str) -> bool:
+    """Recognize secret-related metadata, without excluding actual short secrets."""
+    normalized = _normalize_secret_key(key)
+    prefix, _, suffix = normalized.rpartition("_")
+    return suffix in _SECRET_METADATA_SUFFIXES and bool(_SECRET_KEY_RE.search(prefix))
 
 
 def _key_detector(key: str) -> str:
@@ -495,10 +537,13 @@ def scan_value(
     enabled: Iterable[str] | None = None,
     _depth: int = 0,
     _decode_depth: int = 0,
+    _on_incomplete: Callable[[str], None] | None = None,
 ) -> list[SecretMatch]:
     """Inspect a scalar or nested value without dropping malformed JSON text."""
 
     if _depth > 32:
+        if _on_incomplete is not None:
+            _on_incomplete("max_depth")
         return []
     enabled_set = set(enabled or detector_names())
     if isinstance(value, Mapping):
@@ -514,8 +559,7 @@ def scan_value(
                 except ValueError:
                     pass
             if (
-                _SECRET_KEY_RE.search(normalized_key)
-                and not _NON_SECRET_FIELD_RE.search(normalized_key)
+                is_secret_field_name(normalized_key)
                 and nested is not None
                 and nested != ""
                 and not nested_json
@@ -528,7 +572,12 @@ def scan_value(
                     matches.append(SecretMatch(detector, "high", path, str(nested)))
             matches.extend(
                 scan_value(
-                    nested, object_path=path, enabled=enabled_set, _depth=_depth + 1, _decode_depth=_decode_depth
+                    nested,
+                    object_path=path,
+                    enabled=enabled_set,
+                    _depth=_depth + 1,
+                    _decode_depth=_decode_depth,
+                    _on_incomplete=_on_incomplete,
                 )
             )
         return matches
@@ -542,6 +591,7 @@ def scan_value(
                     enabled=enabled_set,
                     _depth=_depth + 1,
                     _decode_depth=_decode_depth,
+                    _on_incomplete=_on_incomplete,
                 )
             )
         return matches
@@ -560,7 +610,12 @@ def scan_value(
             parsed = None
         if parsed is not None:
             return scan_value(
-                parsed, object_path=object_path, enabled=enabled_set, _depth=_depth + 1, _decode_depth=_decode_depth
+                parsed,
+                object_path=object_path,
+                enabled=enabled_set,
+                _depth=_depth + 1,
+                _decode_depth=_decode_depth,
+                _on_incomplete=_on_incomplete,
             )
     matches = _scan_text(text, object_path, enabled_set)
     if _decode_depth < 2:
@@ -573,6 +628,7 @@ def scan_value(
                     enabled=enabled_set,
                     _depth=_depth + 1,
                     _decode_depth=_decode_depth + 1,
+                    _on_incomplete=_on_incomplete,
                 )
             )
     return list(dict.fromkeys(matches))

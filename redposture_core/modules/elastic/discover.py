@@ -37,6 +37,8 @@ from ...discovery_spool import SpoolingFindings, _DiskValueReferences, _slice_va
 from ...discovery_values import DiskBackedText
 from ...json_stream import JSONPath
 from ...scheduler import NestedSchedulerCancelled
+from ...secret_detection import is_secret_metadata_field
+from ...secret_literals import AssignmentLiterals
 from .value_stream import SpoolingSequence, disk_basic_password, disk_entropy, stable_json_chunks, validated_disk_jose
 
 JsonObject: TypeAlias = dict[str, Any]
@@ -491,6 +493,8 @@ def classify_field(value: str) -> FieldClass:
     leaf = normalize_field_name(segments[-1] if segments else value)
     parts = [part for part in leaf.split("_") if part]
     if leaf in _EXCLUDED_FIELDS:
+        return "excluded"
+    if is_secret_metadata_field(leaf):
         return "excluded"
     if {"public", "key"}.issubset(parts) or {"api", "key", "id"}.issubset(parts):
         return "excluded"
@@ -1196,6 +1200,11 @@ def analyze_value(
         ]
 
     detections: list[DetectedSecret] = []
+    literals = AssignmentLiterals(text, lambda name: _secret_key_kind(name) is not None)
+    for assignment_literal in literals.items:
+        kind = _secret_key_kind(assignment_literal.name)
+        if kind and assignment_literal.value and not _looks_placeholder(assignment_literal.value):
+            detections.append(_candidate(assignment_literal.value, kind, 85, "credential_pair", "sensitive_field"))
     for match in _PRIVATE_KEY_RE.finditer(text):
         detections.append(_candidate(match.group(0), "private_key", 100, "private_key_pem"))
     for match in _JWE_RE.finditer(text):
@@ -1240,6 +1249,8 @@ def analyze_value(
         elif _plausible_opaque_secret(token):
             detections.append(_candidate(token, "bearer_token", 90, "bearer_auth"))
     for match in _KEY_VALUE_RE.finditer(text):
+        if literals.overlap(*match.span()) is not None:
+            continue
         raw_name = match.group(1)
         kind = _secret_key_kind(raw_name)
         if kind is None:
@@ -2127,15 +2138,21 @@ def scan_value_tree(
                     decoded_value = decoded_structured
                 walk(decoded_value, pointer, depth + 1, key_hint, True)
         if not base64_decoded and scalar_size <= effective_options.max_embedded_json_bytes:
-            unescaped = scalar_text
-            if '\\"' in unescaped:
-                unescaped = unescaped.replace('\\"', '"')
-            if re.search(r"\\u[0-9a-fA-F]{4}", unescaped):
-                unescaped = re.sub(
-                    r"\\u([0-9a-fA-F]{4})",
-                    lambda match: chr(int(match.group(1), 16)),
-                    unescaped,
-                )
+
+            def unescape(part: str) -> str:
+                part = part.replace('\\"', '"')
+                return re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), part)
+
+            # Unescape an outer encoded log/JSON representation, never the
+            # contents of an already recognized raw assignment literal.
+            protected = AssignmentLiterals(scalar_text, lambda name: _secret_key_kind(name) is not None)
+            pieces: list[str] = []
+            offset = 0
+            for literal in protected.items:
+                pieces.extend((unescape(scalar_text[offset : literal.start]), scalar_text[literal.start : literal.end]))
+                offset = literal.end
+            pieces.append(unescape(scalar_text[offset:]))
+            unescaped = "".join(pieces)
             if unescaped != scalar_text and depth < effective_options.max_depth:
                 walk(unescaped, pointer, depth + 1, key_hint, True)
         stripped = scalar_text.lstrip()

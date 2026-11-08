@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
 import time
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import closing
@@ -21,10 +22,11 @@ from ...clients.http_api import (
     http_response_requires_https,
 )
 from ...clients.http_session import HttpSessionPool
-from ...clients.scoped_http import ScopedHttpClient
+from ...clients.scoped_http import HttpLifecycleState, ScopedHttpClient
 from ...detection_steps import DetectionRequests, run_requests
 from ...discovery_frontier import DiscoveryFrontier
 from ...discovery_spool import SpoolingFindings, SpoolingRecords
+from ...html_fingerprint import markup_evidence
 from ...storage_discovery import DiscoveryCollector
 
 _VERSION = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
@@ -36,6 +38,65 @@ _MAX_QUEUE = 200
 _MAX_ARTIFACTS = 100
 _JSON_CAP = 1024 * 1024
 host_stage = None  # This module uses the phase-aware audit hooks.
+
+
+class JenkinsLifecycleState(HttpLifecycleState):
+    """One small anonymous proof, scoped to the endpoint and live transport."""
+
+    def __init__(self, http: HttpSessionPool | None) -> None:
+        super().__init__(http)
+        self._anonymous_lock = threading.Lock()
+        self._anonymous_closed = False
+        self._anonymous_control: tuple[tuple[Any, ...], HttpResponse] | None = None
+
+    def _control_key(self, base: str) -> tuple[Any, ...]:
+        pool = self.http
+        return (
+            base,
+            pool,
+            *(
+                (getattr(pool, key, None))
+                for key in ("insecure", "ca_file", "cert_file", "key_file", "proxy", "timeout")
+            ),
+        )
+
+    def remember_anonymous(self, base: str, response: HttpResponse) -> None:
+        # These are memo limits, never response-reading limits. A larger or
+        # ambiguous control is fetched normally during credential verification.
+        usable = (
+            not response.error
+            and not response.truncated
+            and len(response.body) <= 16_384
+            and sum(len(key) + len(value) for key, value in response.headers.items()) <= 8192
+            and response.request_url == base + "/whoAmI/api/json"
+            and response.final_url == base + "/whoAmI/api/json"
+            and (response.status in {401, 403} or _whoami(_json_object(response)))
+            and not _auth_stop_reason(response)
+        )
+        with self._anonymous_lock:
+            if self._anonymous_closed:
+                return
+            self._anonymous_control = (
+                (self._control_key(base), replace(response, headers=dict(response.headers))) if usable else None
+            )
+
+    def anonymous_control(self, base: str) -> HttpResponse | None:
+        with self._anonymous_lock:
+            if not self._anonymous_closed and self._anonymous_control is not None:
+                key, response = self._anonymous_control
+                if key == self._control_key(base):
+                    return response
+            return None
+
+    def discard_anonymous(self) -> None:
+        with self._anonymous_lock:
+            self._anonymous_control = None
+
+    def close(self) -> None:
+        with self._anonymous_lock:
+            self._anonymous_closed = True
+            self._anonymous_control = None
+        super().close()
 
 
 def _client(ctx: Any, *, allow_cross_origin_redirects: bool = False) -> HttpApiClient | ScopedHttpClient:
@@ -88,10 +149,14 @@ def _whoami(value: dict[str, Any] | None) -> bool:
 
 
 def _login(response: HttpResponse) -> bool:
-    if response.status != 200 or response.truncated:
+    if response.status != 200 or response.error or response.truncated:
         return False
-    body = response.text[:128_000].lower()
-    return all(marker in body for marker in ("<form", "j_username", "j_password", "jenkins"))
+    page = markup_evidence(response.text[:128_000])
+    return bool(
+        page is not None
+        and re.search(r"\bjenkins\b", " ".join(page.visible), re.I)
+        and any({"j_username", "j_password"}.issubset(form.inputs) for form in page.forms)
+    )
 
 
 def _get(client: HttpApiClient | ScopedHttpClient, base: str, path: str, basic: str | None = None) -> HttpResponse:
@@ -187,6 +252,9 @@ def detect_record(ctx: Any) -> dict[str, Any]:
 
 
 def detect_requests(ctx: Any) -> DetectionRequests:
+    state = getattr(ctx, "lifecycle_state", None)
+    if isinstance(state, JenkinsLifecycleState):
+        state.discard_anonymous()
     probable = False
     transport_ok = False
     signals: list[str] = []
@@ -222,6 +290,10 @@ def detect_requests(ctx: Any) -> DetectionRequests:
         if (api_ok and (version or who_ok or login_ok)) or (who_ok and login_ok) or (version and login_ok):
             anonymous_access = api_ok
             auth_required = False if anonymous_access else True if api.status in {401, 403} else None
+            confirmed_base = _confirmed_base(base, api, who, login, api_ok=api_ok, who_ok=who_ok, login_ok=login_ok)
+            state = getattr(ctx, "lifecycle_state", None)
+            if isinstance(state, JenkinsLifecycleState) and who is not None:
+                state.remember_anonymous(confirmed_base, who)
             return {
                 "host": ctx.host,
                 "port": ctx.port,
@@ -233,7 +305,7 @@ def detect_requests(ctx: Any) -> DetectionRequests:
                 "auth_required": auth_required,
                 "anonymous_jobs_access": False if api.status in {401, 403} else True if anonymous_access else None,
                 "version": version,
-                "api_endpoint": _confirmed_base(base, api, who, login, api_ok=api_ok, who_ok=who_ok, login_ok=login_ok),
+                "api_endpoint": confirmed_base,
             }
         # A successful unrelated HTTP response is not a reason to probe a
         # second scheme. Only transport failures or canonical HTTPS errors are.
@@ -277,11 +349,11 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     verified = False
     if identity_observed and data is not None and not safety_reason:
         state = getattr(ctx, "lifecycle_state", None)
-        anonymous = getattr(state, "jenkins_anonymous_whoami", None)
+        anonymous = state.anonymous_control(base) if isinstance(state, JenkinsLifecycleState) else None
         if anonymous is None:
             anonymous = _get(client, base, "/whoAmI/api/json")
-            if state is not None:
-                state.jenkins_anonymous_whoami = anonymous
+            if isinstance(state, JenkinsLifecycleState):
+                state.remember_anonymous(base, anonymous)
         if _auth_stop_reason(anonymous):
             evidence = anonymous
             safety_reason = _auth_stop_reason(anonymous)

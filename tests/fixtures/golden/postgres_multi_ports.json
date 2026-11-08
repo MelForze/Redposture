@@ -43,6 +43,11 @@
     "provided_password": "postgres",
     "provided_username": "postgres",
     "readable_tables": 7,
+    "server_implementation": {
+      "evidence": "sql_version_and_settings",
+      "product": "PostgreSQL",
+      "scope": "sql_backend"
+    },
     "service": "postgres",
     "service_identity": "postgresql_compatible",
     "show_columns": false,
@@ -142,6 +147,11 @@
     "provided_password": "postgres",
     "provided_username": "postgres",
     "readable_tables": 7,
+    "server_implementation": {
+      "evidence": "sql_version_and_settings",
+      "product": "PostgreSQL",
+      "scope": "sql_backend"
+    },
     "service": "postgres",
     "service_identity": "postgresql_compatible",
     "show_columns": false,
@@ -241,6 +251,11 @@
     "provided_password": "postgres",
     "provided_username": "postgres",
     "readable_tables": 7,
+    "server_implementation": {
+      "evidence": "sql_version_and_settings",
+      "product": "PostgreSQL",
+      "scope": "sql_backend"
+    },
     "service": "postgres",
     "service_identity": "postgresql_compatible",
     "show_columns": false,
@@ -340,6 +355,11 @@
     "provided_password": "postgres",
     "provided_username": "postgres",
     "readable_tables": 7,
+    "server_implementation": {
+      "evidence": "sql_version_and_settings",
+      "product": "PostgreSQL",
+      "scope": "sql_backend"
+    },
     "service": "postgres",
     "service_identity": "postgresql_compatible",
     "show_columns": false,
@@ -439,6 +459,11 @@
     "provided_password": "postgres",
     "provided_username": "postgres",
     "readable_tables": 7,
+    "server_implementation": {
+      "evidence": "sql_version_and_settings",
+      "product": "PostgreSQL",
+      "scope": "sql_backend"
+    },
     "service": "postgres",
     "service_identity": "postgresql_compatible",
     "show_columns": false,

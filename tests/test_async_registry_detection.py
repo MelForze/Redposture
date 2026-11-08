@@ -98,7 +98,7 @@ def test_all_vendor_records_and_requests_match(monkeypatch, product, positive):
         async def close(self):
             pass
 
-        async def get(self, url, *, headers=None):
+        async def get(self, url, *, headers=None, **redirect_policy):
             return response(url, headers)
 
     got = asyncio.run(

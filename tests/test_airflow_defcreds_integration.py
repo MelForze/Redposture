@@ -337,10 +337,13 @@ def test_airflow2_defcreds_checks_every_pair_and_continues_after_success_and_tra
 
     expected = _plan_pairs(plan)
     assert len(expected) == 19
-    # Every verified pair immediately obtains its own ACL evidence. The
-    # selected pair reuses that evidence in the later capability stage.
-    expected_requests = [pair for pair in expected for _ in range(2 if pair in valid else 1)]
-    assert server.basic_dag_requests == expected_requests
+    # The completed DAG proof already provides its count. Every valid pair
+    # still obtains its own Variables/Connections ACL, without a second DAG read.
+    assert server.basic_dag_requests == expected
+    for username, password in valid:
+        authorization = "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
+        for resource in ("variables", "connections"):
+            assert server.calls.count(("GET", f"/api/v1/{resource}", authorization)) == 1
     assert set(server.basic_dag_requests) == set(expected)
     credential_lines = [line for line in lines if "\t [+] " in line or "\t [-] " in line or "\t [!] " in line]
     assert len(credential_lines) == len(expected) - 1

@@ -12,6 +12,7 @@ from redposture_core.cli_args import parse_args
 from redposture_core.modules.minio import actions
 from redposture_core.modules.minio.stage import build_minio_plan, build_minio_spec
 from redposture_core.stage_runtime import AuditCommandRunner
+from tests.application_markup import application_page
 
 
 class _Server(ThreadingHTTPServer):
@@ -75,7 +76,7 @@ class _ConsoleHandler(_BaseHandler):
                     b"<Message>S3 API Requests must be made to API port.</Message></Error>",
                 )
             else:
-                self.reply(200, b"<html><title>MinIO Console</title><body>Login</body></html>")
+                self.reply(200, application_page("minio").encode())
         else:
             self.reply(404)
 

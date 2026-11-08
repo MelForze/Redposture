@@ -2065,8 +2065,20 @@ def authenticate_clickhouse(
     capability_evidence: dict[str, Any] = {}
     if session is not None:
         capability_evidence = _credential_capabilities(session)
+        from ...server_implementation import clickhouse_implementation
+
+        rows, identity_error = _query_rows(
+            session, "SELECT version(), value FROM system.build_options WHERE name = 'VERSION_FULL'"
+        )
+        implementation = clickhouse_implementation(rows)
+        if implementation is not None:
+            capability_evidence["server_implementation"] = implementation
+        if identity_error is not None:
+            capability_evidence["implementation_probe_error"] = str(identity_error)
         if bool(getattr(ctx.args, "enum_cve", False)) and state.server_version is None:
-            state.server_version = _read_clickhouse_version(session)
+            state.server_version = (
+                implementation["version"] if implementation is not None else _read_clickhouse_version(session)
+            )
             payload["server_version"] = state.server_version
         session_key = (credential.username, credential.password, source)
         state.credential_sessions[session_key] = session

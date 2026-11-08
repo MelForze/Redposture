@@ -145,6 +145,12 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
             dump=bool(options["dump"]),
             max_messages=options["max_messages"] if options["dump"] else None,
         )
+        if payload.get("kafka_interface") == "http_surface":
+            # These adapters already read their public catalogue while
+            # detecting. Carry only that evidence and unsupported-action
+            # metadata across a later unknown-auth gate; do not open access
+            # or perform another request to manufacture a complete result.
+            payload = _native_surfaces.collect(payload, options)
         return AuditRecord.from_mapping(payload, module="kafka", service="kafka")
 
     resolved_host_stage = getattr(actions, _PRODUCTION_HOST_STAGE.__name__, _PRODUCTION_HOST_STAGE)

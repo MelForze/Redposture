@@ -540,6 +540,22 @@ def _scan_decoded_text(
     return _scan_text_chunks(value.iter_text_chunks(), path, portion_bytes, decode_depth, deadline)
 
 
+def _scan_small_value(value: Any, path: str) -> tuple[list[SecretMatch], bool]:
+    reason: str | None = None
+
+    def incomplete(detail: str) -> None:
+        nonlocal reason
+        if reason is None:
+            reason = detail
+
+    matches = scan_value(value, object_path=path, _on_incomplete=incomplete)
+    if reason is not None:
+        retained = SpoolingSecretMatches(matches)
+        retained.incomplete_reason = reason
+        return retained, False
+    return matches, True
+
+
 def _scan_text_chunks(
     chunks: Iterable[str], path: str, portion_bytes: int, decode_depth: int = 0, deadline: float | None = None
 ) -> tuple[list[Any], bool]:
@@ -581,7 +597,9 @@ def _scan_text_chunks(
             matches.extend(found)
             covered &= complete
         else:
-            matches.extend(scan_value(item, object_path=path))
+            found, complete = _scan_small_value(item, path)
+            matches.extend(found)
+            covered &= complete
 
     scanner = DiscoveryTextStream(emit, incomplete, portion=portion_bytes)
     try:
@@ -690,7 +708,8 @@ def _scan_portioned_value(
         except (TypeError, ValueError):
             received_size = None
         if received_size is not None and not _small_encoded_blob(value):
-            return scan_value(value, object_path=path), received_size, False
+            small_matches, _complete = _scan_small_value(value, path)
+            return small_matches, received_size, False
         return [], 0, False
     if isinstance(value, DiskBackedText):
         key = path.rsplit(".", 1)[-1]
@@ -736,7 +755,8 @@ def _scan_portioned_value(
         return [], 0, False
     compressed = _small_encoded_blob(value) if small_size is not None else False
     if small_size is not None and not compressed:
-        return scan_value(value, object_path=path), small_size, True
+        small_matches, complete = _scan_small_value(value, path)
+        return small_matches, small_size, complete
     if isinstance(value, Mapping):
         matches = SpoolingSecretMatches()
         total = 0
@@ -770,7 +790,9 @@ def _scan_portioned_value(
                     else None
                 )
                 if (pair_size is not None or child_size is not None) and not _small_encoded_blob(child):
-                    matches.extend(scan_value(pair, object_path=path))
+                    found, covered = _scan_small_value(pair, path)
+                    matches.extend(found)
+                    complete &= covered
                     total += pair_size if pair_size is not None else int(child_size or 0)
                 else:
                     nested, size, covered = _scan_portioned_value(
@@ -975,7 +997,11 @@ def inspect_record(
         matches, size, covered = _scan_portioned_value(value, f"$.{path}", max_bytes, _deadline=started + max_seconds)
         if not covered:
             status = "partial"
-            partial_reasons.append("time_budget" if time.monotonic() - started >= max_seconds else "byte_budget")
+            partial_reasons.append(
+                "time_budget"
+                if time.monotonic() - started >= max_seconds
+                else getattr(matches, "incomplete_reason", None) or "byte_budget"
+            )
         consumed += size
         for match in matches:
             identity = (match.detector, fingerprint(match.value))

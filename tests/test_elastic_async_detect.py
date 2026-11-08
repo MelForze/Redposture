@@ -212,7 +212,9 @@ def test_hostname_uses_shared_client_without_per_worker_dns_pool() -> None:
     ("error", "operational"),
     [
         ("[Errno 22] Invalid argument", True),
-        ("\x00\x01\x02 not http ÿþ", False),
+        # status=0 is no decoded HTTP response, even when error text looks
+        # binary. It cannot prove a successful foreign HTTP response.
+        ("\x00\x01\x02 not http ÿþ", True),
     ],
 )
 def test_pre_detect_failure_distinguishes_local_socket_error(
@@ -240,6 +242,30 @@ def test_pre_detect_failure_distinguishes_local_socket_error(
     )
     assert record["operational_failure"] is operational
     assert is_pre_detect_operational_failure(record) is operational
+
+
+@pytest.mark.parametrize("status", [200, 404])
+def test_real_foreign_http_response_is_conclusive_not_a_transport_failure(monkeypatch, status):
+    monkeypatch.setattr(
+        elastic_actions,
+        "_request_with_tls_fallback",
+        lambda *_args, **_kwargs: (
+            status,
+            b"<html><title>Other service</title></html>",
+            {},
+            None,
+            "http",
+            False,
+            False,
+        ),
+    )
+    record = elastic_actions._audit_elastic_host(
+        "127.0.0.1", 9200, 1.0, 0, None, None, None, None, False, False, False, False, False
+    )
+    assert record["is_elastic"] is False
+    assert record["status"] == "not_elastic"
+    assert record.get("operational_failure") is not True
+    assert is_pre_detect_operational_failure(record) is False
 
 
 def _self_signed_context(tmp_path: Path) -> ssl.SSLContext:

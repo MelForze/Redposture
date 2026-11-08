@@ -16,6 +16,13 @@
     "connect_sid": null,
     "credential_attempts": [
       {
+        "credential_capabilities": {
+          "server_implementation": {
+            "evidence": "authenticated_database_banner",
+            "product": "Oracle Database",
+            "scope": "sql_backend"
+          }
+        },
         "error": null,
         "ok": true,
         "password": "OracleLab!2026",

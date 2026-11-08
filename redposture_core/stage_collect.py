@@ -44,6 +44,8 @@ COLLECT_VALIDATE_SHOW = True
 COLLECT_VALIDATE_MAX_LINES = 0
 COLLECT_VALIDATE_FAIL_ON_CREDS = False
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_PRODUCTION_COLLECT = collect_exporter_debug_data
+_PRODUCTION_DISCOVERY = scan_exporter_presence
 
 
 def _iter_collect_scan_items(target_plan: Any, ports: tuple[int, ...]) -> Iterator[tuple[str, int, str]]:
@@ -583,7 +585,14 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         else:
             emit_output_line(None, emit_line, line)
 
-    if target_plan.target_count > DEFAULT_MAX_NETWORK_HOSTS:
+    # Native CLI discovery and collection use the same bounded pipeline at
+    # every size. Specialized injected helpers may still require a complete
+    # found_by_host mapping; preserve their existing materialized contract.
+    use_streaming_pipeline = (
+        collect_exporter_debug_data is _PRODUCTION_COLLECT and scan_exporter_presence is _PRODUCTION_DISCOVERY
+    )
+    if target_plan.target_count > DEFAULT_MAX_NETWORK_HOSTS or use_streaming_pipeline:
+        host_count = len(hosts) if hosts else target_plan.target_count
         if args.debug:
             console.debug(f"pass=1 detect start total={target_plan.target_count}")
         default_ports = default_exporter_ports(discovery_exporters)
@@ -637,29 +646,33 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         data_ms = int((time.monotonic() - data_started_at) * 1000)
         if args.debug:
             console.debug(f"pass=1 detect complete checks={scan_checks} detected={scan_found}")
+            for key, value in sorted(collect_stats.items()):
+                if key.startswith("fallback_"):
+                    console.debug(f"detect fallback summary: {key}={value}")
             console.debug(f"pass=2 deep complete processed={scan_found}")
             console.debug(f"stage_trace stage_name=data attempt=1 duration_ms={data_ms} result=ok error=-")
             total_ms = int((time.monotonic() - pipeline_started_at) * 1000)
             console.debug(
-                f"stage_timing_summary status=ok attempts=1/1 detect_ms=0 data_ms={data_ms} total_ms={total_ms}"
+                f"stage_timing_summary status=ok attempts=1/1 pipeline_ms={data_ms} total_ms={total_ms} "
+                "phases=overlapped"
             )
         save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
         resume_suffix = f" resumed={skipped_jobs_total}" if (resume_enabled and checkpoint_path) else ""
         if stream_to_stdout and args.output_format == "txt":
             console.info(
-                f"collect complete: hosts={target_plan.target_count} checks={scan_checks} "
+                f"collect complete: hosts={host_count} checks={scan_checks} "
                 f"detected={scan_found} requests={requests} success={success}{save_suffix}{resume_suffix}"
             )
         elif not stream_to_stdout:
             console.info(
-                f"collect complete: hosts={target_plan.target_count} checks={scan_checks} detected={scan_found} "
+                f"collect complete: hosts={host_count} checks={scan_checks} detected={scan_found} "
                 f"requests={requests} success={success} format={args.output_format} output={args.output}"
                 f"{save_suffix}{resume_suffix}"
             )
         validate_rc = _finish_validation()
         summary_mode = "a"
         _emit_collect_summary(
-            target_plan.target_count,
+            host_count,
             resumed_success + requests,
             resumed_success + success,
             errors_count=collect_errors,
@@ -686,6 +699,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     has_target_overrides = any(spec.explicit_port is not None or spec.scheme is not None for spec in target_specs)
     scan_errors = 0
+    scan_fallback_stats: dict[str, int] = {}
     found_by_scheme: dict[str, dict[str, list[dict[str, Any]]]] = {}
     if not has_target_overrides:
         scan_stats: dict[str, int] = {}
@@ -710,6 +724,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 **_collect_transport_kwargs("http", tls_context),
             )
             scan_errors = int(scan_stats.get("errors", 0))
+            scan_fallback_stats.update({key: value for key, value in scan_stats.items() if key.startswith("fallback_")})
             found_by_scheme["http"] = found_by_host
         except OSError as exc:
             console.error(f"failed to process collect discovery scan: {exc}")
@@ -760,6 +775,9 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 scan_checks += part_checks
                 scan_found += part_found
                 scan_errors += int(part_scan_stats.get("errors", 0))
+                for key, value in part_scan_stats.items():
+                    if key.startswith("fallback_"):
+                        scan_fallback_stats[key] = scan_fallback_stats.get(key, 0) + value
                 if outer_progress is not None:
                     outer_progress.advance(part_checks)
                 for host, hits in part_found_by_host.items():
@@ -787,6 +805,8 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     deep_candidates = sum(1 for host in hosts if found_by_host.get(host))
     if args.debug:
         console.debug(f"pass=1 detect complete checks={scan_checks} detected={scan_found}")
+        for key, value in sorted(scan_fallback_stats.items()):
+            console.debug(f"detect fallback summary: {key}={value}")
         console.debug(f"stage_trace stage_name=detect_protocol attempt=1 duration_ms={detect_ms} result=ok error=-")
         console.debug(f"pass=2 deep start total={deep_candidates}")
         for host in hosts:

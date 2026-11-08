@@ -32,6 +32,7 @@ from ...clients.http_api import (
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...detection_io import DetectCall, DetectDelay, HttpRead, run_sync
+from ...html_fingerprint import markup_evidence
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...scheduler import BoundedScheduler
 from ...stage_runtime import (
@@ -341,12 +342,16 @@ def _api_get_json(
 
 
 def _detect_login_page(body: str) -> bool:
-    text = body.lower()
-    has_gitlab_title = bool(re.search(r"<title[^>]*>[^<]*\bgitlab\b[^<]*</title\s*>", text))
-    has_sign_in_form = bool(
-        re.search(r"<form\b[^>]*\baction\s*=\s*['\"][^'\"]*/users/sign_in(?:[?#][^'\"]*)?['\"]", text)
-    )
-    return has_gitlab_title and has_sign_in_form
+    page = markup_evidence(body)
+    if page is None or not re.search(r"\bgitlab\b", page.title, re.I):
+        return False
+    for form in page.forms:
+        try:
+            if urllib.parse.urlsplit(form.action).path.endswith("/users/sign_in"):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 class _GitLabLoginForm(HTMLParser):
@@ -388,6 +393,27 @@ def _gitlab_active_captcha(body: str) -> bool:
             r"(?:class|name)\s*=\s*['\"][^'\"]*(?:g-recaptcha|h-captcha|captcha-response)", body, re.IGNORECASE
         )
     )
+
+
+def _gitlab_login_feedback(body: str) -> bool:
+    """A rendered credential error is proof; status/form/CSRF alone are not."""
+    page = markup_evidence(body, capture=("div", "flash-alert"))
+    if page is None:
+        return False
+    feedback = "".join(page.captured)
+    if not feedback:
+        # Current GitLab/Bootstrap alert variants; never inspect inert script,
+        # template or example strings as an actual sign-in failure.
+        classes = {token for row in page.attributes.get("div", []) for token in row.get("class", "").split()}
+        for css in ("gl-alert-danger", "alert-danger"):
+            if css in classes:
+                alert = markup_evidence(body, capture=("div", css))
+                if alert is not None:
+                    feedback = "".join(alert.captured)
+                    if feedback:
+                        break
+    rejected = re.search(r"\binvalid\s+(?:login|email|username)\s+or\s+password\b", feedback, re.I) is not None
+    return rejected
 
 
 def verify_gitlab_web_credentials(ctx: Any, username: str, password: str) -> tuple[bool | None, str | None]:
@@ -450,8 +476,11 @@ def verify_gitlab_web_credentials(ctx: Any, username: str, password: str) -> tup
     if _gitlab_active_captcha(posted_text) or detect_browser_sso(headers=posted.headers, body=posted_text) is not None:
         state.web_auth_blocked = True
         return None, "GitLab SSO or CAPTCHA login is not checked"
-    if posted.status in {401, 422} or (posted.status == 200 and _detect_login_page(posted_text)):
-        return False, "GitLab login rejected"
+    if posted.status in {200, 401, 422}:
+        if _gitlab_login_feedback(posted_text):
+            return False, "GitLab login rejected"
+        if posted.status in {401, 422}:
+            return None, f"GitLab login inconclusive status={posted.status}; credential rejection was not confirmed"
     if posted.status not in {200, 302, 303}:
         return None, f"GitLab login inconclusive status={posted.status}"
     location = str(posted.headers.get("location") or "")
@@ -623,7 +652,51 @@ def _probe_project_capabilities(
     }
 
 
+def _exact_project_total(headers: dict[str, str], items: list[dict[str, Any]], *, payload_items: int) -> int | None:
+    """Use an internally consistent first-page REST total, never an estimate.
+
+    GitLab can omit totals (notably above 10k records). Missing, malformed or
+    inconsistent metadata falls back to the original full pagination path.
+    """
+    values = []
+    for name in ("x-total", "x-total-pages", "x-page", "x-per-page"):
+        value = str(headers.get(name) or "").strip()
+        if not value.isascii() or not value.isdecimal() or len(value) > 20:
+            return None
+        values.append(int(value))
+    total, pages, page, per_page = values
+    if page != 1 or not 1 <= per_page <= _MAX_PER_PAGE or payload_items != len(items):
+        return None
+    if len(items) != min(total, per_page):
+        return None
+    expected_pages = (total + per_page - 1) // per_page
+    if pages != expected_pages and not (total == 0 and pages == 1):
+        return None
+    next_page = str(headers.get("x-next-page") or "").strip()
+    if next_page != ("2" if pages > 1 else ""):
+        return None
+    return total
+
+
 def _paginate_projects(
+    host: str, port: int, timeout: float, *, use_https: bool, token: str | None, public_only: bool
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    rows, error = _read_project_pages(host, port, timeout, use_https=use_https, token=token, public_only=public_only)
+    assert rows is None or isinstance(rows, list)
+    return rows, error
+
+
+def _count_projects(
+    host: str, port: int, timeout: float, *, use_https: bool, token: str | None, public_only: bool
+) -> tuple[int | None, str | None]:
+    count, error = _read_project_pages(
+        host, port, timeout, use_https=use_https, token=token, public_only=public_only, count_only=True
+    )
+    assert count is None or isinstance(count, int)
+    return count, error
+
+
+def _read_project_pages(
     host: str,
     port: int,
     timeout: float,
@@ -631,13 +704,19 @@ def _paginate_projects(
     use_https: bool,
     token: str | None,
     public_only: bool,
-) -> tuple[list[dict[str, Any]] | None, str | None]:
+    count_only: bool = False,
+) -> tuple[list[dict[str, Any]] | int | None, str | None]:
     page = 1
     projects: list[dict[str, Any]] = []
+    count = 0
     visited_pages: set[int] = set()
+
+    def obtained() -> list[dict[str, Any]] | int:
+        return count if count_only else projects
+
     while len(visited_pages) < _MAX_PROJECT_PAGES:
         if page in visited_pages:
-            return projects, "partial: GitLab pagination loop detected"
+            return obtained(), "partial: GitLab pagination loop detected"
         visited_pages.add(page)
         query: list[tuple[str, str]] = [
             ("per_page", str(_MAX_PER_PAGE)),
@@ -658,22 +737,28 @@ def _paginate_projects(
             token=token,
         )
         if error:
-            return (projects if projects else None), f"partial: {error}" if projects else error
+            return (obtained() if count else None), f"partial: {error}" if count else error
         if status == 401 or status == 403:
             message = "authentication required"
-            return (projects if projects else None), f"partial: {message}" if projects else message
+            return (obtained() if count else None), f"partial: {message}" if count else message
         if status == 404:
             message = "GitLab API v4 not available"
-            return (projects if projects else None), f"partial: {message}" if projects else message
+            return (obtained() if count else None), f"partial: {message}" if count else message
         if status != 200:
             message = f"unexpected API status={status}"
-            return (projects if projects else None), f"partial: {message}" if projects else message
+            return (obtained() if count else None), f"partial: {message}" if count else message
         if not isinstance(payload, list):
             message = "unexpected API payload"
-            return (projects if projects else None), f"partial: {message}" if projects else message
+            return (obtained() if count else None), f"partial: {message}" if count else message
 
         page_items: list[dict[str, Any]] = [item for item in payload if isinstance(item, dict)]
-        projects.extend(page_items)
+        if count_only and page == 1:
+            exact = _exact_project_total(headers, page_items, payload_items=len(payload))
+            if exact is not None:
+                return exact, None
+        count += len(page_items)
+        if not count_only:
+            projects.extend(page_items)
 
         next_page = str(headers.get("x-next-page") or "").strip()
         if next_page.isdigit() and int(next_page) > page:
@@ -682,8 +767,8 @@ def _paginate_projects(
         if len(page_items) >= _MAX_PER_PAGE:
             page += 1
             continue
-        return projects, None
-    return projects, "partial: GitLab pagination limit exceeded"
+        return obtained(), None
+    return obtained(), "partial: GitLab pagination limit exceeded"
 
 
 def _fetch_project_by_ref(
@@ -1779,6 +1864,12 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
     use_https = bool(record.get("https"))
     token = str(ctx.credential.token or "").strip() or None
     project_filters = list(options["project_filters"])
+    count_only = bool(options.get("count_only")) and not (
+        options.get("show_repositories") or project_filters or options["clone"]
+    )
+    public_count: int | None = 0
+    token_count: int | None = 0
+    read_catalogue = _count_projects if count_only else _paginate_projects
     open_endpoints: list[dict[str, Any]] = []
     if not token and record.get("version"):
         open_endpoints.append({"path": "/api/v4/version", "status": 200})
@@ -1787,7 +1878,7 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
             status, _payload, _headers, error = _http_request(host, port, "GET", path, timeout, use_https=use_https)
             if error is None and status < 400:
                 open_endpoints.append({"path": path, "status": status})
-    public_all, public_error = _paginate_projects(
+    public_all, public_error = read_catalogue(
         host,
         port,
         timeout,
@@ -1800,14 +1891,16 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
         if isinstance(public_all, list)
         else []
     )
-    if isinstance(public_all, list) and not token:
+    if count_only:
+        public_count = public_all if isinstance(public_all, int) else 0
+    if public_all is not None and not token:
         open_endpoints.append({"path": "/api/v4/projects?visibility=public", "status": 200})
 
     token_projects: list[dict[str, Any]] = []
     token_access: list[dict[str, Any]] = []
     token_projects_error = state.token_error
     if state.token_valid and token:
-        token_all, token_projects_error = _paginate_projects(
+        token_all, token_projects_error = read_catalogue(
             host,
             port,
             timeout,
@@ -1815,6 +1908,8 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
             token=token,
             public_only=False,
         )
+        if count_only:
+            token_count = token_all if isinstance(token_all, int) else 0
         if isinstance(token_all, list):
             token_projects = [item for item in token_all if _project_matches_filters(item, project_filters)]
 
@@ -1922,10 +2017,10 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
     record.update(
         {
             "open_endpoints": open_endpoints,
-            "public_projects": public_projects,
+            "public_projects": None if count_only else public_projects,
             "public_projects_error": public_error,
             "project_filters": project_filters,
-            "token_projects": token_projects,
+            "token_projects": None if count_only else token_projects,
             "token_projects_error": token_projects_error,
             "token_access": token_access,
             "clone_requested": bool(options["clone"]),
@@ -1934,6 +2029,9 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
             "clone_results": clone_results,
         }
     )
+    if count_only:
+        record["public_projects_count"] = public_count
+        record["token_projects_count"] = token_count
     state.deep_record = record
     return record
 

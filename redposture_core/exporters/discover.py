@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import ssl
+import time
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -366,6 +367,9 @@ def scan_exporter_presence(
 ) -> tuple[int, int, dict[str, list[dict[str, Any]]]]:
     # Collect hides ordinary misses in its live output. Keep every probe and
     # every requested scan-file record; only skip unused console formatting.
+    from ..detection_diagnostics import FallbackDiagnostics
+
+    fallback_stats = FallbackDiagnostics()
     exporters = prepare_exporter_catalog(list(discovery_exporters or DISCOVERY_EXPORTERS))
     if custom_ports:
         ports = list(dict.fromkeys(int(port) for port in custom_ports))
@@ -481,14 +485,22 @@ def scan_exporter_presence(
                     from .async_detect import prefetch_metrics, scan_with_prefetched_metrics
 
                     async def prepare(item: tuple[str, int, str]) -> Any:
+                        started = time.monotonic()
                         try:
                             return await prefetch_metrics(item[0], item[1], item[2], timeout, retries, tls_context)
-                        except AsyncHttpFallback:
+                        except AsyncHttpFallback as exc:
+                            fallback_stats.record(
+                                "exporters", str(exc), seconds=time.monotonic() - started, requests=exc.native_requests
+                            )
                             return None
 
                     def finish(item: tuple[str, int, str], prepared: Any) -> Any:
                         if prepared is None:
-                            return _scan_item(item)
+                            started = time.monotonic()
+                            try:
+                                return _scan_item(item)
+                            finally:
+                                fallback_stats.record_sync("exporters", time.monotonic() - started)
                         try:
                             return scan_with_prefetched_metrics(
                                 item[0], item[1], exporters, timeout, retries, item[2], prepared
@@ -553,6 +565,7 @@ def scan_exporter_presence(
             emit_output_line(out_fh, emit_line, format_scan_record(summary, output_format))
         if stats_sink is not None:
             stats_sink["checks"] = total_checks
+            stats_sink.update(fallback_stats.flat_stats())
             stats_sink["found"] = total_found
             stats_sink["errors"] = total_errors
     finally:

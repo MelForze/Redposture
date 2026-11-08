@@ -9,6 +9,7 @@ from ...clients.http_session import HttpSessionPool
 from ...detection_io import DetectCall as _DetectCall
 from ...detection_io import HttpRead as _HttpRead
 from ...detection_io import run_sync as _run_detect_sync
+from ...html_fingerprint import document_title
 from ...utils import utc_now_iso
 
 _PRODUCTS = {
@@ -90,12 +91,13 @@ def _detect_detect_steps(pool: HttpSessionPool, base: str, ctx: Any):
     version: str | None = None
     signals: list[str] = []
     inventory: list[str] = []
+    inventory_partial = False
     anonymous_read: bool | None = None
     if "akhq" in candidates or "redpanda_console" in candidates or "kafka_connect" in candidates:
         home = yield _DetectCall(_get, (pool, base, "/"), {})
     if "akhq" in candidates and home is not None:
         page = (yield _DetectCall(_get, (pool, base, "/ui"), {})) if home.status in {301, 302, 307, 308} else home
-        if page.status == 200 and "<title>AKHQ</title>" in page.text[:32768]:
+        if page.status == 200 and not page.error and not page.truncated and document_title(page.text[:32768]) == "AKHQ":
             me = _json((yield _DetectCall(_get, (pool, base, "/api/me"), {})))
             if isinstance(me, dict) and isinstance(me.get("logged"), bool) and isinstance(me.get("roles"), list):
                 vendor, signals = ("akhq", ["akhq_title", "akhq_me_schema"])
@@ -103,18 +105,27 @@ def _detect_detect_steps(pool: HttpSessionPool, base: str, ctx: Any):
                     isinstance(role, dict) and "READ" in role.get("actions", ()) for role in me["roles"]
                 )
     if vendor is None and "redpanda_console" in candidates and (home is not None):
-        if home.status == 200 and "<title>Redpanda Console</title>" in home.text[:32768]:
+        if (
+            home.status == 200
+            and not home.error
+            and not home.truncated
+            and document_title(home.text[:32768]) == "Redpanda Console"
+        ):
             startup = _json((yield _DetectCall(_get, (pool, base, "/admin/startup"), {})))
-            if isinstance(startup, dict):
+            if isinstance(startup, dict) and all(type(startup.get(key)) is bool for key in ("isHttpOk", "isKafkaOk")):
                 vendor, signals = ("redpanda_console", ["redpanda_title", "redpanda_startup"])
                 topics = _json((yield _DetectCall(_get, (pool, base, "/api/topics"), {})))
-                anonymous_read = isinstance(topics, (list, dict))
-                if isinstance(topics, list):
-                    inventory = [
-                        str(item.get("name"))
-                        for item in topics
-                        if isinstance(item, dict) and isinstance(item.get("name"), str)
-                    ]
+                items = topics.get("topics") if isinstance(topics, dict) else topics
+                if isinstance(items, list):
+                    for item in items:
+                        name = item.get("topicName", item.get("name")) if isinstance(item, dict) else None
+                        if isinstance(name, str) and name:
+                            inventory.append(name)
+                        else:
+                            inventory_partial = True
+                    anonymous_read = True if not inventory_partial else None
+                else:
+                    inventory_partial = True
     if vendor is None and "kafka_rest_proxy" in candidates:
         topics_response = yield _DetectCall(_get, (pool, base, "/topics"), {})
         clusters = _json((yield _DetectCall(_get, (pool, base, "/v3/clusters"), {})))
@@ -175,6 +186,7 @@ def _detect_detect_steps(pool: HttpSessionPool, base: str, ctx: Any):
         "auth_required": False if anonymous_read else None,
         "anonymous_read": anonymous_read,
         "http_inventory": inventory,
+        **({"http_inventory_partial": inventory_partial} if vendor == "redpanda_console" else {}),
         "status": "open_no_auth" if anonymous_read else "unknown_auth",
         "detection_status": "confirmed",
         "detection_signals": signals,
@@ -193,6 +205,8 @@ def collect(record: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
     if options.get("show_topics") and vendor in {"kafka_rest_proxy", "redpanda_console"}:
         payload["show_topics"] = True
         payload["ui_topics"] = [{"name": item} for item in items if isinstance(item, str)]
+        if record.get("http_inventory_partial"):
+            payload["ui_topics_partial"] = True
     elif options.get("show_topics"):
         payload["ui_unsupported_actions"] = "topic enumeration is not supported by this HTTP surface"
     if options.get("dump"):

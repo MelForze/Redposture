@@ -59,3 +59,22 @@ def test_auth_required_text_preserves_boolean_json_semantics() -> None:
     assert auth_required_text(True, "native") == "True"
     assert auth_required_text(False, "anonymous") == "False"
     assert auth_required_text(None, None) == "unknown"
+
+
+def test_actual_entra_cdn_script_keeps_existing_provider_evidence() -> None:
+    result = detect_browser_sso(
+        body='<script src="https://aadcdn.msftauth.net/shared/1.0/content/js/login.js"></script>'
+    )
+    assert result is not None and result.provider == "entra"
+
+
+def test_entra_cdn_examples_and_lookalike_script_hosts_are_not_provider_evidence() -> None:
+    script = '<script src="https://aadcdn.msftauth.net/auth.js"></script>'
+    for body in [
+        "<!--" + script + "-->",
+        "<template>" + script + "</template>",
+        '<script>const example="https://aadcdn.msftauth.net/auth.js";</script>',
+        '<script src="https://aadcdn.msftauth.net.other.example/auth.js"></script>',
+        '<script src="https://docs.example/js?example=https://aadcdn.msftauth.net/auth.js"></script>',
+    ]:
+        assert detect_browser_sso(body=body) is None

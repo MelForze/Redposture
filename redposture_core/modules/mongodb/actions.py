@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from ...clients import transport
 from ...clients.mongodb import (
@@ -17,6 +19,7 @@ from ...clients.mongodb import (
     close_quietly,
     is_auth_error,
     is_legacy_wire_error,
+    is_mongodb_hello_response,
     is_transient_network_error,
     json_safe,
     non_system_databases,
@@ -218,8 +221,47 @@ class MongoLifecycleState:
     def __init__(self, ctx: Any) -> None:
         # A PyMongo client also owns monitoring sockets. Reserve conservatively.
         self.sessions = SessionHandoff(getattr(ctx, "session_budget", None), budget_units=3)
+        self._bootstrap: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+        self._bootstrap_lock = threading.Lock()
+        self._closed = False
+
+    def remember_bootstrap(self, key: tuple[Any, ...], record: dict[str, Any]) -> None:
+        """Keep only a complete protected-backend proof in this target lifecycle."""
+        hello = record.get("hello")
+        if not (
+            record.get("is_mongodb") is True
+            and record.get("status") == "auth_required"
+            and record.get("auth_required") is True
+            and not record.get("database")
+            and record.get("error") == "authentication required"
+            and isinstance(hello, dict)
+            and is_mongodb_hello_response(hello)
+        ):
+            with self._bootstrap_lock:
+                self._bootstrap = None
+            return
+        proof = {
+            "status": "auth_required",
+            "auth_required": True,
+            "hello": dict(hello),
+            "server_version": record.get("server_version"),
+        }
+        with self._bootstrap_lock:
+            if not self._closed:
+                self._bootstrap = (key, proof)
+
+    def take_bootstrap(self, key: tuple[Any, ...]) -> dict[str, Any] | None:
+        """Consume once; a retry or changed connection must verify afresh."""
+        with self._bootstrap_lock:
+            proof, self._bootstrap = self._bootstrap, None
+            if self._closed or proof is None or proof[0] != key:
+                return None
+            return proof[1]
 
     def close(self) -> None:
+        with self._bootstrap_lock:
+            self._closed = True
+            self._bootstrap = None
         self.sessions.close()
 
 
@@ -273,6 +315,50 @@ def _open_client(
     return MongoAuditClient(raw_client)
 
 
+_OPEN_CLIENT_ORIGINAL = _open_client
+_OPEN_MONGODB_CLIENT_ORIGINAL = open_mongodb_client
+
+
+def _open_metadata_client(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    username: str | None,
+    password: str | None,
+    auth_db: str,
+    tls: bool = False,
+    tls_ca: str | None = None,
+    tls_cert_key: str | None = None,
+    tls_insecure: bool = False,
+) -> MongoAuditClient:
+    from ...clients.mongodb_metadata import MongoMetadataClient, MongoMetadataFallback
+
+    options = _mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure)
+    try:
+        ipaddress.ip_address(host[1:-1] if host.startswith("[") and host.endswith("]") else host)
+        numeric = True
+    except ValueError:
+        numeric = False
+    # Preserve SDK DNS selection, TLS/OCSP/certificates and embedded factories.
+    if (
+        not options
+        and numeric
+        and _open_client is _OPEN_CLIENT_ORIGINAL
+        and open_mongodb_client is _OPEN_MONGODB_CLIENT_ORIGINAL
+        and isinstance(username, str)
+        and isinstance(password, str)
+    ):
+        try:
+            return MongoMetadataClient(
+                host, port, username=username, password=password, auth_db=auth_db, timeout=timeout
+            )
+        except MongoMetadataFallback:
+            # The native constructor guarantees no saslStart was sent.
+            pass
+    return _open_client(host, port, timeout, username=username, password=password, auth_db=auth_db, **options)
+
+
 def _mongodb_tls_kwargs(
     tls: bool,
     tls_ca: str | None,
@@ -311,6 +397,7 @@ def _try_credentials(
     tls_insecure: bool = False,
     selected_clients: list[tuple[Any, Any]] | None = None,
     session_cache: SessionHandoff | None = None,
+    metadata_only: bool = False,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Try every candidate; return the first success + the complete attempt log.
 
@@ -337,7 +424,7 @@ def _try_credentials(
             mongo = (
                 lease.value
                 if lease is not None
-                else _open_client(
+                else (_open_metadata_client if metadata_only else _open_client)(
                     host,
                     port,
                     timeout,
@@ -348,7 +435,7 @@ def _try_credentials(
                 )
             )
             raw_client = mongo.client
-            mongo.hello()
+            authenticated_hello = mongo.hello()
             identity = mongo.run_command("admin", {"connectionStatus": 1}).get("authInfo")
             users = identity.get("authenticatedUsers") if isinstance(identity, dict) else None
             if not isinstance(users, list) or not any(
@@ -364,14 +451,29 @@ def _try_credentials(
                 "credential_state": "valid",
             }
             evidence: dict[str, Any] = {}
+            from ...server_implementation import mongodb_implementation
+
+            build_info: dict[str, Any] = {}
+            try:
+                build_info = mongo.server_info()
+            except Exception as exc:
+                evidence["implementation_probe_error"] = normalize_mongodb_error(exc)
+            implementation = mongodb_implementation(authenticated_hello, build_info)
+            if implementation is not None:
+                evidence["server_implementation"] = implementation
             try:
                 names, database_error = _try_list_databases(mongo)
                 evidence["database_count"] = len(names) if names is not None else None
                 evidence["database_error"] = database_error
                 count = 0
                 if names is not None:
+                    count_names = getattr(mongo, "count_collection_names", None)
                     for database_name in names:
-                        count += len(mongo.list_collection_names(database_name))
+                        count += (
+                            count_names(database_name)
+                            if callable(count_names)
+                            else len(mongo.list_collection_names(database_name))
+                        )
                 evidence["collection_count"] = count if names is not None else None
             except Exception as exc:
                 evidence["collection_count"] = None
@@ -816,6 +918,7 @@ def _audit_mongodb_host(
     discover: bool = False,
     audit_ctx: Any | None = None,
     session_cache: SessionHandoff | None = None,
+    anonymous_bootstrap: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, int(retries) + 1)
     last_error: str | None = None
@@ -853,24 +956,41 @@ def _audit_mongodb_host(
         active_lease: SessionLease | None = None
         audit_complete = False
         try:
-            client = _open_client(
-                host,
-                port,
-                timeout,
-                username=None,
-                password=None,
-                auth_db=auth_database,
-                **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
+            anon_databases: list[str] | None
+            anon_error: str | None
+            reuse_bootstrap = (
+                attempt == 0
+                and bool(credential_candidates)
+                and selected_database is None
+                and anonymous_bootstrap is not None
+                and anonymous_bootstrap.get("status") == "auth_required"
+                and anonymous_bootstrap.get("auth_required") is True
+                and isinstance(anonymous_bootstrap.get("hello"), dict)
+                and is_mongodb_hello_response(anonymous_bootstrap["hello"])
             )
-            hello = client.hello()
-            version = None
-            try:
-                info = client.server_info()
-                version = str(info.get("version") or "").strip() or None
-            except Exception:
-                version = str(hello.get("version") or "").strip() or None
-
-            anon_databases, anon_error = _try_list_databases(client)
+            if reuse_bootstrap:
+                assert anonymous_bootstrap is not None
+                hello = anonymous_bootstrap["hello"]
+                version = anonymous_bootstrap.get("server_version")
+                anon_databases, anon_error = None, "authentication required"
+            else:
+                client = _open_client(
+                    host,
+                    port,
+                    timeout,
+                    username=None,
+                    password=None,
+                    auth_db=auth_database,
+                    **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
+                )
+                hello = client.hello()
+                version = None
+                try:
+                    info = client.server_info()
+                    version = str(info.get("version") or "").strip() or None
+                except Exception:
+                    version = str(hello.get("version") or "").strip() or None
+                anon_databases, anon_error = _try_list_databases(client)
             # "authentication required" is the canonical marker _try_list_databases sets
             # when is_auth_error matched, but some servers surface auth failures under
             # other normalized messages ("not authorized", "authentication failed"). If we
@@ -883,7 +1003,27 @@ def _audit_mongodb_host(
 
             if credential_candidates:
                 ownership_options: dict[str, Any] = (
-                    {"selected_clients": selected_clients, "session_cache": session_cache}
+                    {
+                        "selected_clients": selected_clients,
+                        "session_cache": session_cache,
+                        "metadata_only": not any(
+                            (
+                                selected_database,
+                                show_databases,
+                                show_collections,
+                                show_indexes,
+                                collection_targets,
+                                collection_targets_by_database,
+                                dump_documents,
+                                query_filter is not None,
+                                projection is not None,
+                                document_selector is not None,
+                                index_filter,
+                                nosql_command is not None,
+                                discover,
+                            )
+                        ),
+                    }
                     if _try_credentials is _TRY_CREDENTIALS_ORIGINAL
                     else {}
                 )
@@ -924,6 +1064,11 @@ def _audit_mongodb_host(
                     # leaked pymongo topology/monitor threads under exceptions.
                     active_client_ref = active_client
                     active_client_owned_ref = True
+                    selected_implementation = (selected_credential.get("credential_capabilities") or {}).get(
+                        "server_implementation"
+                    )
+                    if version is None and isinstance(selected_implementation, dict):
+                        version = selected_implementation.get("version")
                     if version is None:
                         try:
                             authenticated_info = active_client.server_info()
@@ -990,8 +1135,14 @@ def _audit_mongodb_host(
                 if discover and audit_ctx is not None and allow_data_actions
                 else None
             )
+            # No credential was accepted after a protected cached bootstrap:
+            # the empty collector is pure (no selected DB or enabled actions).
+            # Successful credentials always own their independently verified SDK
+            # client; an async client is never moved to this sync worker.
+            if allow_data_actions:
+                assert active_client is not None
             data = _collect_mongodb_data(
-                active_client,
+                cast(MongoAuditClient, active_client),
                 database_names=database_names,
                 selected_database=selected_database,
                 collection_targets=collection_targets if allow_data_actions else [],
@@ -1161,6 +1312,25 @@ def _audit_mongodb_host_stage(
     lifecycle_state: Any | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
+    bootstrap_options: dict[str, Any] = {}
+    if isinstance(lifecycle_state, MongoLifecycleState):
+        bootstrap_options["session_cache"] = lifecycle_state.sessions
+    if isinstance(lifecycle_state, MongoLifecycleState) and run_deep_checks and credential_candidates and not database:
+        key = _mongo_session_key(
+            host,
+            port,
+            timeout,
+            None,
+            None,
+            str(auth_db or "admin").strip() or "admin",
+            tls,
+            tls_ca,
+            tls_cert_key,
+            tls_insecure,
+        )
+        proof = lifecycle_state.take_bootstrap(key)
+        if proof is not None:
+            bootstrap_options["anonymous_bootstrap"] = proof
     record = _audit_mongodb_host(
         host,
         port,
@@ -1187,8 +1357,24 @@ def _audit_mongodb_host_stage(
         tls_insecure=tls_insecure,
         discover=discover and run_deep_checks,
         audit_ctx=audit_ctx,
-        **({"session_cache": lifecycle_state.sessions} if isinstance(lifecycle_state, MongoLifecycleState) else {}),
+        **bootstrap_options,
     )
+    if isinstance(lifecycle_state, MongoLifecycleState) and not run_deep_checks and not credential_candidates:
+        lifecycle_state.remember_bootstrap(
+            _mongo_session_key(
+                host,
+                port,
+                timeout,
+                None,
+                None,
+                str(auth_db or "admin").strip() or "admin",
+                tls,
+                tls_ca,
+                tls_cert_key,
+                tls_insecure,
+            ),
+            record,
+        )
     record["show_databases_limit"] = show_databases_limit if run_deep_checks else None
     record["show_collections_limit"] = show_collections_limit if run_deep_checks else None
     record["show_indexes_limit"] = show_indexes_limit if run_deep_checks else None

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "split": "holdout-v1",
+  "provenance": "Hand-labelled unrelated business API and transport controls; synthetic, not captured products. Expected identities were assigned before the gate run, independently of classifiers.",
+  "cases": [
+    {"id": "inventory-envelope", "status": 200, "content_type": "application/json", "body": "{\"result\":{\"collections\":[]},\"status\":\"ok\",\"time\":0.0031,\"service\":\"inventory-control\"}", "expected": false},
+    {"id": "business-capabilities", "status": 200, "content_type": "application/json", "body": "{\"data\":{\"clustername\":\"billing-cluster\",\"cap\":{}},\"service\":\"billing-control\"}", "expected": false},
+    {"id": "plain-version-build", "status": 200, "content_type": "application/json", "body": "{\"version\":\"9.8.7\",\"build\":\"20261108\",\"service\":\"catalog-control\"}", "expected": false},
+    {"id": "sso-documentation", "status": 200, "content_type": "text/html", "body": "<html><title>Corporate sign in</title><main>Supported integrations: Grafana Jenkins GitLab Qdrant Proxmox MinIO</main><!-- examples, not installed applications --><form action='/session'><input name='username'></form></html>", "expected": false},
+    {"id": "rate-limited-gateway", "status": 429, "content_type": "text/html", "body": "<html><title>Too Many Requests</title><p>gateway control</p></html>", "expected": false},
+    {"id": "damaged-json", "status": 200, "content_type": "application/json", "body": "{\"version\":{\"number\":\"9.8.7\"},\"result\":", "expected": false}
+  ]
+}

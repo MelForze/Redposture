@@ -14,6 +14,7 @@ from redposture_core.clients.http_api import HttpResponse
 from redposture_core.console import Console
 from redposture_core.modules.grafana import stage
 from redposture_core.stage_runtime import AuditCommandRunner
+from tests.application_markup import application_page
 from tests.test_grafana_auth_ping import Peer
 from tests.test_grafana_extended_auth import PAYLOADS
 from tests.test_grafana_extended_auth import Peer as ExtendedPeer
@@ -53,7 +54,7 @@ def test_prefixed_live_http_verifier_and_saved_output(tmp_path, mode, output_for
             if local_path == "/api/health":
                 result = peer.reply(200, {"database": "ok", "version": "13.0.1", "commit": "abcdef"})
             elif local_path == "/login" and self.command == "GET":
-                result = HttpResponse(200, b"<html><title>Grafana</title></html>", {"Content-Type": "text/html"})
+                result = HttpResponse(200, application_page("grafana").encode(), {"Content-Type": "text/html"})
             elif fallback_path is not None and mode == "unavailable":
                 result = peer.reply(404, {})
             else:

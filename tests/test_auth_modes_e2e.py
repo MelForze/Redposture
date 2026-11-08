@@ -15,6 +15,7 @@ import pytest
 from redposture_core.cli_args import parse_args
 from redposture_core.modules.grafana.stage import build_grafana_plan, build_grafana_spec
 from redposture_core.stage_runtime import AuditCommandRunner
+from tests.application_markup import application_page
 
 
 class _GrafanaAuthServer(ThreadingHTTPServer):
@@ -63,7 +64,7 @@ class _GrafanaAuthHandler(BaseHTTPRequestHandler):
                     content_type="text/html",
                 )
             else:
-                self._reply(200, b"<html><title>Grafana</title><form>login</form></html>", content_type="text/html")
+                self._reply(200, application_page("grafana").encode(), content_type="text/html")
             return
         if self.path == "/api/user":
             if self._authorized():

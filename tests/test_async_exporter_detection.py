@@ -149,3 +149,36 @@ def test_collect_scales_detect_only_and_respects_explicit_inflight(monkeypatch, 
     records = [json.loads(line) for line in output.read_text().splitlines()]
     hosts = [r["host"] for r in records if "host" in r]
     assert len(hosts) == len(set(hosts)) == 40
+
+
+def test_native_request_counter_includes_eof_retry_without_serializing_it():
+    import asyncio
+    import json
+
+    from redposture_core.exporters.async_detect import prefetch_metrics
+
+    async def run():
+        calls = []
+
+        async def serve(reader, writer):
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                calls.append(1)
+                if len(calls) == 2:
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nmetrics")
+                    await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        try:
+            result = await prefetch_metrics("127.0.0.1", server.sockets[0].getsockname()[1], "http", 1, 1)
+            assert result["status"] == 200 and result["body"] == "metrics"
+            assert result.native_requests == len(calls) == 2
+            assert "native_requests" not in json.dumps(result)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(run())

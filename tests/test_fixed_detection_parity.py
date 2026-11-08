@@ -4,6 +4,7 @@ import asyncio
 import contextvars
 import hashlib
 import ipaddress
+import time
 from collections import Counter
 from urllib.parse import urlsplit
 
@@ -29,6 +30,17 @@ def run_corpus(module, scheduler_class=AsyncDetectScheduler, *, concurrency=4):
         patch.setattr(asyncio, "sleep", sleep)
         attempts, calls = Counter(), Counter()
         attempt = contextvars.ContextVar("accuracy_attempt", default=0)
+        request_deadline = contextvars.ContextVar("accuracy_request_deadline", default=None)
+        original_send = AsyncDetectionHttp._send_with_retries
+
+        async def checked_send(self, *args, **kwargs):
+            token = request_deadline.set(kwargs.get("deadline"))
+            try:
+                return await original_send(self, *args, **kwargs)
+            finally:
+                request_deadline.reset(token)
+
+        patch.setattr(AsyncDetectionHttp, "_send_with_retries", checked_send)
         first_ip = int(ipaddress.IPv4Address("198.18.0.0"))
         public = {
             "/",
@@ -44,11 +56,27 @@ def run_corpus(module, scheduler_class=AsyncDetectScheduler, *, concurrency=4):
         }
 
         async def wire(self, url, timeout, headers, **options):
+            # The effective timeout is remaining deadline, so its microseconds
+            # cannot match across schedules. Compare configured budgets, while
+            # independently rejecting any reduction beyond elapsed wall time.
+            configured_timeout = self.timeout
+            deadline = request_deadline.get()
+            minimum = configured_timeout if deadline is None else min(configured_timeout, deadline - time.monotonic())
+            assert 0 < timeout <= configured_timeout
+            assert minimum <= timeout
             parsed = urlsplit(url)
             index = int(ipaddress.IPv4Address(parsed.hostname)) - first_ip
             kind = index % 6
             calls[
-                (index, parsed.port, options.get("method", "GET"), parsed.path, parsed.query, timeout, attempt.get())
+                (
+                    index,
+                    parsed.port,
+                    options.get("method", "GET"),
+                    parsed.path,
+                    parsed.query,
+                    configured_timeout,
+                    attempt.get(),
+                )
             ] += 1
             await real_sleep(0.002 if index % 10 else 0.006)
             if kind == 5 or (kind == 4 and attempt.get() == 1):

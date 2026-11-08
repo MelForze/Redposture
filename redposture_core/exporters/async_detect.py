@@ -21,6 +21,7 @@ _PREFETCH_CLIENT: ContextVar[AsyncDetectionHttp | None] = ContextVar("exporter_p
 
 class PrefetchedResponse(HTTPResponseDetails):
     exception: BaseException | None = None
+    native_requests: int = 0
 
 
 def _detection_client(**options: Any) -> AsyncDetectionHttp:
@@ -42,6 +43,7 @@ async def _prefetch_response(
     client: AsyncDetectionHttp, url: str, timeout: float, retries: int, max_bytes: int
 ) -> dict[str, Any]:
     previous_cap = client.max_bytes
+    requests_started = client.stats().get("requests", 0)
     client.max_bytes = max_bytes
     try:
         for attempt in range(max(1, retries + 1)):
@@ -67,6 +69,7 @@ async def _prefetch_response(
                 raw_body=response.body,
             )
             result.exception = error
+            result.native_requests = max(0, client.stats().get("requests", 0) - requests_started)
             return result
     finally:
         client.max_bytes = previous_cap

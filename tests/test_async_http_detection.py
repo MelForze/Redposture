@@ -58,13 +58,12 @@ def test_async_http_keepalive_chunked_gzip_and_size_limit():
 @pytest.mark.parametrize(
     "payload",
     [
-        b"HTTP/1.1 302 Found\r\nLocation: /prefix\r\nContent-Length: 0\r\n\r\n",
         b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nfail",
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: unusual\r\n\r\nfail",
-        b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        b"HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
         b"HTTP/1.1 200 OK\r\n" + b"X-Padding: " + b"a" * 65000 + b"\r\nX-Extra: " + b"b" * 2000 + b"\r\n\r\n",
     ],
-    ids=["redirect", "duplicate-length", "transfer-encoding", "interim", "large-headers"],
+    ids=["duplicate-length", "transfer-encoding", "interim", "large-headers"],
 )
 def test_unsupported_response_is_explicit_fallback_not_service_absence(payload):
     from redposture_core.clients.async_http_detect import AsyncDetectionHttp, AsyncHttpFallback
@@ -232,7 +231,9 @@ def test_streaming_uses_inactivity_timeout_not_whole_response_deadline(chunked):
     asyncio.run(scenario())
 
 
-def test_hostname_requests_fall_back_without_starting_executor_dns(monkeypatch):
+def test_hostname_requests_use_bounded_resolver_without_starting_executor_dns(monkeypatch):
+    import socket
+
     from redposture_core.clients.async_http_detect import AsyncDetectionHttp, AsyncHttpFallback
 
     async def scenario():
@@ -240,9 +241,14 @@ def test_hostname_requests_fall_back_without_starting_executor_dns(monkeypatch):
             pytest.fail("native detection must not start an uncancellable executor DNS lookup")
 
         monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", forbidden)
+
+        async def missing(host, port, timeout):
+            raise socket.gaierror(-2, "fixture hostname not found")
+
+        monkeypatch.setattr("redposture_core.clients.detect_dns.resolve_http_addresses", missing)
         async with AsyncDetectionHttp(timeout=0.1, retries=0, max_bytes=100) as client:
-            with pytest.raises(AsyncHttpFallback, match="hostname"):
-                await client.get("http://qa.example.test/")
+            response = await client.get("http://qa.example.test/")
+            assert response.status == 0 and "fixture hostname not found" in response.error
             with pytest.raises(AsyncHttpFallback, match="scoped"):
                 await client.get("http://[fe80::1%en0]/")
 

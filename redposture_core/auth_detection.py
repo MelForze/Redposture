@@ -7,11 +7,12 @@ without redirecting a browser to an identity provider.
 
 from __future__ import annotations
 
-import re
 import urllib.parse
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from .html_fingerprint import markup_evidence
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,7 @@ _PROVIDER_URL_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("entra", ("login.microsoftonline.com/", "login.microsoft.com/")),
     ("google", ("accounts.google.com/",)),
     ("dex", ("/dex/auth", "/dex/approval")),
-    ("zitadel", ("/oauth/v2/authorize", "/ui/login")),
+    ("zitadel", ("/oauth/v2/authorize",)),
     ("ory", ("/self-service/login",)),
     ("onelogin", (".onelogin.com/",)),
     ("ping", ("/as/authorization.oauth2",)),
@@ -61,18 +62,24 @@ def _urls(
 
 def _provider_from_urls(urls: Iterable[str]) -> tuple[str, str] | None:
     for raw_url in urls:
-        value = raw_url.casefold()
         try:
             parsed = urllib.parse.urlsplit(raw_url)
+            host = (parsed.hostname or "").casefold()
+            value = parsed.path.casefold()
             query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
         except ValueError:
-            query = {}
+            continue
         if "/realms/" in value and "/protocol/openid-connect/" in value:
             return "keycloak", "oidc"
         if "/auth/realms/" in value and "/login-actions/" in value:
             return "keycloak", "oidc"
         for provider, markers in _PROVIDER_URL_MARKERS:
-            if any(marker in value for marker in markers):
+            if any(
+                (host.endswith(marker.rstrip("/")) if marker.startswith(".") else host == marker.rstrip("/"))
+                if not marker.startswith("/")
+                else marker in value
+                for marker in markers
+            ):
                 if provider in {
                     "auth0",
                     "okta",
@@ -101,38 +108,52 @@ def _provider_from_urls(urls: Iterable[str]) -> tuple[str, str] | None:
 
 
 def _provider_from_body(body: bytes | str | None) -> tuple[str, str] | None:
-    if isinstance(body, bytes):
-        text = body.decode("utf-8", errors="replace")
-    else:
-        text = str(body or "")
-    value = text.casefold()
-    if not value:
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body or "")
+    page = markup_evidence(text)
+    if page is None:
         return None
-    keycloak_signals = (
-        'id="kc-form-login"',
-        "id='kc-form-login'",
-        'id="kc-login"',
-        "id='kc-login'",
-        "keycloakify",
-        "/protocol/openid-connect/authenticate",
-    )
-    if any(signal in value for signal in keycloak_signals):
+    selectors = {value.casefold() for value in page.identifiers}
+    selectors.update(page.elements)
+    for attributes in page.attributes.values():
+        for values in attributes:
+            selectors.update(values.get("class", "").casefold().split())
+    selectors.update(meta.get("name", "").casefold() for meta in page.attributes.get("meta", ()))
+    if selectors.intersection({"kc-form-login", "kc-login", "keycloakify"}):
         return "keycloak", "oidc"
-    body_markers: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("auth0", ("cdn.auth0.com", "auth0-lock")),
+    for form in page.forms:
+        fields = {name.casefold() for name in form.inputs}
+        if fields.intersection({"samlrequest", "samlresponse"}) and "relaystate" in fields:
+            return "saml", "saml"
+        detected = _provider_from_urls((form.action,))
+        if detected is not None:
+            return detected
+    for script in page.attributes.get("script", ()):
+        source = script.get("src", "")
+        try:
+            resource = urllib.parse.urlsplit(source)
+            if resource.scheme not in {"", "http", "https"}:
+                continue
+            # Preserve the existing Entra CDN signal only when it is an
+            # actual external script, not an inert example or query string.
+            if (resource.hostname or "").casefold() == "aadcdn.msftauth.net":
+                return "entra", "oidc"
+        except ValueError:
+            continue
+        detected = _provider_from_urls((source,))
+        if detected is not None:
+            return detected
+    markers = (
+        ("auth0", ("auth0-lock",)),
         ("okta", ("okta-sign-in", "okta-signin-widget")),
-        ("entra", ("login.microsoftonline.com", "aadcdn.msftauth.net")),
-        ("google", ("accounts.google.com", "google-signin")),
+        ("google", ("google-signin",)),
         ("dex", ("dex-login", "dex-logo")),
-        ("zitadel", ("zitadel login", "zitadel-login")),
-        ("ory", ("ory kratos", "ory-elements")),
-        ("oauth2-proxy", ("oauth2 proxy", "oauth2-proxy")),
+        ("zitadel", ("zitadel-login",)),
+        ("ory", ("ory-elements",)),
+        ("oauth2-proxy", ("oauth2-proxy",)),
     )
-    for provider, markers in body_markers:
-        if any(marker in value for marker in markers):
+    for provider, names in markers:
+        if any(token == name or token.startswith(name + "-") for name in names for token in selectors):
             return provider, "oidc"
-    if re.search(r"name\s*=\s*['\"]saml(?:request|response)['\"]", value) and "relaystate" in value:
-        return "saml", "saml"
     return None
 
 

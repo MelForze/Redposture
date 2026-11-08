@@ -75,7 +75,7 @@ def test_readonly_detect_record_and_exact_requests_match(monkeypatch, case):
         async def close(self):
             pass
 
-        async def get(self, url, *, headers=None):
+        async def get(self, url, *, headers=None, **redirect_policy):
             return response("GET", url, headers, None)
 
         async def request(self, method, url, *, headers=None, body=None, **kw):

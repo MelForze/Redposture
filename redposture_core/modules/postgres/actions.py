@@ -215,6 +215,7 @@ class _PgSession:
     credential_verified: bool | None = field(default=None, compare=False)
     startup_username: str | None = field(default=None, compare=False)
     startup_database: str | None = field(default=None, compare=False)
+    implementation_fields: dict[str, Any] | None = field(default=None, compare=False, repr=False)
 
 
 def _pg_startup_error_fields(payload: bytes) -> tuple[str, str]:
@@ -976,6 +977,30 @@ def _pg_startup_exchange(
 
         if message_type == b"Z":
             return evidence.session()
+
+
+def _pg_server_implementation(sock: socket.socket, session: _PgSession, *, database: str) -> dict[str, Any]:
+    """Refine only a confirmed identity, once per live authenticated session."""
+    from .server_identity import VERSION_QUERY, parse_implementation
+
+    if session.credential_verified is not True:
+        return {}
+    if session.implementation_fields is not None:
+        return dict(session.implementation_fields)
+    query = "SHOW VERSION" if database == "pgbouncer" else VERSION_QUERY
+    try:
+        rows, error = _pg_query_rows(sock, query)
+    except Exception as exc:
+        rows, error = [], f"{type(exc).__name__}: {exc}"
+    fields: dict[str, Any] = {}
+    if error:
+        fields["implementation_probe_error"] = error
+    else:
+        implementation = parse_implementation(rows, database=database)
+        if implementation is not None:
+            fields["server_implementation"] = implementation
+    session.implementation_fields = fields
+    return dict(fields)
 
 
 def _collect_postgres_privileges(
@@ -2495,6 +2520,11 @@ def _audit_postgres_host(
                 superuser, can_execute_commands, can_read_tables, readable_tables, query_error = (
                     _collect_postgres_privileges(sock)
                 )
+                implementation_fields = (
+                    _pg_server_implementation(sock, session, database=startup_database)
+                    if provided_credentials or defcreds
+                    else {}
+                )
                 database_names_all, databases_error = _pg_query_databases(sock)
                 accessible_database_names: list[str] | None = None
                 accessible_databases_error: str | None = None
@@ -2770,6 +2800,7 @@ def _audit_postgres_host(
                     "acl_inventory": acl_inventory,
                     "server_version": session.server_version,
                     **_pg_startup_record_fields(session, username=effective_username, database=startup_database),
+                    **implementation_fields,
                     "credential_verification": (
                         "unverified"
                         if session.auth_required is False
@@ -2957,14 +2988,19 @@ def _caps_suffix(record: dict[str, Any]) -> str:
         resolved_database_count = len(database_names)
     databases_text = format_count_value(resolved_database_count)
 
-    return " ".join(
-        (
-            f"(superuser:{superuser_text})",
-            f"(rce:{execute_text})",
-            f"(read:{read_tables_text})",
-            f"(DBs:{databases_text})",
-        )
-    )
+    parts = [
+        f"(superuser:{superuser_text})",
+        f"(rce:{execute_text})",
+        f"(read:{read_tables_text})",
+        f"(DBs:{databases_text})",
+    ]
+    implementation = record.get("server_implementation")
+    if isinstance(implementation, dict):
+        if implementation.get("product") == "PostgreSQL" and implementation.get("scope") == "sql_backend":
+            parts.append("(backend:PostgreSQL)")
+        elif implementation.get("product") == "PgBouncer" and implementation.get("scope") == "proxy_console":
+            parts.append("(proxy:PgBouncer)")
+    return " ".join(parts)
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
@@ -3729,7 +3765,7 @@ def _render_colored_postgres_line(console: Console, line: str) -> bool:
         console,
         line,
         tag="POSTGRES",
-        regexes=((r"\(version:[^)]+\)", "orange"),),
+        regexes=((r"\((?:version|backend|proxy):[^)]+\)", "orange"),),
         booleans=(
             BooleanColorRule("superuser", unknown_color="orange"),
             BooleanColorRule("rce", unknown_color="orange"),

@@ -104,6 +104,13 @@
         "username": "scott"
       },
       {
+        "credential_capabilities": {
+          "server_implementation": {
+            "evidence": "authenticated_database_banner",
+            "product": "Oracle Database",
+            "scope": "sql_backend"
+          }
+        },
         "error": null,
         "ok": true,
         "password": "tiger",
@@ -152,6 +159,13 @@
         "username": "system"
       },
       {
+        "credential_capabilities": {
+          "server_implementation": {
+            "evidence": "authenticated_database_banner",
+            "product": "Oracle Database",
+            "scope": "sql_backend"
+          }
+        },
         "error": null,
         "ok": true,
         "password": "oracle",

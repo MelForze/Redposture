@@ -356,7 +356,8 @@ class _UiHandler(BaseHTTPRequestHandler):
                 return
             self._send(
                 200,
-                b'<input name="username"><input name="password"><input name="_csrf" value="token">',
+                b'<form method="post" action="/login"><input name="username">'
+                b'<input name="password"><input name="_csrf" value="token"></form>',
                 headers={"Set-Cookie": "session=start; Path=/"},
             )
         else:

@@ -1,4 +1,4 @@
-"""Binary negative controls must be stable; malformed XML must remain partial."""
+"""Unknown binary input is partial; readable embedded text must survive."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from tests.test_minio_discover import _Client, _obj
 
 @pytest.mark.parametrize("body", [bytes(4096), bytes(range(256)) * 16])
 @pytest.mark.parametrize("chunk_size", [1, 7, 128, 8192])
-def test_unclassified_binary_control_is_fully_read_without_findings(body, chunk_size):
+def test_unclassified_binary_control_is_fully_read_but_remains_partial(body, chunk_size):
     client = _Client({"blob.bin": (200, body)})
     result = discover_secrets(client, [_obj("blob.bin", size=len(body))], budget=Budget(chunk_size=chunk_size))
-    assert result.coverage_complete is True
-    assert result.partial_reasons == []
+    assert result.coverage_complete is False
+    assert result.partial_reasons == ["binary_or_unsupported_encoding"]
     assert result.findings == []
     assert result.objects_scanned == 1
     assert result.bytes_read == len(body)
@@ -48,8 +48,8 @@ def test_binary_source_keeps_embedded_text_secret(chunk_size):
         [_obj("blob.bin", size=len(body))],
         budget=Budget(chunk_size=chunk_size),
     )
-    assert result.coverage_complete is True
-    assert result.partial_reasons == []
+    assert result.coverage_complete is False
+    assert result.partial_reasons == ["binary_or_unsupported_encoding"]
     assert result.bytes_read == len(body)
     assert [finding["value"] for finding in result.findings] == ["fixture-binary-password-7Z9"]
 

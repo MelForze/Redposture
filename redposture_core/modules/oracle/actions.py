@@ -22,6 +22,7 @@ from ...clients.oracle import (
     OracleReadBudgetError,
     OracleServiceError,
     classify_nne_policy,
+    close_quietly,
     connect_oracle,
     normalize_oracle_error,
     oracle_connection_usable,
@@ -367,7 +368,10 @@ def _try_credentials(
     insecure: bool,
     as_sysdba: bool,
     credential_candidates: list[dict[str, Any]],
+    selected_client_handoff: list[tuple[dict[str, Any], OracleAuditClient]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str | None]:
+    if selected_client_handoff:
+        raise ValueError("selected Oracle client handoff must start empty")
     attempts: list[dict[str, Any]] = []
     selected: dict[str, Any] | None = None
     terminal_status: str | None = None
@@ -403,9 +407,23 @@ def _try_credentials(
                 "error": None,
                 "credential_state": "valid",
             }
+            from ...server_implementation import oracle_implementation
+
+            banner_probe = getattr(client, "server_banner", None)
+            if callable(banner_probe):
+                try:
+                    implementation = oracle_implementation(banner_probe())
+                except Exception as exc:
+                    attempt["credential_capabilities"] = {"implementation_probe_error": normalize_oracle_error(exc)}
+                else:
+                    if implementation is not None:
+                        attempt["credential_capabilities"] = {"server_implementation": implementation}
             attempts.append(attempt)
             if selected is None:
                 selected = attempt
+                if selected_client_handoff is not None:
+                    selected_client_handoff.append((attempt, client))
+                    client = None  # Ownership transfers to this call's metadata consumer.
         except OracleAccountLockedError as exc:
             terminal_status = "account_locked"
             locked_users.add(username.casefold())
@@ -576,6 +594,25 @@ def _select_listener_target(rows: list[dict[str, Any]]) -> dict[str, Any] | None
     return rows[0] if rows else None
 
 
+def _retained_oracle_context(client: OracleAuditClient, timeout: float) -> dict[str, Any]:
+    """Check an idle authenticated session without an unlimited SDK round trip."""
+    connection = getattr(client, "connection", None)
+    if connection is None:
+        return client.current_context()
+    if not oracle_connection_usable(connection):
+        raise OracleClientError("Retained Oracle connection is no longer usable")
+    previous_timeout = connection.call_timeout
+    configured_ms = max(1, int(timeout * 1000))
+    previous_ms = int(previous_timeout or 0)
+    connection.call_timeout = min(previous_ms, configured_ms) if previous_ms > 0 else configured_ms
+    try:
+        return client.current_context()
+    finally:
+        # A failed round trip may invalidate native connection properties.
+        if oracle_connection_usable(connection):
+            connection.call_timeout = previous_timeout
+
+
 def _collect_oracle_data(
     client: OracleAuditClient,
     *,
@@ -618,6 +655,7 @@ def _collect_oracle_data(
     discover_implicit_dump: bool = False,
     discover_ctx: Any | None = None,
     on_discovery_ready: Callable[[dict[str, Any]], None] | None = None,
+    verified_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context: dict[str, Any] = {}
     banner: dict[str, Any] = {}
@@ -656,7 +694,7 @@ def _collect_oracle_data(
         else None
     )
     try:
-        context = client.current_context()
+        context = verified_context if verified_context is not None else client.current_context()
     except Exception as exc:
         data["error"] = normalize_oracle_error(exc)
     try:
@@ -1377,6 +1415,8 @@ def _audit_oracle_host(
         client: OracleAuditClient | None = None
         active_client: OracleAuditClient | None = None
         active_client_owned = False
+        selected_client_handoff: list[tuple[dict[str, Any], OracleAuditClient]] = []
+        verified_context: dict[str, Any] | None = None
         try:
             probe_errors: list[str] = []
             cached_probe = probe_state.get("oracle_detection") if probe_state is not None else None
@@ -1565,6 +1605,7 @@ def _audit_oracle_host(
                         insecure=insecure,
                         as_sysdba=as_sysdba,
                         credential_candidates=credential_candidates,
+                        selected_client_handoff=selected_client_handoff,
                     )
                     for auth_attempt in attempts_for_candidate:
                         auth_attempt.setdefault("protocol", proto)
@@ -1581,22 +1622,42 @@ def _audit_oracle_host(
                         selected_credential = credential
                         break
                 if selected_credential is not None:
-                    active_client = _open_client(
-                        host,
-                        port,
-                        service=selected_service,
-                        sid=selected_sid,
-                        protocol=selected_protocol,
-                        timeout=timeout,
-                        wallet=wallet,
-                        ssl_server_dn=ssl_server_dn,
-                        insecure=insecure,
-                        username=str(selected_credential.get("username") or ""),
-                        password=None
-                        if selected_credential.get("password") is None
-                        else str(selected_credential.get("password")),
-                        as_sysdba=as_sysdba,
-                    )
+                    if selected_client_handoff:
+                        proof, retained = selected_client_handoff.pop(0)
+                        if proof is selected_credential:
+                            active_client = retained
+                            active_client_owned = True
+                            # This is the same read the collector normally starts
+                            # with. It verifies the retained session is usable
+                            # before any action/data request is attempted.
+                            try:
+                                verified_context = _retained_oracle_context(active_client, timeout)
+                            except Exception:
+                                close_quietly(active_client)
+                                active_client = None
+                                active_client_owned = False
+                        else:
+                            close_quietly(retained)
+                    if active_client is None:
+                        # A closed/stale handoff or a legacy auth override gets
+                        # the same fresh connection used before this optimization.
+                        # No data or action has run, and none is replayed.
+                        active_client = _open_client(
+                            host,
+                            port,
+                            service=selected_service,
+                            sid=selected_sid,
+                            protocol=selected_protocol,
+                            timeout=timeout,
+                            wallet=wallet,
+                            ssl_server_dn=ssl_server_dn,
+                            insecure=insecure,
+                            username=str(selected_credential.get("username") or ""),
+                            password=None
+                            if selected_credential.get("password") is None
+                            else str(selected_credential.get("password")),
+                            as_sysdba=as_sysdba,
+                        )
                     active_client_owned = True
                     status = "weak_default_creds" if selected_credential.get("default") else "valid_credentials"
                     auth_required = True
@@ -1703,9 +1764,13 @@ def _audit_oracle_host(
                     "credential_attempts": credential_attempts,
                 }
             )
+            collection_options: dict[str, Any] = (
+                {"verified_context": verified_context} if verified_context is not None else {}
+            )
             try:
                 data = _collect_oracle_data(
                     active_client,
+                    **collection_options,
                     host=host,
                     port=port,
                     protocol=selected_protocol,
@@ -1775,6 +1840,8 @@ def _audit_oracle_host(
                 break
             time.sleep(_retry_delay(attempt))
         finally:
+            for _proof, retained in selected_client_handoff:
+                close_quietly(retained)
             if active_client_owned and active_client is not None:
                 active_client.close()
             if client is not None and (not active_client_owned or client is not active_client):

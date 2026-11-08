@@ -6,8 +6,11 @@ import ipaddress
 import random
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections import deque
+from collections.abc import Callable, Generator, Iterable, Iterator
+from concurrent.futures import Future, InvalidStateError
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,6 +19,7 @@ from ...audit_models import AuditRecord
 from ...clients.session_handoff import SessionHandoff
 from ...console import Console
 from ...discovery_spool import contains_spooled
+from ...scheduler import WorkPause, run_paused_sync
 from ...shell_capture import CommandResult, ShellView, read_shell_command
 from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
@@ -55,6 +59,87 @@ class _PostgresHostCredentialState:
     last_finished_at: float | None = None
     cooldown_until: float = 0.0
     overload_streak: int = 0
+    owner: _PostgresCredentialSlot | None = None
+    waiters: deque[_PostgresCredentialSlot] = field(default_factory=deque)
+
+
+class _PostgresCredentialSlot:
+    """FIFO host lease, with socket-free admission expressed as waits."""
+
+    def __init__(self, coordinator: _PostgresCredentialCoordinator, host: str):
+        self.coordinator = coordinator
+        self.host_key = coordinator._host_key(host)
+        self.state = coordinator._state(host)
+        self.granted: Future[None] = Future()
+        self.ready = self.closed = False
+        self.ready_at = self.wait_seconds = 0.0
+        with self.state.lock:
+            immediate = self.state.owner is None
+            if immediate:
+                self.state.owner = self
+                self._grant_locked()
+            else:
+                self.state.waiters.append(self)
+        if immediate:
+            self._notify()
+
+    def _grant_locked(self) -> None:
+        now = self.coordinator._monotonic()
+        paced_start = now
+        if self.state.last_finished_at is not None:
+            paced_start = self.state.last_finished_at + float(self.coordinator._uniform(0.10, 0.25))
+        self.wait_seconds = max(0.0, max(paced_start, self.state.cooldown_until) - now)
+        self.ready_at = now + self.wait_seconds
+
+    def _notify(self) -> None:
+        try:
+            self.granted.set_result(None)
+        except InvalidStateError:
+            if not self.closed and not self.granted.cancelled():
+                raise
+
+    def steps(self) -> Generator[WorkPause, None, None]:
+        if not self.granted.done():
+            yield self.granted
+        self.granted.result()
+        delay = max(0.0, self.ready_at - self.coordinator._monotonic())
+        if delay > 0:
+            yield delay
+        if self.closed:
+            raise RuntimeError("postgres credential slot already closed")
+        self.ready = True
+
+    def close(self) -> None:
+        notify = None
+        with self.state.lock:
+            if self.closed:
+                return
+            self.closed = True
+            if self.state.owner is self:
+                if self.ready:
+                    self.state.last_finished_at = self.coordinator._monotonic()
+                self.state.owner = None
+                while self.state.waiters:
+                    waiter = self.state.waiters.popleft()
+                    if not waiter.closed and not waiter.granted.cancelled():
+                        self.state.owner = waiter
+                        waiter._grant_locked()
+                        notify = waiter
+                        break
+            else:
+                try:
+                    self.state.waiters.remove(self)
+                except ValueError:
+                    if not self.granted.cancelled():
+                        raise
+        self.granted.cancel()
+        if notify is not None:
+            notify._notify()
+
+
+_POSTGRES_CREDENTIAL_SLOT: ContextVar[_PostgresCredentialSlot | None] = ContextVar(
+    "postgres_credential_slot", default=None
+)
 
 
 class _PostgresCredentialCoordinator:
@@ -94,31 +179,28 @@ class _PostgresCredentialCoordinator:
     def slot(self, host: str) -> Iterator[float]:
         """Yield after the host's previous credential attempt and cooldown."""
 
-        state = self._state(host)
-        with state.lock:
-            now = self._monotonic()
-            paced_start = now
-            if state.last_finished_at is not None:
-                paced_start = state.last_finished_at + float(self._uniform(0.10, 0.25))
-            wait_seconds = max(0.0, max(paced_start, state.cooldown_until) - now)
-            if wait_seconds > 0:
-                self._sleep(wait_seconds)
-            try:
-                yield wait_seconds
-            finally:
-                state.last_finished_at = self._monotonic()
+        slot = self.admission(host)
+        try:
+            run_paused_sync(slot.steps(), sleep=self._sleep)
+            yield slot.wait_seconds
+        finally:
+            slot.close()
+
+    def admission(self, host: str) -> _PostgresCredentialSlot:
+        return _PostgresCredentialSlot(self, host)
 
     def observe(self, host: str, record: AuditRecord) -> float:
         """Apply a bounded host cooldown after an explicit overload response."""
 
         state = self._state(host)
-        if not _postgres_is_transient_overload(record):
-            state.overload_streak = 0
-            return 0.0
-        state.overload_streak += 1
-        cooldown = min(2.0, 0.50 * (2 ** (state.overload_streak - 1)))
-        state.cooldown_until = max(state.cooldown_until, self._monotonic() + cooldown)
-        return cooldown
+        with state.lock:
+            if not _postgres_is_transient_overload(record):
+                state.overload_streak = 0
+                return 0.0
+            state.overload_streak += 1
+            cooldown = min(2.0, 0.50 * (2 ** (state.overload_streak - 1)))
+            state.cooldown_until = max(state.cooldown_until, self._monotonic() + cooldown)
+            return cooldown
 
 
 _POSTGRES_OVERLOAD_SQLSTATES = {"53300", "53400", "57P03"}
@@ -453,7 +535,7 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
             capability_fields: dict[str, Any] = {}
 
             def can_retain(fields: dict[str, Any] = capability_fields) -> bool:
-                return not bool(fields.get("query_error"))
+                return not bool(fields.get("query_error") or fields.get("implementation_probe_error"))
 
             with session_scope(
                 ctx.host,
@@ -489,6 +571,8 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
                         )
                     except Exception as exc:
                         capability_fields["query_error"] = f"capability probe: {type(exc).__name__}: {exc}"
+                if session.credential_verified is True:
+                    capability_fields.update(actions._pg_server_implementation(sock, session, database=target_database))
             credential_verified = session.credential_verified
             status = (
                 "invalid_credentials_anonymous"
@@ -601,6 +685,34 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
     )
 
 
+@contextmanager
+def _postgres_auth_wait(ctx: AuditHookContext, detect_record: AuditRecord) -> Iterator[Iterable[WorkPause]]:
+    coordinator = getattr(ctx.args, "_postgres_credential_coordinator", None)
+    if (
+        not isinstance(coordinator, _PostgresCredentialCoordinator)
+        or detect_record.extra.get("surface") == "ui"
+        or not any(
+            value is not None for value in (ctx.credential.username, ctx.credential.password, ctx.credential.token)
+        )
+    ):
+        yield ()
+        return
+    slot = coordinator.admission(ctx.host)
+    token: Token[_PostgresCredentialSlot | None] | None = None
+
+    def wait() -> Generator[WorkPause, None, None]:
+        nonlocal token
+        yield from slot.steps()
+        token = _POSTGRES_CREDENTIAL_SLOT.set(slot)
+
+    try:
+        yield wait()
+    finally:
+        if token is not None:
+            _POSTGRES_CREDENTIAL_SLOT.reset(token)
+        slot.close()
+
+
 def _postgres_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRecord:
     if ctx.credential.username is None and ctx.credential.password is None and ctx.credential.token is None:
         return _postgres_record(
@@ -624,6 +736,14 @@ def _postgres_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRe
         else:
             result = _postgres_probe_credential(ctx)
         debug_emit = getattr(ctx, "debug_emit", None)
+        if callable(debug_emit) and (
+            result.extra.get("server_implementation") or result.extra.get("implementation_probe_error")
+        ):
+            debug_emit(
+                f"postgres implementation host={actions._pg_startup_text(ctx.host)} port={ctx.port} "
+                f"evidence={actions._pg_startup_text(result.extra.get('server_implementation'))} "
+                f"error={actions._pg_startup_text(result.extra.get('implementation_probe_error') or '')}"
+            )
         if callable(debug_emit) and result.extra.get("credential_verification") in {
             "unavailable",
             "unverified",
@@ -644,7 +764,8 @@ def _postgres_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRe
     coordinator = getattr(ctx.args, "_postgres_credential_coordinator", None)
     if not isinstance(coordinator, _PostgresCredentialCoordinator):
         return _probe()
-    with coordinator.slot(ctx.host) as wait_seconds:
+
+    def run_admitted(wait_seconds: float) -> AuditRecord:
         if wait_seconds > 0 and ctx.debug_emit is not None:
             ctx.debug_emit(f"postgres credential pacing host={ctx.host} wait={wait_seconds:.3f}s")
         record = _probe()
@@ -652,6 +773,17 @@ def _postgres_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRe
         if cooldown > 0 and ctx.debug_emit is not None:
             ctx.debug_emit(f"postgres credential cooldown host={ctx.host} wait={cooldown:.3f}s")
         return record
+
+    slot = _POSTGRES_CREDENTIAL_SLOT.get()
+    if (
+        slot is not None
+        and slot.ready
+        and slot.coordinator is coordinator
+        and slot.host_key == coordinator._host_key(ctx.host)
+    ):
+        return run_admitted(slot.wait_seconds)
+    with coordinator.slot(ctx.host) as wait_seconds:
+        return run_admitted(wait_seconds)
 
 
 def _postgres_credential_gate(
@@ -689,6 +821,9 @@ def build_postgres_spec(args: Any) -> ModuleAuditSpec:
         detect_async=async_detect.detect,
         async_detect_sync_hook=_postgres_detect,
         auth=_postgres_auth,
+        auth_wait=_postgres_auth_wait
+        if isinstance(getattr(args, "_postgres_credential_coordinator", None), _PostgresCredentialCoordinator)
+        else None,
         data=_postgres_data,
         lifecycle_state_factory=_postgres_lifecycle_state_factory,
         lifecycle_state_close=lambda state: state.sessions.close(),
@@ -717,6 +852,8 @@ def build_postgres_spec(args: Any) -> ModuleAuditSpec:
             "startup_database",
             "protocol_evidence",
             "service_identity",
+            "server_implementation",
+            "implementation_probe_error",
             "startup_complete",
         ),
         defer_phase_output_until_final=True,

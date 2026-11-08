@@ -52,8 +52,8 @@ class _Pool:
             8080,
             {
                 "/": _response("<title>Redpanda Console</title>"),
-                "/admin/startup": _response({"version": "1"}),
-                "/api/topics": _response([{"name": "orders"}]),
+                "/admin/startup": _response({"isHttpOk": True, "isKafkaOk": True}),
+                "/api/topics": _response({"topics": [{"topicName": "orders"}]}),
             },
             "redpanda_console",
             True,

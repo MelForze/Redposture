@@ -14,6 +14,7 @@ from redposture_core.modules.minio import stage as minio_stage
 from redposture_core.modules.rabbitmq import actions as rabbit_actions
 from redposture_core.modules.rabbitmq import stage as rabbit_stage
 from redposture_core.stage_runtime import AuditCommandRunner
+from tests.application_markup import application_page
 
 
 class DetectionPool:
@@ -28,7 +29,13 @@ class DetectionPool:
             return HttpResponse(400, b"Client sent an HTTP request to an HTTPS server.", {})
         if self.module == "minio":
             if self.console:
-                return HttpResponse(200, b'<html><title data-x="1">\n MinIO Console </title></html>', {})
+                return HttpResponse(
+                    200,
+                    application_page("minio")
+                    .replace("<title>MinIO Console</title>", '<title data-x="1">\n MinIO Console </title>')
+                    .encode(),
+                    {},
+                )
             if urlsplit(url).path == "/minio/health/live":
                 return HttpResponse(404, b"", {})  # reverse proxy blocks diagnostics
             return HttpResponse(403, b"<Error><Code>AccessDenied</Code></Error>", {"SERVER": "MinIO"})
@@ -99,7 +106,7 @@ def test_minio_defcreds_continue_on_https_after_explicit_http_redirect(monkeypat
             if parsed.scheme == "http":
                 return HttpResponse(
                     200,
-                    b"<html><title>MinIO Console</title></html>",
+                    application_page("minio").encode(),
                     {},
                     request_url=url,
                     final_url=f"https://{parsed.netloc}/",

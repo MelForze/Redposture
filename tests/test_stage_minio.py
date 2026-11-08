@@ -10,6 +10,7 @@ from redposture_core.clients.minio_api import MinioResponse
 from redposture_core.modules.minio import actions, policy, render, stage
 from redposture_core.modules.minio.types import AnonymousResult, CredentialResult, MinioDetection
 from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun
+from tests.application_markup import application_page
 
 
 def test_build_minio_plan_default_ports():
@@ -249,7 +250,7 @@ def test_console_redirect_preserves_original_s3_origin(monkeypatch: pytest.Monke
         return MinioResponse(
             http_status=200,
             headers={},
-            body=b"<html><title>MinIO Console</title></html>",
+            body=application_page("minio").encode(),
             request_url="http://10.0.0.9:9000/",
             final_url="https://storage.internal:9443/console/",
             redirect_history=("http://10.0.0.9:9000/",),
@@ -284,7 +285,7 @@ def test_console_on_http_upgrades_when_https_is_s3(monkeypatch: pytest.MonkeyPat
             return MinioResponse(
                 http_status=200,
                 headers={},
-                body=b"<html><title>MinIO Console</title></html>",
+                body=application_page("minio").encode(),
             )
         return MinioResponse(
             http_status=403,

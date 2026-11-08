@@ -16,6 +16,7 @@ from typing import Any, TypeVar, cast
 
 from .clients.async_http_detect import AsyncHttpFallback
 from .clients.http_api import HttpResponse
+from .clients.http_redirects import is_redirect_policy_error
 from .clients.http_session import HttpSessionPool
 from .detection_steps import NATIVE_DETECT_BODY_MAX_BYTES
 
@@ -109,9 +110,16 @@ async def read_http(step: HttpRead, http: Any) -> HttpResponse:
     http.retries = max(0, int(pool.default_retries if options.get("retries") is None else options["retries"]))
     http.max_bytes = min(NATIVE_DETECT_BODY_MAX_BYTES, max(0, int(options.get("response_size_cap", 10 * 1024 * 1024))))
     http.ssl_context = tls
+    redirect_policy: dict[str, Any] = {
+        key: options[key]
+        for key in ("allow_cross_origin_redirects", "preserve_authorization_on_cross_origin")
+        if key in options
+    }
+    if options.get("timeout") is not None:
+        redirect_policy["deadline"] = time.monotonic() + max(0.001, float(options["timeout"]))
     try:
         if step.method.upper() == "GET" and not options.get("body"):
-            response = await http.get(step.url, headers=options.get("headers"))
+            response = await http.get(step.url, headers=options.get("headers"), **redirect_policy)
         else:
             response = await http.request(
                 step.method,
@@ -119,8 +127,9 @@ async def read_http(step: HttpRead, http: Any) -> HttpResponse:
                 headers=options.get("headers"),
                 body=options.get("body"),
                 replay_safe=bool(options.get("replay_safe", False)),
+                **redirect_policy,
             )
-        if response.truncated or (response.status > 0 and response.error):
+        if response.truncated or (response.status > 0 and response.error and not is_redirect_policy_error(response)):
             raise AsyncHttpFallback("detection response needs the original client")
         return response
     finally:

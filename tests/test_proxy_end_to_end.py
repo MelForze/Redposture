@@ -22,6 +22,7 @@ import pytest
 
 from redposture_core.clients.http_session import HttpSessionPool
 from redposture_core.network_proxy import ProxyConfig
+from tests.application_markup import application_page
 
 
 class _HttpServer(ThreadingHTTPServer):
@@ -71,7 +72,7 @@ class _GrafanaDestinationHandler(BaseHTTPRequestHandler):
             body = b"[]"
             content_type = "application/json"
         else:
-            body = b"<html><title>Grafana</title></html>"
+            body = application_page("grafana").encode()
             content_type = "text/html"
         self.send_response(200)
         self.send_header("Content-Type", content_type)

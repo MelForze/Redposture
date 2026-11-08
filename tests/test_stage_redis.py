@@ -1354,6 +1354,8 @@ def test_redis_production_path_credential_batch_detects_protocol_once(
             return ("simple", "OK") if parts[-1] == "good" else ("error", "WRONGPASS invalid credentials")
         if command == "DBSIZE":
             return "integer", 7
+        if command == "INFO":
+            return "error", "NOPERM INFO denied"
         pytest.fail(f"unexpected Redis command: {parts!r}")
 
     monkeypatch.setattr(redis_stage.socket, "create_connection", create_connection)
@@ -1375,7 +1377,7 @@ def test_redis_production_path_credential_batch_detects_protocol_once(
     rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_args, **_kwargs: None))
 
     assert rc == 0
-    assert command_counts == {"CONNECT": 1, "PING": 1, "AUTH": 2, "DBSIZE": 1}
+    assert command_counts == {"CONNECT": 1, "PING": 1, "AUTH": 2, "DBSIZE": 1, "INFO": 1}
 
 
 def test_redis_production_path_direct_credentials_detect_protocol_once(
@@ -1396,6 +1398,8 @@ def test_redis_production_path_direct_credentials_detect_protocol_once(
             return "simple", "OK"
         if command == "DBSIZE":
             return "integer", 7
+        if command == "INFO":
+            return "error", "NOPERM INFO denied"
         pytest.fail(f"unexpected Redis command: {parts!r}")
 
     monkeypatch.setattr(redis_stage.socket, "create_connection", create_connection)
@@ -1419,7 +1423,7 @@ def test_redis_production_path_direct_credentials_detect_protocol_once(
     rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_args, **_kwargs: None))
 
     assert rc == 0
-    assert command_counts == {"CONNECT": 1, "PING": 1, "AUTH": 1, "DBSIZE": 1}
+    assert command_counts == {"CONNECT": 1, "PING": 1, "AUTH": 1, "DBSIZE": 1, "INFO": 1}
 
 
 def _run_redis_lifecycle_result(args):
@@ -1490,6 +1494,8 @@ def test_redis_defcreds_checks_full_catalog_after_late_default_success(
             return "error", "WRONGPASS invalid credentials"
         if command == ("DBSIZE",):
             return "integer", 2
+        if command[0] == "INFO":
+            return "error", "NOPERM INFO denied"
         pytest.fail(f"unexpected Redis command: {command!r}")
 
     monkeypatch.setattr(redis_actions, "_send_cmd", send_cmd)
@@ -1516,7 +1522,7 @@ def test_redis_defcreds_checks_full_catalog_after_late_default_success(
                 redis_actions._REDIS_DEFAULT_CREDENTIALS, key=lambda pair: (pair[0].lower(), pair[1].lower())
             )
             for command in (
-                [("AUTH", username, password), ("DBSIZE",)]
+                [("AUTH", username, password), ("DBSIZE",), ("INFO", "SERVER")]
                 if (username, password) == ("default", "password")
                 else [("AUTH", username, password)]
             )
@@ -1560,6 +1566,8 @@ def test_redis_defcreds_counts_keys_for_each_verified_pair_without_reusing_winne
             if pair == ("viewer", "read"):
                 return "error", "NOPERM this user has no permissions to run DBSIZE"
             return "integer", {("default", "one"): 4, ("default", "two"): 7}[pair]
+        if command[0] == "INFO":
+            return "error", "NOPERM INFO denied"
         pytest.fail(f"unexpected Redis command: {command!r}")
 
     monkeypatch.setattr(redis_actions, "_send_cmd", send_cmd)
@@ -1657,6 +1665,8 @@ def test_redis_auth_transient_retries_without_repeating_detect(monkeypatch) -> N
             return "simple", "OK"
         if command == "DBSIZE":
             return "integer", 4
+        if command == "INFO":
+            return "error", "NOPERM INFO denied"
         pytest.fail(f"unexpected Redis command: {parts!r}")
 
     monkeypatch.setattr(redis_actions.socket, "create_connection", create_connection)
@@ -1683,7 +1693,7 @@ def test_redis_auth_transient_retries_without_repeating_detect(monkeypatch) -> N
     result = _run_redis_lifecycle_result(args)
 
     assert connects == 2
-    assert commands == ["PING", "AUTH", "AUTH", "DBSIZE"]
+    assert commands == ["PING", "AUTH", "AUTH", "INFO", "DBSIZE"]
     assert result.records[0]["status"] == "valid_credentials"
 
 
@@ -1752,6 +1762,8 @@ def test_redis_data_transient_reconnects_and_reauths_without_ping(monkeypatch) -
             raise ConnectionResetError("transient data reset")
         if command == "DBSIZE":
             return "integer", 9
+        if command == "INFO":
+            return "error", "NOPERM INFO denied"
         pytest.fail(f"unexpected Redis command: {parts!r}")
 
     monkeypatch.setattr(redis_actions.socket, "create_connection", create_connection)
@@ -1778,7 +1790,7 @@ def test_redis_data_transient_reconnects_and_reauths_without_ping(monkeypatch) -
     result = _run_redis_lifecycle_result(args)
 
     assert connects == 2
-    assert commands == ["PING", "AUTH", "DBSIZE", "AUTH", "DBSIZE"]
+    assert commands == ["PING", "AUTH", "INFO", "DBSIZE", "AUTH", "DBSIZE"]
     assert result.records[0]["status"] == "valid_credentials"
     assert result.records[0]["key_count"] == 9
 
@@ -2108,6 +2120,8 @@ def test_redis_noperm_ping_still_attempts_credentials(monkeypatch: pytest.Monkey
             return "simple", "OK"
         if command == ("DBSIZE",):
             return "integer", 0
+        if command[0] == "INFO":
+            return "error", "NOPERM INFO denied"
         pytest.fail(f"unexpected Redis command: {command!r}")
 
     monkeypatch.setattr(redis_actions, "_send_cmd", _send)

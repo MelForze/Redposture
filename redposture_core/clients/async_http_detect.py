@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import http.client
 import io
+import socket
 import ssl
+import time
 from functools import lru_cache
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -17,7 +19,8 @@ from urllib.parse import urlsplit
 from ..detect_backoff import detect_backoff
 from ..http_headers import merge_custom_http_headers
 from . import transport
-from .http_api import HttpResponse, decode_http_content, normalize_http_error
+from .http_api import HttpResponse, decode_http_content, normalize_http_error, pin_http_redirect_path
+from .http_redirects import REDIRECT_STATUSES, follow_redirects_async, http_origin
 from .numeric_host import numeric_host_family
 from .tls_cache import shared_client_ssl_context
 
@@ -31,6 +34,8 @@ def _request_url(url: str) -> Any:
 
 class AsyncHttpFallback(Exception):
     """The synchronous client must verify this target; never a negative verdict."""
+
+    native_requests: int = 0
 
 
 class _HeaderSocket:
@@ -88,8 +93,24 @@ class AsyncDetectionHttp:
             writer.transport.abort()
             raise
 
-    async def get(self, url: str, *, headers: dict[str, str] | None = None) -> HttpResponse:
-        return await self.request("GET", url, headers=headers, replay_safe=True)
+    async def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        allow_cross_origin_redirects: bool = True,
+        preserve_authorization_on_cross_origin: bool = True,
+        deadline: float | None = None,
+    ) -> HttpResponse:
+        return await self.request(
+            "GET",
+            url,
+            headers=headers,
+            replay_safe=True,
+            deadline=deadline,
+            allow_cross_origin_redirects=allow_cross_origin_redirects,
+            preserve_authorization_on_cross_origin=preserve_authorization_on_cross_origin,
+        )
 
     async def request(
         self,
@@ -99,20 +120,89 @@ class AsyncDetectionHttp:
         headers: dict[str, str] | None = None,
         body: bytes | None = None,
         replay_safe: bool = False,
+        allow_cross_origin_redirects: bool = True,
+        preserve_authorization_on_cross_origin: bool = True,
+        deadline: float | None = None,
     ) -> HttpResponse:
         method = method.upper()
-        request_headers = merge_custom_http_headers(headers)
         if method not in {"GET", "HEAD", "POST"}:
             raise AsyncHttpFallback("unsupported detection HTTP method")
-        retries = self.retries if method in {"GET", "HEAD"} or replay_safe else 0
         self.last_exception = None
-        for attempt in range(retries + 1):
-            timeout = transport.escalating_timeout(self.timeout, attempt) if self.escalate_timeouts else self.timeout
+
+        async def send(verb: str, current: str, outgoing: dict[str, str], data: bytes | None) -> HttpResponse:
+            outgoing = merge_custom_http_headers(outgoing)
+            if not preserve_authorization_on_cross_origin and http_origin(current) != http_origin(url):
+                outgoing = {key: value for key, value in outgoing.items() if key.lower() != "authorization"}
+            response = await self._send_with_retries(
+                verb, current, outgoing, body=data, replay_safe=replay_safe, deadline=deadline
+            )
+            if response.truncated and response.status in REDIRECT_STATUSES and (verb in {"GET", "HEAD"} or replay_safe):
+                await self.close()
+                raise AsyncHttpFallback("redirect body needs the original client")
+            return response
+
+        # Unknown POST operations never gain redirect replay. Read-only POST
+        # probes are explicitly marked by the detection continuation adapter.
+        if method == "POST" and not replay_safe:
             try:
+                return await send(method, url, dict(headers or {}), body)
+            except AsyncHttpFallback as exc:
+                # This POST may already have reached the server. A fallback
+                # signal could cause its caller to send it a second time.
+                return HttpResponse(
+                    0,
+                    b"",
+                    {},
+                    error=f"unverified POST response; not replayed: {exc}",
+                    request_url=url,
+                    final_url=url,
+                )
+        response = await follow_redirects_async(
+            send,
+            method,
+            url,
+            headers=merge_custom_http_headers(headers),
+            body=body,
+            allow_cross_origin=allow_cross_origin_redirects,
+            preserve_authorization=preserve_authorization_on_cross_origin,
+            passthrough=(AsyncHttpFallback,),
+        )
+        pin_http_redirect_path(response, method=method)
+        return response
+
+    async def _send_with_retries(
+        self,
+        method: str,
+        url: str,
+        request_headers: dict[str, str],
+        *,
+        body: bytes | None,
+        replay_safe: bool,
+        deadline: float | None,
+    ) -> HttpResponse:
+        retries = self.retries if method in {"GET", "HEAD"} or replay_safe else 0
+        for attempt in range(retries + 1):
+            timeout = (
+                transport.escalating_timeout(self.timeout, attempt)
+                if self.escalate_timeouts and deadline is None
+                else self.timeout
+            )
+            try:
+                remaining = deadline - time.monotonic() if deadline is not None else None
+                if remaining is not None:
+                    if remaining <= 0:
+                        raise TimeoutError("HTTP request timeout budget exhausted before redirect")
+                    timeout = min(timeout, remaining)
                 if method == "GET" and body is None:
-                    return await self._once(url, timeout, request_headers)
-                return await self._once(url, timeout, request_headers, method=method, body=body)
-            except AsyncHttpFallback:
+                    operation = self._once(url, timeout, request_headers)
+                else:
+                    operation = self._once(url, timeout, request_headers, method=method, body=body)
+                return await asyncio.wait_for(operation, remaining) if remaining is not None else await operation
+            except asyncio.CancelledError:
+                await self.close()
+                raise
+            except AsyncHttpFallback as exc:
+                exc.native_requests = self._stats["requests"]
                 await self.close()
                 raise
             except (
@@ -132,7 +222,10 @@ class AsyncDetectionHttp:
                 )
                 if attempt < retries and retryable:
                     self._stats["retries"] += 1
-                    await detect_backoff(min(1.5, 0.2 * (2**attempt)))
+                    delay = min(1.5, 0.2 * (2**attempt))
+                    if deadline is not None:
+                        delay = min(delay, max(0.0, deadline - time.monotonic()))
+                    await detect_backoff(delay)
                     continue
                 return HttpResponse(
                     status=0, body=b"", headers={}, error=error or type(exc).__name__, request_url=url, final_url=url
@@ -178,13 +271,6 @@ class AsyncDetectionHttp:
         host = parsed.hostname
         if scheme not in {"http", "https"} or not host or parsed.username is not None:
             raise AsyncHttpFallback("unsupported request URL")
-        try:
-            numeric_host_family(host)
-        except ValueError as exc:
-            # asyncio's default resolver owns non-daemon executor threads;
-            # blocked DNS survives cancellation. Keep DNS on the daemon sync
-            # path until a bounded cancellable resolver is available.
-            raise AsyncHttpFallback("hostname requires synchronous resolver") from exc
         if "%" in host:
             # asyncio also resolves zone-indexed IPv6 through its executor.
             raise AsyncHttpFallback("scoped IPv6 requires synchronous resolver")
@@ -224,12 +310,20 @@ class AsyncDetectionHttp:
         await asyncio.wait_for(writer.drain(), timeout)
         self._stats["requests"] += 1
         raw = await self._until(reader, b"\r\n\r\n", timeout, _HEADER_CAP)
-        # HTTPResponse.begin itself consumes a following header block for 100.
-        # Our bounded header buffer intentionally contains only one block.
-        try:
-            raw_status = int(raw.split(b"\r\n", 1)[0].split()[1])
-        except (ValueError, IndexError) as exc:
-            raise AsyncHttpFallback("invalid HTTP status") from exc
+        header_bytes = len(raw)
+        while True:
+            try:
+                raw_status = int(raw.split(b"\r\n", 1)[0].split()[1])
+            except (ValueError, IndexError) as exc:
+                raise AsyncHttpFallback("invalid HTTP status") from exc
+            if raw_status != 100:
+                break
+            # Match HTTPResponse.begin's supported Continue semantics, while
+            # bounding the aggregate headers and retaining buffered final bytes.
+            if header_bytes >= _HEADER_CAP:
+                raise AsyncHttpFallback("large interim HTTP headers")
+            raw = await self._until(reader, b"\r\n\r\n", timeout, _HEADER_CAP - header_bytes)
+            header_bytes += len(raw)
         if 100 <= raw_status < 200:
             raise AsyncHttpFallback("interim HTTP response")
         message = http.client.HTTPResponse(cast(Any, _HeaderSocket(raw)))
@@ -237,16 +331,13 @@ class AsyncDetectionHttp:
         self.last_reason = str(message.reason)
         status = message.status
         header_items = message.getheaders()
-        headers = {str(k): str(v) for k, v in header_items}
+        from .http_session import _response_headers
+
+        headers = _response_headers(header_items)
         names = [k.lower() for k, _ in header_items]
         lower = {k.lower(): v for k, v in header_items}
-        if (
-            100 <= status < 200
-            or 300 <= status < 400
-            or names.count("content-length") > 1
-            or names.count("transfer-encoding") > 1
-        ):
-            raise AsyncHttpFallback("redirect or ambiguous framing")
+        if 100 <= status < 200 or names.count("content-length") > 1 or names.count("transfer-encoding") > 1:
+            raise AsyncHttpFallback("ambiguous HTTP framing")
         encoding = lower.get("transfer-encoding", "").strip().lower()
         if encoding and (encoding != "chunked" or "content-length" in lower):
             raise AsyncHttpFallback("unsupported transfer encoding")
@@ -303,7 +394,50 @@ class AsyncDetectionHttp:
     async def _open(
         self, host: str, port: int, tls: ssl.SSLContext | None, timeout: float
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        try:
+            numeric_host_family(host)
+        except ValueError:
+            from .detect_dns import ResolutionUnavailable, resolve_http_addresses
+
+            try:
+                resolved = await resolve_http_addresses(host, port, timeout)
+            except ResolutionUnavailable as exc:
+                raise AsyncHttpFallback(str(exc)) from exc
+            addresses = []
+            for family, kind, _proto, _canonical, address in resolved:
+                if (
+                    family not in {socket.AF_INET, socket.AF_INET6}
+                    or kind != socket.SOCK_STREAM
+                    or len(address) > 2
+                    and address[3]
+                ):
+                    raise AsyncHttpFallback("hostname requires unsupported address family or IPv6 scope") from None
+                try:
+                    numeric_host_family(str(address[0]))
+                except ValueError as exc:
+                    raise AsyncHttpFallback("hostname resolver returned nonnumeric address") from exc
+                addresses.append((str(address[0]), int(address[1])))
+            if not addresses:
+                raise OSError("getaddrinfo returns an empty list") from None
+        else:
+            addresses = [(host, port)]
+        last_error: OSError | None = None
+        for address, resolved_port in addresses:
+            try:
+                return await self._open_address(address, resolved_port, tls, timeout, server_hostname=host)
+            except ssl.SSLError:
+                raise
+            except OSError as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
+
+    async def _open_address(
+        self, address: str, port: int, tls: ssl.SSLContext | None, timeout: float, *, server_hostname: str
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         return await asyncio.wait_for(
-            asyncio.open_connection(host, port, ssl=tls, server_hostname=host if tls else None, limit=_HEADER_CAP + 4),
+            asyncio.open_connection(
+                address, port, ssl=tls, server_hostname=server_hostname if tls else None, limit=_HEADER_CAP + 4
+            ),
             timeout,
         )

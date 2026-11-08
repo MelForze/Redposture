@@ -185,8 +185,8 @@ class OwnedLab:
             self.docker("logs", "--tail", "100", container, check=False)
             self.docker("rm", "-f", container)
         self.volume_ledger.cleanup()
-        networks = self.docker("network", "ls", "-q", "--filter", "label=" + self.label).split()
-        for network in networks:
+        network_ids = self.docker("network", "ls", "-q", "--filter", "label=" + self.label).split()
+        for network in network_ids:
             self.docker("network", "rm", network)
         after = self.snapshot()
         networks = compare_network_snapshots(self.before["networks"], after["networks"])

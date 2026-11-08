@@ -161,7 +161,7 @@ def test_qdrant_error_and_response_helpers_cover_extra_shapes() -> None:
         qdrant._qdrant_looks_like_response(
             {"result": {"collections": [{"name": "documents"}]}, "status": "ok", "time": 0.01}
         )
-        is True
+        is False
     )
     assert qdrant._qdrant_looks_like_response({"status": {"error": "forbidden"}}) is False
     assert qdrant._qdrant_looks_like_response({"hello": "world"}) is False
@@ -227,7 +227,8 @@ def test_qdrant_fingerprint_requires_product_specific_shape() -> None:
     assert qdrant._qdrant_is_root_payload({"title": "Qdrant - vector search engine", "version": "1.15.0"})
     assert not qdrant._qdrant_is_root_payload({"version": "1.15.0", "result": {}})
     assert not qdrant._qdrant_looks_like_response({"status": {"error": "forbidden"}})
-    assert qdrant._qdrant_looks_like_response({"status": {"error": "invalid api key"}})
+    assert not qdrant._qdrant_looks_like_response({"status": {"error": "invalid api key"}})
+    assert qdrant._qdrant_looks_like_response({"status": {"error": "Qdrant: invalid api key"}})
 
 
 def test_format_detect_and_summary_records() -> None:

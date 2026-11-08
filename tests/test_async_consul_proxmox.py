@@ -83,7 +83,7 @@ def test_detect_and_state_parity(monkeypatch, module, case):
         async def close(self):
             pass
 
-        async def get(self, url, *, headers=None):
+        async def get(self, url, *, headers=None, **redirect_policy):
             return response(url, headers)
 
     assert spec.detect_async is not None

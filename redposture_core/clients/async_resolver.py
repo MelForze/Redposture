@@ -38,6 +38,28 @@ async def numeric_getaddrinfo(
 
 
 def install_numeric_resolver() -> None:
-    """Called only at startup of our private AsyncDetectScheduler event loop."""
+    """Configure only the private detector loop, including socket ownership.
+
+    SDKs can cancel a pending connect while stopping a topology monitor. Some
+    callers close on OSError/TimeoutError but not CancelledError, leaving the
+    raw descriptor in a traceback cycle until GC. Close only that cancelled
+    socket; successful connects and ordinary errors keep their caller's policy.
+    """
     loop = asyncio.get_running_loop()
     cast(Any, loop).getaddrinfo = numeric_getaddrinfo
+    connect = loop.sock_connect
+    if connect is getattr(loop, "_redposture_owned_sock_connect", None):
+        return
+
+    async def owned_connect(sock: socket.socket, address: Any) -> None:
+        try:
+            await connect(sock, address)
+        except asyncio.CancelledError:
+            try:
+                sock.close()
+            except OSError:
+                pass  # A previously closed descriptor must not replace cancellation.
+            raise
+
+    cast(Any, loop).sock_connect = owned_connect
+    cast(Any, loop)._redposture_owned_sock_connect = owned_connect

@@ -19,6 +19,7 @@ from ...detection_io import DetectCall, run_sync
 from ...discovery_options import DEFAULT_DISCOVER_MAX_BYTES, DEFAULT_DISCOVER_TIME
 from ...discovery_paths import concat_discovery_text
 from ...discovery_values import DiskBackedText, InlineDiskText
+from ...product_markup import minio_console_application
 from .types import AdminCapability, AnonymousResult, CredentialResult, MinioDetection
 
 # `Server: MinIO/RELEASE.2021-06-17T00-10-46Z` on older deployments; modern ones
@@ -107,7 +108,6 @@ def _server_is_minio(resp: MinioResponse) -> bool:
     return "minio" in str(server).lower()
 
 
-_MINIO_CONSOLE_TITLE_RE = re.compile(rb"<title\b[^>]*>\s*MinIO\s+Console\b", re.I)
 _CONSOLE_API_CANDIDATE_PORTS = (9000,)
 
 
@@ -134,13 +134,10 @@ def _origin_url(url: str | None) -> str | None:
 
 
 def _is_minio_console(resp: MinioResponse) -> bool:
-    """True when the endpoint serves the MinIO Console SPA (an HTML page titled
-    ``MinIO Console``) rather than the S3/Admin API. The console proves a MinIO
-    deployment is present but carries no S3 verifier, so credentials are never
-    replayed against it."""
-    if resp.transport_error or resp.http_status != 200:
+    """A real Console document proves the UI, never an S3 credential verifier."""
+    if resp.transport_error or resp.truncated or resp.http_status != 200:
         return False
-    return bool(_MINIO_CONSOLE_TITLE_RE.search(resp.body or b""))
+    return minio_console_application((resp.body or b"").decode("utf-8", errors="replace"))
 
 
 def _is_s3_request_on_console_port(resp: MinioResponse) -> bool:

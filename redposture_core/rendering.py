@@ -54,6 +54,21 @@ class CountColorRule:
 # space rather than dropped, so an injected `a\nb` collapses to a readable `a b`
 # instead of `ab`.
 _REPORT_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_REPORT_ASCII_CONTROLS = tuple(chr(value) for value in (*range(32), 127))
+_REPORT_DETECTION_START_RE = re.compile(r"\s*\[\*\] ")
+_REPORT_VERSION_RE = re.compile(r"\(version:[^()]*\)")
+
+
+def _report_payload_start(line: str) -> int | None:
+    """Locate the fourth TSV field without copying an arbitrarily large value."""
+    first = line.find("\t")
+    if first < 0:
+        return None
+    second = line.find("\t", first + 1)
+    if second < 0:
+        return None
+    third = line.find("\t", second + 1)
+    return third + 1 if third >= 0 else None
 
 
 def sanitize_report_payload(text: str) -> str:
@@ -77,27 +92,45 @@ def sanitize_report_line(line: str) -> str:
     for everything except a record payload that actually contains a control
     character."""
 
-    parts = line.split("\t", 3)
-    if len(parts) < 4:
+    # A clean finding can contain a multi-megabyte value. Splitting its fourth
+    # field and joining it back duplicates that entire payload even when there
+    # is nothing to scrub. Find the three structural separators without copying
+    # the value, and only allocate a replacement for an actual control byte.
+    start = _report_payload_start(line)
+    if start is None:
         return line
-    parts[3] = sanitize_report_payload(parts[3])
-    return "\t".join(parts)
+    if line.isascii() and len(line) - start >= 65536:
+        # Large token/config values are commonly ASCII. Vectorized str.find
+        # avoids the per-character regex class engine without allocating a
+        # payload slice. Keep the first chunk on regex so a newline near the
+        # beginning does not require many whole-value scans. Non-ASCII retains
+        # the exact C1/control handling below; small lines keep the faster regex.
+        boundary = start + 1024
+        dirty = _REPORT_CONTROL_RE.search(line, start, boundary) is not None or any(
+            line.find(character, boundary) >= 0 for character in _REPORT_ASCII_CONTROLS
+        )
+        if not dirty:
+            return line
+    elif _REPORT_CONTROL_RE.search(line, start) is None:
+        return line
+    return line[:start] + sanitize_report_payload(line[start:])
 
 
 def order_detection_fields(line: str) -> str:
     """Keep the version last in detection headers, preserving data/detail rows."""
     if "(version:" not in line:
         return line
-    parts = line.split("\t", 3)
-    if len(parts) != 4 or not parts[3].lstrip().startswith("[*] ") or "(auth required:" not in parts[3]:
+    start = _report_payload_start(line)
+    if (
+        start is None
+        or _REPORT_DETECTION_START_RE.match(line, start) is None
+        or line.find("(auth required:", start) < 0
+    ):
         return line
-    payload = parts[3]
-    matches = list(re.finditer(r"\(version:[^()]*\)", payload))
-    if len(matches) != 1 or matches[0].end() == len(payload):
+    match = _REPORT_VERSION_RE.search(line, start)
+    if match is None or match.end() == len(line) or _REPORT_VERSION_RE.search(line, match.end()) is not None:
         return line
-    match = matches[0]
-    parts[3] = payload[: match.start()].rstrip() + " " + payload[match.end() :].strip() + " " + match[0]
-    return "\t".join(parts)
+    return line[:start] + line[start : match.start()].rstrip() + " " + line[match.end() :].strip() + " " + match[0]
 
 
 def normalize_report_line_for_storage(line: str) -> str:
@@ -111,11 +144,13 @@ def normalize_report_line_for_storage(line: str) -> str:
     """
 
     line = order_detection_fields(line)
-    parts = line.split("\t", 3)
-    if len(parts) < 4:
+    first = line.find("\t")
+    if first < 0:
         return line
-    parts[0] = parts[0].rstrip(" ")
-    return "\t".join(parts)
+    label = line[:first].rstrip(" ")
+    if len(label) == first or _report_payload_start(line) is None:
+        return line
+    return label + line[first:]
 
 
 def format_report_line_for_console(line: str) -> str:
@@ -127,11 +162,14 @@ def format_report_line_for_console(line: str) -> str:
     """
 
     line = order_detection_fields(line)
-    parts = line.split("\t", 3)
-    if len(parts) < 4:
+    first = line.find("\t")
+    if first < 0:
         return line
-    parts[0] = f"{parts[0].rstrip(' '):<15}"
-    return "\t".join(parts)
+    original = line[:first]
+    label = f"{original.rstrip(' '):<15}"
+    if label == original or _report_payload_start(line) is None:
+        return line
+    return label + line[first:]
 
 
 def suppress_redundant_auth_requirement(lines: Iterable[str]) -> list[str]:

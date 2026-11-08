@@ -17,6 +17,7 @@ import redposture_core.modules.consul.actions as consul_actions
 import redposture_core.modules.elastic.actions as elastic_actions
 import redposture_core.modules.gitlab.actions as gitlab_actions
 import redposture_core.modules.grafana.actions as grafana_actions
+from tests.application_markup import application_page
 
 # ---------------------------------------------------------------------------
 # consul pure helpers
@@ -265,9 +266,9 @@ def test_grafana_normalize_ssrf_path_adds_leading_slash() -> None:
 
 def test_grafana_looks_like_grafana_login_status_codes_and_body() -> None:
     headers: dict[str, str] = {}
-    assert grafana_actions._looks_like_grafana_login(200, "<html><title>Grafana</title>", headers) is True
+    assert grafana_actions._looks_like_grafana_login(200, application_page("grafana"), headers) is True
     # 4xx/5xx do not qualify regardless of body
-    assert grafana_actions._looks_like_grafana_login(404, "<html><title>Grafana</title>", headers) is False
+    assert grafana_actions._looks_like_grafana_login(404, application_page("grafana"), headers) is False
     # 200 without grafana markers in body is rejected
     assert grafana_actions._looks_like_grafana_login(200, "<html>nothing</html>", headers) is False
 

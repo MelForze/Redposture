@@ -35,6 +35,7 @@ class CredentialResult:
     error_code: str | None = None
     bearer_token: str | None = None  # 3.x JWT, kept in-memory only (never serialized)
     proof_surface: str | None = None  # api | web; web login does not prove API authorization
+    resource_evidence: AuthResourceEvidence | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,16 @@ class ResourceAccess:
     count: int | None = None
     http_status: int | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class AuthResourceEvidence:
+    """Small, immediate auth→capabilities handoff; never a serialized cache."""
+
+    endpoint: str
+    username: str
+    password: str = field(repr=False)
+    resources: tuple[tuple[str, ResourceAccess], ...] = ()
 
 
 @dataclass(frozen=True)

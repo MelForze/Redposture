@@ -491,6 +491,9 @@ def _scan_exporters_and_trigger(
 
         http_get_text_fn = _tls_http_get_text
 
+    from ..detection_diagnostics import FallbackDiagnostics
+
+    fallback_stats = FallbackDiagnostics()
     exporters = prepare_exporter_catalog(list(trigger_exporters or SCAN_EXPORTERS))
     callback_list = list(dict.fromkeys(callback_targets))
     pipeline_started_at = time.monotonic()
@@ -578,6 +581,8 @@ def _scan_exporters_and_trigger(
         kind, host, exporter = job
         if kind != "detect":
             return None
+        started = time.monotonic()
+        native_requests = 0
         try:
             # Preserve both existing detect batches, including retries within
             # each batch, but keep the recovery batch on the event loop.
@@ -592,18 +597,36 @@ def _scan_exporters_and_trigger(
                     path=str(exporter["detect_path"]),
                     **({"max_bytes": sys.maxsize} if batch else {}),
                 )
+                native_requests += int(getattr(details, "native_requests", 0))
                 if details.get("truncated"):
+                    fallback_stats.record(
+                        "exporters-trigger",
+                        "truncated detection body",
+                        seconds=time.monotonic() - started,
+                        requests=native_requests,
+                    )
                     return None  # Legacy detection reads the complete body.
                 if not details.get("error") or batch:
                     return details
-        except AsyncHttpFallback:
+        except AsyncHttpFallback as exc:
+            fallback_stats.record(
+                "exporters-trigger",
+                str(exc),
+                seconds=time.monotonic() - started,
+                requests=native_requests + exc.native_requests,
+            )
             return None
         raise AssertionError("unreachable trigger detect batch")
 
     def finish(job: tuple[str, str, dict[str, Any]], details: Any = None) -> dict[str, Any]:
         kind, host, exporter = job
         if kind == "detect":
-            result = detect_job(host, exporter, details)
+            started = time.monotonic()
+            try:
+                result = detect_job(host, exporter, details)
+            finally:
+                if details is None and detect_limit:
+                    fallback_stats.record_sync("exporters-trigger", time.monotonic() - started)
             if not result.get("detected"):
                 release = getattr(details, "release_handoff", None)
                 if release is not None:
@@ -757,6 +780,9 @@ def _scan_exporters_and_trigger(
         close = getattr(outcomes, "close", None)
         if callable(close):
             close()
+        if emit_stage_event is not None:
+            for line in fallback_stats.debug_lines():
+                emit_stage_event({"kind": "detect_fallback_summary", "summary": line})
     deep_ms = int((time.monotonic() - deep_started_at) * 1000) if deep_started else 0
     if emit_stage_event is not None:
         emit_stage_event(
