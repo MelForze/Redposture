@@ -55,11 +55,21 @@ _PLAIN_SCALAR_TYPES = (str, int, float, bool, type(None))
 
 
 def _plain_scalar_record(value: Mapping[str, Any]) -> bool:
-    """Allow small flat records to skip recursive disk-reference encoding."""
-    return type(value) is dict and all(
-        type(key) is str and key not in _REFERENCE_MARKERS and type(item) in _PLAIN_SCALAR_TYPES
-        for key, item in value.items()
-    )
+    """Skip reference encoding for flat JSON fields and scalar-only arrays.
+
+    Exact built-in types cannot carry disk leases. Nested containers, marker
+    keys and subclasses continue through the reference-preserving codec.
+    """
+    if type(value) is not dict:
+        return False
+    for key, item in value.items():
+        if type(key) is not str or key in _REFERENCE_MARKERS:
+            return False
+        if type(item) in _PLAIN_SCALAR_TYPES:
+            continue
+        if type(item) not in (list, tuple) or any(type(part) not in _PLAIN_SCALAR_TYPES for part in item):
+            return False
+    return True
 
 
 def _slice_values(values: Any, index: slice) -> list[Any]:

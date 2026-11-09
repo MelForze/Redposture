@@ -15,6 +15,16 @@
         "username": "admin"
       }
     ],
+    "credential_capabilities": {
+      "topic_count": 4,
+      "topic_lifecycle": {
+        "cleanup_complete": true,
+        "create": true,
+        "delete": true,
+        "errors": [],
+        "topic": "__redposture_probe_<ID>"
+      }
+    },
     "defcreds_enabled": false,
     "dump": false,
     "dump_coverage": null,
@@ -72,6 +82,13 @@
     ],
     "status": "valid_credentials",
     "topic_count": 4,
+    "topic_lifecycle": {
+      "cleanup_complete": true,
+      "create": true,
+      "delete": true,
+      "errors": [],
+      "topic": "__redposture_probe_<ID>"
+    },
     "topic_messages": null,
     "topic_permissions": {
       "secure.audit": {

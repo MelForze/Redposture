@@ -365,6 +365,8 @@ Kafka UI and broker credentials are verified separately. `--show-topics` without
 
 `--probe-write` appends an audit marker; `--write-message` or `--write-file` sends one record to `--topic` (binary limit: 1 MiB). A lost acknowledgment is unconfirmed and is never retried automatically.
 
+`--probe-topic` tests a real temporary topic lifecycle after verified broker access (anonymous or authenticated). Without this flag, the temporary lifecycle check is not run and its fields are omitted. With the flag, the access/credential line shows `(Topics:N) (Topic create:True/False/unknown) (Topic delete:True/False/unknown)`. The check creates one empty, uniquely named topic and confirms its deletion; it never writes to existing topics. Results belong to each credential pair independently and apply to the generated probe name; name-scoped ACLs can differ for other topic names. An unconfirmed operation stays `unknown`; debug/JSON contain the reason and probe name. If cleanup is unconfirmed, normal output also shows the topic name for manual cleanup. Kafka UI credentials do not run this broker check.
+
 ### Keeper
 
 ```bash

@@ -98,6 +98,7 @@ def _build_kafka_lifecycle_options(args: Any) -> dict[str, Any]:
         "max_messages": max_messages,
         "max_messages_explicit": explicit_max is not None or dump_limit is not None,
         "probe_write": bool(getattr(args, "probe_write", False)),
+        "probe_topic": bool(getattr(args, "probe_topic", False)),
         "write_payload": getattr(args, "_kafka_write_payload", None),
         "write_key": getattr(args, "_kafka_write_key", None),
         "show_clusters": bool(getattr(args, "show_clusters", False)),
@@ -301,7 +302,7 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         record_all_credential_attempts=full_credential_sweep,
-        credential_attempt_detail_fields=("provided_credentials_ok",),
+        credential_attempt_detail_fields=("provided_credentials_ok", "credential_capabilities"),
         continue_after_credential_success=full_credential_sweep,
         continue_after_credential_error=full_credential_sweep,
         credential_gate=_kafka_credential_gate,
@@ -372,6 +373,8 @@ def _kafka_mode(args: Any) -> str:
     topic = getattr(args, "topic", None) or getattr(args, "query_topic", None)
     if topic:
         parts.append(f"topic={topic}")
+    if bool(getattr(args, "probe_topic", False)):
+        parts.append("probe-topic")
     if bool(getattr(args, "dump", False)):
         parts.append("dump")
         max_messages = getattr(args, "max_messages", None)

@@ -10,6 +10,9 @@
         "username": "admin"
       },
       {
+        "credential_capabilities": {
+          "topic_count": 2
+        },
         "error": null,
         "password": "admin",
         "provided_credentials_ok": true,
@@ -58,6 +61,9 @@
         "username": "broker"
       },
       {
+        "credential_capabilities": {
+          "topic_count": 2
+        },
         "error": null,
         "password": "brokerpass",
         "provided_credentials_ok": true,
@@ -90,6 +96,9 @@
         "username": "kafka"
       },
       {
+        "credential_capabilities": {
+          "topic_count": 2
+        },
         "error": null,
         "password": "kafka",
         "provided_credentials_ok": true,
@@ -161,6 +170,9 @@
         "username": "admin"
       }
     ],
+    "credential_capabilities": {
+      "topic_count": 2
+    },
     "defcreds_enabled": true,
     "dump": true,
     "dump_coverage": {

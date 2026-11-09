@@ -15,6 +15,9 @@
         "username": "metrics"
       }
     ],
+    "credential_capabilities": {
+      "topic_count": 4
+    },
     "defcreds_enabled": false,
     "dump": true,
     "dump_coverage": {

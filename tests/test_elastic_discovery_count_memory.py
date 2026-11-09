@@ -8,10 +8,10 @@ import pytest
 
 from redposture_core.discovery_values import DiskBackedText
 from redposture_core.modules.elastic import discover
+from scripts.qa_memory_workload import run_memory_workload
 
 
-def test_elastic_disk_scalar_many_detections_do_not_rebuild_one_large_list() -> None:
-    count = 50_000
+def _check_disk_scalar(count: int) -> dict[str, int]:
     value = DiskBackedText()
     for number in range(count):
         value.append_text(f'password="secret-{number:08d}"\n')
@@ -27,10 +27,10 @@ def test_elastic_disk_scalar_many_detections_do_not_rebuild_one_large_list() -> 
     assert detections[0].value == "secret-00000000"
     assert detections[-1].value == f"secret-{count - 1:08d}"
     assert peak < 10_000_000, f"Elastic scalar detections retained {peak} bytes"
+    return {"count": count, "peak": peak}
 
 
-def test_elastic_many_fields_do_not_retain_normalized_catalog_and_detections() -> None:
-    count = 30_000
+def _check_many_fields(count: int) -> dict[str, int]:
     source = {f"password_{i:08d}": f"secret-{i:08d}" for i in range(count)}
     tracemalloc.start()
     try:
@@ -45,6 +45,23 @@ def test_elastic_many_fields_do_not_retain_normalized_catalog_and_detections() -
     for i, (detection, location) in enumerate(result.detections):
         assert detection.value == f"secret-{i:08d}" and location.path == f"/password_{i:08d}"
     assert peak < 10_000_000, f"Elastic mapping scan retained {peak} bytes"
+    return {"count": count, "peak": peak}
+
+
+def test_elastic_disk_scalar_spill_under_coverage() -> None:
+    _check_disk_scalar(4096)
+
+
+def test_elastic_disk_scalar_many_detections_do_not_rebuild_one_large_list() -> None:
+    run_memory_workload(__file__, "_check_disk_scalar", 50_000)
+
+
+def test_elastic_many_fields_spill_under_coverage() -> None:
+    _check_many_fields(4096)
+
+
+def test_elastic_many_fields_do_not_retain_normalized_catalog_and_detections() -> None:
+    run_memory_workload(__file__, "_check_many_fields", 30_000)
 
 
 def test_elastic_accumulator_spills_medium_values_before_count_threshold() -> None:

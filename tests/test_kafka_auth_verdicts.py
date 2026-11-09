@@ -23,7 +23,7 @@ def auth_context():
     ctx = SimpleNamespace(
         host="localhost",
         port=9092,
-        args=SimpleNamespace(timeout=1, retries=0, debug=True),
+        args=SimpleNamespace(timeout=1, retries=0, debug=True, probe_topic=True),
         lifecycle_state=state,
         credential=AuditCredentialRun(username="admin", password="qa-secret", source="default"),
         debug_emit=messages.append,
@@ -48,6 +48,71 @@ def install_session(monkeypatch, *, ok, error):
             pass
 
     monkeypatch.setattr(actions.KafkaSession, "open", lambda *args, **kwargs: Session())
+
+
+@pytest.mark.parametrize("ok", [False, None])
+def test_unverified_identity_never_creates_or_deletes_a_topic(monkeypatch, auth_context, ok):
+    ctx, _ = auth_context
+    install_session(monkeypatch, ok=ok, error="not verified")
+    monkeypatch.setattr(actions, "probe_topic_lifecycle", lambda *a, **kw: pytest.fail("unverified mutation"))
+    result = actions.authenticate_kafka(ctx, {"status": "auth_required"}, {})
+    assert "topic_lifecycle" not in result and "credential_capabilities" not in result
+
+
+def test_verified_pair_evidence_survives_runtime_aggregation(monkeypatch, auth_context):
+    ctx, _ = auth_context
+    install_session(monkeypatch, ok=True, error=None)
+    monkeypatch.setattr(
+        actions,
+        "probe_topic_lifecycle",
+        lambda *a, **kw: {
+            "create": kw["password"] == "one",
+            "delete": True if kw["password"] == "one" else None,
+            "cleanup_complete": True,
+        },
+    )
+    attempts = []
+    for password in ("one", "two"):
+        ctx.credential = AuditCredentialRun(username="same", password=password, source="default")
+        result = actions.authenticate_kafka(ctx, {"host": "broker", "port": 9092, "status": "auth_required"}, {})
+        attempts.append((ctx.credential, AuditRecord.from_mapping(result, module="kafka", service="kafka")))
+    args = parse_args(["kafka", "-t", "broker:9092", "--defcreds"])
+    runner = AuditCommandRunner(args=args, spec=build_kafka_spec(args), emit_line=lambda line: None)
+    record = runner._with_attempted_credentials(attempts[0][1], attempts, force=True).to_dict()
+    rows = record["attempted_credentials"]
+    assert rows[0]["credential_capabilities"]["topic_lifecycle"]["create"] is True
+    assert rows[1]["credential_capabilities"]["topic_lifecycle"]["create"] is False
+    lines = actions._format_credential_attempts_records(record, "txt")
+    assert "Topic create:True" in lines[0] and "Topic delete:True" in lines[0]
+    assert "Topic create:False" in lines[1] and "Topic delete:unknown" in lines[1]
+
+
+def test_cancellation_closes_the_session_not_yet_registered_in_lifecycle(monkeypatch, auth_context):
+    ctx, _ = auth_context
+
+    class Session:
+        transport_mode = "plaintext"
+        closed = False
+
+        def bootstrap(self, **kw):
+            return True, None
+
+        def fetch_metadata(self, **kw):
+            return {"topic_map": {}}, None
+
+        def close(self):
+            self.closed = True
+
+    session = Session()
+    monkeypatch.setattr(actions.KafkaSession, "open", lambda *a, **kw: session)
+
+    def interrupt(*a, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(actions, "probe_topic_lifecycle", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        actions.authenticate_kafka(ctx, {"status": "auth_required"}, {})
+    assert session.closed and ctx.lifecycle_state.authenticated_session is None
 
 
 @pytest.mark.parametrize("source", ["default", "provided"])
@@ -118,6 +183,7 @@ def test_debug_exposes_actual_auth_reason(monkeypatch, auth_context, ok, error, 
     ctx, messages = auth_context
     install_session(monkeypatch, ok=ok, error=error)
     actions.authenticate_kafka(ctx, {"status": "auth_required"}, {})
+    messages = [message for message in messages if "kafka auth mechanism=" in message]
     assert len(messages) == 1
     assert f"verdict={verdict}" in messages[0] and "mechanism=PLAIN" in messages[0]
     if error:
@@ -154,3 +220,76 @@ def test_pair_colors_follow_airflow_and_no_color_is_plain(capsys, marker):
         assert ("\x1b[1;38;5;196m[-]" if marker == "[-]" else "\x1b[1;92m[+]") in text
     actions._render_colored_kafka_line(Console(no_color=True), f"KAFKA\tlocalhost\t9092\t {marker} admin:qa-secret")
     assert "\x1b" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("source", ["default", "provided"])
+def test_real_topic_mutation_requires_explicit_opt_in(monkeypatch, auth_context, enabled, source):
+    ctx, _ = auth_context
+    ctx.args.probe_topic = enabled
+    ctx.credential = AuditCredentialRun(username="admin", password="qa-secret", source=source)
+    install_session(monkeypatch, ok=True, error=None)
+    calls = []
+
+    def probe(*args, **kwargs):
+        calls.append(kwargs)
+        return {"create": True, "delete": True, "cleanup_complete": True}
+
+    monkeypatch.setattr(actions, "probe_topic_lifecycle", probe)
+    args = parse_args(["kafka", "-t", "broker:9092", *(["--probe-topic"] if enabled else [])])
+    from redposture_core.modules.kafka.stage import _build_kafka_lifecycle_options
+
+    result = actions.authenticate_kafka(ctx, {"status": "auth_required"}, _build_kafka_lifecycle_options(args))
+    assert len(calls) == int(enabled)
+    assert ("topic_lifecycle" in result) is enabled
+    assert ("topic_lifecycle" in result["credential_capabilities"]) is enabled
+    line = actions._with_optional_topics(result, "[+] admin:qa-secret")
+    assert ("Topic create:" in line) is enabled
+    assert ("Topic delete:" in line) is enabled
+
+
+def test_probe_topic_rejected_with_execute_or_os_shell(capsys):
+    from redposture_core.modules.kafka.policy import validate_args
+
+    for action in (["--execute", "id"], ["--os-shell"]):
+        args = parse_args(["kafka", "-t", "broker:9092", "--probe-topic", *action])
+        assert validate_args(args, Console(no_color=True)) == 2
+    assert "probe-topic" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--probe-write", "--show-topics", "--dump"])
+def test_other_actions_do_not_opt_in_to_topic_lifecycle(monkeypatch, auth_context, flag):
+    from redposture_core.modules.kafka.stage import _build_kafka_lifecycle_options
+
+    ctx, _ = auth_context
+    install_session(monkeypatch, ok=True, error=None)
+    monkeypatch.setattr(actions, "probe_topic_lifecycle", lambda *a, **kw: pytest.fail("implicit mutation"))
+    args = parse_args(["kafka", "-t", "broker:9092", flag])
+    result = actions.authenticate_kafka(ctx, {"status": "auth_required"}, _build_kafka_lifecycle_options(args))
+    assert result["provided_credentials_ok"] is True and "topic_lifecycle" not in result
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_anonymous_probe_requires_flag_and_confirmed_access(monkeypatch, auth_context, enabled):
+    from redposture_core.modules.kafka.stage import _build_kafka_lifecycle_options
+
+    ctx, _ = auth_context
+    ctx.lifecycle_state.auth_required = False
+    ctx.lifecycle_state.anonymous_metadata = {"topic_map": {"orders": 1}}
+    ctx.credential = AuditCredentialRun(username=None, password=None, source="anonymous")
+    calls = []
+
+    def probe(*a, **kw):
+        calls.append(kw)
+        return {"create": True, "delete": True, "cleanup_complete": True}
+
+    monkeypatch.setattr(actions, "probe_topic_lifecycle", probe)
+    monkeypatch.setattr(actions, "_probe_kafka_acl_state", lambda **kw: ({}, {}))
+    options = _build_kafka_lifecycle_options(
+        parse_args(["kafka", "-t", "broker:9092", *(["--probe-topic"] if enabled else [])])
+    )
+    result = actions.collect_kafka_data(ctx, {"status": "open_no_auth", "topic_count": 1}, options)
+    assert len(calls) == int(enabled)
+    assert ("topic_lifecycle" in result) is enabled
+    if enabled:
+        assert calls[0]["username"] is None and calls[0]["password"] is None

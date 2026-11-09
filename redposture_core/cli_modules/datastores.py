@@ -333,6 +333,11 @@ def configure_kafka_parser(
             "The marker is a real record and stays in the log."
         ),
     )
+    actions.add_argument(
+        "--probe-topic",
+        action="store_true",
+        help="Actively create one empty temporary broker topic and delete it after verified access.",
+    )
     write_input = actions.add_mutually_exclusive_group()
     write_input.add_argument(
         "--write-message",

@@ -15,6 +15,9 @@
         "username": "admin"
       }
     ],
+    "credential_capabilities": {
+      "topic_count": 2
+    },
     "defcreds_enabled": false,
     "dump": true,
     "dump_coverage": {

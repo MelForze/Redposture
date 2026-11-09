@@ -75,6 +75,7 @@ from ...utils import (
     format_credential_attempts_suffix,
     utc_now_iso,
 )
+from .topic_lifecycle import probe_topic_lifecycle
 
 _KAFKA_DEFAULT_CREDENTIALS = _kafka_client._KAFKA_DEFAULT_CREDENTIALS
 
@@ -1483,15 +1484,36 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
             known_kafka=True,
             sasl_first=state.sasl_first,
         )
+    topic_lifecycle = None
+    if ok is True and bool(options.get("probe_topic", getattr(ctx.args, "probe_topic", False))):
+        try:
+            topic_lifecycle = probe_topic_lifecycle(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                username=username,
+                password=password,
+                existing_session=retained_session,
+                use_tls=(transport_mode == "tls") or None,
+                tls_config=state.tls_config,
+                sasl_first=state.sasl_first,
+                debug_emit=getattr(ctx, "debug_emit", None) if bool(getattr(ctx.args, "debug", False)) else None,
+            )
+        except BaseException:
+            if retained_session is not None:
+                retained_session.close()
+            raise
     if ok and metadata is not None:
         key = _kafka_lifecycle_key(ctx)
         state.credential_metadata[key] = dict(metadata)
-        if retained_session is not None:
+        if retained_session is not None and not getattr(retained_session, "closed", False):
             if state.authenticated_session is None:
                 state.authenticated_session = retained_session
                 state.authenticated_session_key = key
             else:
                 retained_session.close()
+    elif retained_session is not None:
+        retained_session.close()
     anonymous_open = state.auth_required is False or str(payload.get("status") or "") == "open_no_auth"
     is_default = credential.source == "default"
     if ok:
@@ -1534,6 +1556,7 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
             # Keeping None here erases explicit SASL rejections when the shared
             # runtime builds attempted_credentials for the sweep renderer.
             "provided_credentials_ok": ok,
+            **({"topic_lifecycle": topic_lifecycle} if topic_lifecycle is not None else {}),
             "defcreds_enabled": credential.source == "default",
             "credential_attempts": [
                 {
@@ -1547,6 +1570,16 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
             "effective_username": username if ok else None,
             "topic_count": len(topic_names) if topic_names is not None else payload.get("topic_count"),
             "topics": topic_names if topic_names is not None else payload.get("topics"),
+            **(
+                {
+                    "credential_capabilities": {
+                        "topic_count": len(topic_names) if topic_names is not None else None,
+                        **({"topic_lifecycle": topic_lifecycle} if topic_lifecycle is not None else {}),
+                    }
+                }
+                if ok is True
+                else {}
+            ),
             "transport_mode": transport_mode or state.transport_mode,
             "error": None if ok or status == "invalid_credentials_anonymous" else error or "authentication failed",
         }
@@ -1670,6 +1703,20 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
     )
     if selected_session is not None:
         state.sessions_reused += 1
+
+    if not use_authenticated and state.auth_required is False and options.get("probe_topic"):
+        payload["topic_lifecycle"] = probe_topic_lifecycle(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            username=None,
+            password=None,
+            existing_session=selected_session,
+            use_tls=(transport_mode == "tls") or None,
+            tls_config=state.tls_config,
+            sasl_first=state.sasl_first,
+            debug_emit=getattr(ctx, "debug_emit", None) if bool(getattr(ctx.args, "debug", False)) else None,
+        )
 
     query_topic_value: str | None = None
     if query_topic_name:
@@ -1858,32 +1905,21 @@ def _nxc_prefix(record: dict[str, Any]) -> str:
 
 
 def _cluster_permission_markers(record: dict[str, Any]) -> list[str]:
-    """Return `(create:X)` / `(delete:X)` markers derived from the record's
-    `cluster_permissions` dict. Only booleans are emitted; `None` (probe
-    was inconclusive) yields no marker to avoid faking a state. Ordered
-    create-then-delete for a stable read direction.
-    """
-    perms = record.get("cluster_permissions")
+    """Only the real lifecycle supplies these booleans, never dry-run ACLs."""
+    perms = record.get("topic_lifecycle")
     if not isinstance(perms, dict):
         return []
     markers: list[str] = []
     for key in ("create", "delete"):
         value = perms.get(key)
-        if value is True:
-            markers.append(f"({key}:true)")
-        elif value is False:
-            markers.append(f"({key}:false)")
+        text = str(value) if type(value) is bool else "unknown"
+        markers.append(f"(Topic {key}:{text})")
     return markers
 
 
 def _with_optional_topics(record: dict[str, Any], message: str) -> str:
-    # Layout: `<message> (create:X) (delete:X) (topics:N)`. Cluster ACL
-    # markers land immediately after credentials but before the topic
-    # count so the "identity → power → surface" reading flow stays left-
-    # to-right, and topics — the noisiest number — sits at the end.
-    parts = [message]
+    parts = [message, f"(Topics:{format_count_value(record.get('topic_count'))})"]
     parts.extend(_cluster_permission_markers(record))
-    parts.append(f"(topics:{format_count_value(record.get('topic_count'))})")
     return " ".join(parts)
 
 
@@ -2030,13 +2066,28 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         else:
             password_text = str(password)
         marker = "[+]" if status in success_statuses else "[-]"
-        lines.append(f"{prefix} {marker} {username}:{password_text}")
+        line = f"{prefix} {marker} {username}:{password_text}"
+        capabilities = attempt.get("credential_capabilities")
+        if not isinstance(capabilities, dict):
+            capabilities = attempt
+        if status in success_statuses:
+            line = _with_optional_topics(capabilities, line)
+        lines.append(line)
+        if status in success_statuses:
+            lines.extend(_topic_cleanup_warning(capabilities, prefix))
     if inconclusive:
         lines.append(f"{prefix} [*] {inconclusive} credential check(s) inconclusive; see --debug/JSON")
     return lines
 
 
 _KAFKA_DEBUG_DIAG_SUFFIX_RE = re.compile(r"\s*\(topic=.*\)$")
+
+
+def _topic_cleanup_warning(record: dict[str, Any], prefix: str) -> list[str]:
+    probe = record.get("topic_lifecycle")
+    if isinstance(probe, dict) and probe.get("cleanup_complete") is False:
+        return [f"{prefix} [!] Temporary topic cleanup unverified: {probe.get('topic')}; see --debug/JSON"]
+    return []
 
 
 def _strip_debug_context(text: str, *, debug: bool) -> str:
@@ -2147,8 +2198,11 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
         if query_topic not in dump_topics and (query_topic in dump_results or query_topic in dump_errors):
             dump_topics.append(query_topic)
 
+    cleanup_lines = (
+        _topic_cleanup_warning(record, _nxc_prefix(record)) if not record.get("attempted_credentials") else []
+    )
     if not show_topics and not query_topic and not dump and not probe_write and not isinstance(write_result, dict):
-        return []
+        return cleanup_lines if output_format == "txt" else []
 
     if output_format == "json":
         lines: list[str] = []
@@ -2264,7 +2318,7 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
         return lines
 
     prefix = _nxc_prefix(record)
-    lines = []
+    lines = list(cleanup_lines)
     # Per-topic ACL probe results (read/write) — populated by
     # `_probe_topic_permissions_bulk`. Each entry is a dict {read: bool|None,
     # write: bool|None} where None means "inconclusive" (transient error,
@@ -2449,9 +2503,16 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
             LiteralColorRule("(create:false)", "bright_green"),
             LiteralColorRule("(delete:true)", "true_red"),
             LiteralColorRule("(delete:false)", "bright_green"),
+            LiteralColorRule("(Topic create:True)", "true_red"),
+            LiteralColorRule("(Topic create:False)", "bright_green"),
+            LiteralColorRule("(Topic create:unknown)", "orange"),
+            LiteralColorRule("(Topic delete:True)", "true_red"),
+            LiteralColorRule("(Topic delete:False)", "bright_green"),
+            LiteralColorRule("(Topic delete:unknown)", "orange"),
         ),
         counts=(
             CountColorRule("topics", "true_red", unknown_color="orange", zero_color="bright_green"),
+            CountColorRule("Topics", "true_red", unknown_color="orange", zero_color="bright_green"),
             CountColorRule("partitions", "true_red", unknown_color="orange", zero_color="bright_green"),
         ),
         regexes=(RegexColorRule(r"\d+ credential check\(s\) inconclusive", "orange"),),

@@ -3107,6 +3107,31 @@ def _normalize_for_golden(
     (paths, timestamps) so the golden diff catches semantic regressions only."""
     if isinstance(payload, dict):
         effective_module = str(payload.get("module") or module or "").strip() or None
+        if effective_module == "kafka" and parent_key is None and payload.get("is_kafka") is True:
+            # Only generated runtime probe names are volatile. Never redact
+            # booleans/cleanup/errors, user topics, or discovery payloads.
+            def probe_row(row: Any) -> Any:
+                if not isinstance(row, dict):
+                    return row
+                probe = row.get("topic_lifecycle")
+                if (
+                    isinstance(probe, dict)
+                    and isinstance(probe.get("topic"), str)
+                    and re.fullmatch(r"__redposture_probe_[0-9a-f]{32}", probe["topic"])
+                ):
+                    return {**row, "topic_lifecycle": {**probe, "topic": "__redposture_probe_<ID>"}}
+                return row
+
+            def capability_row(row: Any) -> Any:
+                row = probe_row(row)
+                if isinstance(row, dict) and isinstance(row.get("credential_capabilities"), dict):
+                    return {**row, "credential_capabilities": probe_row(row["credential_capabilities"])}
+                return row
+
+            payload = capability_row(payload)
+            for field in ("attempted_credentials", "credential_attempts"):
+                if isinstance(payload.get(field), list):
+                    payload = {**payload, field: [capability_row(row) for row in payload[field]]}
         clickhouse_chunks = (
             effective_module == "clickhouse"
             and isinstance(payload.get("completed_chunks"), int)

@@ -269,3 +269,44 @@ def test_live_record_reverse_window_does_not_finalize_producer() -> None:
     values.append({"value": 3})
     assert list(values.iter_appended(1, reverse=True)) == [{"value": 3}, {"value": 2}]
     assert list(values.iter_appended(1)) == [{"value": 2}, {"value": 3}]
+
+
+def test_scalar_array_records_skip_reference_reencoding(monkeypatch) -> None:
+    records = SpoolingRecords()
+
+    def unexpected(*args):
+        pytest.fail("plain scalar arrays entered reference encoder")
+
+    monkeypatch.setattr(records, "_encode_disk_refs", unexpected)
+    record = {"value": "exact-secret", "rules": ["sensitive_field", "provider_format"], "span": [0, 12], "empty": []}
+    records.append(record)
+    assert list(records) == [record]
+
+
+@pytest.mark.parametrize("shape", ["nested", "disk", "subclass", "marker"])
+def test_scalar_array_fast_path_preserves_reference_fallback(shape):
+    from redposture_core.discovery_spool import _plain_scalar_record
+
+    class Text(str):
+        pass
+
+    value = DiskBackedText()
+    value.append_text("retained-secret")
+    value.finish()
+    try:
+        record = {
+            "nested": {"items": [{"value": "nested-secret"}]},
+            "disk": {"items": [value]},
+            "subclass": {"items": [Text("subclass-secret")]},
+            "marker": {"\x00redposture_disk_value": ["user-supplied", "text"]},
+        }[shape]
+        assert not _plain_scalar_record(record)
+        records = SpoolingRecords()
+        records.append(record)
+        actual = list(records)[0]
+        if shape == "disk":
+            assert actual["items"][0].digest == value.digest
+        else:
+            assert actual == record
+    finally:
+        value.close()

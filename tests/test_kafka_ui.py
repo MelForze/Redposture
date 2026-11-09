@@ -763,9 +763,10 @@ def test_default_sweep_stops_on_rate_limit(ui_server: tuple[str, type[_UiHandler
     assert handler.posts == 1
 
 
-def test_broker_write_flags_never_mutate_ui(ui_server: tuple[str, type[_UiHandler]]) -> None:
+@pytest.mark.parametrize("flag", ["--probe-write", "--probe-topic"])
+def test_broker_write_flags_never_mutate_ui(ui_server: tuple[str, type[_UiHandler]], flag: str) -> None:
     target, handler = ui_server
-    result = _run("-t", target, "-u", "admin", "-p", "admin", "--topic", "events", "--probe-write", "--no-color")
+    result = _run("-t", target, "-u", "admin", "-p", "admin", "--topic", "events", flag, "--no-color")
     assert result.returncode == 0, result.stderr
     assert "topic writes are unavailable through Kafka UI" in result.stdout
     assert handler.posts == 1

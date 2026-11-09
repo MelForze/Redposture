@@ -1793,7 +1793,8 @@ def test_sasl_fallback_collects_and_renders_acl_markers(monkeypatch: pytest.Monk
             "debug_emit": None,
         }
     ]
-    assert "[+] user:pass (create:true) (delete:false) (topics:1)" in kafka._format_record(record, "txt")
+    # Dry-run ACLs are not evidence of an actual Create/Delete lifecycle.
+    assert "[+] user:pass (Topics:1)" in kafka._format_record(record, "txt")
     assert kafka._format_topics_detail_records(record, "txt")[-1].endswith("raw-keycloak (read:true) (write:unknown)")
 
 
@@ -2196,7 +2197,7 @@ def test_kafka_format_detail_records_additional_empty_and_json_branches() -> Non
     assert detect_json["detected"] is True
     assert detect_json["auth_required"] is None
 
-    assert "(topics:unknown)" in kafka._with_optional_topics({"topic_count": "many"}, "KAFKA h 9092 [+] ok")
+    assert "(Topics:unknown)" in kafka._with_optional_topics({"topic_count": "many"}, "KAFKA h 9092 [+] ok")
 
     limited_record = {
         "timestamp": "ts",

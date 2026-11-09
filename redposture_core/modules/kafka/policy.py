@@ -28,6 +28,7 @@ def validate_args(args: Any, console: Any) -> int | None:
                 "query_topic",
                 "dump",
                 "probe_write",
+                "probe_topic",
                 "write_message",
                 "write_file",
                 "write_key",
@@ -43,10 +44,11 @@ def validate_args(args: Any, console: Any) -> int | None:
         return shell_rc
     if getattr(args, "execute", None) is not None and (
         bool(getattr(args, "probe_write", False))
+        or bool(getattr(args, "probe_topic", False))
         or getattr(args, "write_message", None) is not None
         or getattr(args, "write_file", None) is not None
     ):
-        console.error("--execute cannot be combined with --probe-write/--write-message/--write-file")
+        console.error("--execute cannot be combined with --probe-topic/--probe-write/--write-message/--write-file")
         return 2
     max_messages = getattr(args, "max_messages", None)
     if max_messages is not None and int(max_messages) <= 0:

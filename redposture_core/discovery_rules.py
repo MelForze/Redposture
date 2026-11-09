@@ -730,6 +730,16 @@ def _credential_uri_carriers(text: str) -> Iterator[tuple[str, str, tuple[int, i
             yield raw, kind, match.span()
 
 
+# These ASCII atoms contain none of the punctuation/whitespace required by
+# assignment, DSN, JOSE, auth-header, XML, cookie or URI grammars. Provider,
+# AWS, field-context, base64 and entropy checks still run in their original order.
+_ATOMIC_TOKEN_RE = re.compile(r"[A-Za-z0-9_+/-]+\Z")
+
+
+def _syntax_free_token(text: str) -> bool:
+    return len(text) <= 65_536 and _ATOMIC_TOKEN_RE.fullmatch(text) is not None
+
+
 def analyze_value(
     value: Any,
     *,
@@ -745,6 +755,8 @@ def analyze_value(
     text = str(value)
     stripped = text.strip()
     field_class = field_classification or classify_field(path)
+    normalized_path = normalize_field_name(path)
+    atomic = _syntax_free_token(text)
     markup = stripped.startswith("<") and ("=" in stripped or "</" in stripped)
     if _looks_placeholder(stripped) and not markup:
         return [
@@ -760,16 +772,16 @@ def analyze_value(
     from .discovery_credentials import COOKIE_HEAD, valid_basic_carrier, valid_cookie_carrier
     from .discovery_dsn import dsn_carriers
 
-    dsns = list(dsn_carriers(text))
+    dsns = [] if atomic else list(dsn_carriers(text))
     if len(dsns) == 1 and dsns[0][0] == stripped:
         return (
             [_candidate(stripped, "connection_string", 96, "connection_dsn", span=dsns[0][1])]
             if dsns[0][2]
             else [DetectedSecret("", "secret_indicator", 0, ("placeholder",), available=False)]
         )
-    if valid_cookie_carrier(stripped, body=normalize_field_name(path).endswith("cookie")):
+    if not atomic and valid_cookie_carrier(stripped, body=normalized_path.endswith("cookie")):
         return [_candidate(stripped, "session_cookie", 90, "cookie_carrier")]
-    if normalize_field_name(path).endswith("auth") and valid_basic_carrier(stripped, encoded=True):
+    if normalized_path.endswith("auth") and valid_basic_carrier(stripped, encoded=True):
         return [_candidate(stripped, "encoded_credentials", 92, "registry_auth", "credential_pair")]
 
     detections: list[DetectedSecret] = []
@@ -800,13 +812,13 @@ def analyze_value(
                     field_name=assignment_literal.name,
                 )
             )
-    for match in _PRIVATE_KEY_RE.finditer(text):
+    for match in () if atomic else _PRIVATE_KEY_RE.finditer(text):
         detections.append(_candidate(match.group(0), "private_key", 100, "private_key_pem", span=match.span()))
-    for match in _JWE_RE.finditer(text):
+    for match in () if atomic else _JWE_RE.finditer(text):
         token = match.group(1)
         if _validated_jwe(token):
             detections.append(_candidate(token, "jwe", 95, "jwe_structure", span=match.span(1)))
-    for match in _JWT_RE.finditer(text):
+    for match in () if atomic else _JWT_RE.finditer(text):
         token = match.group(1)
         if _validated_jwt(token):
             detections.append(_candidate(token, "jwt", 95, "jwt_structure", span=match.span(1)))
@@ -828,11 +840,13 @@ def analyze_value(
         (_WEBHOOK_RE, "webhook", 96, "webhook_url"),
         (_SESSION_RE, "session_cookie", 70, "session_assignment"),
     ):
+        if atomic:
+            break
         for match in regex.finditer(text):
             secret = match.group(1) if match.lastindex else match.group(0)
             if not _looks_placeholder(secret):
                 detections.append(_candidate(secret, secret_type, score, rule_id, span=match.span()))
-    for match in _AUTH_HEADER_RE.finditer(text):
+    for match in () if atomic else _AUTH_HEADER_RE.finditer(text):
         kind = match.group(1).lower()
         token = match.group(2)
         if kind == "basic":
@@ -843,7 +857,7 @@ def analyze_value(
                 )
         elif _plausible_opaque_secret(token):
             detections.append(_candidate(token, "bearer_token", 90, "bearer_auth"))
-    for match in _KEY_VALUE_RE.finditer(text):
+    for match in () if atomic else _KEY_VALUE_RE.finditer(text):
         if literals.overlap(*match.span()) is not None:
             continue
         raw_name = match.group(1)
@@ -857,7 +871,7 @@ def analyze_value(
                     secret, kind, 85, "credential_pair", "sensitive_field", span=match.span(), field_name=raw_name
                 )
             )
-    for match in chain(SQL_IDENTIFIED_HEAD.finditer(text), SQL_PASSWORD_HEAD.finditer(text)):
+    for match in () if atomic else chain(SQL_IDENTIFIED_HEAD.finditer(text), SQL_PASSWORD_HEAD.finditer(text)):
         sql_reader = SQLLiteral(match.group(1), portion=max(64, len(text)), dialect=sql_dialect)
         try:
             end = match.end() + sql_reader.feed(text[match.end() :], final=True)
@@ -880,12 +894,12 @@ def analyze_value(
             reader.finish()
         finally:
             reader.close()
-    for match in _XML_SECRET_RE.finditer(text):
+    for match in () if atomic else _XML_SECRET_RE.finditer(text):
         kind = _secret_key_kind(match.group(1))
         secret = html.unescape(match.group(2).strip())
         if kind and not _looks_placeholder(secret):
             detections.append(_candidate(secret, kind, 85, "xml_secret_element"))
-    for tag in _TAG_RE.finditer(text):
+    for tag in () if atomic else _TAG_RE.finditer(text):
         attributes = {name.lower(): html.unescape(raw) for name, _quote, raw in _ATTR_RE.findall(tag.group(2))}
         input_kind = _secret_key_kind(attributes.get("name", ""))
         if tag.group(1).lower() == "input" and input_kind:
@@ -902,7 +916,7 @@ def analyze_value(
             signature = urllib.parse.unquote(match.group(1))
             if len(signature) >= 16:
                 detections.append(_candidate(signature, "azure_sas_signature", 96, "azure_sas", span=match.span(1)))
-    for match in _AZURE_ACCOUNT_KEY_RE.finditer(text):
+    for match in () if atomic else _AZURE_ACCOUNT_KEY_RE.finditer(text):
         account_key = match.group(1)
         if not _looks_placeholder(account_key):
             detections.append(
@@ -916,7 +930,7 @@ def analyze_value(
             )
 
     cookie_spans = []
-    for header in COOKIE_HEAD.finditer(text):
+    for header in () if atomic else COOKIE_HEAD.finditer(text):
         end = text.find("\n", header.start())
         end = len(text) if end < 0 else end
         raw = text[header.start() : end].rstrip("\r")
@@ -925,7 +939,7 @@ def analyze_value(
     carriers = (
         [(raw, "connection_string", span) for raw, span, _available in dsns]
         + cookie_spans
-        + list(_credential_uri_carriers(text))
+        + ([] if atomic else list(_credential_uri_carriers(text)))
     )
     outer_carriers = []
     maximum_end = -1
@@ -969,7 +983,7 @@ def analyze_value(
         ]
 
     if field_class in {"strong", "medium"}:
-        normalized = normalize_field_name(path)
+        normalized = normalized_path
         if any(name in normalized for name in ("password", "passwd", "pwd")):
             secret_type = "password"
         elif normalized.endswith(("aws_secret_access_key", "secret_access_key")):

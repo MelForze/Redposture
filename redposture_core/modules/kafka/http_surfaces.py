@@ -211,6 +211,8 @@ def collect(record: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
         payload["ui_unsupported_actions"] = "topic enumeration is not supported by this HTTP surface"
     if options.get("dump"):
         payload["ui_unsupported_actions"] = "message dump is not supported by this HTTP surface"
+    if options.get("probe_topic"):
+        payload["ui_unsupported_actions"] = "topic lifecycle probe is unavailable through this HTTP surface"
     return payload
 
 

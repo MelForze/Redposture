@@ -1144,7 +1144,7 @@ run_kafka_cases() {
     run_case kafka kafka_tls_extended_bad_password 0 kafka -t 127.0.0.1 --port 29093 -u admin -p wrong --show-topics
     run_case kafka kafka_tls_idempotency 0 kafka -t 127.0.0.1 --port 29093 --defcreds --show-topics --dump --max-messages 5
     # ACL probing (--probe-write is destructive: writes a marker record).
-    run_case kafka kafka_extended_probe_write 0 kafka -t 127.0.0.1 --port 29092 -u admin -p admin --show-topics --probe-write
+    run_case kafka kafka_extended_probe_write 0 kafka -t 127.0.0.1 --port 29092 -u admin -p admin --show-topics --probe-write --probe-topic
     # Explicit producer actions use a dedicated topic and never depend on inventory flags.
     run_case kafka kafka_extended_write_message 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --topic redposture-write --write-message 'matrix text' --write-key matrix-key
     local kafka_binary_file="${OUT_DIR}/kafka-binary-message.bin"

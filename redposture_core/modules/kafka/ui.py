@@ -1447,7 +1447,7 @@ def _collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str,
     if discovery_budget is not None and discovery_budget.reason:
         payload["ui_discovery_budget_reason"] = discovery_budget.reason
         payload["ui_dump_partial"] = True
-    if any(options.get(key) for key in ("probe_write", "write_payload")):
+    if any(options.get(key) for key in ("probe_write", "probe_topic", "write_payload")):
         payload["ui_unsupported_actions"] = "topic writes are unavailable through Kafka UI"
     return payload
 
