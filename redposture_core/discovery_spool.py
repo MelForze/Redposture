@@ -89,6 +89,10 @@ class _DiskValueReferences:
         return self._decode_disk_refs(value) if "\\u0000redposture_" in payload else value
 
     def _encode_disk_refs(self, value: Any, pending: dict[str, Any]) -> Any:
+        # Plain JSON scalars cannot own disk references. Match the decoder's
+        # fast path; exact types keep subclass/reference handling unchanged.
+        if type(value) in _PLAIN_SCALAR_TYPES:
+            return value
         if isinstance(value, CredentialObject):
             return {_CREDENTIAL_OBJECT_REF: self._encode_disk_refs(value.source, pending)}
         if isinstance(value, EncodedSecretText):

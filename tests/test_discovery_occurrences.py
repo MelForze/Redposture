@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 
@@ -20,6 +21,33 @@ def finding(value="inactive-occurrence-secret", kind="password", path="$.passwor
 
 def materialize(value):
     return json.loads("".join(iter_json_chunks(value)))
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        {},
+        {"path": "/password", "object": "project/a"},
+        {"path": '\u0000"\\\nλ😀', "object": "пример"},
+        {"path": "x" * 4092},
+        {"path": "x" * 4093},
+        {str(i): "" for i in range(33)},
+        {"path": ["nested", 1, True, None]},
+    ],
+)
+def test_location_identity_matches_streaming_canonical_bytes(location):
+    expected = "".join(iter_json_chunks(dict(sorted(location.items())))).encode("utf-8")
+    store = OccurrenceRegistry()
+    assert store._location_identity(location) == (hashlib.sha256(expected).hexdigest(), len(expected))
+
+
+def test_small_location_identity_still_checks_cancellation():
+    def cancelled():
+        raise TimeoutError("discovery deadline")
+
+    store = OccurrenceRegistry(check=cancelled)
+    with pytest.raises(TimeoutError, match="discovery deadline"):
+        store._location_identity({"path": "/password"})
 
 
 def test_value_emits_once_but_keeps_every_distinct_location():

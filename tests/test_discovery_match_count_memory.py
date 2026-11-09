@@ -15,8 +15,7 @@ from redposture_core.storage_discovery import DiscoveryCollector
 from scripts.qa_memory_workload import run_memory_workload
 
 
-def test_many_text_findings_are_retained_without_one_large_memory_list() -> None:
-    count = 100_000
+def _check_many_text_findings(count: int) -> dict[str, int]:
     text = "".join(f"password=secret-value-{number:08d}\n" for number in range(count))
     tracemalloc.start()
     try:
@@ -27,9 +26,20 @@ def test_many_text_findings_are_retained_without_one_large_memory_list() -> None
     assert complete and size == len(text)
     assert len(matches) == count
     assert matches[0].value == "secret-value-00000000"
-    assert matches[-1].value == "secret-value-00099999"
+    assert matches[-1].value == f"secret-value-{count - 1:08d}"
     assert all(match.detector == "password" and match.object_path == "$.log" for match in matches)
     assert peak < 8_000_000, f"intermediate findings retained {peak} bytes"
+    return {"count": count, "peak": peak}
+
+
+def test_text_findings_cover_portions_and_disk_spill_under_coverage() -> None:
+    _check_many_text_findings(4096)
+
+
+def test_many_text_findings_are_retained_without_one_large_memory_list() -> None:
+    # The full memory proof must not include coverage's allocation/CPU cost.
+    # The separate parent case still covers portions and the 2048-row spill.
+    run_memory_workload(__file__, "_check_many_text_findings", 100_000)
 
 
 def test_match_spool_also_bounds_memory_when_individual_values_are_medium_sized() -> None:
@@ -97,10 +107,13 @@ def _check_specific_filter(count: int) -> dict[str, int]:
     return {"count": count, "peak": peak}
 
 
-def test_specific_detector_filter_does_not_rebuild_large_lists_or_fingerprint_sets() -> None:
-    # This parent input also exercises both disk-spill thresholds under branch
-    # coverage; the isolated child still checks the full 100k cardinality.
+def test_specific_filter_covers_disk_spill_branches_under_coverage() -> None:
     _check_specific_filter(8192)
+
+
+def test_specific_detector_filter_does_not_rebuild_large_lists_or_fingerprint_sets() -> None:
+    # Keep the covered parent and full-cardinality child in separate tests:
+    # neither spends the other's 180-second CI watchdog budget.
     run_memory_workload(__file__, "_check_specific_filter", 100_000)
 
 

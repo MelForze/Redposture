@@ -212,6 +212,19 @@ class OccurrenceRegistry(SpoolingFindings):
             raise
 
     def _location_identity(self, location: Mapping[str, Any]) -> tuple[str, int]:
+        # Small string locators need no recursive streaming encoder. Bound both
+        # fields and characters; large/disk/nested locators keep the chunked path.
+        if (
+            len(location) <= 32
+            and all(type(key) is str and type(value) is str for key, value in location.items())
+            and sum(len(key) + len(value) for key, value in location.items()) <= 4096
+        ):
+            if self._check is not None:
+                self._check()
+            encoded = json.dumps(dict(sorted(location.items())), ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+            return hashlib.sha256(encoded).hexdigest(), len(encoded)
         digest = hashlib.sha256()
         size = 0
         # Locators have scalar keys; canonical key order makes replay/page

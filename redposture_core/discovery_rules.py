@@ -165,11 +165,51 @@ _PROVIDER_TOKENS = (
     (re.compile(r"(https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+)"), "slack_webhook"),
 )
 
-# Necessary literal starts only; this gate never confirms a provider token.
-_PROVIDER_MARKER = re.compile(
-    r"AIza|gh[pousr]_|github_pat_|glpat-|xox|[sr]k_(?:live|test)_|hvs\.|npm_|"
-    r"sk-|glsa_|dop_v1_|shpat_|dckr_pat_|pypi-AgEI|SG\.|SK|:AA|https://hooks\.slack\.com/services/"
+# The selector only excludes impossible rules; the full regex still validates
+# every candidate. Keep rule order independent of marker order in the input.
+_PROVIDER_RULES = (
+    (_GOOGLE_API_RE, "google_api_key", "google_api_key_format", 98),
+    (_GITHUB_RE, "github_token", "github_token_format", 98),
+    (_GITLAB_RE, "gitlab_token", "gitlab_token_format", 98),
+    (_SLACK_RE, "slack_token", "slack_token_format", 98),
+    (_STRIPE_RE, "stripe_key", "stripe_key_format", 98),
+    (_VAULT_RE, "vault_token", "vault_token_format", 98),
+    (_NPM_RE, "npm_token", "npm_token_format", 98),
+    *((regex, kind, "provider_token_format", 96) for regex, kind in _PROVIDER_TOKENS),
 )
+_PROVIDER_STARTS = (
+    r"AIza",
+    r"gh[pousr]_|github_pat_",
+    r"glpat-",
+    r"xox",
+    r"[sr]k_(?:live|test)_",
+    r"hvs\.",
+    r"npm_",
+    r"sk-",
+    r"glsa_",
+    r"dop_v1_",
+    r"shpat_",
+    r"dckr_pat_",
+    r"pypi-AgEI",
+    r"SG\.",
+    r"SK",
+    r":AA",
+    r"https://hooks\.slack\.com/services/",
+)
+# Necessary literal starts only; neither selector confirms a token.
+_PROVIDER_MARKER = re.compile("|".join(_PROVIDER_STARTS))
+_PROVIDER_SELECTOR = re.compile("|".join(f"(?P<p{i}>{start})" for i, start in enumerate(_PROVIDER_STARTS)))
+
+
+def _candidate_provider_rules(text: str) -> tuple[tuple[re.Pattern[str], str, str, int], ...]:
+    if len(text) > 65_536:
+        return _PROVIDER_RULES if _PROVIDER_MARKER.search(text) is not None else ()
+    indices = set()
+    for match in _PROVIDER_SELECTOR.finditer(text):
+        assert match.lastgroup is not None
+        indices.add(int(match.lastgroup[1:]))
+    return tuple(_PROVIDER_RULES[index] for index in sorted(indices))
+
 
 _AUTH_HEADER_RE = re.compile(r"(?i)\b(Basic|Bearer)\s+([A-Za-z0-9._~+/=-]{8,})")
 
@@ -780,23 +820,9 @@ def analyze_value(
                 available=False,
             )
         )
-    if _PROVIDER_MARKER.search(text) is not None:
-        for regex, secret_type, detector, score in (
-            (_GOOGLE_API_RE, "google_api_key", "google_api_key_format", 98),
-            (_GITHUB_RE, "github_token", "github_token_format", 98),
-            (_GITLAB_RE, "gitlab_token", "gitlab_token_format", 98),
-            (_SLACK_RE, "slack_token", "slack_token_format", 98),
-            (_STRIPE_RE, "stripe_key", "stripe_key_format", 98),
-            (_VAULT_RE, "vault_token", "vault_token_format", 98),
-            (_NPM_RE, "npm_token", "npm_token_format", 98),
-        ):
-            for match in regex.finditer(text):
-                detections.append(_candidate(match.group(1), secret_type, score, detector, span=match.span(1)))
-        for regex, secret_type in _PROVIDER_TOKENS:
-            for match in regex.finditer(text):
-                detections.append(
-                    _candidate(match.group(1), secret_type, 96, "provider_token_format", span=match.span(1))
-                )
+    for regex, secret_type, detector, score in _candidate_provider_rules(text):
+        for match in regex.finditer(text):
+            detections.append(_candidate(match.group(1), secret_type, score, detector, span=match.span(1)))
     for regex, secret_type, score, rule_id in (
         (_PASSWORD_HASH_RE, "password_hash", 70, "password_hash"),
         (_WEBHOOK_RE, "webhook", 96, "webhook_url"),
