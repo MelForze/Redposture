@@ -740,6 +740,39 @@ def _syntax_free_token(text: str) -> bool:
     return len(text) <= 65_536 and _ATOMIC_TOKEN_RE.fullmatch(text) is not None
 
 
+# A single closed password assignment has exactly one ordinary finding when
+# its value has no carrier syntax or provider/AWS marker. Keep the original
+# literal span/name: this shortcut must not turn a text line into a mapping.
+_PLAIN_PASSWORD_LITERAL_RE = re.compile(
+    r"""[ \t]*(?P<assignment>(?:--)?(?P<name>password|passwd|pwd|passphrase)[ \t]*"""
+    r"""(?:=>|[:=])[ \t]*(?P<quote>["'])(?P<value>[A-Za-z0-9_+/-]+)(?P=quote))"""
+    r"[ \t]*(?:\r?\n)?\Z",
+    re.IGNORECASE | re.ASCII,
+)
+
+
+def _simple_password_assignment(text: str, field_class: FieldClass) -> list[DetectedSecret] | None:
+    if field_class not in {"neutral", "excluded"} or len(text) > 65_536:
+        return None
+    match = _PLAIN_PASSWORD_LITERAL_RE.fullmatch(text)
+    if match is None or _PROVIDER_MARKER.search(text) is not None or "AKIA" in text or "ASIA" in text:
+        return None
+    value = match.group("value")
+    if _looks_placeholder(value):
+        return None
+    return [
+        _candidate(
+            value,
+            "password",
+            85,
+            "credential_pair",
+            "sensitive_field",
+            span=match.span("assignment"),
+            field_name=match.group("name"),
+        )
+    ]
+
+
 def analyze_value(
     value: Any,
     *,
@@ -755,6 +788,8 @@ def analyze_value(
     text = str(value)
     stripped = text.strip()
     field_class = field_classification or classify_field(path)
+    if (simple := _simple_password_assignment(text, field_class)) is not None:
+        return simple
     normalized_path = normalize_field_name(path)
     atomic = _syntax_free_token(text)
     markup = stripped.startswith("<") and ("=" in stripped or "</" in stripped)
