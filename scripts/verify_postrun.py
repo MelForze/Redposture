@@ -3155,6 +3155,19 @@ def _normalize_for_golden(
                     for data_key, data_value in sorted(value.items(), key=lambda item: str(item[0]))
                 }
                 continue
+            if (
+                effective_module == "elastic"
+                and parent_key is None
+                and key == "discover_coverage"
+                and isinstance(value, dict)
+                and type(value.get("suppressed_indicators")) is int
+                and value["suppressed_indicators"] >= 0
+            ):
+                # Fresh index UUIDs can cross the entropy-candidate threshold
+                # and are deliberately suppressed. Their diagnostic count is
+                # not stable across equivalent lab boots. Keep findings,
+                # completeness/read counts and nested user data fully strict.
+                value = {name: item for name, item in value.items() if name != "suppressed_indicators"}
             normalized_value = _normalize_for_golden(
                 value,
                 out_dir=out_dir,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...discovery_options import validate_discovery_budget
+
 
 def validate_args(args: Any, console: Any) -> int | None:
     user, password = getattr(args, "username", None), getattr(args, "password", None)
@@ -19,4 +21,4 @@ def validate_args(args: Any, console: Any) -> int | None:
     if error:
         console.error(error)
         return 2
-    return None
+    return validate_discovery_budget(args, console)

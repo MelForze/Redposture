@@ -981,6 +981,7 @@ def inventory(source: Path) -> dict[str, Any]:
                         flag
                         for action in choices[module]._actions
                         if action.dest.startswith("show_")
+                        or any(flag.startswith("--show-") for flag in action.option_strings)
                         or action.dest in {"namespaces", "pods", "containers", "images", "analyze"}
                         for flag in action.option_strings
                     }

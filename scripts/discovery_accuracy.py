@@ -8,6 +8,7 @@ Actual enumeration, authentication and UI availability require separate tests.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import resource
@@ -20,13 +21,17 @@ from typing import Any, cast
 
 from redposture_core.data_discovery import inspect_record
 from redposture_core.discovery_engine import _scan_portioned_value
-from redposture_core.discovery_values import DiskBackedText, iter_json_chunks
+from redposture_core.discovery_values import CredentialObject, DiskBackedText, iter_json_chunks
 from redposture_core.storage_discovery import DiscoveryCollector
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "tests/fixtures/discovery_accuracy/holdout-v3.json"
 CORPUS_SHA256 = "55296c01675172090dd9874c593844e4c4a974067d16807c59182c6a002494f8"
 COMMON = {
+    "docker": ("docker_metadata", "$.docker_metadata[0]", "list"),
+    "rabbitmq": ("rabbitmq_metadata", "$.rabbitmq_metadata[0]", "list"),
+    "grafana": ("grafana_metadata", "$.grafana_metadata[0]", "list"),
+    "keycloak": ("keycloak_metadata", "$.keycloak_metadata[0]", "list"),
     "redis": ("key_value_entries", "$.key_value_entries.corpus.corpus", "kv"),
     "etcd": ("key_value_entries", "$.key_value_entries.corpus.corpus", "kv"),
     "consul": ("kv_dump_items", "$.kv_dump_items.corpus.corpus", "kv"),
@@ -49,8 +54,10 @@ COMMON = {
 STORAGE = ("gitlab", "harbor", "nexus", "docker-registry")
 MODULES = (*COMMON, *STORAGE, "airflow", "elastic", "minio", "proxmox", "clickhouse")
 READERS = ("common", "disk-json", "stream-json")
-HOLDOUT = ROOT / "tests/fixtures/discovery_accuracy/locked-holdout-v1.json"
-HOLDOUT_SHA256 = "d282119afc054eaeedbcceac34897dedcd0feb02152f25515a7d985be81962f8"
+LEGACY_HOLDOUT = ROOT / "tests/fixtures/discovery_accuracy/locked-holdout-v1.json"
+LEGACY_HOLDOUT_SHA256 = "d282119afc054eaeedbcceac34897dedcd0feb02152f25515a7d985be81962f8"
+HOLDOUT = ROOT / "tests/fixtures/discovery_accuracy/locked-holdout-v3.json"
+HOLDOUT_SHA256 = "f815a09e00ec24f19a358cbabcc63b63d4f84908c0a53bf0fced2bcc530fd88c"
 
 
 def full(value: Any) -> str:
@@ -74,7 +81,20 @@ def _load_locked(path: Path, expected_sha256: str) -> dict[str, Any]:
     if len({row["id"] for row in cases}) != len(cases):
         raise ValueError("duplicate case id")
     for row in cases:
+        # The label author encodes JSON solely to avoid publishing raw
+        # provider-token-shaped fixture literals. This lossless codec knows no
+        # detection rules and never derives expected answers from the scanner.
+        if "body_json_base64" in row:
+            if "body" in row:
+                raise ValueError("ambiguous fixture body")
+            row["body"] = json.loads(base64.b64decode(row.pop("body_json_base64"), validate=True).decode("utf-8"))
         for finding in row["expected"]:
+            if "value_json_base64" in finding:
+                if "value" in finding:
+                    raise ValueError("ambiguous fixture value")
+                finding["value"] = json.loads(
+                    base64.b64decode(finding.pop("value_json_base64"), validate=True).decode("utf-8")
+                )
             if not finding["path"].startswith("$") or not finding["value"]:
                 raise ValueError("invalid independent label")
     return corpus
@@ -110,6 +130,7 @@ def compact_rows(rows: Any, *, prefix: str = "$") -> list[dict[str, str]]:
             result.append(
                 {
                     "value": full(row["value"]),
+                    "value_kind": "object" if isinstance(row["value"], CredentialObject) else "string",
                     "type": row["type"],
                     "path": path,
                     "confidence": row.get("confidence", "unspecified"),
@@ -167,6 +188,7 @@ def scan(route: str, body: Any, *, portion: int = 37) -> tuple[list[dict[str, st
                 rows.append(
                     {
                         "value": full(finding.value),
+                        "value_kind": "object" if isinstance(finding.value, CredentialObject) else "string",
                         "type": finding.secret_type,
                         "path": path,
                         "confidence": finding.confidence,
@@ -243,12 +265,15 @@ def scan(route: str, body: Any, *, portion: int = 37) -> tuple[list[dict[str, st
 def measure(expected: list[dict[str, str]], actual: list[dict[str, str]]) -> dict[str, int]:
     """Do not collapse duplicates or accept a matching prefix as a correct value."""
 
-    def key(row: dict[str, str]) -> tuple[str, str, str]:
-        return hashlib.sha256(row["value"].encode()).hexdigest(), row["type"], row["path"]
+    def value_key(row: dict[str, str]) -> tuple[str, str]:
+        return hashlib.sha256(row["value"].encode()).hexdigest(), row.get("value_kind", "string")
+
+    def key(row: dict[str, str]) -> tuple[tuple[str, str], str, str]:
+        return value_key(row), row["type"], row["path"]
 
     want, got = Counter(map(key, expected)), Counter(map(key, actual))
-    want_values = {hashlib.sha256(r["value"].encode()).hexdigest() for r in expected}
-    got_values = {hashlib.sha256(r["value"].encode()).hexdigest() for r in actual}
+    want_values = {value_key(r) for r in expected}
+    got_values = {value_key(r) for r in actual}
     return {
         "tp": sum((want & got).values()),
         "fn": sum((want - got).values()),
@@ -273,13 +298,26 @@ def expected_rows(case: dict[str, Any], route: str) -> list[dict[str, str]]:
     # JSON-field location and a parser's subfield locator are both precise but
     # different published contracts. Labels declare both, not a suffix wildcard.
     return [
-        {**row, "path": row.get("embedded_path", row["path"]) if route != "elastic" else row["path"]}
+        {
+            **row,
+            "value": json.dumps(row["value"], sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+            if isinstance(row["value"], dict)
+            else row["value"],
+            "value_kind": "object" if isinstance(row["value"], dict) else row.get("value_kind", "string"),
+            "path": row.get("embedded_path", row["path"]) if route != "elastic" else row["path"],
+        }
         for row in case["expected"]
     ]
 
 
 def run(routes: list[str], *, split: str = "holdout") -> dict[str, Any]:
-    corpus = load_holdout() if split == "holdout" else load_corpus()
+    corpus = (
+        load_holdout()
+        if split == "holdout"
+        else _load_locked(LEGACY_HOLDOUT, LEGACY_HOLDOUT_SHA256)
+        if split == "legacy-holdout"
+        else load_corpus()
+    )
     rows = []
     for route in routes:  # deliberately serial, no sockets or stands
         for case in corpus["cases"]:
@@ -317,7 +355,11 @@ def run(routes: list[str], *, split: str = "holdout") -> dict[str, Any]:
         totals.update(row["metrics"])
     return {
         "status": "FAIL" if failed else "PASS",
-        "corpus_sha256": HOLDOUT_SHA256 if split == "holdout" else CORPUS_SHA256,
+        "corpus_sha256": HOLDOUT_SHA256
+        if split == "holdout"
+        else LEGACY_HOLDOUT_SHA256
+        if split == "legacy-holdout"
+        else CORPUS_SHA256,
         "split": split,
         "scope": "authored locked DTO/reader holdout, not live-product or production accuracy",
         "routes": routes,
@@ -336,7 +378,7 @@ def run(routes: list[str], *, split: str = "holdout") -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--route", action="append", choices=(*READERS, *MODULES))
-    parser.add_argument("--split", choices=("development", "holdout"), default="holdout")
+    parser.add_argument("--split", choices=("development", "holdout", "legacy-holdout"), default="holdout")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     result = run(args.route or [*READERS, *MODULES], split=args.split)

@@ -97,7 +97,11 @@ def test_portainer_config_metadata_projection_does_not_rebuild_wide_spec(monkeyp
     monkeypatch.setattr(web_panels, "_get", get)
     ctx = SimpleNamespace(args=SimpleNamespace(discover_time=90, timeout=1, secure=False), host="qa", port=9000)
     record = {"status": "valid_credentials", "ui": {"endpoint": "http://qa:9000", "session_token": "token"}}
-    inventory = {"environments": {"records": [{"Id": 2, "Name": "local"}]}, "containers": {"records": []}}
+    inventory = {
+        "environments": {"records": [{"Id": 2, "Name": "local"}]},
+        "containers": {"records": []},
+        "images": {"records": []},
+    }
     collector = storage.DiscoveryCollector("portainer", ctx, record)
     original_add = collector.add
 

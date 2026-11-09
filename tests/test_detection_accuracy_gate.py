@@ -17,7 +17,7 @@ def pair(expected=True, detected=True):
 def test_reference_covers_every_module_and_holdout_is_locked():
     assert len(gate.PRODUCTS) == 32 and set(gate.PRODUCTS) == set(AUDIT_MODULE_NAMES)
     holdout = gate.load_holdout()
-    assert len(holdout["cases"]) == 6
+    assert len(holdout["cases"]) == 14
     assert {c["expected"] for c in holdout["cases"]} == {False}
 
 

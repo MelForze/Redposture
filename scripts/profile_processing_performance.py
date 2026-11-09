@@ -29,11 +29,18 @@ if str(ROOT) not in sys.path:
 from scripts.performance_container import container_sample  # noqa: E402
 from scripts.profile_module_performance import activate_source, environment_evidence, source_hash  # noqa: E402
 
-CASES = ("xml-dense", "html-inputs", "duplicate-lines")
+CASES = ("xml-dense", "html-inputs", "duplicate-lines", "json-stream", "http-config")
 FIRST, LAST = "processing-first-secret", "processing-last-secret"
 
 
 def payload_parts(case: str) -> tuple[bytes, bytes, bytes, str]:
+    if case in {"json-stream", "http-config"}:
+        return (
+            ('{"head":{"password":"' + FIRST + '"},"padding":"').encode(),
+            b"ordinary data ",
+            ('","tail":{"password":"' + LAST + '"}}').encode(),
+            "runtime/config.json",
+        )
     if case == "xml-dense":
         return (
             f"<config><password>{FIRST}</password>\n".encode(),
@@ -80,6 +87,11 @@ def file_sha256(path: Path) -> str:
 
 
 def expected_findings(case: str, name: str) -> list[dict[str, str]]:
+    if case in {"json-stream", "http-config"}:
+        return [
+            {"type": "password", "value": value, "place": f"$.benchmark/file/{name}.{position}.password"}
+            for position, value in (("head", FIRST), ("tail", LAST))
+        ]
     path = f"$.benchmark/file/{name}" + ("" if case == "duplicate-lines" else ".password")
     return [{"type": "password", "value": value, "place": path} for value in (FIRST, LAST)]
 
@@ -164,7 +176,33 @@ def measure(args: argparse.Namespace) -> dict[str, Any]:
                 {"status": "open_no_auth"},
             )
             with payload.open("rb") as stream:
-                collector._scan_member_stream("benchmark", name, stream, prefer_specific=True)
+                if args.case == "http-config":
+                    from redposture_core.clients.http_api import HttpResponse
+                    from redposture_core.discovery_http_reader import read_json
+
+                    class Pool:
+                        def request_stream(
+                            self, _method: str, _url: str, *, on_chunk: Any, on_response: Any, **_kwargs: Any
+                        ) -> HttpResponse:
+                            on_response(200, {"Content-Type": "application/json"})
+                            while chunk := stream.read(65_536):
+                                on_chunk(chunk)
+                            return HttpResponse(200, b"", {})
+
+                    read_json(
+                        collector,
+                        Pool(),
+                        "http://fixture.invalid/config",
+                        "benchmark/file/" + name,
+                        source_class="jenkins.profile_config",
+                        headers={},
+                        timeout=args.discover_time,
+                        required_fields=("head",),
+                    )
+                elif args.case == "json-stream":
+                    collector.scan_json_chunks("benchmark/file/" + name, iter(lambda: stream.read(65_536), b""))
+                else:
+                    collector._scan_member_stream("benchmark", name, stream, prefer_specific=True)
             result = collector.result()
             findings = [
                 {"type": row["type"], "value": row["value"], "place": row["object_path"]} for row in result["findings"]
@@ -225,7 +263,8 @@ def measure(args: argparse.Namespace) -> dict[str, Any]:
         "profile_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "environment": environment_evidence(),
         "discover_time": args.discover_time,
-        "note": "Offline shared reader, not a product or network. First finding follows member validation. "
+        "note": "Offline shared reader, not a product or network. JSON stream/config first finding is live; "
+        "other cases report after member validation. "
         "RSS includes imports; disk includes input and open anonymous temp files. "
         "20ms sampled FD/disk peaks can miss shorter transients. One sampler thread is included.",
     }

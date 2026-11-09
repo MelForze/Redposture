@@ -14,7 +14,7 @@ def test_module_accuracy_reference_and_holdout(module):
     summary = classify(rows)
     failures = [r for r in rows if r.get("error_type") or r.get("detected") != r["expected"]]
     assert summary["status"] == "PASS", (module, summary, failures)
-    assert {r["provenance"] for r in rows} == {"synthetic-protocol-reference", "holdout-v1"}
+    assert {r["provenance"] for r in rows} == {"synthetic-protocol-reference", "holdout-v2"}
     assert all(r.get("wire_exchanges", 0) > 0 for r in rows), (module, rows)
 
 

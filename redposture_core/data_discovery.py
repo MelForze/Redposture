@@ -74,9 +74,17 @@ DISCOVERY_MODULES = frozenset(
         "harbor",
         "nexus",
         "docker-registry",
+        "docker",
+        "rabbitmq",
+        "grafana",
+        "keycloak",
     }
 )
 _FIELDS: dict[str, tuple[str, ...]] = {
+    "docker": ("docker_metadata",),
+    "rabbitmq": ("rabbitmq_metadata",),
+    "grafana": ("grafana_metadata",),
+    "keycloak": ("keycloak_metadata",),
     "kafka": ("dump_results", "ui_dump_records"),
     "redis": ("key_value_entries", "query_key_entry"),
     "etcd": ("key_value_entries", "query_key_entry"),

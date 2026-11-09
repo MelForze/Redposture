@@ -20,8 +20,8 @@ from redposture_core.discovery_values import DiskBackedText
 from redposture_core.modules.kafka import ui as kafka_ui
 from redposture_core.modules.portainer import actions as portainer_actions
 
-CORPUS = Path(__file__).resolve().parents[1] / "tests/fixtures/discovery_accuracy/ui-holdout-v2.json"
-SHA256 = "b2929e8ff4965697bd43e1e8dc1e2d07130b7227cd7f15bdfa3d17771d2f4c25"
+CORPUS = Path(__file__).resolve().parents[1] / "tests/fixtures/discovery_accuracy/ui-holdout-v4.json"
+SHA256 = "5d80ab03c46ea810edd4edfbe00f7d3f29a545deab9f65e5d2df6ea12afd3ee6"
 BASE = "http://ui.accuracy.invalid"
 SUPPORTED = ("kibana", "opensearch_dashboards", "minio_console", "portainer", "provectus", "kafbat")
 UNSUPPORTED = ("mongo_express", "redis_insight", "pgadmin", "postgrest", "kubernetes_dashboard")
@@ -108,6 +108,27 @@ class UIHTTP:
             assert kwargs["headers"]["Cookie"] == "ui-session=known"
             return self._backend(query["method"][0], query["path"][0], kwargs.get("body") or b"")
         assert method == "GET", "reader attempted a write or execution request"
+        if product in {"kafka_connect", "schema_registry"}:
+            if self.case["mode"] == "denied":
+                return 403, self.case["body"], {}
+            if product == "kafka_connect":
+                if path == "/connectors":
+                    return 200, ["qa"], {}
+                if path == "/connectors/qa/config":
+                    return 200, {"connector.class": "FileStreamSourceConnector", **self.case["body"]}, {}
+            else:
+                assert query["deleted"] == ["true"]
+                if path == "/subjects":
+                    return 200, ["qa-value"], {}
+                if path == "/subjects/qa-value/versions":
+                    return 200, [1], {}
+                if path == "/subjects/qa-value/versions/1":
+                    return (
+                        200,
+                        {"subject": "qa-value", "version": 1, "id": 1, "schema": json.dumps(self.case["body"])},
+                        {},
+                    )
+            raise AssertionError(("unhandled Kafka config source", path))
         if product in UNSUPPORTED:
             return 200, "<html><title>Mongo Express</title><body>password=" + self.case["value"] + "</body></html>", {}
         if product == "portainer":
@@ -122,7 +143,7 @@ class UIHTTP:
                 return 200, {"Config": {"Tty": True, "Env": ["TOKEN=[REDACTED]"]}}, {}
             if path.endswith("/containers/c1/logs"):
                 assert query.get("follow") == ["0"] and query.get("tail") == ["all"]
-                return 200, ('password="' + self.case["value"] + '"\n').encode(), {}
+                return 200, self.case.get("source_text", 'password="' + self.case["value"] + '"\n').encode(), {}
             if path.endswith("/volumes"):
                 return 200, {"Volumes": []}, {}
             if path.endswith("/info"):
@@ -142,7 +163,7 @@ class UIHTTP:
                 return 200, {"objects": [{"name": "deploy/app.env"}], "isTruncated": False}, {}
             if path.endswith("/objects/download"):
                 assert query["prefix"] == ["deploy/app.env"]
-                raw = ("PASSWORD=" + self.case["value"] + "\n").encode()
+                raw = self.case.get("source_text", "PASSWORD=" + self.case["value"] + "\n").encode()
                 if self.case["mode"] == "denied":
                     return 403, raw, {}
                 start = int(kwargs["headers"]["Range"].split("=")[1].split("-")[0])
@@ -158,7 +179,9 @@ class UIHTTP:
                 return 200, {"partitions": [{"partition": 0, "offsetMin": 0, "offsetMax": 1}]}, {}
             if "/messages" in path:
                 value = json.dumps(
-                    {
+                    self.case["body"]
+                    if self.case.get("source_document")
+                    else {
                         "password": self.case["value"],
                         "tokenUrl": "https://auth.invalid/token",
                         "maskedPassword": "[REDACTED]",
@@ -223,15 +246,20 @@ def run_case(case: dict[str, Any]) -> dict[str, Any]:
         patch("redposture_core.clients.http_session.HttpSessionPool", lambda **kw: pool),
     ):
         if product in HTTP_SURFACES:
+            state = SimpleNamespace(ui_base=BASE, ui_http=pool)
             record = kafka_ui.collect_ui(
                 ctx,
                 {**prior, "kafka_interface": "http_surface", "ui_vendor": product, "http_inventory": [case["body"]]},
-                None,
+                state,
                 {"dump": True, "ui_dump_all": True},
             )
-            assert record.get("ui_unsupported_actions")
-            assert "content_discovery" not in record
-            rows, status = [], "unsupported_by_ui"
+            if product in {"kafka_connect", "schema_registry"}:
+                report = record["content_discovery"]
+                rows, status = report["findings"], report["status"]
+            else:
+                assert record.get("ui_unsupported_actions")
+                assert "content_discovery" not in record
+                rows, status = [], "unsupported_by_ui"
         elif product in {"provectus", "kafbat"}:
             ctx.lifecycle_state = SimpleNamespace(
                 ui_base=BASE, ui_http=pool, ui_cookie="ui-session=known", ui_vendor=product

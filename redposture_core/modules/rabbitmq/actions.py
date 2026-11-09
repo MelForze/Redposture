@@ -336,7 +336,13 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     show_all = bool(getattr(ctx.args, "enum", False))
     selected = [name for name in collections if show_all or getattr(ctx.args, f"show_{name}", False)]
     show_permissions = show_all or bool(getattr(ctx.args, "show_permissions", False))
-    if not (selected or show_permissions) or not _can_read(prior):
+    discovery = bool(getattr(ctx.args, "discover", False))
+    if not (selected or show_permissions or discovery) or not _can_read(prior):
+        return record
+    if discovery and not (selected or show_permissions):
+        from .discover import discover
+
+        record["content_discovery"] = discover(ctx, record)
         return record
     record["show_permissions"] = show_permissions
     client = _read_client(ctx, prior)
@@ -384,6 +390,13 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             projected = [{key: row[key] for key in columns.split(",") if key in row} for row in result.items]
             enumeration[name] = {**asdict(result), "items": projected}
     record["enumeration"] = enumeration
+    if discovery:
+        ready = getattr(ctx, "emit_ready_inventory", None)
+        if callable(ready):
+            ready(record)
+        from .discover import discover
+
+        record["content_discovery"] = discover(ctx, record)
     return record
 
 

@@ -1722,6 +1722,7 @@ def _record_looks_detected(record: AuditRecord | dict[str, Any]) -> bool:
 
 
 _PRE_DETECT_NOISE_MARKERS = (
+    "connect call failed",
     "connection refused",
     "connection reset",
     "reset by peer",
@@ -1776,6 +1777,7 @@ _PRE_DETECT_NOISE_MARKERS = (
 )
 
 _PRE_DETECT_OPERATIONAL_MARKERS = (
+    "connect call failed",
     "connection refused",
     "connection reset",
     "reset by peer",

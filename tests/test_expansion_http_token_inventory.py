@@ -190,15 +190,35 @@ def test_vault_list_fallback_nested_duplicates_and_unsafe_keys(monkeypatch: pyte
         secret = {"password": path}
         return reply({"data": {"data": secret} if version == "2" else secret})
 
+    class HistoryPool:
+        def request_stream(self, method, url, *, headers, on_response, on_chunk, **kwargs):
+            path = urlsplit(url).path
+            assert version == "2" and method == "GET"
+            assert path in {prefix + "one", prefix + "sub/two"}
+            calls.append((method, path, headers.get("X-Vault-Token")))
+            on_response(200, {"Content-Type": "application/json"})
+            on_chunk(
+                json.dumps(
+                    {
+                        "data": {
+                            "current_version": 1,
+                            "versions": {"1": {"destroyed": False, "deletion_time": ""}},
+                        }
+                    }
+                ).encode()
+            )
+            return HttpResponse(200, b"", {})
+
     monkeypatch.setattr(
-        vault, "_client", lambda ctx: ScopedHttpClient(pool=cast(Any, object()), response_size_cap=4 * 1024 * 1024)
+        vault, "_client", lambda ctx: ScopedHttpClient(pool=cast(Any, HistoryPool()), response_size_cap=4 * 1024 * 1024)
     )
     monkeypatch.setattr(vault, "_request", request)
     result = vault.data_record(context(discover=True), {"api_endpoint": "http://qa", "token_valid": True})
     assert [item["key"] for item in result["kv_dump_items"]] == ["secret/one", "secret/sub/two"]
     assert result["kv_secrets_read"] == 2 and result["kv_discovery_partial"] is True
     assert result["inventory_status"] == "partial"
-    assert len(calls) == 6 and all(token == "verified-token" for _, _, token in calls)
+    assert len(calls) == (8 if version == "2" else 6)
+    assert all(token == "verified-token" for _, _, token in calls)
     assert calls[2][:2] == ("GET", prefix + "?list=true")
 
 

@@ -727,6 +727,7 @@ run_valkey_cases() {
 
 run_grafana_cases() {
   run_case grafana grafana_default 0 grafana -t 127.0.0.1 --port 3000 -u admin -p admin --show-datasources
+  run_case grafana grafana_discover 0 grafana -t 127.0.0.1:3000 -u admin -p admin --discover --discover-time 30 -f json -o "${OUT_DIR}/json/grafana-discover.json"
   run_case grafana grafana_apitoken 0 grafana -t 127.0.0.1 --port 3000 --apitoken glsa-fake-token-2026 --show-datasources
   run_case grafana grafana_url_http 0 grafana -t "http://127.0.0.1:3000/login?next=%2F" -u admin -p admin --show-datasources
   run_case grafana grafana_url_https_transport_fallback 0 grafana -t "https://127.0.0.1:3000/login"
@@ -746,6 +747,7 @@ run_grafana_cases() {
 run_rabbitmq_cases() {
   run_case rabbitmq rabbitmq_default 0 rabbitmq -t localhost --port 15672 --debug --defcreds
   run_case rabbitmq rabbitmq_enum 0 rabbitmq --targets 127.0.0.1 --port 15672 --ports 15672 -u guest -p guest --enum --vhost / --limit 5 --page-size 2 -f json -o "${OUT_DIR}/json/rabbitmq-enum.json" -ot excluded.invalid
+  run_case rabbitmq rabbitmq_discover 0 rabbitmq -t 127.0.0.1:15672 -u guest -p guest --vhost / --discover --discover-time 30 -f json -o "${OUT_DIR}/json/rabbitmq-discover.json"
   run_case rabbitmq rabbitmq_rejected 0 rabbitmq -t 127.0.0.1:15672 -u guest -p wrong
   run_case rabbitmq rabbitmq_cluster_tls 0 rabbitmq -t https://localhost:15671 -u ops_admin -p 'Ops-Lab-2026!' --enum --vhost prod/orders
   run_case rabbitmq rabbitmq_observer 0 rabbitmq -t localhost:15672 -u observer -p 'Observe-Lab-2026!' --enum
@@ -941,6 +943,7 @@ run_docker_cases() {
   run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --tls-cert "${docker_client_cert}" --tls-key "${docker_client_key}" --system
   run_case docker docker_multi_ports 0 docker -t 127.0.0.1 --ports "2375,2376,24243,24244,24245" --tls-cert "${docker_client_cert}" --tls-key "${docker_client_key}" --containers
   run_case docker docker_inventory 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
+  run_case docker docker_discover 0 docker -t 127.0.0.1:2375 --discover --discover-time 30 -f json -o "${OUT_DIR}/json/docker-discover.json"
   run_case docker docker_exec 0 docker -t 127.0.0.1 --port 2375 --container redposture-web --exec-cmd "id"
   run_text_case docker docker_debug_smoke 0 docker -t 127.0.0.1 --port 2375 --debug
   if is_extended_matrix; then

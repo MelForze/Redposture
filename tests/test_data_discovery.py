@@ -160,8 +160,10 @@ def test_discover_help_is_in_module_inventory_group(module: str) -> None:
         if module == "nexus"
         else "OCI images"
         if module in {"harbor", "docker-registry"}
+        else "Enumeration"
+        if module in {"rabbitmq", "keycloak"}
         else "Inventory"
-        if module in {"jenkins", "vault", "nomad", "jupyter", "spark", "yarn", "portainer"}
+        if module in {"docker", "jenkins", "vault", "nomad", "jupyter", "spark", "yarn", "portainer"}
         else "Actions"
     )
     owner = next(

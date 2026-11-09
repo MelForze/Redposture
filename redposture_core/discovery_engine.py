@@ -258,7 +258,13 @@ def _scan_small_value(value: Any, path: str, field_name: str | None = None) -> t
 
 
 def _scan_text_chunks(
-    chunks: Iterable[str], path: str, portion_bytes: int, decode_depth: int = 0, deadline: float | None = None
+    chunks: Iterable[str],
+    path: str,
+    portion_bytes: int,
+    decode_depth: int = 0,
+    deadline: float | None = None,
+    *,
+    field_name: str | None = None,
 ) -> tuple[list[Any], bool]:
     matches = SpoolingSecretMatches()
     covered = True
@@ -305,7 +311,7 @@ def _scan_text_chunks(
             matches.extend(found)
             covered &= complete
         else:
-            found, complete = _scan_small_value(item, path)
+            found, complete = _scan_small_value(item, path, field_name)
             if isinstance(item, str) and scanner.cloudinit is not None and scanner.cloudinit.active:
                 # The incremental block reader already owns this grammar.
                 # Ordinary lexer leftovers may contain the same whole block;
@@ -653,7 +659,7 @@ def _scan_portioned_value(
         if value.uniform and next(value.iter_text_chunks(max_chars=1), "") not in {"{", "["}:
             return [], value.byte_length, True
         text_matches, covered = _scan_text_chunks(
-            value.iter_text_chunks(), path, portion_bytes, _decode_depth, _deadline
+            value.iter_text_chunks(), path, portion_bytes, _decode_depth, _deadline, field_name=_field_name
         )
         return text_matches, value.byte_length, covered
     try:
@@ -806,5 +812,7 @@ def _scan_portioned_value(
             inspected += len(chunk.encode("utf-8"))
             yield chunk
 
-    text_matches, covered = _scan_text_chunks(measured_chunks(), path, portion_bytes, _decode_depth, _deadline)
+    text_matches, covered = _scan_text_chunks(
+        measured_chunks(), path, portion_bytes, _decode_depth, _deadline, field_name=_field_name
+    )
     return text_matches, inspected, covered

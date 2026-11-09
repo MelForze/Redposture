@@ -179,3 +179,72 @@ def scan_container_logs(
                     except OSError as exc:
                         collector.partial(source, str(exc) or type(exc).__name__)
         return complete and collector.partial_events == initial_errors, status
+
+
+def discover_image_configs(
+    collector: Any, pool: Any, base: str, headers: Any, timeout: float, selected_ids: Any, inventory: Any
+) -> None:
+    """Reuse a complete image inventory or stream the full endpoint catalog."""
+    import json
+    from collections.abc import Mapping
+    from urllib.parse import quote
+
+    from ...discovery_frontier import DiscoveryFrontier
+    from ...discovery_http_reader import read_json
+
+    collector.declare_sources("image_catalog", "image_inspect")
+    with DiscoveryFrontier() as images:
+
+        def enqueue(endpoint: int, row: Any) -> bool:
+            identifier = row.get("Id") if isinstance(row, Mapping) else None
+            if not isinstance(identifier, str) or not identifier or len(identifier) > 4096:
+                collector.partial("portainer/images", "invalid_image_identity")
+                return False
+            images.enqueue(json.dumps([endpoint, identifier]))
+            return True
+
+        section = inventory.get("images") if isinstance(inventory, Mapping) else None
+        records = section.get("records") if isinstance(section, Mapping) else None
+        if (
+            isinstance(section, Mapping)
+            and isinstance(records, list)
+            and not section.get("partial")
+            and not section.get("status")
+        ):
+            with collector.source_attempt(
+                "portainer.image_catalog", scope="selected_inventory", content=False
+            ) as evidence:
+                for row in records:
+                    endpoint = row.get("environment") if isinstance(row, Mapping) else None
+                    if type(endpoint) is not int or endpoint not in selected_ids or not enqueue(endpoint, row):
+                        collector.partial("portainer/images", "invalid_image_environment")
+                evidence.accept(len(records))
+        else:
+            for endpoint in selected_ids:
+                path = f"/api/endpoints/{endpoint}/docker/images/json?all=1"
+                catalog = read_json(
+                    collector,
+                    pool,
+                    base.rstrip("/") + path,
+                    f"portainer/environment/{endpoint}/images",
+                    source_class="portainer.image_catalog",
+                    headers=headers,
+                    timeout=timeout,
+                    root="array",
+                )
+                if catalog is not None:
+                    for row in catalog:
+                        enqueue(endpoint, row)
+        while collector.allowed() and (item := images.pop()) is not None:
+            endpoint, identifier = json.loads(item)
+            path = f"/api/endpoints/{endpoint}/docker/images/{quote(identifier, safe='')}/json"
+            read_json(
+                collector,
+                pool,
+                base.rstrip("/") + path,
+                f"portainer/environment/{endpoint}/image/{identifier}",
+                source_class="portainer.image_inspect",
+                headers=headers,
+                timeout=timeout,
+                required_fields=("Config",),
+            )

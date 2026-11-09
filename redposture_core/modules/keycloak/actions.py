@@ -438,7 +438,12 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     enum_realms = bool(getattr(ctx.args, "enum_realms", False))
     show_realms = bool(getattr(ctx.args, "show_realms", False))
     show_clients = bool(getattr(ctx.args, "show_clients", False))
+    discovery = bool(getattr(ctx.args, "discover", False))
     if not (enum_realms or show_realms or show_clients):
+        if discovery:
+            from .discover import discover
+
+            result["content_discovery"] = discover(ctx, result)
         return result
     base = str(prior.get("api_endpoint") or "")
     token = getattr(ctx.args, "_keycloak_token", None)
@@ -556,4 +561,11 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         result["clients_partial"] = bool(clients_errors)
         if clients_errors:
             result["clients_errors"] = clients_errors
+    if discovery:
+        ready = getattr(ctx, "emit_ready_inventory", None)
+        if callable(ready):
+            ready(result)
+        from .discover import discover
+
+        result["content_discovery"] = discover(ctx, result)
     return result

@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "split": "holdout-v2",
+  "provenance": "Hand-labelled unrelated business API and transport controls; synthetic, not captured products. Expected identities were assigned before the gate run, independently of classifiers. Version 2 preserves v1 and appends corporate proxy, API and UI lookalikes before their first execution.",
+  "cases": [
+    {
+      "id": "inventory-envelope",
+      "status": 200,
+      "content_type": "application/json",
+      "body": "{\"result\":{\"collections\":[]},\"status\":\"ok\",\"time\":0.0031,\"service\":\"inventory-control\"}",
+      "expected": false
+    },
+    {
+      "id": "business-capabilities",
+      "status": 200,
+      "content_type": "application/json",
+      "body": "{\"data\":{\"clustername\":\"billing-cluster\",\"cap\":{}},\"service\":\"billing-control\"}",
+      "expected": false
+    },
+    {
+      "id": "plain-version-build",
+      "status": 200,
+      "content_type": "application/json",
+      "body": "{\"version\":\"9.8.7\",\"build\":\"20261108\",\"service\":\"catalog-control\"}",
+      "expected": false
+    },
+    {
+      "id": "sso-documentation",
+      "status": 200,
+      "content_type": "text/html",
+      "body": "<html><title>Corporate sign in</title><main>Supported integrations: Grafana Jenkins GitLab Qdrant Proxmox MinIO</main><!-- examples, not installed applications --><form action='/session'><input name='username'></form></html>",
+      "expected": false
+    },
+    {
+      "id": "rate-limited-gateway",
+      "status": 429,
+      "content_type": "text/html",
+      "body": "<html><title>Too Many Requests</title><p>gateway control</p></html>",
+      "expected": false
+    },
+    {
+      "id": "damaged-json",
+      "status": 200,
+      "content_type": "application/json",
+      "body": "{\"version\":{\"number\":\"9.8.7\"},\"result\":",
+      "expected": false
+    },
+    {
+      "id": "business-health",
+      "status": 200,
+      "content_type": "application/json",
+      "body": "{\"status\":\"UP\",\"components\":{\"db\":{\"status\":\"UP\"}},\"service\":\"billing\"}",
+      "expected": false
+    },
+    {
+      "id": "oidc-business",
+      "status": 200,
+      "content_type": "application/json",
+      "body": "{\"issuer\":\"https://identity.invalid\",\"authorization_endpoint\":\"https://identity.invalid/login\",\"token_endpoint\":\"https://identity.invalid/token\",\"jwks_uri\":\"https://identity.invalid/keys\"}",
+      "expected": false
+    },
+    {
+      "id": "integration-openapi",
+      "status": 200,
+      "content_type": "application/json",
+      "body": "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"Billing integration API\",\"version\":\"1.0\"},\"paths\":{\"/grafana\":{},\"/jenkins\":{},\"/gitlab\":{}}}",
+      "expected": false
+    },
+    {
+      "id": "generic-spa",
+      "status": 200,
+      "content_type": "text/html",
+      "body": "<html><title>Operations portal</title><div id=\"root\"></div><script src=\"/assets/app.js\"></script></html>",
+      "expected": false
+    },
+    {
+      "id": "waf-policy",
+      "status": 403,
+      "content_type": "text/html",
+      "body": "<html><title>Access policy</title><p>Request blocked. Contact your administrator.</p></html>",
+      "expected": false
+    },
+    {
+      "id": "generic-unauthorized",
+      "status": 401,
+      "content_type": "application/json",
+      "body": "{\"error\":\"Unauthorized\",\"message\":\"Authentication required\"}",
+      "expected": false
+    },
+    {
+      "id": "proxy-upstream",
+      "status": 502,
+      "content_type": "text/html",
+      "body": "<html><title>Bad Gateway</title><p>Upstream service unavailable</p></html>",
+      "expected": false
+    },
+    {
+      "id": "integration-log",
+      "status": 200,
+      "content_type": "application/json",
+      "body": "{\"level\":\"info\",\"message\":\"Enabled optional integrations: Kafka MongoDB RabbitMQ Grafana Keycloak Kubernetes Docker\",\"version\":\"2026.11.09\",\"application\":\"billing\"}",
+      "expected": false
+    }
+  ]
+}

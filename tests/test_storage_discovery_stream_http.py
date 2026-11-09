@@ -244,7 +244,11 @@ def test_portainer_stack_file_streams_past_one_portion() -> None:
             "status": "valid_credentials",
             "ui": {"endpoint": f"http://127.0.0.1:{server.server_address[1]}/portainer", "session_token": "qa"},
         }
-        inventory = {"environments": {"records": [{"Id": 2, "Name": "local"}]}, "containers": {"records": []}}
+        inventory = {
+            "environments": {"records": [{"Id": 2, "Name": "local"}]},
+            "containers": {"records": []},
+            "images": {"records": []},
+        }
         collector = DiscoveryCollector("portainer", ctx, record)
         discover_portainer_sources(ctx, record, inventory, collector)
         result = collector.result()
@@ -301,6 +305,7 @@ def test_portainer_large_container_inspect_streams_selected_fields() -> None:
         inventory = {
             "environments": {"records": [{"Id": 2, "Name": "local"}]},
             "containers": {"records": [{"environment": 2, "Id": "qa-container"}]},
+            "images": {"records": []},
         }
         collector = DiscoveryCollector("portainer", ctx, record)
         discover_portainer_sources(ctx, record, inventory, collector)
@@ -356,7 +361,11 @@ def test_portainer_swarm_catalog_streams_through_real_http_pool(monkeypatch: pyt
             "status": "valid_credentials",
             "ui": {"endpoint": f"http://127.0.0.1:{ctx.port}/portainer", "session_token": "qa"},
         }
-        inventory = {"environments": {"records": [{"Id": 2, "Name": "local"}]}, "containers": {"records": []}}
+        inventory = {
+            "environments": {"records": [{"Id": 2, "Name": "local"}]},
+            "containers": {"records": []},
+            "images": {"records": []},
+        }
         collector = DiscoveryCollector("portainer", ctx, record)
         monkeypatch.setattr(collector, "cap", lambda maximum=10 * 1024 * 1024: min(512, maximum))
         discover_portainer_sources(ctx, record, inventory, collector)
@@ -415,7 +424,11 @@ def test_portainer_large_stack_catalog_keeps_completed_rows_and_reads_files(monk
             "status": "valid_credentials",
             "ui": {"endpoint": f"http://127.0.0.1:{ctx.port}/portainer", "session_token": "qa"},
         }
-        inventory = {"environments": {"records": [{"Id": 2, "Name": "local"}]}, "containers": {"records": []}}
+        inventory = {
+            "environments": {"records": [{"Id": 2, "Name": "local"}]},
+            "containers": {"records": []},
+            "images": {"records": []},
+        }
         collector = DiscoveryCollector("portainer", ctx, record)
         monkeypatch.setattr(collector, "cap", lambda maximum=10 * 1024 * 1024: min(512, maximum))
         discover_portainer_sources(ctx, record, inventory, collector)

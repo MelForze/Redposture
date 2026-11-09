@@ -59,9 +59,9 @@ def test_gate_includes_every_existing_discover_command():
     from redposture_core.module_registry import AUDIT_MODULE_NAMES
 
     expected = {name for name in AUDIT_MODULE_NAMES if hasattr(parse_args([name, "-t", "127.0.0.1"]), "discover")}
-    assert len(MODULES) == len(set(MODULES)) == 27
+    assert len(MODULES) == len(set(MODULES)) == 31
     assert set(MODULES) == expected
-    assert len(COMMON) == 18
+    assert len(COMMON) == 22
 
 
 @pytest.mark.parametrize("module", MODULES)

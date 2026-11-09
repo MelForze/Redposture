@@ -609,6 +609,10 @@ def _discover_kv(
                                 if manifest is not None:
                                     manifest.finish(source_kind, complete=False)
                         continue
+                    if version == "2":
+                        from .discover import discover_kv_history
+
+                        discover_kv_history(client, base, name, full, token, budget, collector)
                     read_path = f"/v1/{quote(name, safe='/')}{content + '/' if content else ''}{quote(full, safe='/')}"
                     read = _request(budget.scoped(client), base, read_path, token=token, timeout=budget.timeout())
                     if read.status == 200 and read.truncated and not read.error:

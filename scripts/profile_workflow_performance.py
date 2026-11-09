@@ -165,6 +165,63 @@ def verify_records(rows: list[dict[str, Any]], workflow: str, module: str, expec
     }
 
 
+class FirstFinding:
+    """Observe complete, known-positive JSONL records, never just a nonempty file."""
+
+    def __init__(self, workflow: str, module: str, expected: set[str]) -> None:
+        self.workflow, self.module, self.expected = workflow, module, expected
+        self.offset = 0
+        self.pending = b""
+        self.seconds: float | None = None
+        self.error: str | None = None
+        self.lock = threading.Lock()
+
+    def positive(self, row: Any) -> bool:
+        if not isinstance(row, dict) or row.get("host") not in self.expected:
+            return False
+        if self.workflow == "collect":
+            endpoint = row.get("endpoint")
+            return (
+                isinstance(endpoint, str)
+                and endpoint in ENDPOINTS
+                and row.get("ok") is True
+                and row.get("body") == fixture_body(endpoint)
+            )
+        if self.workflow == "spray":
+            return (
+                row.get("module") == self.module
+                and row.get("credential_type") == "pair"
+                and row.get("status") == "valid"
+                and (row.get("username"), row.get("password")) == PAIR
+            )
+        return row.get("source_type", row.get("type")) == "trigger" and all(
+            row.get(key) is True for key in ("success", "confirmed", "probe_success")
+        )
+
+    def observe(self, path: Path, started: float) -> None:
+        with self.lock:
+            if self.seconds is not None or self.error:
+                return
+            try:
+                with path.open("rb") as source:
+                    source.seek(self.offset)
+                    while chunk := source.read(16_384):
+                        self.offset += len(chunk)
+                        self.pending += chunk
+                        while b"\n" in self.pending:
+                            line, self.pending = self.pending.split(b"\n", 1)
+                            if line.strip() and self.positive(json.loads(line)):
+                                self.seconds = time.monotonic() - started
+                                return
+                        if len(self.pending) > 65_536:
+                            self.error = "fixture JSONL record exceeds observer bound"
+                            return
+            except FileNotFoundError:
+                return
+            except (OSError, ValueError, TypeError) as exc:
+                self.error = type(exc).__name__
+
+
 def measure(args: argparse.Namespace) -> dict[str, Any]:
     activate_source(args.source)
     from redposture_core import cli
@@ -289,6 +346,7 @@ def measure(args: argparse.Namespace) -> dict[str, Any]:
     peak = {"fd": fd_count(), "threads": threading.active_count()}
     stopping = threading.Event()
     first: list[float] = []
+    confirmed_first = FirstFinding(args.workflow, args.module, expected)
     started = time.monotonic()
     cpu = time.process_time()
 
@@ -298,6 +356,7 @@ def measure(args: argparse.Namespace) -> dict[str, Any]:
             peak["threads"] = max(peak["threads"], threading.active_count())
             if not first and output.exists() and output.stat().st_size:
                 first.append(time.monotonic() - started)
+            confirmed_first.observe(output, started)
 
     sampler = threading.Thread(target=sample, name="workflow-resource-sampler", daemon=True)
     sampler.start()
@@ -311,6 +370,7 @@ def measure(args: argparse.Namespace) -> dict[str, Any]:
             contextlib.redirect_stderr(err),
         ):
             code = cli.main(argv)
+        confirmed_first.observe(output, started)
         wall = time.monotonic() - started
         cpu = time.process_time() - cpu
     finally:
@@ -347,6 +407,8 @@ def measure(args: argparse.Namespace) -> dict[str, Any]:
         or admission.snapshot()["restore_conflict"]
         or admission.snapshot()["overflow"]
         or not routes.snapshot()["complete"]
+        or confirmed_first.error is not None
+        or (bool(expected) and confirmed_first.seconds is None)
     ):
         quality["quality"] = "FAIL"
     return {
@@ -357,12 +419,15 @@ def measure(args: argparse.Namespace) -> dict[str, Any]:
         "target_style": "http",
         "auth_case": "valid_and_invalid" if args.workflow == "spray" else "not_applicable",
         "auth_surface": "default",
+        "read_wire_storage_policy": "not_applicable_workflow_jsonl_observation",
         "actions": list(ENDPOINTS)
         if args.workflow == "collect"
         else ["probe:profile"]
         if args.workflow == "trigger"
         else ["two-seeded-pairs"],
         "detect_concurrency": admission.selected_detect_workers(),
+        "detect_policy": "automatic",
+        "http_peer": "async",
         "detect_concurrency_source": "actual_scheduler_constructor",
         "scheduler_admission": admission.snapshot(),
         "debug_io_policy": "public CLI owns stdout/stderr",
@@ -372,7 +437,9 @@ def measure(args: argparse.Namespace) -> dict[str, Any]:
         "format": "json",
         "save": True,
         "invalid_credentials_accepted": wrong_acceptances,
-        "first_finding_seconds": None,
+        "first_finding_seconds": confirmed_first.seconds,
+        "first_finding_note": "20 ms sampled upper bound: first complete saved JSONL record matching a known positive fixture; includes output flush latency",
+        "first_finding_observer_error": confirmed_first.error,
         "model": args.model,
         "targets": args.targets,
         "seed": args.seed,

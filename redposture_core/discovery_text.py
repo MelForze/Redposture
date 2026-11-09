@@ -106,6 +106,7 @@ class DiscoveryTextStream:
         self.value: _Value | None = None
         self.key: str | None = None
         self.mode = ""
+        self.assignment_newline = False
         self.quote = ""
         self.escaped = False
         self.pem_end = ""
@@ -408,9 +409,20 @@ class DiscoveryTextStream:
                         self.pending = self.pending[-keep:]
                     return
                 if self.mode == "start":
-                    self.pending = self.pending.lstrip()
+                    stripped = self.pending.lstrip()
+                    whitespace = self.pending[: len(self.pending) - len(stripped)]
+                    self.assignment_newline |= "\n" in whitespace or "\r" in whitespace
+                    self.pending = stripped
                     if not self.pending:
                         return
+                    if self.assignment_newline and self.pending[0] not in "\"'":
+                        # An empty assignment cannot consume an unquoted word
+                        # on the next line. Leave that line for ordinary rules.
+                        self.value.close()
+                        self.value = None
+                        self.key = None
+                        self.mode = ""
+                        continue
                     if self.pending[0] in "\"'":
                         if len(self.pending) < 3 and self.pending == self.pending[0] * len(self.pending):
                             return
@@ -552,6 +564,14 @@ class DiscoveryTextStream:
                 self.pending = self.pending[pem.end() :]
                 continue
             multiline = assignment is not None and self.pending[assignment.end() :].lstrip().startswith(('"""', "'''"))
+            if assignment is not None and newline >= assignment.end():
+                tail = self.pending[assignment.end() :]
+                if not tail[: newline - assignment.end()].strip():
+                    if not tail.strip() and len(self.pending) <= self.limit:
+                        return
+                    # JSON/YAML may put a quoted scalar after a line break.
+                    # Preserve its head instead of emitting the empty line.
+                    multiline |= tail.lstrip().startswith(('"', "'"))
             if newline >= 0:
                 for candidate in _ASSIGNMENT.finditer(self.pending, 0, newline):
                     if not is_secret_field_name(candidate.group(1)):
@@ -584,6 +604,7 @@ class DiscoveryTextStream:
                 if match is assignment:
                     self.key = match.group(1)
                     self.mode = "start"
+                    self.assignment_newline = False
                     self.pending = self.pending[match.end() :]
                 else:
                     self.key = None

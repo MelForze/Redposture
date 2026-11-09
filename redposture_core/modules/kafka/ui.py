@@ -1147,6 +1147,16 @@ def _collect_ui_full(ctx: Any, record: dict[str, Any], state: Any, options: dict
 def collect_ui(ctx: Any, record: dict[str, Any], state: Any, options: dict[str, Any]) -> dict[str, Any]:
     if not bool(getattr(getattr(ctx, "args", None), "discover", False)):
         return _collect_ui(ctx, record, state, options)
+    from .http_discover import SUPPORTED, discover
+
+    if record.get("kafka_interface") == "http_surface" and record.get("ui_vendor") in SUPPORTED:
+        inventory_options = dict(options)
+        if getattr(ctx.args, "_discover_implicit_dump", False):
+            inventory_options["dump"] = False
+        payload = http_surfaces.collect(record, inventory_options)
+        payload["content_discovery"] = discover(ctx, record, state)
+        payload["discover_sources"] = payload["content_discovery"].get("sources", [])
+        return payload
     manifest = SourceManifest()
     if record.get("kafka_interface") == "http_surface":
         source = "kafka.http_surface_messages"

@@ -1,0 +1,806 @@
+{
+  "version": 3,
+  "provenance": "Prospective authored QA holdout. Exact labels frozen before first detector run, not externally reviewed and not a representative production/IID sample. Only inactive or test-generated values. Value storage is base64(JSON) to avoid raw provider-token literals in repository fixtures; decoding is lossless and does not invoke detectors. Private key is generated solely for this corpus and never deployed. Version 3 corrects only the malformed Slack URL input from v2 after independent documentation review; v2 and its failed run remain preserved. All other labels unchanged.",
+  "cases": [
+    {
+      "id": "provider-0-google_api_key",
+      "family": "google_api_key",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgQUl6YXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxIGNvbXBsZXRlIn19",
+      "expected": [
+        {
+          "type": "google_api_key",
+          "value_json_base64": "IkFJemFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcSI=",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-1-github_token",
+      "family": "github_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgZ2hwX3FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcSBjb21wbGV0ZSJ9fQ==",
+      "expected": [
+        {
+          "type": "github_token",
+          "value_json_base64": "ImdocF9xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEi",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-2-github_token",
+      "family": "github_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgZ2l0aHViX3BhdF9xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcSBjb21wbGV0ZSJ9fQ==",
+      "expected": [
+        {
+          "type": "github_token",
+          "value_json_base64": "ImdpdGh1Yl9wYXRfcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEi",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-3-gitlab_token",
+      "family": "gitlab_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgZ2xwYXQtcXFxcXFxcXFxcXFxcXFxcXFxcXFxcSBjb21wbGV0ZSJ9fQ==",
+      "expected": [
+        {
+          "type": "gitlab_token",
+          "value_json_base64": "ImdscGF0LXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEi",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-4-slack_token",
+      "family": "slack_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgeG94Yi1xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEgY29tcGxldGUifX0=",
+      "expected": [
+        {
+          "type": "slack_token",
+          "value_json_base64": "InhveGItcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxIg==",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-5-stripe_key",
+      "family": "stripe_key",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgc2tfdGVzdF9xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEgY29tcGxldGUifX0=",
+      "expected": [
+        {
+          "type": "stripe_key",
+          "value_json_base64": "InNrX3Rlc3RfcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxIg==",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-6-vault_token",
+      "family": "vault_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgaHZzLnFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcSBjb21wbGV0ZSJ9fQ==",
+      "expected": [
+        {
+          "type": "vault_token",
+          "value_json_base64": "Imh2cy5xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEi",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-7-npm_token",
+      "family": "npm_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgbnBtX3FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcSBjb21wbGV0ZSJ9fQ==",
+      "expected": [
+        {
+          "type": "npm_token",
+          "value_json_base64": "Im5wbV9xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEi",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-8-api_token",
+      "family": "api_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgc2stcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEgY29tcGxldGUifX0=",
+      "expected": [
+        {
+          "type": "api_token",
+          "value_json_base64": "InNrLXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxIg==",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-9-grafana_token",
+      "family": "grafana_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgZ2xzYV9xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEgY29tcGxldGUifX0=",
+      "expected": [
+        {
+          "type": "grafana_token",
+          "value_json_base64": "Imdsc2FfcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxIg==",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-10-digitalocean_token",
+      "family": "digitalocean_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgZG9wX3YxX3FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEgY29tcGxldGUifX0=",
+      "expected": [
+        {
+          "type": "digitalocean_token",
+          "value_json_base64": "ImRvcF92MV9xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxIg==",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-11-shopify_token",
+      "family": "shopify_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgc2hwYXRfcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEgY29tcGxldGUifX0=",
+      "expected": [
+        {
+          "type": "shopify_token",
+          "value_json_base64": "InNocGF0X3FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxIg==",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-12-docker_token",
+      "family": "docker_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgZGNrcl9wYXRfcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcSBjb21wbGV0ZSJ9fQ==",
+      "expected": [
+        {
+          "type": "docker_token",
+          "value_json_base64": "ImRja3JfcGF0X3FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEi",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-13-pypi_token",
+      "family": "pypi_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgcHlwaS1BZ0VJcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEgY29tcGxldGUifX0=",
+      "expected": [
+        {
+          "type": "pypi_token",
+          "value_json_base64": "InB5cGktQWdFSXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxIg==",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-14-sendgrid_token",
+      "family": "sendgrid_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgU0cucXFxcXFxcXFxcXFxcXFxcS52dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYgY29tcGxldGUifX0=",
+      "expected": [
+        {
+          "type": "sendgrid_token",
+          "value_json_base64": "IlNHLnFxcXFxcXFxcXFxcXFxcXEudnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2Ig==",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-15-twilio_token",
+      "family": "twilio_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgU0swMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiBjb21wbGV0ZSJ9fQ==",
+      "expected": [
+        {
+          "type": "twilio_token",
+          "value_json_base64": "IlNLMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYi",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-16-telegram_token",
+      "family": "telegram_token",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgOTAwMTIzNDU2OkFBcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxIGNvbXBsZXRlIn19",
+      "expected": [
+        {
+          "type": "telegram_token",
+          "value_json_base64": "IjkwMDEyMzQ1NjpBQXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcSI=",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "provider-17-slack_webhook",
+      "family": "slack_webhook",
+      "body_json_base64": "eyJldmVudCI6eyJtZXNzYWdlIjoiY29ubmVjdGlvbiBsb2cgaHR0cHM6Ly9ob29rcy5zbGFjay5jb20vc2VydmljZXMvVDAwMDAwMDAwL0IwMDAwMDAwMC9xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXEgY29tcGxldGUifX0=",
+      "expected": [
+        {
+          "type": "slack_webhook",
+          "value_json_base64": "Imh0dHBzOi8vaG9va3Muc2xhY2suY29tL3NlcnZpY2VzL1QwMDAwMDAwMC9CMDAwMDAwMDAvcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxIg==",
+          "path": "$.event.message"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "uri-postgresql",
+      "family": "connection_string",
+      "body_json_base64": "eyJjb25uZWN0aW9uIjoicG9zdGdyZXNxbDovL3FhOmluYWN0aXZlJTIxcm90YXRpb25Ac2VydmljZS5pbnZhbGlkOjEyMzQvYXBwP21vZGU9cmVhZG9ubHkifQ==",
+      "expected": [
+        {
+          "type": "connection_string",
+          "value_json_base64": "InBvc3RncmVzcWw6Ly9xYTppbmFjdGl2ZSUyMXJvdGF0aW9uQHNlcnZpY2UuaW52YWxpZDoxMjM0L2FwcD9tb2RlPXJlYWRvbmx5Ig==",
+          "path": "$.connection"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "uri-redis",
+      "family": "connection_string",
+      "body_json_base64": "eyJjb25uZWN0aW9uIjoicmVkaXM6Ly9xYTppbmFjdGl2ZSUyMXJvdGF0aW9uQHNlcnZpY2UuaW52YWxpZDoxMjM0L2FwcD9tb2RlPXJlYWRvbmx5In0=",
+      "expected": [
+        {
+          "type": "connection_string",
+          "value_json_base64": "InJlZGlzOi8vcWE6aW5hY3RpdmUlMjFyb3RhdGlvbkBzZXJ2aWNlLmludmFsaWQ6MTIzNC9hcHA/bW9kZT1yZWFkb25seSI=",
+          "path": "$.connection"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "uri-amqp",
+      "family": "connection_string",
+      "body_json_base64": "eyJjb25uZWN0aW9uIjoiYW1xcDovL3FhOmluYWN0aXZlJTIxcm90YXRpb25Ac2VydmljZS5pbnZhbGlkOjEyMzQvYXBwP21vZGU9cmVhZG9ubHkifQ==",
+      "expected": [
+        {
+          "type": "connection_string",
+          "value_json_base64": "ImFtcXA6Ly9xYTppbmFjdGl2ZSUyMXJvdGF0aW9uQHNlcnZpY2UuaW52YWxpZDoxMjM0L2FwcD9tb2RlPXJlYWRvbmx5Ig==",
+          "path": "$.connection"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "uri-mysql",
+      "family": "connection_string",
+      "body_json_base64": "eyJjb25uZWN0aW9uIjoibXlzcWw6Ly9xYTppbmFjdGl2ZSUyMXJvdGF0aW9uQHNlcnZpY2UuaW52YWxpZDoxMjM0L2FwcD9tb2RlPXJlYWRvbmx5In0=",
+      "expected": [
+        {
+          "type": "connection_string",
+          "value_json_base64": "Im15c3FsOi8vcWE6aW5hY3RpdmUlMjFyb3RhdGlvbkBzZXJ2aWNlLmludmFsaWQ6MTIzNC9hcHA/bW9kZT1yZWFkb25seSI=",
+          "path": "$.connection"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "uri-mongodb",
+      "family": "connection_string",
+      "body_json_base64": "eyJjb25uZWN0aW9uIjoibW9uZ29kYjovL3FhOmluYWN0aXZlJTIxcm90YXRpb25Ac2VydmljZS5pbnZhbGlkOjEyMzQvYXBwP21vZGU9cmVhZG9ubHkifQ==",
+      "expected": [
+        {
+          "type": "connection_string",
+          "value_json_base64": "Im1vbmdvZGI6Ly9xYTppbmFjdGl2ZSUyMXJvdGF0aW9uQHNlcnZpY2UuaW52YWxpZDoxMjM0L2FwcD9tb2RlPXJlYWRvbmx5Ig==",
+          "path": "$.connection"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "uri-https",
+      "family": "connection_string",
+      "body_json_base64": "eyJjb25uZWN0aW9uIjoiaHR0cHM6Ly9xYTppbmFjdGl2ZSUyMXJvdGF0aW9uQHNlcnZpY2UuaW52YWxpZDoxMjM0L2FwcD9tb2RlPXJlYWRvbmx5In0=",
+      "expected": [
+        {
+          "type": "connection_string",
+          "value_json_base64": "Imh0dHBzOi8vcWE6aW5hY3RpdmUlMjFyb3RhdGlvbkBzZXJ2aWNlLmludmFsaWQ6MTIzNC9hcHA/bW9kZT1yZWFkb25seSI=",
+          "path": "$.connection"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "dsn-odbc",
+      "family": "connection_string",
+      "body_json_base64": "eyJjb25uZWN0aW9uIjoiRHJpdmVyPXtPREJDIERyaXZlciAxOCBmb3IgU1FMIFNlcnZlcn07U0VSVkVSPXNxbC5pbnZhbGlkO1VJRD1xYTtQV0Q9e2dyZWVuOyBtZWFkb3chNzN9In0=",
+      "expected": [
+        {
+          "type": "connection_string",
+          "value_json_base64": "IkRyaXZlcj17T0RCQyBEcml2ZXIgMTggZm9yIFNRTCBTZXJ2ZXJ9O1NFUlZFUj1zcWwuaW52YWxpZDtVSUQ9cWE7UFdEPXtncmVlbjsgbWVhZG93ITczfSI=",
+          "path": "$.connection"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "dsn-libpq",
+      "family": "connection_string",
+      "body_json_base64": "eyJjb25uZWN0aW9uIjoiaG9zdD1kYi5pbnZhbGlkIHVzZXI9cWEgcGFzc3dvcmQ9J2NvcHBlciBtZWFkb3chNzMnIGRibmFtZT1xYSJ9",
+      "expected": [
+        {
+          "type": "connection_string",
+          "value_json_base64": "Imhvc3Q9ZGIuaW52YWxpZCB1c2VyPXFhIHBhc3N3b3JkPSdjb3BwZXIgbWVhZG93ITczJyBkYm5hbWU9cWEi",
+          "path": "$.connection"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "dsn-jdbc",
+      "family": "connection_string",
+      "body_json_base64": "eyJjb25uZWN0aW9uIjoiamRiYzpzcWxzZXJ2ZXI6Ly9zcWwuaW52YWxpZDt1c2VyPXFhO3Bhc3N3b3JkPXtzaWx2ZXI7bWVhZG93ITczfSJ9",
+      "expected": [
+        {
+          "type": "connection_string",
+          "value_json_base64": "ImpkYmM6c3Fsc2VydmVyOi8vc3FsLmludmFsaWQ7dXNlcj1xYTtwYXNzd29yZD17c2lsdmVyO21lYWRvdyE3M30i",
+          "path": "$.connection"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "http-basic",
+      "family": "basic_auth",
+      "body_json_base64": "eyJyZXF1ZXN0Ijp7ImF1dGhvcml6YXRpb24iOiJCYXNpYyBjV0U2WVcxaVpYSXRZbkp2YjJzaE56TT0ifX0=",
+      "expected": [
+        {
+          "type": "basic_auth",
+          "value_json_base64": "IkJhc2ljIGNXRTZZVzFpWlhJdFluSnZiMnNoTnpNPSI=",
+          "path": "$.request.authorization"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "cookie",
+      "family": "session_cookie",
+      "body_json_base64": "eyJoZWFkZXIiOiJDb29raWU6IHNlc3Npb249aW5hY3RpdmUtc2Vzc2lvbi03MzsgdGhlbWU9ZGFyayJ9",
+      "expected": [
+        {
+          "type": "session_cookie",
+          "value_json_base64": "IkNvb2tpZTogc2Vzc2lvbj1pbmFjdGl2ZS1zZXNzaW9uLTczOyB0aGVtZT1kYXJrIg==",
+          "path": "$.header"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "set-cookie",
+      "family": "session_cookie",
+      "body_json_base64": "eyJoZWFkZXIiOiJTZXQtQ29va2llOiBzZXNzaW9uPWluYWN0aXZlLXNlc3Npb24tNzQ7IFBhdGg9LzsgSHR0cE9ubHk7IFNlY3VyZSJ9",
+      "expected": [
+        {
+          "type": "session_cookie",
+          "value_json_base64": "IlNldC1Db29raWU6IHNlc3Npb249aW5hY3RpdmUtc2Vzc2lvbi03NDsgUGF0aD0vOyBIdHRwT25seTsgU2VjdXJlIg==",
+          "path": "$.header"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "private-key",
+      "family": "private_key",
+      "body_json_base64": "eyJwcml2YXRlS2V5IjoiLS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tXG5NQzRDQVFBd0JRWURLMlZ3QkNJRUlNNkJCaUFUZjBIeFZNWXovZVR5ZHNFSW4wcDNIT3piNDVXbXduK1RDZVlzXG4tLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tIn0=",
+      "expected": [
+        {
+          "type": "private_key",
+          "value_json_base64": "Ii0tLS0tQkVHSU4gUFJJVkFURSBLRVktLS0tLVxuTUM0Q0FRQXdCUVlESzJWd0JDSUVJTTZCQmlBVGYwSHhWTVl6L2VUeWRzRUluMHAzSE96YjQ1V213bitUQ2VZc1xuLS0tLS1FTkQgUFJJVkFURSBLRVktLS0tLSI=",
+          "path": "$.privateKey"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "jwt",
+      "family": "jwt",
+      "body_json_base64": "eyJhdXRob3JpemF0aW9uIjoiZXlKaGJHY2lPaUpJVXpJMU5pSXNJblI1Y0NJNklrcFhWQ0o5LmV5SnpkV0lpT2lKeFlTMWpiM0p3ZFhNaUxDSmhkV1FpT2lKcGJtRmpkR2wyWlMxMFpYTjBjeUlzSW1saGRDSTZNVGN3TURBd01EQXdNSDAuQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOCJ9",
+      "expected": [
+        {
+          "type": "jwt",
+          "value_json_base64": "ImV5SmhiR2NpT2lKSVV6STFOaUlzSW5SNWNDSTZJa3BYVkNKOS5leUp6ZFdJaU9pSnhZUzFqYjNKd2RYTWlMQ0poZFdRaU9pSnBibUZqZEdsMlpTMTBaWE4wY3lJc0ltbGhkQ0k2TVRjd01EQXdNREF3TUgwLkFBRUNBd1FGQmdjSUNRb0xEQTBPRHhBUkVoTVVGUllYR0JrYUd4d2RIaDgi",
+          "path": "$.authorization"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "aws-object",
+      "family": "aws_credentials",
+      "body_json_base64": "eyJjbG91ZCI6eyJhd3NfYWNjZXNzX2tleV9pZCI6IkFLSUFRUVFRUVFRUVFRUVFRUVFRIiwiYXdzX3NlY3JldF9hY2Nlc3Nfa2V5IjoiYUIzZEU2Z0g5aksybU41cFE4c1Qxdlc0eVo3Y0YwaUwzb1I2dVY5eCIsInJlZ2lvbiI6ImV1LXdlc3QtMSJ9fQ==",
+      "expected": [
+        {
+          "type": "aws_credentials",
+          "value_json_base64": "eyJhd3NfYWNjZXNzX2tleV9pZCI6IkFLSUFRUVFRUVFRUVFRUVFRUVFRIiwiYXdzX3NlY3JldF9hY2Nlc3Nfa2V5IjoiYUIzZEU2Z0g5aksybU41cFE4c1Qxdlc0eVo3Y0YwaUwzb1I2dVY5eCIsInJlZ2lvbiI6ImV1LXdlc3QtMSJ9",
+          "path": "$.cloud"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "oauth-object",
+      "family": "oauth_credentials",
+      "body_json_base64": "eyJvYXV0aCI6eyJjbGllbnRfaWQiOiJxYS1yZWFkZXIiLCJjbGllbnRfc2VjcmV0IjoiaW5hY3RpdmUtY29yYWwhNzMiLCJyZWZyZXNoX3Rva2VuIjoiaW5hY3RpdmUtcml2ZXIhNzMiLCJ0b2tlbl90eXBlIjoiQmVhcmVyIn19",
+      "expected": [
+        {
+          "type": "oauth_credentials",
+          "value_json_base64": "eyJjbGllbnRfaWQiOiJxYS1yZWFkZXIiLCJjbGllbnRfc2VjcmV0IjoiaW5hY3RpdmUtY29yYWwhNzMiLCJyZWZyZXNoX3Rva2VuIjoiaW5hY3RpdmUtcml2ZXIhNzMiLCJ0b2tlbl90eXBlIjoiQmVhcmVyIn0=",
+          "path": "$.oauth"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "password-json",
+      "family": "password",
+      "body_json_base64": "eyJkYiI6eyJwYXNzd29yZCI6ImFtYmVyIHdhdGVyZmFsbCE3MyJ9fQ==",
+      "expected": [
+        {
+          "type": "password",
+          "value_json_base64": "ImFtYmVyIHdhdGVyZmFsbCE3MyI=",
+          "path": "$.db.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "password-unicode",
+      "family": "password",
+      "body_json_base64": "eyJkYiI6eyJwYXNzd29yZCI6ItC/0YDQvtCy0LXRgNC60LAt0YDQtdC60LgtNzMhIn19",
+      "expected": [
+        {
+          "type": "password",
+          "value_json_base64": "ItC/0YDQvtCy0LXRgNC60LAt0YDQtdC60LgtNzMhIg==",
+          "path": "$.db.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "password-newline",
+      "family": "password",
+      "body_json_base64": "eyJkYiI6eyJwYXNzd29yZCI6ImFtYmVyXG5yaXZlciE3MyJ9fQ==",
+      "expected": [
+        {
+          "type": "password",
+          "value_json_base64": "ImFtYmVyXG5yaXZlciE3MyI=",
+          "path": "$.db.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "password-spaces",
+      "family": "password",
+      "body_json_base64": "eyJkYiI6eyJwYXNzd29yZCI6IiBhbWJlciByaXZlciE3MyAifX0=",
+      "expected": [
+        {
+          "type": "password",
+          "value_json_base64": "IiBhbWJlciByaXZlciE3MyAi",
+          "path": "$.db.password"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "benign-service-health",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJzZXJ2aWNlIjp7Im5hbWUiOiJiaWxsaW5nIiwidmVyc2lvbiI6IjMuNy40In0sImhlYWx0aCI6eyJoZWFsdGh5Ijp0cnVlfX0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-oauth-public",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJvYXV0aCI6eyJjbGllbnRfaWQiOiJwdWJsaWMtdWkiLCJ0b2tlblVybCI6Imh0dHBzOi8vbG9naW4uaW52YWxpZC90b2tlbiIsImF1dGhvcml6YXRpb25VcmwiOiJodHRwczovL2xvZ2luLmludmFsaWQvYXV0aCJ9fQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-oauth-schema",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJ0eXBlIjoib2F1dGgyIiwiZmxvd3MiOnsiY2xpZW50Q3JlZGVudGlhbHMiOnsidG9rZW5VcmwiOiJodHRwczovL2xvZ2luLmludmFsaWQvdG9rZW4iLCJzY29wZXMiOnsicmVhZCI6IlJlYWQgcmVwb3J0cyJ9fX19",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-openapi-header",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJjb21wb25lbnRzIjp7InNlY3VyaXR5U2NoZW1lcyI6eyJhcGlLZXkiOnsidHlwZSI6ImFwaUtleSIsImluIjoiaGVhZGVyIiwibmFtZSI6IlgtQXBpLUtleSJ9fX19",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-secret-reference",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJkYXRhYmFzZSI6eyJwYXNzd29yZCI6eyJzZWNyZXRLZXlSZWYiOnsibmFtZSI6ImRhdGFiYXNlLWF1dGgiLCJrZXkiOiJwYXNzd29yZCJ9fX19",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-env-reference",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJlbnYiOlt7Im5hbWUiOiJEQVRBQkFTRV9QQVNTV09SRCIsInZhbHVlRnJvbSI6eyJzZWNyZXRLZXlSZWYiOnsibmFtZSI6InFhLWRiIiwia2V5IjoicGFzc3dvcmQifX19XX0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-public-url",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJlbmRwb2ludCI6Imh0dHBzOi8vc2VydmljZS5pbnZhbGlkL2FwaS92MS91c2Vycz9saW1pdD0xMDAifQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-metrics-log",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJtZXNzYWdlIjoicHJvY2Vzc19jcHVfc2Vjb25kc190b3RhbCAwLjIzMVxuaHR0cF9yZXF1ZXN0c190b3RhbCA0MzIxXG4ifQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-permission-metadata",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJwZXJtaXNzaW9ucyI6WyJzZWNyZXRzLnJlYWQiLCJ0b2tlbnMubGlzdCJdLCJwYXNzd29yZFJlcXVpcmVkIjp0cnVlLCJzZWN1cmVKc29uRmllbGRzIjp7InBhc3N3b3JkIjp0cnVlfX0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-masked-api",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJwYXNzd29yZCI6IltSRURBQ1RFRF0iLCJjbGllbnRfc2VjcmV0IjoiKioqKioqKioqKiJ9",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-masked-reference",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJkYXRhYmFzZV9wYXNzd29yZCI6IiR7REFUQUJBU0VfUEFTU1dPUkR9Iiwib2F1dGhfc2VjcmV0Ijoie3sgdmF1bHQuc2VjcmV0IH19In0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-empty",
+      "family": "benign_config_or_log",
+      "body_json_base64": "e30=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-empty-list",
+      "family": "benign_config_or_log",
+      "body_json_base64": "W10=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-empty-string",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJwYXNzd29yZCI6IiJ9",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-null-secret",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJwYXNzd29yZCI6bnVsbH0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-boolean-secret",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJwYXNzd29yZCI6ZmFsc2V9",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-version-digest",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJ2ZXJzaW9uIjoiUjdjNGUxZjBhMmI5ZDVjOGU2ZjMxMmFlMDQ5OGJkNzMifQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-sha256",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJzaGEyNTYiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIn0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-etag",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJFVGFnIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-tls-fingerprint",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJmaW5nZXJwcmludCI6IjAxOjIzOjQ1OjY3Ojg5OmFiOmNkOmVmOjAxOjIzOjQ1OjY3Ojg5OmFiOmNkOmVmIn0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-short-github",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJtZXNzYWdlIjoidG9rZW4gcHJlZml4IGdocF9hYmMgaXMgYSBwbGFjZWhvbGRlciBpbiB0aGlzIGRvY3VtZW50In0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-short-slack",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJtZXNzYWdlIjoicHJlZml4IHhveGItYWJjIGlzIGluY29tcGxldGUifQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-short-jwt",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJtZXNzYWdlIjoiZXlKaGJHY2lPaUpJVXpJMU5pSjkgaXMgYSBoZWFkZXIsIG5vdCBhIGNvbXBsZXRlIHRva2VuIn0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-no-auth",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJhdXRoIjp7ImVuYWJsZWQiOmZhbHNlLCJtZWNoYW5pc20iOiJub25lIn19",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-password-policy",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJwYXNzd29yZFBvbGljeSI6eyJtaW5MZW5ndGgiOjE2LCJyZXF1aXJlTnVtYmVycyI6dHJ1ZX0sInJvdGF0aW9uRGF5cyI6MzB9",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-kube-name",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJraW5kIjoiU2VjcmV0IiwibWV0YWRhdGEiOnsibmFtZSI6InFhLWRhdGFiYXNlIiwibmFtZXNwYWNlIjoicWEifSwiZGF0YSI6e319",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-oidc-discovery",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJpc3N1ZXIiOiJodHRwczovL2lkZW50aXR5LmludmFsaWQvcmVhbG1zL3FhIiwiandrc191cmkiOiJodHRwczovL2lkZW50aXR5LmludmFsaWQvcmVhbG1zL3FhL2NlcnRzIiwidG9rZW5fZW5kcG9pbnQiOiJodHRwczovL2lkZW50aXR5LmludmFsaWQvcmVhbG1zL3FhL3Rva2VuIn0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-grafana-metadata",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJzZWN1cmVKc29uRmllbGRzIjp7ImJhc2ljQXV0aFBhc3N3b3JkIjp0cnVlfSwiYmFzaWNBdXRoVXNlciI6InFhIiwiYmFzaWNBdXRoIjp0cnVlfQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-keycloak-metadata",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJjbGllbnRJZCI6ImZyb250ZW5kIiwicHVibGljQ2xpZW50Ijp0cnVlLCJyZWRpcmVjdFVyaXMiOlsiaHR0cHM6Ly9mcm9udGVuZC5pbnZhbGlkLyoiXX0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-rate-limit",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJlcnJvciI6IlRvbyBtYW55IHJlcXVlc3RzIiwic3RhdHVzIjo0MjksInJldHJ5X2FmdGVyIjo2MH0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-waf",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJtZXNzYWdlIjoiUmVxdWVzdCBibG9ja2VkIGJ5IGFjY2VzcyBwb2xpY3kiLCJyZXF1ZXN0X2lkIjoicWEtcmVxdWVzdC0wMDAwMDEifQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-login-ui",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJodG1sIjoiPGZvcm0+PGlucHV0IG5hbWU9XCJ1c2VybmFtZVwiPjxpbnB1dCB0eXBlPVwicGFzc3dvcmRcIiBuYW1lPVwicGFzc3dvcmRcIiB2YWx1ZT1cIlwiPjwvZm9ybT4ifQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-docs-comment",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJtZXNzYWdlIjoiIyBwYXNzd29yZD1cbiMgdXNlIGVudmlyb25tZW50IGNvbmZpZ3VyYXRpb25cbiJ9",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-rotation-log",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJtZXNzYWdlIjoicGFzc3dvcmQgcm90YXRpb24gY29tcGxldGVkIHN1Y2Nlc3NmdWxseSBmb3Igc2VydmljZSBiaWxsaW5nIn0=",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-database-no-password",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJjb25uZWN0aW9uIjoicG9zdGdyZXNxbDovL3FhQGRiLmludmFsaWQ6NTQzMi9hcHAifQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-http-errors",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJjb2RlIjo0MDMsIm1lc3NhZ2UiOiJBY2Nlc3MgZGVuaWVkIiwiZGV0YWlscyI6ImNyZWRlbnRpYWxzIGFyZSByZXF1aXJlZCJ9",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-uri-port",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJsaXN0ZW4iOiIxMjcuMC4wLjE6ODA4MCIsInVybCI6Imh0dHA6Ly8xMjcuMC4wLjE6ODA4MC9oZWFsdGgifQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-empty-key-list",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJrZXlzIjpbXSwidG90YWwiOjB9",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-sql-ddl",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJtZXNzYWdlIjoiQ1JFQVRFIFRBQkxFIHVzZXJzICh1c2VybmFtZSBURVhULCBwYXNzd29yZCBURVhUKTsifQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "benign-empty-html-config",
+      "family": "benign_config_or_log",
+      "body_json_base64": "eyJodG1sIjoiPGRpdiBkYXRhLXRva2VuPVwiXCIgZGF0YS1zZWNyZXQ9XCJcIj48L2Rpdj4ifQ==",
+      "expected": [],
+      "status": "complete"
+    },
+    {
+      "id": "azure-sas",
+      "family": "signed_url",
+      "body_json_base64": "eyJzaWduZWRfdXJsIjoiaHR0cHM6Ly9xYS5ibG9iLmNvcmUud2luZG93cy5uZXQvcHJpdmF0ZS9xYS50eHQ/c3Y9MjAyMy0xMS0wMyZzZT0yMDMwLTAxLTAxVDAwJTNBMDAlM0EwMFomc3A9ciZzcj1iJnNpZz1BQUVDQXdRRkJnY0lDUW9MREEwT0R4QVJFaE1VRlJZWEdCa2FHeHdkSGg4JTNEIn0=",
+      "expected": [
+        {
+          "type": "signed_url",
+          "value_json_base64": "Imh0dHBzOi8vcWEuYmxvYi5jb3JlLndpbmRvd3MubmV0L3ByaXZhdGUvcWEudHh0P3N2PTIwMjMtMTEtMDMmc2U9MjAzMC0wMS0wMVQwMCUzQTAwJTNBMDBaJnNwPXImc3I9YiZzaWc9QUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOCUzRCI=",
+          "path": "$.signed_url"
+        }
+      ],
+      "status": "complete"
+    },
+    {
+      "id": "aws-presigned",
+      "family": "signed_url",
+      "body_json_base64": "eyJzaWduZWRfdXJsIjoiaHR0cHM6Ly9xYS5zMy5hbWF6b25hd3MuY29tL3FhLnR4dD9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFRUVFRUVFRUVFRUVFRUVFRJTJGMjAyNjExMDklMkZldS13ZXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYxMTA5VDAwMDAwMFomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0JlgtQW16LVNpZ25hdHVyZT1hMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExIn0=",
+      "expected": [
+        {
+          "type": "signed_url",
+          "value_json_base64": "Imh0dHBzOi8vcWEuczMuYW1hem9uYXdzLmNvbS9xYS50eHQ/WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBUVFRUVFRUVFRUVFRUVFRUSUyRjIwMjYxMTA5JTJGZXUtd2VzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MTEwOVQwMDAwMDBaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZYLUFtei1TaWduYXR1cmU9YTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMSI=",
+          "path": "$.signed_url"
+        }
+      ],
+      "status": "complete"
+    }
+  ]
+}

@@ -12,7 +12,7 @@ import tarfile
 import tempfile
 import time
 import zipfile
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from contextlib import ExitStack, closing, contextmanager
 from contextvars import ContextVar
 from io import BytesIO
@@ -49,6 +49,50 @@ FINDING_SPOOL_THRESHOLD = 4096
 _SOURCE_LOCATION: ContextVar[tuple[object, Mapping[str, Any]] | None] = ContextVar(
     "discovery_source_location", default=None
 )
+
+
+class JSONChunkScan:
+    """Push interface to the same scanner used by iterable JSON readers."""
+
+    def __init__(self, driver: Generator[None, bytes | None, bool]) -> None:
+        self.driver = driver
+        self.done = False
+        self.complete = False
+        try:
+            next(driver)
+        except StopIteration as result:
+            self.done = True
+            self.complete = bool(result.value)
+
+    def _send(self, chunk: bytes | None) -> bool:
+        if not self.done:
+            try:
+                self.driver.send(chunk)
+            except StopIteration as result:
+                self.done = True
+                self.complete = bool(result.value)
+        return not self.done or self.complete
+
+    def feed(self, chunk: bytes) -> bool:
+        return self._send(chunk)
+
+    def finish(self) -> bool:
+        self._send(None)
+        return self.complete
+
+    def abort(self, error: BaseException) -> bool:
+        """Let the parser retain closed fields using its existing error policy."""
+        if not self.done:
+            try:
+                self.driver.throw(error)
+            except StopIteration as result:
+                self.done = True
+                self.complete = bool(result.value)
+        return self.complete
+
+    def close(self) -> None:
+        self.driver.close()
+        self.done = True
 
 
 class DiscoveryCollector:
@@ -381,6 +425,37 @@ class DiscoveryCollector:
         self, source: Text, chunks: Iterable[bytes], *, _depth: int = 0, prefer_specific: bool = False
     ) -> bool:
         """Publish completed JSON fields while the enclosing source is still arriving."""
+        scanner = self.json_chunk_scanner(source, _depth=_depth, prefer_specific=prefer_specific)
+        try:
+            for chunk in chunks:
+                if not scanner.feed(chunk):
+                    return False
+            return scanner.finish()
+        except (OSError, ValueError, UnicodeError, NestedSchedulerCancelled) as exc:
+            return scanner.abort(exc)
+        finally:
+            scanner.close()
+
+    def json_chunk_scanner(
+        self,
+        source: Text,
+        *,
+        _depth: int = 0,
+        prefer_specific: bool = False,
+        exclude: Callable[[JSONPath], bool] | None = None,
+    ) -> JSONChunkScan:
+        return JSONChunkScan(
+            self._json_chunk_parser(source, _depth=_depth, prefer_specific=prefer_specific, exclude=exclude)
+        )
+
+    def _json_chunk_parser(
+        self,
+        source: Text,
+        *,
+        _depth: int,
+        prefer_specific: bool,
+        exclude: Callable[[JSONPath], bool] | None,
+    ) -> Generator[None, bytes | None, bool]:
         from .discovery_context import JSONFieldContext
 
         if _depth > 32:
@@ -414,6 +489,8 @@ class DiscoveryCollector:
 
         def on_string(path: JSONPath, text: str, final: bool) -> None:
             nonlocal pending, pending_size, scalar
+            if exclude is not None and exclude(path):
+                return
             if scalar is None:
                 pending.append(text)
                 pending_size += len(text.encode("utf-8"))
@@ -438,7 +515,8 @@ class DiscoveryCollector:
 
         def on_primitive(item: tuple[JSONPath, Any]) -> None:
             path, content = item
-            contexts.value(path, content)
+            if exclude is None or not exclude(path):
+                contexts.value(path, content)
 
         decoder = JSONScalarStream(
             on_string,
@@ -449,7 +527,7 @@ class DiscoveryCollector:
         )
         flush_context = True
         try:
-            for chunk in chunks:
+            while (chunk := (yield)) is not None:
                 if not self.allowed():
                     return False
                 decoder.feed(chunk)
@@ -457,6 +535,9 @@ class DiscoveryCollector:
             self.mark_accessible_source()
             return True
         except NestedSchedulerCancelled:
+            flush_context = False
+            raise
+        except GeneratorExit:
             flush_context = False
             raise
         except (ValueError, UnicodeError):
@@ -3005,7 +3086,7 @@ def discover_portainer_sources(
     """Read visible stack files and selected Docker environment data via Portainer."""
     from . import web_panels
     from .clients.http_session import HttpSessionPool
-    from .modules.portainer.discover import scan_container_logs
+    from .modules.portainer.discover import discover_image_configs, scan_container_logs
 
     if collector.source_manifest is None:
         collector.source_manifest = SourceManifest()
@@ -3484,6 +3565,7 @@ def discover_portainer_sources(
                         unsupported=status in {404, 405, 501},
                     )
 
+        discover_image_configs(collector, pool, base, headers, timeout, selected_ids, inventory)
         for endpoint_id in sorted(selected_ids):
             source = f"portainer/environment/{endpoint_id}"
             configs = get_json(

@@ -170,10 +170,16 @@ Spray checkpoints preserve cooldowns and stopped origins on resume. Older checkp
 | Module | Sources | Scope selectors |
 | --- | --- | --- |
 | `gitlab` | Project files, branches/history, CI configuration, accessible project/group variables, job logs and artifacts | `--project` |
-| `portainer` | Environment/container metadata, stack files and readable Docker configs | `--endpoint` |
+| `portainer` | Environment/container metadata, stack files, image configurations, container logs and readable Docker configs | `--endpoint` |
 | `harbor` | Accessible repositories, image configs and files in OCI layers | `--repository`, `--image`, `--tag` |
 | `nexus` | Accessible repositories/assets, image configs and files in OCI layers | `--repository`, `--image`, `--tag`, `--asset` |
 | `docker-registry` | Accessible images, configs and files in OCI layers | `--repository`, `--image`, `--tag` |
+| `docker` | Existing container/image configurations, environment variables and labels | `--container` (also reads its image) |
+| `rabbitmq` | Runtime parameters and definitions: connector URIs, policies, queue/exchange/binding arguments; user password hashes excluded | `--vhost` |
+| `grafana` | Visible dashboards, readable datasource configuration, permitted decrypted contact-point exports and stored alert rules | Current organization |
+| `keycloak` | Visible realm/client configuration, existing client secrets, identity-provider and component configuration | `--realm` or realm URL; otherwise visible realms |
+| `vault` | KV v1/v2 values and readable retained KV v2 versions; inaccessible metadata or deleted versions leave coverage partial | `--mount`, `--path` |
+| `kafka` HTTP surfaces | Kafka Connect configurations and Schema Registry schemas across retained versions, including readable soft-deleted versions | Detected Connect/Schema Registry API; broker topic selectors do not select these configurations |
 
 With no selector, these modules traverse accessible sources until the target deadline. `--discover-time` caps the whole target (default 900 seconds); the CLI has no byte limit. Findings include the full value in TXT and JSON. Network reads and archive expansion use bounded internal portions. A source that cannot be fully streamed, a denied source or a malformed response is reported as `partial` or `unavailable`, never as complete. Hidden values and Swarm secret metadata are not treated as recovered secrets. Panel access and registry access are checked separately.
 
@@ -245,6 +251,7 @@ redposture consul -t http://consul.example:8500 --token "$CONSUL_TOKEN" --key ap
 ```bash
 redposture docker -t http://docker.example:2375 --containers --images --system
 redposture docker -t https://docker.example:2376 --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --containers
+redposture docker -t http://docker.example:2375 --container billing-api --discover
 ```
 
 ### Portainer
@@ -313,6 +320,7 @@ redposture grafana -t https://grafana.example -u auditor -p 'password' --show-da
 ```bash
 redposture keycloak -t https://id.example/auth --enum-realms
 redposture keycloak -t https://id.example --token-file token.txt --show-realms --show-clients
+redposture keycloak -t https://id.example --token-file token.txt --realm production --discover
 ```
 
 `master` is checked by default; `--enum-realms` tests up to 32 candidate names. A token unlocks Admin API realm/client settings and may reveal the exact version. A generic SSO page or UI theme alone does not identify Keycloak or its version.
@@ -433,6 +441,7 @@ redposture qdrant -t http://qdrant.example:6333 --api-key "$QDRANT_API_KEY" --co
 
 ```bash
 redposture rabbitmq -t http://rabbitmq.example:15672 -u auditor -p 'password' --enum
+redposture rabbitmq -t http://rabbitmq.example:15672 -u auditor -p 'password' --vhost / --discover
 ```
 
 ### Redis / Valkey
@@ -514,6 +523,8 @@ credential results remain unchanged. Observers and the reporter are disabled
 without `--debug`; diagnostic service times are summed work, not wall time.
 
 The separate opt-in `module-performance` section compares all 32 detectors in sequential isolated containers. It requires an explicit baseline and measurement image; public auth/data and workflow profiles have their own coverage limits. See [performance profiles](scripts/PERFORMANCE.md) for reproducible commands, quality gates and resource accounting.
+
+For changed-path regression checks, `scripts/check_performance_regressions.py` selects module/protocol representatives, paired detect/auth/data profiles, discover quality and collect/trigger/spray as applicable. It retains the full 32-module inventory, checks exact results and resource limits, and keeps native data-transport boundaries explicit. Use `--plan` to inspect the selection first; the [short-gate instructions](scripts/PERFORMANCE.md#short-regression-gate-for-changed-paths) describe the baseline, isolated image and output requirements. Full CI/QA remains required.
 
 ## License
 

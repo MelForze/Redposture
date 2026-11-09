@@ -16,7 +16,22 @@ _NON_SECRET_FIELD_RE = re.compile(
 )
 
 _SECRET_METADATA_SUFFIXES = frozenset(
-    {"count", "length", "enabled", "name", "type", "endpoint", "policy", "status", "description", "format", "required"}
+    {
+        "count",
+        "length",
+        "enabled",
+        "name",
+        "type",
+        "endpoint",
+        "policy",
+        "status",
+        "description",
+        "format",
+        "required",
+        "flow",
+        "timeout",
+        "lifespan",
+    }
 )
 
 _SECRET_SENTINELS = frozenset(
@@ -86,7 +101,16 @@ def is_secret_metadata_field(key: str) -> bool:
     """Recognize secret-related metadata, without excluding actual short secrets."""
     normalized = _normalize_secret_key(key)
     prefix, _, suffix = normalized.rpartition("_")
-    return suffix in _SECRET_METADATA_SUFFIXES and bool(_SECRET_KEY_RE.search(prefix))
+    if suffix in _SECRET_METADATA_SUFFIXES and bool(_SECRET_KEY_RE.search(prefix)):
+        return True
+    # Policy names such as ssoSessionMaxLifespanRememberMe contain a unit
+    # before a trailing qualifier. Do not apply this to a true secret suffix
+    # (e.g. sessionTimeoutPassword), or to numeric passwords by their value.
+    parts = normalized.split("_")
+    if suffix not in {"password", "passwd", "pwd", "secret", "token", "key", "credential", "credentials"}:
+        if set(parts) & {"timeout", "lifespan", "duration", "interval", "ttl"} and _SECRET_KEY_RE.search(normalized):
+            return True
+    return normalized in {"required_credentials", "required_credential"}
 
 
 def _key_detector(key: str) -> str:

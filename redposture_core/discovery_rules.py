@@ -103,6 +103,13 @@ _EXCLUDED_FIELDS = {
     "expires_at",
     "expiration",
     "ttl",
+    "version",
+    "release",
+    "build",
+    "build_id",
+    "revision",
+    "commit",
+    "commit_id",
 }
 
 _PLACEHOLDER_RE = re.compile(
@@ -183,7 +190,7 @@ _KEY_VALUE_RE = re.compile(
     r"client[_-]?secret|api[_-]?secret|apisecret|api[_-]?token|"
     r"_?auth[_-]?token|refresh[_-]?token|secret[_-]?access[_-]?key|"
     r"secret[_-]?key|api[_-]?key|apikey|secret|token))"
-    r"[\"']?\s*(?:=>|[:=])\s*(?:[\"']([^\"'\s,;<>]+)[\"']|([^\s,;&<>]+))"
+    r"[\"']?[^\S\r\n]*(?:=>|[:=])[^\S\r\n]*(?:[\"']([^\"'\s,;<>]+)[\"']|([^\s,;&<>]+))"
 )
 
 _SECRET_KEY_SUFFIXES = (
@@ -997,10 +1004,11 @@ def analyze_value(
 
     explicit_values = {item.value for item in detections if item.available and isinstance(item.value, str)}
     spans = sorted(item.span for item in detections if item.span is not None)
-    detections.extend(
-        _candidate(candidate, "high_entropy", 55, "entropy_candidate")
-        for candidate in entropy_candidates(text, path, explicit_values, spans, literals)
-    )
+    if field_class != "excluded":
+        detections.extend(
+            _candidate(candidate, "high_entropy", 55, "entropy_candidate")
+            for candidate in entropy_candidates(text, path, explicit_values, spans, literals)
+        )
 
     unique: dict[object, DetectedSecret] = {}
     for detection in detections:

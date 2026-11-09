@@ -44,13 +44,23 @@ class Pool:
         return HttpResponse(status, json.dumps(data).encode(), {"Content-Type": "application/json"})
 
 
+class VaultStreamPool(Pool):
+    def request_stream(self, method: str, url: str, *, on_chunk: Any, on_response: Any, **kwargs: Any) -> HttpResponse:
+        response = self.request(method, url, **kwargs)
+        on_response(response.status, response.headers)
+        for offset in range(0, len(response.body), 65536):
+            on_chunk(response.body[offset : offset + 65536])
+        return HttpResponse(response.status, b"", response.headers, error=response.error, truncated=response.truncated)
+
+
 def context(replies: dict[str, Any], **options: Any) -> SimpleNamespace:
+    pool_type = VaultStreamPool if options.pop("_vault_streams", False) else Pool
     return SimpleNamespace(
         host="127.0.0.1",
         port=8200,
         args=SimpleNamespace(**options),
         credential=None,
-        lifecycle_state=SimpleNamespace(http=Pool(replies)),
+        lifecycle_state=SimpleNamespace(http=pool_type(replies)),
     )
 
 
@@ -189,12 +199,17 @@ def test_vault_kv_v1_v2_traversal_and_denied_child_are_partial() -> None:
                 {"data": {"secret/": {"type": "kv", "options": {"version": "2"}}, "legacy/": {"type": "kv"}}},
             ),
             "/v1/secret/metadata/": (200, {"data": {"keys": ["app", "denied/"]}}),
+            "/v1/secret/metadata/app": (
+                200,
+                {"data": {"current_version": 1, "versions": {"1": {"destroyed": False, "deletion_time": ""}}}},
+            ),
             "/v1/secret/data/app": (200, {"data": {"data": {"password": "qa-password-value"}}}),
             "/v1/secret/metadata/denied/": (403, {}),
             "/v1/legacy/": (200, {"data": {"keys": ["app"]}}),
             "/v1/legacy/app": (200, {"data": {"token": "secret-token-value"}}),
         },
         discover=True,
+        _vault_streams=True,
     )
     record = actions("vault").data_record(ctx, {"api_endpoint": "http://127.0.0.1:8200", "status": "open_no_auth"})
     assert len(record["kv_dump_items"]) == 2 and record["kv_discovery_partial"]
@@ -691,8 +706,10 @@ def test_vault_discover_streams_oversized_mount_catalog_before_kv_walk(show_moun
         },
     }
 
-    class StreamPool(Pool):
-        def request_stream(self, _method, url, *, on_chunk, on_response, **_kwargs):
+    class StreamPool(VaultStreamPool):
+        def request_stream(self, method, url, *, on_chunk, on_response, **kwargs):
+            if not url.endswith("/v1/sys/mounts"):
+                return super().request_stream(method, url, on_chunk=on_chunk, on_response=on_response, **kwargs)
             assert url.endswith("/v1/sys/mounts")
             on_response(200, {"Content-Type": "application/json"})
             payload = json.dumps(catalog).encode()
@@ -704,6 +721,10 @@ def test_vault_discover_streams_oversized_mount_catalog_before_kv_walk(show_moun
         {
             "/v1/sys/mounts": HttpResponse(200, b'{"data":{', {}, truncated=True),
             "/v1/secret/metadata/": (200, {"data": {"keys": ["app"]}}),
+            "/v1/secret/metadata/app": (
+                200,
+                {"data": {"current_version": 1, "versions": {"1": {"destroyed": False, "deletion_time": ""}}}},
+            ),
             "/v1/secret/data/app": (200, {"data": {"data": {"api_token": "glpat-abcdefghijklmnopqrst"}}}),
         }
     )

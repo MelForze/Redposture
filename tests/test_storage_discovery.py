@@ -1970,7 +1970,11 @@ def test_portainer_discover_streams_oversized_swarm_config_catalog(monkeypatch, 
     monkeypatch.setattr(web_panels, "_get", fake_get)
     ctx = SimpleNamespace(args=SimpleNamespace(discover_time=30, timeout=1, secure=False), host="qa", port=9000)
     record = {"status": "valid_credentials", "ui": {"endpoint": "http://qa:9000", "session_token": "token"}}
-    inventory = {"environments": {"records": [{"Id": 2, "Name": "local"}]}, "containers": {"records": []}}
+    inventory = {
+        "environments": {"records": [{"Id": 2, "Name": "local"}]},
+        "containers": {"records": []},
+        "images": {"records": []},
+    }
     collector = DiscoveryCollector("portainer", ctx, record)
     monkeypatch.setattr(collector, "cap", lambda maximum=10 * 1024 * 1024: min(512, maximum))
     storage_discovery.discover_portainer_sources(ctx, record, inventory, collector)
@@ -2023,7 +2027,11 @@ def test_portainer_discover_streams_oversized_swarm_config_detail(monkeypatch, e
     monkeypatch.setattr(web_panels, "_get", fake_get)
     ctx = SimpleNamespace(args=SimpleNamespace(discover_time=30, timeout=1, secure=False), host="qa", port=9000)
     record = {"status": "valid_credentials", "ui": {"endpoint": "http://qa:9000", "session_token": "token"}}
-    inventory = {"environments": {"records": [{"Id": 2, "Name": "local"}]}, "containers": {"records": []}}
+    inventory = {
+        "environments": {"records": [{"Id": 2, "Name": "local"}]},
+        "containers": {"records": []},
+        "images": {"records": []},
+    }
     collector = DiscoveryCollector("portainer", ctx, record)
     monkeypatch.setattr(collector, "cap", lambda maximum=10 * 1024 * 1024: min(256, maximum))
 
@@ -2072,7 +2080,11 @@ def test_portainer_discover_streams_oversized_swarm_secret_metadata(monkeypatch)
     monkeypatch.setattr(web_panels, "_get", fake_get)
     ctx = SimpleNamespace(args=SimpleNamespace(discover_time=30, timeout=1, secure=False), host="qa", port=9000)
     record = {"status": "valid_credentials", "ui": {"endpoint": "http://qa:9000", "session_token": "token"}}
-    inventory = {"environments": {"records": [{"Id": 2, "Name": "local"}]}, "containers": {"records": []}}
+    inventory = {
+        "environments": {"records": [{"Id": 2, "Name": "local"}]},
+        "containers": {"records": []},
+        "images": {"records": []},
+    }
     collector = DiscoveryCollector("portainer", ctx, record)
     monkeypatch.setattr(collector, "cap", lambda maximum=10 * 1024 * 1024: min(512, maximum))
     storage_discovery.discover_portainer_sources(ctx, record, inventory, collector)
@@ -2125,7 +2137,11 @@ def test_portainer_discover_classifies_swarm_only_503_by_docker_state(
         port=9000,
     )
     record = {"status": "valid_credentials", "ui": {"endpoint": "http://qa:9000", "session_token": "token"}}
-    inventory = {"environments": {"records": [{"Id": 2, "Name": "local"}]}, "containers": {"records": []}}
+    inventory = {
+        "environments": {"records": [{"Id": 2, "Name": "local"}]},
+        "containers": {"records": []},
+        "images": {"records": []},
+    }
     collector = DiscoveryCollector("portainer", ctx, record)
     discover_portainer_sources(ctx, record, inventory, collector)
 

@@ -144,6 +144,8 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "enum_realms": "Bounded realm candidates run in the focused Keycloak suite.",
         "show_realms": "Admin realm inventory runs in the focused Keycloak suite.",
         "show_clients": "Admin client inventory runs in the focused Keycloak suite.",
+        "discover": "Keycloak discovery has focused full-CLI HTTP and real-product checks; this sequential matrix has no Keycloak service.",
+        "discover_time": "Keycloak discovery deadline parsing and bounded reader behavior run in the focused discovery suite.",
     },
     "jenkins": {
         "execute": "Jenkins execute is covered by focused execution regression and loopback tests; the regular matrix stays read-only.",

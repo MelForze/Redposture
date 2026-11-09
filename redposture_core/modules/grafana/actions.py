@@ -2713,7 +2713,11 @@ def collect_grafana_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
         except (urllib.error.URLError, OSError, TimeoutError, ValueError):
             pass  # Exact version is optional; do not erase a verified login.
     prefetched = state.prefetched_data
-    if prefetched is None:
+    if prefetched is None and bool(getattr(ctx.args, "discover", False)) and not options["show_datasources"]:
+        # Discovery reads the complete configuration through its bounded JSON
+        # reader; do not first materialize a capped inventory response here.
+        datasources, datasource_error, datasource_status = None, None, None
+    elif prefetched is None:
         datasources, datasource_error, datasource_status = _fetch_datasources(
             str(ctx.host),
             int(ctx.port),
@@ -2739,6 +2743,13 @@ def collect_grafana_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
     record["check_urls"] = list(options["check_urls"])
     if datasource_error:
         record["error"] = datasource_error
+    if bool(getattr(ctx.args, "discover", False)):
+        ready = getattr(ctx, "emit_ready_inventory", None)
+        if callable(ready):
+            ready(record)
+        from .discover import discover
+
+        record["content_discovery"] = discover(ctx, record)
     state.deep_record = record
     return record
 

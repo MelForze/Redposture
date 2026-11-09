@@ -81,7 +81,7 @@ def detector_matches(match: SecretMatch, enabled: Collection[str]) -> bool:
 
 
 _PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
-    ("password", "high", re.compile(r"(?i)\b(?:password|passwd|pwd)\s*[=:]\s*[\"']?([^\s,;\"']{4,})")),
+    ("password", "high", re.compile(r"(?i)\b(?:password|passwd|pwd)[^\S\r\n]*[=:][^\S\r\n]*[\"']?([^\s,;\"']{4,})")),
     (
         "private_key",
         "high",
@@ -197,7 +197,7 @@ _ASSIGNMENT_RE = re.compile(
     r"(?:password|passwd|pwd|passphrase|pass|credential|credentials|cred|creds|"
     r"client[_-]?secret|api[_-]?secret|apisecret|api[_-]?token|"
     r"auth[_-]?token|refresh[_-]?token|secret[_-]?key|apikey|secret|token))"
-    r"[\"']?\s*(?:=>|[:=])\s*(?:[\"']([^\"'\s,;]+)[\"']|([^\s,;&<>]+))"
+    r"[\"']?[^\S\r\n]*(?:=>|[:=])[^\S\r\n]*(?:[\"']([^\"'\s,;]+)[\"']|([^\s,;&<>]+))"
 )
 _SQL_PASSWORD_RE = re.compile(r"(?i)\b(?:WITH\s+)?PASSWORD\s+['\"]([^'\"\s;]{4,})['\"]")
 _XML_ELEMENT_RE = re.compile(r"(?is)<([A-Za-z][\w:.-]{0,79})\b[^>]{0,2048}>([^<>]{4,4096})</\1\s*>")
@@ -353,6 +353,14 @@ def scan_disk_atomic_token(
     grammars are left to the caller's other readers rather than guessed by size.
     """
     first = next(value.iter_text_chunks(max_chars=1024), "")
+    if value.byte_length <= 65_536 and re.match(r"(?:jdbc:)?[A-Za-z][A-Za-z0-9+.-]*://", first):
+        # A small portion can spill an otherwise ordinary completed token to
+        # disk. It must still receive every scalar rule, not just the subset
+        # with dedicated unbounded validators below. This allocation has a
+        # fixed ceiling independent of the source's total size.
+        completed = "".join(value.iter_text_chunks())
+        if re.fullmatch(r"(?:jdbc:)?[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+", completed):
+            return _scan_text(completed, object_path, set(detector_names()))
     from .discovery_dsn import dsn_carrier
 
     if dsn_carrier(value, deadline=deadline)[0]:

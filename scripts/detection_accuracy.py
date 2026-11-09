@@ -65,9 +65,9 @@ _FIXTURES = {
 }
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "tests/fixtures/detection_accuracy/holdout.json"
+CORPUS = ROOT / "tests/fixtures/detection_accuracy/holdout-v2.json"
 # Updated only on an explicitly reviewed new corpus version, never by a gate run.
-CORPUS_SHA256 = "d7f8efce0aa44f9a15505679ea2371d3110fcec757f87ec85431a3b17cece599"
+CORPUS_SHA256 = "40800fdb13b87ef0442852fef3a93c2f8b7cfe83af480729942b1f57178031af"
 
 
 def load_holdout() -> dict[str, Any]:
@@ -133,9 +133,9 @@ def response_peer(
                     self.request.sendall(reply)
                     return
                 status, body, headers = routes.get(path, routes.get("*", (404, b"{}", {})))
-                head = f"HTTP/1.1 {status} Control\r\nContent-Length: {len(body)}\r\nConnection: close\r\n"
-                head += "".join(f"{k}: {v}\r\n" for k, v in headers.items())
-                self.request.sendall(head.encode() + b"\r\n" + body)
+                response_head = f"HTTP/1.1 {status} Control\r\nContent-Length: {len(body)}\r\nConnection: close\r\n"
+                response_head += "".join(f"{k}: {v}\r\n" for k, v in headers.items())
+                self.request.sendall(response_head.encode() + b"\r\n" + body)
             except (OSError, ValueError):
                 return
 
@@ -456,7 +456,7 @@ def special_cases() -> list[dict[str, Any]]:
                 "module": "clickhouse",
                 "mode": mode,
                 "expected": False,
-                "provenance": "holdout-v1",
+                "provenance": load_holdout()["split"],
             }
             try:
                 with response_peer(

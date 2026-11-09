@@ -150,6 +150,11 @@ class DiskJSONDocument:
     def is_open_container(self, path: JSONPath) -> bool:
         return path in self._containers
 
+    def root_field_seen(self, field: str) -> bool:
+        """Confirm a required field without materializing or flushing the document."""
+        root = self.value if isinstance(self.value, Mapping) else self._containers.get(())
+        return (field,) in self._containers or (isinstance(root, Mapping) and field in root)
+
     def completed_array(self) -> SpoolingValues | None:
         """Recover closed root-array items after input has stopped with an error.
 

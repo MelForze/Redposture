@@ -28,6 +28,11 @@ def run(monkeypatch, *, denied=None, malformed=False, inactive=False, cancel=Fal
             pass
 
         def request_stream(self, method, url, *, on_response, on_chunk, **kwargs):
+            if "/docker/images/" in url:
+                response = get(self, "http://qa", url.removeprefix("http://qa"))
+                on_response(response.status, response.headers)
+                on_chunk(response.body)
+                return HttpResponse(response.status, b"", response.headers)
             assert method == "GET" and "follow=0" in url
             status = 403 if denied == "logs" else 200
             on_response(status, {})
@@ -41,6 +46,7 @@ def run(monkeypatch, *, denied=None, malformed=False, inactive=False, cancel=Fal
         "/api/stacks": ("stacks", [{"Id": 1}]),
         "/api/stacks/1/file": ("file", {"StackFileContent": 'password="inactive-stack!42"'}),
         "/api/endpoints/2/docker/containers/c/json": ("inspect", {"Config": {"Tty": True}}),
+        "/api/endpoints/2/docker/images/i/json": ("image", {"Config": {}}),
         "/api/endpoints/2/docker/configs": ("configs", [{"ID": "cfg"}]),
         "/api/endpoints/2/docker/configs/cfg": (
             "config",
@@ -70,7 +76,11 @@ def run(monkeypatch, *, denied=None, malformed=False, inactive=False, cancel=Fal
         discover_portainer_sources(
             ctx,
             record,
-            {"environments": {"records": [{"Id": 2}]}, "containers": {"records": [{"environment": 2, "Id": "c"}]}},
+            {
+                "environments": {"records": [{"Id": 2}]},
+                "containers": {"records": [{"environment": 2, "Id": "c"}]},
+                "images": {"records": [{"environment": 2, "Id": "i"}]},
+            },
             c,
         )
     except NestedSchedulerCancelled:
@@ -89,6 +99,8 @@ def test_manifest_covers_existing_content_and_metadata_without_claiming_secret_v
             "stack_catalog",
             "stack_files",
             "container_inspect",
+            "image_catalog",
+            "image_inspect",
             "container_logs",
             "swarm_config_catalog",
             "swarm_config_contents",

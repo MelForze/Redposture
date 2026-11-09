@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ...discovery_options import validate_discovery_budget
 from .actions import _MAX_REALMS
 
 
@@ -34,7 +35,7 @@ def validate_args(args: Any, console: Any) -> int | None:
         # The common runtime must see an explicit credential for PR:L CVEs,
         # but never receive the bearer secret in its record serialization.
         args.token = "<redacted>"
-    return None
+    return validate_discovery_budget(args, console)
 
 
 __all__ = ["validate_args"]

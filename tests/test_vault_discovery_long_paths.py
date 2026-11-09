@@ -153,7 +153,11 @@ def test_long_kv_directory_and_leaf_are_both_followed_without_truncation(stream_
             else {"password": "known-vault-secret"}
         },
     }
-    streams = {}
+    streams: dict[str, Any] = {}
+    if version == "2":
+        streams[listing + directory + key] = {
+            "data": {"current_version": 1, "versions": {"1": {"destroyed": False, "deletion_time": ""}}}
+        }
     if stream_keys:
         for path in (listing, listing + directory):
             streams[path + "?list=true"] = routes[path]

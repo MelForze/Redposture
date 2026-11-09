@@ -691,6 +691,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .discovery_options import add_discovery_budget_flags
 
     discovery_groups = {
+        "docker": "Inventory",
+        "rabbitmq": "Enumeration",
+        "keycloak": "Enumeration",
         "mongodb": "Discovery / Dump",
         "oracle": "Discovery / Dump",
         "postgres": "Discovery / Dump",

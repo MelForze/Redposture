@@ -222,6 +222,7 @@ def test_portainer_adapter_reads_logs_only_for_selected_environment_and_reports_
         {
             "environments": {"records": [{"Id": 2, "Name": "selected"}]},
             "containers": {"records": [{"environment": 2, "Id": "abc"}]},
+            "images": {"records": []},
         },
         c,
     )

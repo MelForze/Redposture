@@ -6,10 +6,12 @@ from dataclasses import replace
 from typing import Any
 
 from ...audit_config import AuditConfig
+from ...audit_models import AuditRecord
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
     ModuleAuditSpec,
+    _invoke_host_stage,
     build_basic_audit_plan,
     run_basic_host_audit,
 )
@@ -28,6 +30,16 @@ def build_docker_plan(args: Any) -> AuditCommandPlan:
 
 
 def build_docker_spec(args: Any) -> ModuleAuditSpec:
+    def data(ctx: Any, _prior: AuditRecord) -> AuditRecord:
+        payload = _invoke_host_stage(actions.host_stage, module="docker", ctx=ctx, run_deep_checks=True).to_dict()
+        ready = getattr(ctx, "emit_ready_inventory", None)
+        if callable(ready):
+            ready(payload)
+        from .discover import discover
+
+        payload["content_discovery"] = discover(ctx, payload)
+        return AuditRecord.from_mapping(payload, module="docker", service="docker")
+
     spec = ModuleAuditSpec(
         module="docker",
         label="DOCKER",
@@ -38,6 +50,7 @@ def build_docker_spec(args: Any) -> ModuleAuditSpec:
         is_detected=lambda record: record.extra.get("is_docker") is True,
         # E3 opt-in: Docker Engine anon-open API needs no credentials.
         keep_anonymous_open_no_auth=True,
+        data=data if bool(getattr(args, "discover", False)) else None,
     )
 
     from .async_detect import bind

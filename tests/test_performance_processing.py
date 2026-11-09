@@ -8,8 +8,10 @@ from argparse import Namespace
 import pytest
 
 from scripts.profile_processing_performance import (
+    CASES,
     FIRST,
     LAST,
+    expected_findings,
     measure,
     payload_parts,
     resources,
@@ -18,7 +20,7 @@ from scripts.profile_processing_performance import (
 )
 
 
-@pytest.mark.parametrize("case", ["xml-dense", "html-inputs", "duplicate-lines"])
+@pytest.mark.parametrize("case", CASES)
 def test_processing_payload_is_exact_length_and_reaches_last_secret(tmp_path, case):
     path = tmp_path / "payload"
     name = write_payload(path, case, 10_003)
@@ -55,6 +57,19 @@ def test_processing_quality_rejects_missing_extra_duplicate_and_wrong_place():
 def test_processing_profile_does_not_fall_back_to_live_core_for_an_empty_snapshot(tmp_path):
     with pytest.raises(ValueError, match="source must contain"):
         measure(Namespace(source=tmp_path))
+
+
+def test_json_stream_oracle_keeps_both_distinct_paths():
+    rows = expected_findings("json-stream", "runtime/config.json")
+    assert [r["place"] for r in rows] == [
+        "$.benchmark/file/runtime/config.json.head.password",
+        "$.benchmark/file/runtime/config.json.tail.password",
+    ]
+    assert verify_findings("json-stream", "runtime/config.json", rows)
+    for field, wrong in (("type", "token"), ("value", "truncated"), ("place", "$.wrong")):
+        changed = [dict(row) for row in rows]
+        changed[1][field] = wrong
+        assert not verify_findings("json-stream", "runtime/config.json", changed)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc resource contract")

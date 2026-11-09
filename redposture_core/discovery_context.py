@@ -45,7 +45,7 @@ def field_binding(value: Mapping[Any, Any], *, deadline: float | None = None) ->
     label = next((entries[name][1] for name in LABEL_ORDER if name in entries), None)
     if isinstance(label, DiskBackedText):
         label = disk_key_hint(label, deadline)
-    if not isinstance(label, str) or classify_field(label) not in {"strong", "medium"}:
+    if not isinstance(label, str) or classify_field(label) not in {"strong", "medium", "excluded"}:
         return None
     return FieldBinding(actual_value[0], label, actual_value[1])
 

@@ -5,6 +5,44 @@ entrypoints against deterministic protocol fixtures. They do not test physical
 hosts or replace integration checks against real products. Run one profile at a
 time, separately from CI and Docker stands.
 
+## Short regression gate for changed paths
+
+```bash
+python scripts/check_performance_regressions.py --before /path/to/before-source --output /tmp/redposture_short_plan --container-image redposture-detect-performance:local --plan
+python scripts/check_performance_regressions.py --before /path/to/before-source --output /tmp/redposture_short_gate --container-image redposture-detect-performance:local
+```
+
+Use a new output directory and an unchanged baseline. The planner retains all
+32 modules and their UI surfaces. Direct module paths select their consumers;
+shared runtime changes select PostgreSQL, Redis, Grafana, Kafka and
+collect/trigger/spray. Shared scanner changes select every supported discover
+route. `--all-modules` explicitly selects all modules. No standalone Place
+download is implemented by these profiles.
+
+Selected wire cases exercise detect, invalid supplied credentials and seeded
+read-only inventory. Every case uses one warmup per side and at least three
+alternating measured pairs in separate offline containers. First-finding,
+wall, peak RSS and sampled FD have repeated thresholds. The default is 64
+logical targets; Redis credential checks use 512 to observe the sustained FD
+peak rather than a startup burst shorter than the sampler interval. Input,
+ports, attempts and timeouts match between the two sides of each comparison.
+
+All 32 modules have a data recipe: 25 use seeded wire/CLI actions; Redis,
+PostgreSQL, ClickHouse, MongoDB, Oracle, ZooKeeper and Keeper instead use the
+production read/format helpers with independently authored socket/SDK peers.
+These seven adapter profiles explicitly exclude network/session/TLS and SDK
+internals. They do not certify full native data transport. Discover quality
+uses independently labelled DTO/reader corpora and UI cases; shared JSON
+processing has a separate paired 10 MB profile. Those are distinct evidence,
+not full product traversal or production recall.
+
+`--case CASE_ID` is an explicit focused rerun. Its report retains the complete
+plan and filter so a partial rerun cannot masquerade as all selected cases.
+Original failed runs remain separate artifacts. Missing artifacts, inaccurate
+values/types/paths, duplicates, changed instruments or failed cleanup fail the
+gate. A timing difference within the threshold is noise, not a speedup claim.
+This optional gate does not remove or replace the full CI/QA release checks.
+
 ## Prepare an offline measurement image
 
 From the repository root:

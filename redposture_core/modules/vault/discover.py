@@ -9,6 +9,7 @@ from urllib.parse import quote
 from ...discovery_base64 import decoded_base64_file
 from ...discovery_engine import _scan_portioned_value
 from ...discovery_frontier import DiscoveryFrontier
+from ...discovery_http_reader import read_json
 from ...discovery_json import DiskJSONDocument
 from ...discovery_sources import SourceManifest
 from ...discovery_text import _Value
@@ -290,3 +291,79 @@ def discover_transit_mount(
                     if ok:
                         manifest.read(kind)
                     manifest.finish(kind, complete=ok, denied=status in {401, 403})
+
+
+def discover_kv_history(
+    client: Any,
+    base: str,
+    mount: str,
+    key: str,
+    token: str | None,
+    budget: ReadBudget,
+    collector: DiscoveryCollector,
+) -> None:
+    """Inspect retained KVv2 versions without undelete/destroy or dynamic reads."""
+    metadata_path = f"/v1/{quote(mount, safe='/')}metadata/{quote(key, safe='/')}"
+    with collector.source_attempt("vault.kv_history_metadata", scope=mount + key, content=False) as evidence:
+        status, body, complete = _document(client, base, metadata_path, "GET", token, budget, collector)
+        evidence.status = status
+        data = body.get("data") if isinstance(body, Mapping) else None
+        versions = data.get("versions") if isinstance(data, Mapping) else None
+        current = data.get("current_version") if isinstance(data, Mapping) else None
+        if (
+            not complete
+            or status != 200
+            or not isinstance(data, Mapping)
+            or not isinstance(versions, Mapping)
+            or type(current) is not int
+            or current < 1
+        ):
+            collector.partial(
+                metadata_path, "access_denied" if status in {401, 403} else "invalid_or_unavailable_version_metadata"
+            )
+            return
+        custom = data.get("custom_metadata")
+        if isinstance(custom, Mapping):
+            collector.add(metadata_path + ".custom_metadata", custom, charge=False)
+        evidence.accept()
+    for number, metadata in versions.items():
+        if not collector.allowed() or not budget.allowed():
+            return
+        if (
+            not isinstance(number, str)
+            or not number.isascii()
+            or not number.isdecimal()
+            or not number.lstrip("0")
+            or not isinstance(metadata, Mapping)
+        ):
+            collector.partial(metadata_path, "invalid_version_row")
+            if collector.source_manifest is not None:
+                collector.source_manifest.finish("vault.kv_history_metadata", complete=False)
+            continue
+        if int(number) == current:
+            continue  # Existing latest-value reader owns the current version.
+        path = f"/v1/{quote(mount, safe='/')}data/{quote(key, safe='/')}?version={number}"
+        if metadata.get("destroyed") is True or metadata.get("deletion_time"):
+            with collector.source_attempt("vault.kv_history_values", scope=mount + key):
+                collector.partial(path, "version_deleted_or_destroyed")
+            continue
+        budget.calls += 1
+        with collector.source_location({"source_kind": "kv_version", "object": mount + key, "version": number}):
+            document = read_json(
+                collector,
+                client.pool,
+                base + path,
+                path,
+                source_class="vault.kv_history_values",
+                headers={"Accept": "application/json", **({"X-Vault-Token": token} if token else {})},
+                timeout=budget.timeout(),
+                required_fields=("data",),
+                exclude=lambda parts: parts[:2] != ("data", "data"),
+            )
+        if document is not None:
+            envelope = document.get("data")
+            value = envelope.get("data") if isinstance(envelope, Mapping) else None
+            if not isinstance(value, Mapping):
+                collector.partial(path, "invalid_or_unavailable_version")
+                if collector.source_manifest is not None:
+                    collector.source_manifest.finish("vault.kv_history_values", complete=False)

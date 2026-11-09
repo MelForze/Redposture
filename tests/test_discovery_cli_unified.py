@@ -14,6 +14,10 @@ from redposture_core.modules.minio import policy as minio_policy
 from redposture_core.modules.proxmox import policy as proxmox_policy
 
 _DISCOVERY_COMMANDS = (
+    "docker",
+    "rabbitmq",
+    "grafana",
+    "keycloak",
     "airflow",
     "clickhouse",
     "consul",

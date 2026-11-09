@@ -124,7 +124,10 @@ def test_portainer_swarm_config_bytes_use_shared_payload_reader(monkeypatch, kin
     record = {"status": "valid_credentials", "ui": {"endpoint": "http://qa:9000", "session_token": "qa"}}
     target = DiscoveryCollector("portainer", context, record)
     discover_portainer_sources(
-        context, record, {"environments": {"records": [{"Id": 2}]}, "containers": {"records": []}}, target
+        context,
+        record,
+        {"environments": {"records": [{"Id": 2}]}, "containers": {"records": []}, "images": {"records": []}},
+        target,
     )
     result = target.result()
     if kind == "binary":

@@ -72,4 +72,7 @@ def test_http_surface_cases_reach_kafka_reader_not_generic_panel_fallback(monkey
     monkeypatch.setattr(ui, "collect_ui", checked)
     result = run_case(next(case for case in load()["cases"] if case["product"] == product))
     assert observed == [product]
-    assert result["status"] == "unsupported_by_ui" and result["requests"] == 0
+    if product in {"kafka_connect", "schema_registry"}:
+        assert result["status"] == "complete" and result["requests"] > 0
+    else:
+        assert result["status"] == "unsupported_by_ui" and result["requests"] == 0

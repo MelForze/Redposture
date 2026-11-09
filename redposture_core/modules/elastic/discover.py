@@ -1429,6 +1429,7 @@ def scan_value_tree(
             if binding is not None:
                 semantic_path = binding.field_name
                 value_item = (binding.key, binding.value)
+                processed_value_key = value_item[0]
                 if _needs_disk_scan(value_item[1]):
                     walk(
                         value_item[1],
@@ -1437,7 +1438,6 @@ def scan_value_tree(
                         semantic_path,
                         base64_decoded,
                     )
-                    processed_value_key = value_item[0]
                     semantic_detections = []
                 else:
                     semantic_detections = analyze_value(

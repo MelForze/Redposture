@@ -123,3 +123,55 @@ def test_workflow_snapshot_does_not_silently_rewrite_a_corrupted_manifest(tmp_pa
     manifest.write_text('{"files":{},"profile_sha256":"corrupted"}')
     with pytest.raises(ValueError, match="manifest changed"):
         profile.workflow_hash(tmp_path)
+
+
+@pytest.mark.parametrize("workflow", ["collect", "trigger", "spray"])
+def test_first_finding_ignores_negative_partial_and_wrong_value(tmp_path, workflow):
+    import json
+    import time
+
+    from scripts.profile_workflow_performance import FirstFinding
+
+    observer = FirstFinding(workflow, "grafana", {"qa"})
+    path = tmp_path / "records.jsonl"
+    path.write_text(json.dumps({"host": "foreign", "status": "valid"}) + "\n")
+    observer.observe(path, 0.1)
+    assert observer.seconds is None
+    positive = sample(workflow)[-1]
+    raw = json.dumps(positive).encode() + b"\n"
+    with path.open("ab") as stream:
+        stream.write(raw[: len(raw) // 2])
+    observer.observe(path, 0.2)
+    assert observer.seconds is None
+    with path.open("ab") as stream:
+        stream.write(raw[len(raw) // 2 :])
+    observer.observe(path, time.monotonic() - 0.3)
+    assert observer.seconds == pytest.approx(0.3, abs=0.01) and observer.error is None
+    recorded = observer.seconds
+    observer.observe(path, 0.9)
+    assert observer.seconds == recorded
+
+
+def test_first_finding_never_accepts_a_truncated_collect_body(tmp_path):
+    import json
+
+    from scripts.profile_workflow_performance import FirstFinding
+
+    row = sample("collect")[0]
+    row["body"] = row["body"][:-1]
+    path = tmp_path / "records.jsonl"
+    path.write_text(json.dumps(row) + "\n")
+    observer = FirstFinding("collect", "grafana", {"qa"})
+    observer.observe(path, 0.1)
+    assert observer.seconds is None
+
+
+def test_first_finding_reports_corrupt_or_unbounded_fixture_records(tmp_path):
+    from scripts.profile_workflow_performance import FirstFinding
+
+    for raw in (b"not json\n", b"x" * 65537):
+        path = tmp_path / "records.jsonl"
+        path.write_bytes(raw)
+        observer = FirstFinding("collect", "grafana", {"qa"})
+        observer.observe(path, 0.1)
+        assert observer.error and observer.seconds is None
