@@ -448,6 +448,8 @@ redposture rabbitmq -t http://rabbitmq.example:15672 -u auditor -p 'password' --
 
 ### Redis / Valkey
 
+For anonymous Redis/Valkey access, the detection line includes `(keys:N)` before the version. The count comes from read-only `DBSIZE` for the current database; denied or unconfirmed counts appear as `(keys:unknown)`.
+
 ```bash
 redposture redis -t redis.example -u auditor -p 'password' --show-keys 20 --dump 10
 ```

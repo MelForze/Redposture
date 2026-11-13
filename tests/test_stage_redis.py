@@ -314,7 +314,7 @@ def test_format_detect_record_includes_known_version_and_plain_json() -> None:
         "server_version": "7.4.11",
     }
     line = redis_stage._format_detect_record(record, "txt")
-    assert line.endswith("(auth required:False) (version:7.4.11)")
+    assert line.endswith("(auth required:False) (keys:unknown) (version:7.4.11)")
     assert "\x1b[" not in line
     payload = json.loads(redis_stage._format_detect_record(record, "json"))
     assert payload["version"] == "7.4.11"
@@ -336,10 +336,12 @@ def test_anonymous_redis_detection_reads_version_without_enum_cve(monkeypatch: p
         redis_actions, "_open_redis_lifecycle_socket", lambda item: setattr(item, "sock", _DummySocket())
     )
 
-    def reply(_sock: object, *parts: str) -> tuple[str, str]:
+    def reply(_sock: object, *parts: str) -> tuple[str, str | int]:
         calls.append(" ".join(parts))
         if parts == ("PING",):
             return "simple", "PONG"
+        if parts == ("DBSIZE",):
+            return "integer", 4
         return "bulk", "# Server\r\nredis_version:7.4.11\r\n"
 
     monkeypatch.setattr(redis_actions, "_send_cmd", reply)
@@ -352,7 +354,7 @@ def test_anonymous_redis_detection_reads_version_without_enum_cve(monkeypatch: p
         lifecycle_state=state,
     )
     detected = redis_actions.redis_detect_hook(ctx)
-    assert calls == ["PING", "INFO SERVER"]
+    assert calls == ["PING", "INFO SERVER", "DBSIZE"]
     assert detected.extra["server_version"] == "7.4.11"
     assert "(version:7.4.11)" in redis_stage._format_detect_record(detected.to_dict(), "txt")
 

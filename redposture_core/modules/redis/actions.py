@@ -303,6 +303,26 @@ def _capture_redis_server_identity_detect_steps(state: RedisAuditLifecycleState)
         state.server_version = version
 
 
+def _capture_anonymous_redis_keys(state: RedisAuditLifecycleState) -> None:
+    return _run_detect_sync(_capture_anonymous_redis_keys_detect_steps(state))
+
+
+def _capture_anonymous_redis_keys_detect_steps(state: RedisAuditLifecycleState):
+    if state.sock is None or state.auth_required is not False:
+        return
+    try:
+        kind, value = yield _DetectCall(_send_cmd, (state.sock, "DBSIZE"), {})
+        if kind == "integer" and int(value) >= 0:
+            state.key_count, state.key_count_error = int(value), None
+        else:
+            state.key_count_error = str(value) if kind == "error" else f"unexpected DBSIZE response: {kind} {value}"
+    except (OSError, ValueError, ConnectionError) as exc:
+        # A confirmed PONG/INFO remains evidence even when optional counting
+        # fails. Never hand a partial response to the following AUTH/data step.
+        state.key_count_error = str(exc)
+        _close_redis_lifecycle_socket(state)
+
+
 def _confirm_redis_error_response(sock: socket.socket, message: str) -> tuple[bool, bool | None]:
     return _run_detect_sync(_confirm_redis_error_response_detect_steps(sock, message))
 
@@ -861,10 +881,10 @@ def _redis_lifecycle_record(state: RedisAuditLifecycleState, *, include_data: bo
         "dump_keys": state.dump_keys if include_data else False,
         "query_key": state.query_key if include_data else None,
         "key_count": state.key_count
-        if include_data or state.status in {"valid_credentials", "weak_default_creds"}
+        if include_data or state.auth_required is False or state.status in {"valid_credentials", "weak_default_creds"}
         else None,
         "key_count_error": state.key_count_error
-        if include_data or state.status in {"valid_credentials", "weak_default_creds"}
+        if include_data or state.auth_required is False or state.status in {"valid_credentials", "weak_default_creds"}
         else None,
         "keys": state.keys if include_data else None,
         "key_values": state.key_values if include_data else None,
@@ -942,6 +962,7 @@ def _redis_detect_hook_detect_steps(ctx: Any):
                 state.status = "open_no_auth"
                 state.error = None
                 yield _DetectCall(_capture_redis_server_identity, (state,), {})
+                yield _DetectCall(_capture_anonymous_redis_keys, (state,), {})
                 return _redis_lifecycle_record(state, include_data=False)
             if ping_type == "error":
                 confirmed, auth_required = yield _DetectCall(
@@ -955,6 +976,8 @@ def _redis_detect_hook_detect_steps(ctx: Any):
                     state.error = None
                     if state.protected_mode:
                         _close_redis_lifecycle_socket(state)
+                    elif state.auth_required is False:
+                        yield _DetectCall(_capture_anonymous_redis_keys, (state,), {})
                     return _redis_lifecycle_record(state, include_data=False)
             state.is_redis = False
             state.auth_required = None
@@ -985,13 +1008,14 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
         return _redis_lifecycle_record(state, include_data=False)
     credential = ctx.credential
     exhaustive_credentials = bool(getattr(ctx.args, "defcreds", False))
-    state.key_count = None
-    state.key_count_error = None
     state.server_implementation = None
     state.implementation_probe_error = None
     if credential.username is None and credential.password is None:
         state.status = "open_no_auth" if state.auth_required is False else "auth_required"
         return _redis_lifecycle_record(state, include_data=False)
+
+    state.key_count = None
+    state.key_count_error = None
 
     attempts = max(1, state.retries + 1)
     last_error: str | None = None
@@ -1832,6 +1856,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "service": "redis",
                 "detected": bool(record.get("is_redis")),
                 "auth_required": auth_required_value,
+                **({"key_count": record.get("key_count")} if auth_required_value is False else {}),
                 "version": version,
             },
             ensure_ascii=False,
@@ -1839,6 +1864,8 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
 
     prefix = _nxc_prefix(record)
     line = f"{prefix} [*] Redis Database (auth required:{auth_required_text})"
+    if auth_required_value is False:
+        line += f" (keys:{format_count_value(record.get('key_count'))})"
     if version:
         line += f" (version:{version})"
     return line
@@ -1980,6 +2007,7 @@ _ASYNC_RETAINED_STEPS = {
     _read_resp: _read_resp_detect_steps,
     _send_cmd: _send_cmd_detect_steps,
     _capture_redis_server_identity: _capture_redis_server_identity_detect_steps,
+    _capture_anonymous_redis_keys: _capture_anonymous_redis_keys_detect_steps,
     _confirm_redis_error_response: _confirm_redis_error_response_detect_steps,
     _open_redis_socket: _open_redis_socket_detect_steps,
     _open_redis_lifecycle_socket: _open_redis_lifecycle_socket_detect_steps,
